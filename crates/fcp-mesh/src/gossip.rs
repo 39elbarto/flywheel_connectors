@@ -27,8 +27,8 @@ use xorf::Filter as _;
 
 use crate::admission::ObjectAdmissionClass;
 use crate::iblt::{Iblt, IbltDecodeResult};
-use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
+use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Constants (NORMATIVE defaults)
@@ -92,6 +92,189 @@ pub const fn is_outside_freshness_window(
         return true;
     }
     now.saturating_sub(timestamp) > ttl_secs
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Peer Protocol Capability Advertisement
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Wire-level mesh protocol generations a peer can speak during V3 -> V4 migration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MeshProtocolVersion {
+    /// V3 classical mesh keying: Ed25519 + X25519.
+    V3,
+    /// V4 hybrid post-quantum mesh keying: Dilithium + ML-KEM hybrid.
+    V4,
+}
+
+impl MeshProtocolVersion {
+    #[must_use]
+    const fn wire_id(self) -> u8 {
+        match self {
+            Self::V3 => 3,
+            Self::V4 => 4,
+        }
+    }
+}
+
+/// Advertised protocol generations for a mesh peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerProtocolCapabilities {
+    /// Protocol generations this peer claims it can complete.
+    pub protocols: BTreeSet<MeshProtocolVersion>,
+}
+
+impl PeerProtocolCapabilities {
+    /// Classical-only capability advertisement.
+    #[must_use]
+    pub fn v3_only() -> Self {
+        Self {
+            protocols: BTreeSet::from([MeshProtocolVersion::V3]),
+        }
+    }
+
+    /// Hybrid migration advertisement: accepts V3 fallback and V4.
+    #[must_use]
+    pub fn v3_v4() -> Self {
+        Self {
+            protocols: BTreeSet::from([MeshProtocolVersion::V3, MeshProtocolVersion::V4]),
+        }
+    }
+
+    /// V4-only advertisement for peers past the fallback phase.
+    #[must_use]
+    pub fn v4_only() -> Self {
+        Self {
+            protocols: BTreeSet::from([MeshProtocolVersion::V4]),
+        }
+    }
+
+    /// Whether this advertisement includes a protocol generation.
+    #[must_use]
+    pub fn supports(&self, protocol: MeshProtocolVersion) -> bool {
+        self.protocols.contains(&protocol)
+    }
+
+    /// Whether this advertisement can satisfy a V4-required receiver policy.
+    #[must_use]
+    pub fn supports_v4(&self) -> bool {
+        self.supports(MeshProtocolVersion::V4)
+    }
+
+    /// Whether this peer explicitly claims only V3 capability.
+    #[must_use]
+    pub fn is_v3_only(&self) -> bool {
+        self.protocols.len() == 1 && self.supports(MeshProtocolVersion::V3)
+    }
+}
+
+impl Default for PeerProtocolCapabilities {
+    fn default() -> Self {
+        Self::v3_only()
+    }
+}
+
+/// Signed control-plane gossip advertisement for peer V3/V4 capability state.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerCapabilityAdvertisement {
+    /// Peer making the capability claim.
+    pub from: TailscaleNodeId,
+    /// Supported mesh protocol generations.
+    pub capabilities: PeerProtocolCapabilities,
+    /// Advertisement timestamp (Unix seconds).
+    pub timestamp: u64,
+    /// Peer signature over [`Self::signing_bytes`].
+    pub signature: Option<NodeSignature>,
+}
+
+impl PeerCapabilityAdvertisement {
+    /// Build a new unsigned capability advertisement.
+    #[must_use]
+    pub fn new(
+        from: TailscaleNodeId,
+        capabilities: PeerProtocolCapabilities,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            from,
+            capabilities,
+            timestamp,
+            signature: None,
+        }
+    }
+
+    /// Convenience constructor for a V3-only peer.
+    #[must_use]
+    pub fn v3_only(from: TailscaleNodeId, timestamp: u64) -> Self {
+        Self::new(from, PeerProtocolCapabilities::v3_only(), timestamp)
+    }
+
+    /// Convenience constructor for a V3/V4-capable peer.
+    #[must_use]
+    pub fn v3_v4(from: TailscaleNodeId, timestamp: u64) -> Self {
+        Self::new(from, PeerProtocolCapabilities::v3_v4(), timestamp)
+    }
+
+    /// Check whether the advertisement falls outside the freshness window.
+    #[must_use]
+    pub const fn is_stale(&self, now: u64, ttl_secs: u64, max_future_skew_secs: u64) -> bool {
+        is_outside_freshness_window(self.timestamp, now, ttl_secs, max_future_skew_secs)
+    }
+
+    /// Canonical transcript bytes signed by the peer.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any encoded variable-length field exceeds `u32::MAX`.
+    #[must_use]
+    pub fn signing_bytes(&self) -> Vec<u8> {
+        let mut bytes =
+            Vec::with_capacity(64usize.saturating_add(self.capabilities.protocols.len()));
+        bytes.extend_from_slice(b"FCP4-PEER-CAPABILITY-V1");
+
+        let from_bytes = self.from.as_str().as_bytes();
+        bytes.extend_from_slice(
+            &u32::try_from(from_bytes.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        bytes.extend_from_slice(from_bytes);
+
+        bytes.extend_from_slice(
+            &u32::try_from(self.capabilities.protocols.len())
+                .unwrap_or(u32::MAX)
+                .to_le_bytes(),
+        );
+        for protocol in &self.capabilities.protocols {
+            bytes.push(protocol.wire_id());
+        }
+
+        bytes.extend_from_slice(&self.timestamp.to_le_bytes());
+        bytes
+    }
+
+    /// Attach a peer signature to the advertisement.
+    #[must_use]
+    pub fn with_signature(mut self, signature: NodeSignature) -> Self {
+        self.signature = Some(signature);
+        self
+    }
+
+    /// Verify the attached peer signature against the canonical transcript.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the advertisement is unsigned or signature
+    /// validation fails.
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
+        let signature = self
+            .signature
+            .as_ref()
+            .ok_or_else(|| CryptoError::MissingField("signature".into()))?;
+        let signature = Ed25519Signature::from_bytes(&signature.signature);
+        verifying_key.verify(&self.signing_bytes(), &signature)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -891,6 +1074,9 @@ impl GossipSummary {
 pub enum GossipMessage {
     /// Summary announcement (periodic broadcast).
     Summary(GossipSummary),
+
+    /// Signed V3/V4 peer capability advertisement.
+    PeerCapabilities(PeerCapabilityAdvertisement),
 
     /// Request for specific objects/symbols (bounded).
     Request(GossipRequest),
@@ -2273,6 +2459,7 @@ fn symbol_key(object_id: &ObjectId, esi: u32) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::admission::ObjectAdmissionClass;
+    use fcp_crypto::Ed25519SigningKey;
     use serde::Serialize;
 
     fn test_zone() -> ZoneId {
@@ -3259,6 +3446,42 @@ mod tests {
         let sig = NodeSignature::new(node_id, [0xAB; 64], 1000);
         let signed = summary.with_signature(sig);
         assert!(signed.signature.is_some());
+    }
+
+    #[test]
+    fn peer_capability_advertisement_signing_round_trip() {
+        let signing_key = Ed25519SigningKey::generate();
+        let template = PeerCapabilityAdvertisement::v3_v4(test_node("node-1"), 1_000);
+        let signature = NodeSignature::new(
+            fcp_core::NodeId::new("node-1"),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let advertisement = template.with_signature(signature);
+
+        advertisement
+            .verify_signature(&signing_key.verifying_key())
+            .expect("peer capability advertisement signature should verify");
+        assert!(advertisement.capabilities.supports_v4());
+        assert!(!advertisement.capabilities.is_v3_only());
+    }
+
+    #[test]
+    fn peer_capability_message_serde_roundtrip() {
+        let msg = GossipMessage::PeerCapabilities(PeerCapabilityAdvertisement::v3_only(
+            test_node("node-1"),
+            1_000,
+        ));
+        let json = serde_json::to_string(&msg).unwrap();
+        let deserialized: GossipMessage = serde_json::from_str(&json).unwrap();
+
+        match deserialized {
+            GossipMessage::PeerCapabilities(advertisement) => {
+                assert!(advertisement.capabilities.is_v3_only());
+                assert_eq!(advertisement.from.as_str(), "node-1");
+            }
+            other => panic!("expected PeerCapabilities variant, got {other:?}"),
+        }
     }
 
     #[test]
@@ -4876,10 +5099,7 @@ mod tests {
             5_000
         );
         assert_eq!(PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES, 3);
-        assert_eq!(
-            PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS,
-            60
-        );
+        assert_eq!(PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS, 60);
     }
 
     #[test]
@@ -4928,10 +5148,7 @@ mod tests {
             "Emergency must override max_revocation_push_peers"
         );
         // Verify DirectPush still honors the configured cap.
-        assert_eq!(
-            PriorityGossipPolicy::DirectPush.fanout_cap(&config),
-            5
-        );
+        assert_eq!(PriorityGossipPolicy::DirectPush.fanout_cap(&config), 5);
         // Non-direct-push policies have no fanout (they wait for the
         // next gossip round instead of bursting).
         assert_eq!(
@@ -4952,8 +5169,7 @@ mod tests {
             PriorityGossipPolicy::Emergency,
         ] {
             let json = serde_json::to_string(&variant).expect("encode");
-            let back: PriorityGossipPolicy =
-                serde_json::from_str(&json).expect("decode");
+            let back: PriorityGossipPolicy = serde_json::from_str(&json).expect("decode");
             assert_eq!(back, variant, "round-trip drift for {variant:?}");
         }
     }

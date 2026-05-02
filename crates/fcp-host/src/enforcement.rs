@@ -33,6 +33,7 @@ use fcp_evidence::{
     RevocationRecord, check_revocation_chain,
 };
 use fcp_kernel::{ConnectorId, OperationId};
+use fcp_mesh::PeerProtocolCapabilities;
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
     RequestDescriptor, ZoneId,
@@ -458,6 +459,10 @@ pub struct EnforcementContext {
     /// admit/refuse without re-classifying. `None` means tier-based
     /// admission is skipped (back-compat).
     pub deployment_classification: Option<Arc<DeploymentClassification>>,
+    /// Remote mesh peer identifier, when this request arrived over mesh gossip.
+    pub remote_peer_id: Option<String>,
+    /// Remote peer's advertised V3/V4 protocol capability set.
+    pub remote_peer_capabilities: Option<PeerProtocolCapabilities>,
 }
 
 /// Builder for constructing an [`EnforcementContext`].
@@ -495,6 +500,8 @@ pub struct EnforcementContextBuilder {
     manifest_allowed_operations: Vec<String>,
     safety_tier: Option<SafetyTier>,
     deployment_classification: Option<Arc<DeploymentClassification>>,
+    remote_peer_id: Option<String>,
+    remote_peer_capabilities: Option<PeerProtocolCapabilities>,
 }
 
 impl EnforcementContextBuilder {
@@ -704,6 +711,20 @@ impl EnforcementContextBuilder {
         self
     }
 
+    /// Set the remote mesh peer identifier for peer-capability checks.
+    #[must_use]
+    pub fn remote_peer_id(mut self, peer_id: impl Into<String>) -> Self {
+        self.remote_peer_id = Some(peer_id.into());
+        self
+    }
+
+    /// Set the remote peer's advertised V3/V4 protocol capabilities.
+    #[must_use]
+    pub fn remote_peer_capabilities(mut self, capabilities: PeerProtocolCapabilities) -> Self {
+        self.remote_peer_capabilities = Some(capabilities);
+        self
+    }
+
     /// Build the enforcement context.
     ///
     /// Returns `None` if any of the required fields (`request_id`, `connector_id`,
@@ -743,6 +764,8 @@ impl EnforcementContextBuilder {
             manifest_allowed_operations: self.manifest_allowed_operations,
             safety_tier: self.safety_tier,
             deployment_classification: self.deployment_classification,
+            remote_peer_id: self.remote_peer_id,
+            remote_peer_capabilities: self.remote_peer_capabilities,
         })
     }
 }
@@ -1353,6 +1376,115 @@ impl EnforcementCheck for DeploymentTierCheck {
             },
         }
     }
+}
+
+/// Stable reason code when a V4-required request lacks peer capability input.
+pub const PEER_CAPABILITY_NOT_ADVERTISED: &str = "PEER_CAPABILITY_NOT_ADVERTISED";
+
+/// Stable reason code when a remote peer advertises only V3 but policy requires V4.
+pub const PEER_CAPABILITY_REQUIRES_V4: &str = "PEER_CAPABILITY_REQUIRES_V4";
+
+/// Validates remote mesh peer V3/V4 capability before high-risk operations proceed.
+///
+/// Safe requests may continue over V3 during migration. Risky, Dangerous, and
+/// Critical requests require a V4-capable remote advertisement so a receiver
+/// cannot silently fall back to classical-only peer state.
+pub struct PeerCapabilityCheck {
+    on_missing: MissingFieldPolicy,
+}
+
+impl PeerCapabilityCheck {
+    /// Strict (fail-CLOSED) constructor for production receivers.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            on_missing: MissingFieldPolicy::Deny,
+        }
+    }
+
+    /// Back-compat constructor for callers that have not yet threaded peer
+    /// capability advertisements into their enforcement context.
+    #[must_use]
+    pub const fn back_compat() -> Self {
+        Self {
+            on_missing: MissingFieldPolicy::Skip,
+        }
+    }
+
+    /// Whether this check fails closed on missing safety/capability inputs.
+    #[must_use]
+    pub const fn fails_closed(&self) -> bool {
+        matches!(self.on_missing, MissingFieldPolicy::Deny)
+    }
+
+    fn handle_missing(&self, field: &str, skip_reason: &'static str) -> CheckOutcome {
+        match self.on_missing {
+            MissingFieldPolicy::Deny => CheckOutcome::Deny {
+                reason_code: PEER_CAPABILITY_NOT_ADVERTISED.into(),
+                explanation: format!(
+                    "peer-capability enforcement cannot be evaluated: required EnforcementContext field `{field}` is missing"
+                ),
+            },
+            MissingFieldPolicy::Skip => CheckOutcome::Skip {
+                reason: skip_reason.into(),
+            },
+        }
+    }
+}
+
+impl Default for PeerCapabilityCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl EnforcementCheck for PeerCapabilityCheck {
+    fn name(&self) -> &'static str {
+        "peer_capability"
+    }
+
+    fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
+        let Some(tier) = ctx.safety_tier else {
+            return self.handle_missing(
+                "safety_tier",
+                "request has no safety_tier; peer-capability enforcement deferred",
+            );
+        };
+        if !safety_tier_requires_v4_peer(tier) {
+            return CheckOutcome::Allow;
+        }
+
+        let Some(capabilities) = ctx.remote_peer_capabilities.as_ref() else {
+            return self.handle_missing(
+                "remote_peer_capabilities",
+                "request has no remote peer capability advertisement; peer-capability enforcement deferred",
+            );
+        };
+        if capabilities.supports_v4() {
+            return CheckOutcome::Allow;
+        }
+
+        let peer = ctx.remote_peer_id.as_deref().unwrap_or("<unknown-peer>");
+        let claim = if capabilities.is_v3_only() {
+            "claims V3-only"
+        } else {
+            "does not advertise V4"
+        };
+        CheckOutcome::Deny {
+            reason_code: PEER_CAPABILITY_REQUIRES_V4.into(),
+            explanation: format!(
+                "remote peer {peer} {claim}, but safety tier {tier:?} requires V4-capable mesh protocol negotiation"
+            ),
+        }
+    }
+}
+
+#[must_use]
+const fn safety_tier_requires_v4_peer(tier: SafetyTier) -> bool {
+    matches!(
+        tier,
+        SafetyTier::Risky | SafetyTier::Dangerous | SafetyTier::Critical | SafetyTier::Forbidden
+    )
 }
 
 impl DeploymentTierCheck {
@@ -1971,6 +2103,8 @@ fn test_context() -> EnforcementContext {
         // deployment_tier_check_default_denies_when_*_missing).
         safety_tier: Some(SafetyTier::Safe),
         deployment_classification: Some(test_mesh_active_classification()),
+        remote_peer_id: None,
+        remote_peer_capabilities: None,
     }
 }
 
@@ -5284,6 +5418,70 @@ mod tests {
         ctx.safety_tier = Some(tier);
         ctx.deployment_classification = Some(classification);
         ctx
+    }
+
+    #[test]
+    fn peer_capability_check_allows_safe_v3_only_during_migration() {
+        let check = PeerCapabilityCheck::new();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Safe);
+        ctx.remote_peer_id = Some("peer-v3".into());
+        ctx.remote_peer_capabilities = Some(PeerProtocolCapabilities::v3_only());
+
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(matches!(outcome, CheckOutcome::Allow));
+    }
+
+    #[test]
+    fn peer_capability_check_refuses_v3_only_when_policy_requires_v4() {
+        let check = PeerCapabilityCheck::new();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Risky);
+        ctx.remote_peer_id = Some("peer-v3".into());
+        ctx.remote_peer_capabilities = Some(PeerProtocolCapabilities::v3_only());
+
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        match outcome {
+            CheckOutcome::Deny {
+                reason_code,
+                explanation,
+            } => {
+                assert_eq!(reason_code, PEER_CAPABILITY_REQUIRES_V4);
+                assert!(explanation.contains("peer-v3"));
+                assert!(explanation.contains("V3-only"));
+            }
+            other => panic!("expected V3-only peer to be denied, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn peer_capability_check_allows_v4_when_policy_requires_v4() {
+        let check = PeerCapabilityCheck::new();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Dangerous);
+        ctx.remote_peer_id = Some("peer-v4".into());
+        ctx.remote_peer_capabilities = Some(PeerProtocolCapabilities::v3_v4());
+
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(matches!(outcome, CheckOutcome::Allow));
+    }
+
+    #[test]
+    fn peer_capability_check_denies_missing_capability_when_policy_requires_v4() {
+        let check = PeerCapabilityCheck::new();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Critical);
+        ctx.remote_peer_id = Some("peer-missing".into());
+        ctx.remote_peer_capabilities = None;
+
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(matches!(
+            outcome,
+            CheckOutcome::Deny {
+                reason_code,
+                ..
+            } if reason_code == PEER_CAPABILITY_NOT_ADVERTISED
+        ));
     }
 
     // ── Per-tier admission in Evaluation mode ──

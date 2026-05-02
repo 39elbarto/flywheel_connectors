@@ -13,12 +13,12 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
+use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
     OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
     ZoneTransportPolicy,
 };
-use fcp_crypto::{CwtClaims, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolRequest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_store::{ObjectStore, QuarantineStore, SymbolStore};
@@ -43,7 +43,7 @@ use crate::degraded::{
 use crate::device::DeviceProfile;
 use crate::gossip::{
     GossipConfig, GossipMessage, GossipRequest, GossipResponse, GossipSummary, MeshGossip,
-    RevocationPushMessage,
+    PeerCapabilityAdvertisement, PeerProtocolCapabilities, RevocationPushMessage,
 };
 use crate::planner::{
     CandidateNode, ExecutionPlanner, HeldLease, LeasePurpose, NodeInfo, PlannerContext,
@@ -215,6 +215,13 @@ pub enum MeshNodeError {
     #[error("peer {peer} is not authorized for zone {zone_id}")]
     UnauthorizedZone { peer: String, zone_id: String },
 
+    /// Peer protocol capabilities cannot satisfy the receiver policy.
+    #[error("peer {peer} advertised {advertised:?}, but receiver policy requires v4")]
+    PeerCapabilityRejected {
+        peer: String,
+        advertised: PeerProtocolCapabilities,
+    },
+
     /// Peer has a registered signing key but no entry in `peers` — the
     /// attested handshake / enrollment step that populates zone
     /// membership hasn't completed yet. Control-plane messages cannot
@@ -320,6 +327,8 @@ pub struct PeerState {
     /// requests for zones outside the set are rejected with
     /// `SymbolRequestError::UnauthorizedZone`.
     pub zones: HashSet<ZoneId>,
+    /// Mesh protocol generations the peer advertised during V3 -> V4 migration.
+    pub protocol_capabilities: PeerProtocolCapabilities,
     /// Last observed timestamp (ms since epoch).
     pub last_seen_ms: u64,
 }
@@ -767,11 +776,17 @@ impl MeshNode {
             .get(&node_id)
             .map(|state| state.zones.clone())
             .unwrap_or_default();
+        let existing_protocol_capabilities = self
+            .peers
+            .get(&node_id)
+            .map(|state| state.protocol_capabilities.clone())
+            .unwrap_or_default();
         let state = PeerState {
             profile,
             local_symbols,
             held_leases,
             zones: existing_zones,
+            protocol_capabilities: existing_protocol_capabilities,
             last_seen_ms: now_ms,
         };
         self.peers.insert(node_id, state);
@@ -797,10 +812,76 @@ impl MeshNode {
                 local_symbols: HashSet::new(),
                 held_leases: Vec::new(),
                 zones,
+                protocol_capabilities: PeerProtocolCapabilities::default(),
                 last_seen_ms: current_time_ms(),
             },
         );
         self.metrics.peer_updates += 1;
+    }
+
+    /// Replace the advertised protocol capabilities for a peer.
+    ///
+    /// Unknown peers get a conservative placeholder state with no zones; zone
+    /// authorization still fails closed until enrollment populates membership.
+    pub fn update_peer_protocol_capabilities(
+        &mut self,
+        node_id: &NodeId,
+        protocol_capabilities: PeerProtocolCapabilities,
+        now_ms: u64,
+    ) {
+        if let Some(state) = self.peers.get_mut(node_id) {
+            state.protocol_capabilities = protocol_capabilities;
+            state.last_seen_ms = now_ms;
+        } else {
+            self.peers.insert(
+                node_id.clone(),
+                PeerState {
+                    profile: DeviceProfile::builder(node_id.clone()).build(),
+                    local_symbols: HashSet::new(),
+                    held_leases: Vec::new(),
+                    zones: HashSet::new(),
+                    protocol_capabilities,
+                    last_seen_ms: now_ms,
+                },
+            );
+        }
+        self.metrics.peer_updates = self.metrics.peer_updates.saturating_add(1);
+    }
+
+    /// Return a peer's currently advertised mesh protocol capabilities.
+    #[must_use]
+    pub fn peer_protocol_capabilities(
+        &self,
+        node_id: &NodeId,
+    ) -> Option<&PeerProtocolCapabilities> {
+        self.peers
+            .get(node_id)
+            .map(|state| &state.protocol_capabilities)
+    }
+
+    /// Enforce a receiver policy that requires the remote peer to support V4.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MeshNodeError::PeerCapabilityRejected`] when the peer is
+    /// enrolled but has advertised only V3 capability, and
+    /// [`MeshNodeError::UnknownPeer`] when the peer has not completed
+    /// enrollment.
+    pub fn require_peer_v4_capability(&self, node_id: &NodeId) -> Result<(), MeshNodeError> {
+        let state = self
+            .peers
+            .get(node_id)
+            .ok_or_else(|| MeshNodeError::UnknownPeer {
+                peer: node_id.as_str().to_string(),
+                message_kind: "peer capability policy",
+            })?;
+        if state.protocol_capabilities.supports_v4() {
+            return Ok(());
+        }
+        Err(MeshNodeError::PeerCapabilityRejected {
+            peer: node_id.as_str().to_string(),
+            advertised: state.protocol_capabilities.clone(),
+        })
     }
 
     /// Replace the set of zones the local node is authorized for.
@@ -1529,6 +1610,47 @@ impl MeshNode {
         Ok(peer)
     }
 
+    fn verify_peer_capability_advertisement(
+        &self,
+        advertisement: &PeerCapabilityAdvertisement,
+    ) -> Result<NodeId, MeshNodeError> {
+        let signature = advertisement.signature.as_ref().ok_or_else(|| {
+            MeshNodeError::PeerSignatureInvalid {
+                peer: advertisement.from.as_str().to_string(),
+                message_kind: "peer capability advertisement",
+            }
+        })?;
+        if signature.node_id.as_str() != advertisement.from.as_str() {
+            return Err(MeshNodeError::SignatureNodeMismatch {
+                message_kind: "peer capability advertisement",
+                expected: advertisement.from.as_str().to_string(),
+                actual: signature.node_id.as_str().to_string(),
+            });
+        }
+
+        let peer = NodeId::new(advertisement.from.as_str());
+        let key = self.peer_signing_keys.get(&peer).ok_or_else(|| {
+            MeshNodeError::PeerSigningKeyMissing {
+                peer: advertisement.from.as_str().to_string(),
+            }
+        })?;
+        advertisement
+            .verify_signature(key)
+            .map_err(|_| MeshNodeError::PeerSignatureInvalid {
+                peer: advertisement.from.as_str().to_string(),
+                message_kind: "peer capability advertisement",
+            })?;
+
+        if !self.peers.contains_key(&peer) {
+            return Err(MeshNodeError::UnknownPeer {
+                peer: peer.as_str().to_string(),
+                message_kind: "peer capability advertisement",
+            });
+        }
+
+        Ok(peer)
+    }
+
     fn verify_revocation_push_signature(
         &self,
         push: &RevocationPushMessage,
@@ -1674,6 +1796,35 @@ impl MeshNode {
         Ok(())
     }
 
+    /// Verify and apply a peer V3/V4 capability advertisement.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the advertisement is unsigned, stale, signed for a
+    /// different node, fails verification, or arrives before peer enrollment.
+    pub fn handle_peer_capability_advertisement(
+        &mut self,
+        advertisement: PeerCapabilityAdvertisement,
+        now_secs: u64,
+    ) -> Result<(), MeshNodeError> {
+        let peer = self.verify_peer_capability_advertisement(&advertisement)?;
+        if advertisement.is_stale(
+            now_secs,
+            self.gossip.summary_ttl_secs(),
+            self.gossip.max_future_skew_secs(),
+        ) {
+            return Err(MeshNodeError::StaleGossipMessage {
+                peer: advertisement.from.as_str().to_string(),
+                message_kind: "peer capability advertisement",
+            });
+        }
+
+        let now_ms = now_secs.saturating_mul(1_000);
+        self.update_peer_protocol_capabilities(&peer, advertisement.capabilities, now_ms);
+        self.metrics.gossip_updates = self.metrics.gossip_updates.saturating_add(1);
+        Ok(())
+    }
+
     /// Verify and dispatch a priority revocation push.
     ///
     /// The mesh node does not own a revocation registry, so this returns a
@@ -1781,6 +1932,10 @@ impl MeshNode {
         match message {
             GossipMessage::Summary(summary) => {
                 self.handle_summary(summary, now_secs)?;
+                Ok(GossipDispatchOutcome::default())
+            }
+            GossipMessage::PeerCapabilities(advertisement) => {
+                self.handle_peer_capability_advertisement(advertisement, now_secs)?;
                 Ok(GossipDispatchOutcome::default())
             }
             GossipMessage::RevocationPush(push) => self
@@ -2264,8 +2419,8 @@ mod tests {
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
-    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_crypto::Ed25519SigningKey;
+    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
     };
@@ -3647,6 +3802,94 @@ mod tests {
     }
 
     #[test]
+    fn peer_capability_advertisement_updates_peer_protocol_state() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-capable");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-capable"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+
+        let template =
+            PeerCapabilityAdvertisement::v3_v4(TailscaleNodeId::new("peer-capable"), 1_000);
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let advertisement = template.with_signature(signature);
+
+        let _ = node
+            .handle_gossip_message(GossipMessage::PeerCapabilities(advertisement), 1_000)
+            .expect("signed capability advertisement should verify");
+
+        let capabilities = node
+            .peer_protocol_capabilities(&peer)
+            .expect("peer state should retain capabilities");
+        assert!(capabilities.supports_v4());
+        assert_eq!(node.metrics().gossip_updates, 1);
+    }
+
+    #[test]
+    fn peer_capability_advertisement_rejects_unknown_peer() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-unenrolled");
+        let signing_key = Ed25519SigningKey::generate();
+        node.register_peer_signing_key(peer.clone(), signing_key.verifying_key());
+
+        let template =
+            PeerCapabilityAdvertisement::v3_v4(TailscaleNodeId::new("peer-unenrolled"), 1_000);
+        let signature = fcp_core::NodeSignature::new(
+            fcp_core::NodeId::new(peer.as_str()),
+            signing_key.sign(&template.signing_bytes()).to_bytes(),
+            1_000,
+        );
+        let advertisement = template.with_signature(signature);
+
+        let err = node
+            .handle_gossip_message(GossipMessage::PeerCapabilities(advertisement), 1_000)
+            .expect_err("capability advertisement before enrollment must fail closed");
+        assert!(matches!(
+            err,
+            MeshNodeError::UnknownPeer {
+                message_kind: "peer capability advertisement",
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn peer_capability_policy_rejects_v3_only_when_v4_required() {
+        let mut node = test_node("node-1");
+        let peer = NodeId::new("peer-v3-only");
+        node.update_peer_state(
+            peer.clone(),
+            test_device_profile("peer-v3-only"),
+            HashSet::new(),
+            vec![],
+            1_000,
+        );
+        node.update_peer_protocol_capabilities(&peer, PeerProtocolCapabilities::v3_only(), 1_000);
+
+        let err = node
+            .require_peer_v4_capability(&peer)
+            .expect_err("receiver policy requiring V4 must reject V3-only peers");
+        assert!(matches!(
+            err,
+            MeshNodeError::PeerCapabilityRejected { peer: reported, .. } if reported == "peer-v3-only"
+        ));
+
+        node.update_peer_protocol_capabilities(&peer, PeerProtocolCapabilities::v3_v4(), 2_000);
+        node.require_peer_v4_capability(&peer)
+            .expect("V3/V4 peer should satisfy V4-required policy");
+    }
+
+    #[test]
     fn handle_revocation_push_returns_verified_descriptor() {
         let mut node = test_node("node-1");
         let peer = NodeId::new("peer-1");
@@ -4662,6 +4905,7 @@ mod tests {
             local_symbols: HashSet::new(),
             held_leases: vec![],
             zones: HashSet::new(),
+            protocol_capabilities: PeerProtocolCapabilities::default(),
             last_seen_ms: 5000,
         };
         let dbg = format!("{state:?}");
@@ -5527,6 +5771,7 @@ mod tests {
             local_symbols: symbols,
             held_leases: leases,
             zones: HashSet::new(),
+            protocol_capabilities: PeerProtocolCapabilities::default(),
             last_seen_ms: 3000,
         };
         let cloned = state.clone();

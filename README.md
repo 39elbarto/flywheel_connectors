@@ -2096,7 +2096,6 @@ Honest about what FCP doesn't do yet:
 - **No GUI**: `fwc` is CLI-only. The `serve-mcp` command exposes connectors as MCP tools for AI agent consumption, but there is no web dashboard.
 - **Connector maturity varies**: The connector workspace compiles and passes tests, but depth of operation coverage ranges from comprehensive (GitHub: 12 ops, Gmail: 10 ops) to minimal (some connectors have 3-5 core operations).
 - **No Windows sandbox**: `fcp-sandbox` implements seccomp/Landlock on Linux and basic WASI isolation. macOS uses seatbelt. Windows sandbox support is Tier 2 and not yet hardened.
-- **Capability constraint enforcement is declarative only**: Constraints are serialized into COSE tokens but runtime enforcement is not yet wired into the request execution path. This is the next major security milestone.
 - **No automatic connector updates**: `fwc install` and `fwc update` exist but automatic background updates with rollback are not yet implemented.
 - **Single-node state only**: Connector state is externalized as mesh objects in the protocol spec, but the current host implementation stores state locally. Multi-node state replication is architecturally designed but not yet operational.
 

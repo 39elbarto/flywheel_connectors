@@ -201,6 +201,73 @@ impl WrappedKey {
     }
 }
 
+/// br-gtplu: tagged result type for
+/// [`ZoneKeyManifest::resolved_wrapped_key_observable_for`]. Surfaces
+/// the resolution path (V4 direct vs V3 fallback) so callers can emit
+/// per-call observability for the V3-deprecation cutover.
+///
+/// Once the compatibility-ledger phase advances to `V4Required` (see
+/// `docs/post-quantum/v3_v4_compatibility_ledger.md`), every
+/// [`ResolvedWrappedKey::V3Fallback`] return is a deprecation event
+/// the operator should know about. Callers SHOULD emit
+/// `fcp_zone_key_v3_fallback_total{zone_id, node_id}` on the
+/// `V3Fallback` arm and a structured WARN with `bead = "gtplu"` so
+/// the cutover gate has the per-call evidence it needs.
+///
+/// `#[must_use]` because dropping the variant tag silently is exactly
+/// the operator-invisible bypass this type was introduced to prevent.
+#[derive(Debug, Clone)]
+#[must_use]
+pub enum ResolvedWrappedKey {
+    /// V4 wrap found in `wrapped_keys_v4`. Modern path; no
+    /// observability action required.
+    V4(WrappedKey),
+    /// V3 wrap found in `wrapped_keys` (V4 list missed). Deprecated
+    /// path — caller SHOULD increment the
+    /// `fcp_zone_key_v3_fallback_total` metric and log a WARN.
+    V3Fallback(WrappedKey),
+}
+
+impl ResolvedWrappedKey {
+    /// Strip the variant tag and return the underlying `WrappedKey`,
+    /// matching the legacy [`ZoneKeyManifest::resolved_wrapped_key_for`]
+    /// behaviour. Use this only when bridging to legacy call sites
+    /// that don't yet consume the observable variant.
+    #[must_use]
+    pub fn into_wrapped_key(self) -> WrappedKey {
+        match self {
+            Self::V4(wk) | Self::V3Fallback(wk) => wk,
+        }
+    }
+
+    /// Borrow the underlying `WrappedKey` without consuming the tag.
+    #[must_use]
+    pub const fn wrapped_key(&self) -> &WrappedKey {
+        match self {
+            Self::V4(wk) | Self::V3Fallback(wk) => wk,
+        }
+    }
+
+    /// Whether this resolution took the deprecated V3-fallback path.
+    /// Convenience predicate for callers that only need to gate
+    /// observability emission.
+    #[must_use]
+    pub const fn is_v3_fallback(&self) -> bool {
+        matches!(self, Self::V3Fallback(_))
+    }
+
+    /// Stable machine-readable label for tracing / metrics.
+    /// `"v4"` or `"v3_fallback"`. Operators write log-aggregator
+    /// alerts against these strings.
+    #[must_use]
+    pub const fn path_label(&self) -> &'static str {
+        match self {
+            Self::V4(_) => "v4",
+            Self::V3Fallback(_) => "v3_fallback",
+        }
+    }
+}
+
 /// V4 wrapped zone-key entry — uses the [`WrappedKey`] enum so a single
 /// manifest can carry mixed V3+V4 wraps.
 ///
@@ -410,29 +477,78 @@ impl ZoneKeyManifest {
     /// know which list a recipient was published into. V4 senders that
     /// also published a V3 wrap for this recipient (interop manifests)
     /// will see the V4 form returned.
+    ///
+    /// **Observability note (br-gtplu):** this method is OPAQUE about
+    /// whether the result came from the V4 list or fell back to the V3
+    /// list. Once the compatibility-ledger phase advances to V4Required
+    /// (see `docs/post-quantum/v3_v4_compatibility_ledger.md`), every
+    /// V3 fallback is a deprecation event the operator should know
+    /// about — but this method gives them no signal. Prefer the
+    /// observable variant
+    /// [`Self::resolved_wrapped_key_observable_for`] in any new
+    /// caller, and emit a `fcp_zone_key_v3_fallback_total{zone_id,
+    /// node_id}` metric on the `V3Fallback` arm.
     #[must_use]
     pub fn resolved_wrapped_key_for(&self, node_id: &TailscaleNodeId) -> Option<WrappedKey> {
+        self.resolved_wrapped_key_observable_for(node_id)
+            .map(ResolvedWrappedKey::into_wrapped_key)
+    }
+
+    /// Observable resolver: returns a [`ResolvedWrappedKey`] tagged with
+    /// the resolution path so callers can emit per-call observability
+    /// (logs, metrics, audit-events) when the V3 fallback path fires.
+    ///
+    /// This is the post-`gtplu` recommended entry point. The legacy
+    /// [`Self::resolved_wrapped_key_for`] now delegates here and strips
+    /// the tag for backward compatibility with the zoo of existing
+    /// call sites; new code should consume the tagged enum.
+    ///
+    /// Resolution order is identical to the legacy method:
+    /// 1. V4 list (`wrapped_keys_v4`) — returns
+    ///    [`ResolvedWrappedKey::V4`].
+    /// 2. V3 list (`wrapped_keys`)    — returns
+    ///    [`ResolvedWrappedKey::V3Fallback`].
+    ///
+    /// **Operator metric (br-gtplu):** when this method returns
+    /// `Some(ResolvedWrappedKey::V3Fallback(_))`, callers SHOULD
+    /// increment `fcp_zone_key_v3_fallback_total{zone_id, node_id}`
+    /// and log a WARN with `bead = "gtplu"` so the
+    /// compatibility-ledger cutover gate has the per-call evidence
+    /// it needs to verify the migration finished.
+    #[must_use]
+    pub fn resolved_wrapped_key_observable_for(
+        &self,
+        node_id: &TailscaleNodeId,
+    ) -> Option<ResolvedWrappedKey> {
         if let Some(v4) = self.wrapped_key_v4_for(node_id) {
-            return Some(v4.sealed.clone());
+            return Some(ResolvedWrappedKey::V4(v4.sealed.clone()));
         }
         self.wrapped_key_for(node_id)
-            .map(|v3| WrappedKey::from_hpke(v3.sealed.clone()))
+            .map(|v3| ResolvedWrappedKey::V3Fallback(WrappedKey::from_hpke(v3.sealed.clone())))
     }
 
     /// Produce a V4 view of this manifest by promoting every entry in
     /// `wrapped_keys` to a `WrappedZoneKeyV4` tagged as `HpkeX25519`,
     /// and setting the manifest-level `kem` field if requested.
     ///
-    /// **Does NOT re-sign.** The caller is responsible for re-issuing the
-    /// owner signature against the migrated payload — the migration
-    /// helper is intentionally non-cryptographic and exists so callers
-    /// can shape a V4 manifest before handing it to the owner-key
-    /// signing flow.
+    /// **Does NOT re-sign.** Returns an [`UnsignedV4Manifest`] — a
+    /// type-system-enforced "unsigned-by-construction" wrapper that
+    /// cannot be confused with a publishable [`ZoneKeyManifest`]
+    /// (br-z8bsg). The only way to extract a publishable manifest is
+    /// to call [`UnsignedV4Manifest::sign`] with a fresh owner
+    /// signature over the migrated payload.
+    ///
+    /// Closes the modes-of-reasoning audit gap that the doc-comment
+    /// said "caller MUST re-sign" but the type system did not enforce.
+    /// A caller who ignored the doc could previously call
+    /// `store.publish(manifest.migrated_to_v4(kem))` and ship a
+    /// manifest whose signature commits to the OLD pre-migration
+    /// payload. With the typestate, that line is a compile error.
     ///
     /// Originally V3 wraps are NOT removed; the V4 manifest carries
     /// both lists so V3-only recipients keep working.
     #[must_use]
-    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> Self {
+    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> UnsignedV4Manifest {
         let mut migrated = self.clone();
         migrated.kem = manifest_kem;
         // Promote any V3 wraps the migrated manifest doesn't already
@@ -443,7 +559,14 @@ impl ZoneKeyManifest {
                 migrated.wrapped_keys_v4.push(v3.to_v4());
             }
         }
-        migrated
+        // The inherited V3 signature is intentionally left as-is. It
+        // commits to the V3-shaped payload, so any V4 verifier that
+        // re-derives canonical signing bytes from the migrated form
+        // will reject it — defence-in-depth even if a downstream
+        // consumer reaches inside via `as_payload().clone()` and
+        // tries to publish the inner value. The typestate is the
+        // load-bearing safety property; this is the secondary one.
+        UnsignedV4Manifest { inner: migrated }
     }
 
     /// Add a V4 X-Wing wrap for a recipient. If the recipient already
@@ -543,6 +666,106 @@ impl ZoneKeyManifest {
             });
         }
         Ok(())
+    }
+}
+
+/// A `ZoneKeyManifest` produced by [`ZoneKeyManifest::migrated_to_v4`]
+/// that has NOT yet been re-signed by the owner (br-z8bsg).
+///
+/// The type system enforces that an unsigned migrated manifest cannot
+/// be confused with a freshly-signed [`ZoneKeyManifest`]: the only way
+/// to extract a publishable manifest is through [`Self::sign`] with a
+/// caller-supplied `NodeSignature` covering the migrated payload.
+///
+/// Read-only inspection of the migrated payload is supported via
+/// [`Self::as_payload`] (e.g. computing the canonical signing bytes
+/// the owner-key flow will sign over, or running validators like
+/// [`ZoneKeyManifest::validate_no_recipient_split_view`] before
+/// signing). Idempotency of the migration helper is preserved via
+/// [`Self::migrated_to_v4`].
+///
+/// **The inherited V3 signature is preserved as-is** — but it
+/// commits to the V3-shaped payload, so any V4 verifier that
+/// re-derives canonical signing bytes from the migrated form will
+/// reject it. Defence in depth in case a downstream consumer reaches
+/// inside via `as_payload().clone()` and tries to publish the inner
+/// value: the publish would succeed but verification would fail.
+#[derive(Debug, Clone)]
+pub struct UnsignedV4Manifest {
+    inner: ZoneKeyManifest,
+}
+
+impl UnsignedV4Manifest {
+    /// Borrow the migrated payload for inspection — e.g. computing
+    /// the canonical signing bytes the caller's owner-key flow will
+    /// sign over, or running structural validators
+    /// ([`ZoneKeyManifest::validate_no_recipient_split_view`],
+    /// [`ZoneKeyManifest::wrapped_key_v4_for`]) before signing.
+    ///
+    /// The returned reference's `signature` field is the all-zero
+    /// placeholder installed by [`ZoneKeyManifest::migrated_to_v4`]
+    /// — it cannot verify. Callers that bypass the type system by
+    /// cloning the inner value still ship a manifest that fails
+    /// every owner-signature check, so the safety property holds
+    /// even under defeated typestate.
+    #[must_use]
+    pub fn as_payload(&self) -> &ZoneKeyManifest {
+        &self.inner
+    }
+
+    /// Install a fresh owner signature over the migrated payload and
+    /// extract the publishable [`ZoneKeyManifest`].
+    ///
+    /// **Caller is responsible** for computing `signature` over the
+    /// canonical signing bytes of the migrated payload (which the
+    /// caller obtains via [`Self::as_payload`] and the owner-key
+    /// signing flow). This method does not verify the signature — it
+    /// just performs the type-level transition from "unsigned" to
+    /// "publishable form."
+    #[must_use]
+    pub fn sign(self, signature: NodeSignature) -> ZoneKeyManifest {
+        let mut m = self.inner;
+        m.signature = signature;
+        m
+    }
+
+    /// Idempotency helper: re-run migration on the unsigned payload.
+    /// Matches the property pinned by
+    /// `zone_key_manifest_v4_migrated_to_v4_is_idempotent_for_already_migrated_recipients`.
+    /// The resulting `UnsignedV4Manifest` covers exactly the same
+    /// recipients as `self` when the wraps already cover every V3
+    /// recipient.
+    #[must_use]
+    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> UnsignedV4Manifest {
+        self.inner.migrated_to_v4(manifest_kem)
+    }
+
+    /// Add a V4 X-Wing wrap to the migrated payload BEFORE signing.
+    /// Delegates to [`ZoneKeyManifest::add_xwing_wrap`]; the typestate
+    /// is preserved because mutation pre-sign is safe — the eventual
+    /// owner signature will commit to the final post-mutation
+    /// payload via [`Self::sign`].
+    pub fn add_xwing_wrap(
+        &mut self,
+        recipient: TailscaleNodeId,
+        issued_at: u64,
+        sealed: XWingSealedBox,
+    ) {
+        self.inner.add_xwing_wrap(recipient, issued_at, sealed);
+    }
+
+    /// Convenience extraction for `#[cfg(test)]` and benchmarking
+    /// callers that need a `ZoneKeyManifest` without performing real
+    /// owner signing — the typestate is bypassed by an explicit
+    /// caller-supplied no-op signature. **Production callers MUST use
+    /// [`Self::sign`] with a real signature.**
+    ///
+    /// The name is deliberately verbose so a careless production grep
+    /// for `.sign(` does not pick this up.
+    #[cfg(any(test, feature = "test-only-bypass-signing"))]
+    #[must_use]
+    pub fn into_inner_unsigned_for_testing_only(self) -> ZoneKeyManifest {
+        self.inner
     }
 }
 
@@ -1017,7 +1240,7 @@ mod tests {
         )
         .expect("carol v3 wrap");
 
-        let mut manifest = ZoneKeyManifest {
+        let mut unsigned = ZoneKeyManifest {
             header: test_header(&zone_id),
             zone_id: zone_id.clone(),
             zone_key_id: ZoneKeyId::from_bytes([0xA1; 8]),
@@ -1034,7 +1257,11 @@ mod tests {
             wrapped_keys_v4: vec![],
         }
         .migrated_to_v4(ZoneKemAlgorithm::XWing);
-        manifest.add_xwing_wrap(bob.clone(), issued_at, bob_v4);
+        unsigned.add_xwing_wrap(bob.clone(), issued_at, bob_v4);
+        // br-z8bsg: typestate transition. Production callers would
+        // compute a real owner signature here; the in-tree test uses
+        // the same dummy signature the rest of this test suite uses.
+        let manifest = unsigned.sign(test_signature());
 
         manifest
             .validate_no_recipient_split_view()
@@ -3559,6 +3786,142 @@ mod tests {
         // Should return the first match (issued_at_a)
         let found = manifest.wrapped_key_for(&node_id).unwrap();
         assert_eq!(found.issued_at, issued_at_a);
+    }
+
+    /// br-gtplu: when a recipient has only a V3 wrap (no entry in
+    /// `wrapped_keys_v4`), `resolved_wrapped_key_observable_for` MUST
+    /// return [`ResolvedWrappedKey::V3Fallback`] so callers can emit
+    /// per-call observability for the V3-deprecation cutover.
+    #[test]
+    fn br_gtplu_observable_resolver_returns_v3_fallback_when_only_v3_present() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-v3-only");
+        let issued_at = 1_700_000_000;
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        let v3_wrap = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![v3_wrap],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![], // recipient has NO V4 entry
+        };
+
+        let resolved = manifest
+            .resolved_wrapped_key_observable_for(&node_id)
+            .expect("v3-only recipient must resolve");
+        assert!(
+            resolved.is_v3_fallback(),
+            "br-gtplu: V3-only recipient must surface as V3Fallback; got {:?}",
+            resolved.path_label()
+        );
+        assert_eq!(resolved.path_label(), "v3_fallback");
+        assert!(matches!(resolved.wrapped_key(), WrappedKey::HpkeX25519 { .. }));
+    }
+
+    /// br-gtplu: when a recipient has a V4 wrap (and possibly also a
+    /// V3 wrap for interop), the observable resolver MUST return the
+    /// V4 path so callers don't emit a spurious deprecation signal.
+    #[test]
+    fn br_gtplu_observable_resolver_returns_v4_when_v4_present() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-v4");
+        let issued_at = 1_700_000_000;
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        // Build a V3 wrap (used to populate wrapped_keys_v4 below as
+        // an HpkeX25519 V4 entry — same KEM, but in the V4 list).
+        let v3_wrap = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+        let v4_entry = WrappedZoneKeyV4 {
+            recipient: node_id.clone(),
+            issued_at,
+            sealed: WrappedKey::from_hpke(v3_wrap.sealed.clone()),
+        };
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            // ALSO put a V3 entry to confirm V4 wins when both lists
+            // contain the recipient (interop manifest case).
+            wrapped_keys: vec![v3_wrap],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![v4_entry],
+        };
+
+        let resolved = manifest
+            .resolved_wrapped_key_observable_for(&node_id)
+            .expect("v4 recipient must resolve");
+        assert!(
+            !resolved.is_v3_fallback(),
+            "br-gtplu: recipient with V4 entry must NOT surface as V3Fallback; got {:?}",
+            resolved.path_label()
+        );
+        assert_eq!(resolved.path_label(), "v4");
+    }
+
+    /// br-gtplu: legacy `resolved_wrapped_key_for` MUST keep returning
+    /// the same `WrappedKey` payload as the new observable variant
+    /// (just without the variant tag) — back-compat for the zoo of
+    /// existing call sites that haven't migrated yet.
+    #[test]
+    fn br_gtplu_legacy_resolver_strips_observable_tag_unchanged() {
+        let zone_id = ZoneId::work();
+        let node_id = TailscaleNodeId::new("node-back-compat");
+        let issued_at = 1_700_000_000;
+        let sk = X25519SecretKey::generate();
+        let pk = sk.public_key();
+        let zone_key = random_zone_key();
+        let v3_wrap = wrap_zone_key(&pk, &zone_id, &node_id, issued_at, &zone_key).unwrap();
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id: zone_id.clone(),
+            zone_key_id: ZoneKeyId::from_bytes([0x01; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x11; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![v3_wrap.clone()],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![],
+        };
+
+        // Both APIs must return the SAME wrapped-key bytes.
+        let legacy = manifest.resolved_wrapped_key_for(&node_id).unwrap();
+        let observable = manifest
+            .resolved_wrapped_key_observable_for(&node_id)
+            .unwrap();
+        let observable_inner = observable.into_wrapped_key();
+
+        let legacy_sealed = legacy.hpke_sealed().expect("legacy is HPKE");
+        let observable_sealed = observable_inner.hpke_sealed().expect("observable is HPKE");
+        assert_eq!(legacy_sealed.to_bytes(), observable_sealed.to_bytes());
     }
 
     /// Verify `ZoneKeyRing` does not change state on failed `set_active_zone_key`.

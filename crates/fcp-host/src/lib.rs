@@ -39,6 +39,7 @@ mod error;
 // health responses.
 #[allow(dead_code)]
 mod health;
+mod migration_linux;
 mod output_capture;
 mod progress;
 mod redaction;
@@ -56,6 +57,7 @@ pub use discovery::*;
 pub use doctor::*;
 pub use enforcement::*;
 pub use error::*;
+pub use migration_linux::*;
 pub use output_capture::*;
 pub use progress::*;
 pub use redaction::*;

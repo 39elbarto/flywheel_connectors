@@ -965,13 +965,51 @@ impl IndexedZoneKeyManifest {
     /// `O(1)` equivalent of [`ZoneKeyManifest::resolved_wrapped_key_for`].
     /// V4 first, V3 fallback — same precedence as the linear-scan
     /// version.
+    ///
+    /// Post-`vkb3m`: delegates to
+    /// [`Self::resolved_wrapped_key_observable_for`] and strips the
+    /// resolution-path tag for backward compatibility with existing
+    /// call sites. New callers SHOULD consume the observable variant
+    /// directly so V3-fallback observability fires on this O(1) hot
+    /// path the same way it does on the linear-scan resolver
+    /// (br-gtplu).
     #[must_use]
     pub fn resolved_wrapped_key_for(&self, node_id: &TailscaleNodeId) -> Option<WrappedKey> {
+        self.resolved_wrapped_key_observable_for(node_id)
+            .map(ResolvedWrappedKey::into_wrapped_key)
+    }
+
+    /// `O(1)` observable resolver — the indexed-manifest analogue of
+    /// [`ZoneKeyManifest::resolved_wrapped_key_observable_for`].
+    /// Returns a [`ResolvedWrappedKey`] tagged with whether the wrap
+    /// came from the V4 list or fell back to the V3 list, so callers
+    /// on the dispatcher hot path can emit the same per-call
+    /// `fcp_zone_key_v3_fallback_total{zone_id, node_id}` metric and
+    /// `bead = "gtplu"` WARN that the linear-scan resolver does
+    /// (br-vkb3m).
+    ///
+    /// gtplu's original fix only extended observability to the
+    /// linear-scan resolver. The cross-domain audit (br-vkb3m) found
+    /// that production hot paths use [`IndexedZoneKeyManifest`] for
+    /// the per-request `O(1)` lookup and were left with an opaque
+    /// resolver — the cutover-gate evidence the gtplu fix was
+    /// supposed to provide was missing on the call sites that matter
+    /// most. This method closes that gap: the indexed and linear
+    /// paths now both surface the resolution tag.
+    ///
+    /// Resolution order (identical to the linear-scan version):
+    /// 1. V4 list (`wrapped_keys_v4`) → [`ResolvedWrappedKey::V4`].
+    /// 2. V3 list (`wrapped_keys`)    → [`ResolvedWrappedKey::V3Fallback`].
+    #[must_use]
+    pub fn resolved_wrapped_key_observable_for(
+        &self,
+        node_id: &TailscaleNodeId,
+    ) -> Option<ResolvedWrappedKey> {
         if let Some(v4) = self.wrapped_key_v4_for(node_id) {
-            return Some(v4.sealed.clone());
+            return Some(ResolvedWrappedKey::V4(v4.sealed.clone()));
         }
         self.wrapped_key_for(node_id)
-            .map(|v3| WrappedKey::from_hpke(v3.sealed.clone()))
+            .map(|v3| ResolvedWrappedKey::V3Fallback(WrappedKey::from_hpke(v3.sealed.clone())))
     }
 }
 
@@ -4771,6 +4809,239 @@ mod tests {
         let legacy_sealed = legacy.hpke_sealed().expect("legacy is HPKE");
         let observable_sealed = observable_inner.hpke_sealed().expect("observable is HPKE");
         assert_eq!(legacy_sealed.to_bytes(), observable_sealed.to_bytes());
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-vkb3m: extend gtplu's V3-deprecation observability (the
+    // ResolvedWrappedKey-tagged variant) to the IndexedZoneKeyManifest
+    // hot path. Pre-vkb3m the indexed resolver returned an opaque
+    // WrappedKey, so dispatcher-tier callers (which use the indexed
+    // form for O(1) per-request lookup) couldn't emit the
+    // fcp_zone_key_v3_fallback_total metric or the bead="gtplu" WARN
+    // when a V3 fallback fired. The cutover-gate evidence the gtplu
+    // fix was supposed to provide was missing on the call sites that
+    // matter most.
+    //
+    // These tests pin three correctness properties of the new
+    // IndexedZoneKeyManifest::resolved_wrapped_key_observable_for and
+    // a fourth that the indexed and linear resolvers agree on the
+    // tagged outcome — so dispatcher-tier code emitting one metric
+    // gives operators the same picture as a one-shot inspection
+    // through ZoneKeyManifest's linear resolver.
+    // ─────────────────────────────────────────────────────────────────
+
+    fn vkb3m_three_recipient_manifest() -> (
+        ZoneKeyManifest,
+        TailscaleNodeId,
+        TailscaleNodeId,
+        TailscaleNodeId,
+    ) {
+        let zone_id = ZoneId::work();
+        let issued_at = 1_700_020_000;
+        let zone_key = random_zone_key();
+
+        // Recipient A: V3-only — must surface as V3Fallback.
+        let alice = TailscaleNodeId::new("alice-v3-only");
+        let alice_sk = X25519SecretKey::generate();
+        let alice_v3 = wrap_zone_key(
+            &alice_sk.public_key(),
+            &zone_id,
+            &alice,
+            issued_at,
+            &zone_key,
+        )
+        .expect("alice v3 wrap");
+
+        // Recipient B: V4-only X-Wing — must surface as V4.
+        let bob = TailscaleNodeId::new("bob-v4-only");
+        let xwing = XWingProvider::new();
+        let (bob_pk, _bob_sk) = xwing.generate().expect("bob xwing keypair");
+        let bob_aad = Fcp4Aad::for_zone_key(zone_id.as_bytes(), bob.as_str().as_bytes(), issued_at)
+            .encode()
+            .expect("bob aad");
+        let bob_v4_sealed = xwing
+            .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+            .expect("bob v4 wrap");
+        let bob_v4 = WrappedZoneKeyV4 {
+            recipient: bob.clone(),
+            issued_at,
+            sealed: WrappedKey::from_xwing(bob_v4_sealed),
+        };
+
+        // Recipient C: interop-both (V3 wrap + promoted-V4 entry whose
+        // sealed bytes match) — must surface as V4 (no spurious
+        // V3-deprecation signal on a recipient already migrated).
+        let carol = TailscaleNodeId::new("carol-interop-both");
+        let carol_sk = X25519SecretKey::generate();
+        let carol_v3 = wrap_zone_key(
+            &carol_sk.public_key(),
+            &zone_id,
+            &carol,
+            issued_at,
+            &zone_key,
+        )
+        .expect("carol v3 wrap");
+        let carol_v4 = WrappedZoneKeyV4 {
+            recipient: carol.clone(),
+            issued_at,
+            sealed: WrappedKey::from_hpke(carol_v3.sealed.clone()),
+        };
+
+        let manifest = ZoneKeyManifest {
+            header: test_header(&zone_id),
+            zone_id,
+            zone_key_id: ZoneKeyId::from_bytes([0x77; 8]),
+            object_id_key_id: ObjectIdKeyId::from_bytes([0x88; 8]),
+            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+            valid_from: issued_at,
+            valid_until: None,
+            prev_zone_key_id: None,
+            wrapped_keys: vec![alice_v3, carol_v3],
+            wrapped_object_id_keys: vec![],
+            rekey_policy: None,
+            signature: test_signature(),
+            kem: ZoneKemAlgorithm::HpkeX25519,
+            wrapped_keys_v4: vec![bob_v4, carol_v4],
+        };
+
+        (manifest, alice, bob, carol)
+    }
+
+    #[test]
+    fn br_vkb3m_indexed_observable_wrap_resolution_returns_v3_fallback_for_v3_only_recipient() {
+        let (manifest, alice, _bob, _carol) = vkb3m_three_recipient_manifest();
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("manifest has no duplicates → index builds");
+
+        let resolved = indexed
+            .resolved_wrapped_key_observable_for(&alice)
+            .expect("V3-only recipient must resolve via the indexed path");
+
+        assert!(
+            resolved.is_v3_fallback(),
+            "br-vkb3m: V3-only recipient via IndexedZoneKeyManifest MUST surface as V3Fallback \
+             so dispatcher-hot-path callers emit the gtplu deprecation metric/log; got {:?}",
+            resolved.path_label()
+        );
+        assert_eq!(resolved.path_label(), "v3_fallback");
+        assert!(matches!(
+            resolved.wrapped_key(),
+            WrappedKey::HpkeX25519 { .. }
+        ));
+    }
+
+    #[test]
+    fn br_vkb3m_indexed_observable_wrap_resolution_returns_v4_for_v4_only_recipient() {
+        let (manifest, _alice, bob, _carol) = vkb3m_three_recipient_manifest();
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("manifest has no duplicates → index builds");
+
+        let resolved = indexed
+            .resolved_wrapped_key_observable_for(&bob)
+            .expect("V4-only recipient must resolve via the indexed path");
+
+        assert!(
+            !resolved.is_v3_fallback(),
+            "br-vkb3m: V4-only recipient via IndexedZoneKeyManifest MUST NOT surface as \
+             V3Fallback (would spuriously fire the gtplu deprecation alert); got {:?}",
+            resolved.path_label()
+        );
+        assert_eq!(resolved.path_label(), "v4");
+        assert!(matches!(resolved.wrapped_key(), WrappedKey::XWing { .. }));
+    }
+
+    #[test]
+    fn br_vkb3m_indexed_observable_wrap_resolution_returns_v4_for_interop_both_recipient() {
+        let (manifest, _alice, _bob, carol) = vkb3m_three_recipient_manifest();
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("manifest has no duplicates → index builds");
+
+        let resolved = indexed
+            .resolved_wrapped_key_observable_for(&carol)
+            .expect("interop-both recipient must resolve via the indexed path");
+
+        assert!(
+            !resolved.is_v3_fallback(),
+            "br-vkb3m: interop-both recipient (with V4 entry available) MUST resolve as V4 \
+             via the indexed path so the gtplu deprecation signal does not fire on a \
+             recipient already migrated to V4; got {:?}",
+            resolved.path_label()
+        );
+        assert_eq!(resolved.path_label(), "v4");
+    }
+
+    /// br-vkb3m: the indexed and linear-scan resolvers MUST agree on
+    /// the tagged outcome for every recipient. This is the
+    /// load-bearing cutover-gate property: a node that toggles
+    /// between the two resolver flavours (e.g. one-shot inspection
+    /// vs. dispatcher hot path) must observe the SAME
+    /// V3-vs-V4 picture for any given recipient — otherwise the
+    /// `fcp_zone_key_v3_fallback_total` metric splits across paths
+    /// and the cutover gate cannot be trusted.
+    #[test]
+    fn br_vkb3m_indexed_and_linear_wrap_resolution_paths_agree_on_observable_tag() {
+        let (manifest, alice, bob, carol) = vkb3m_three_recipient_manifest();
+        let indexed = IndexedZoneKeyManifest::new(manifest.clone())
+            .expect("manifest has no duplicates → index builds");
+
+        for recipient in [&alice, &bob, &carol] {
+            let linear = manifest
+                .resolved_wrapped_key_observable_for(recipient)
+                .expect("linear resolver returns recipient");
+            let indexed_resolved = indexed
+                .resolved_wrapped_key_observable_for(recipient)
+                .expect("indexed resolver returns recipient");
+
+            assert_eq!(
+                linear.path_label(),
+                indexed_resolved.path_label(),
+                "br-vkb3m: linear and indexed observable resolvers MUST agree on path \
+                 tag for recipient `{}` — linear={:?} indexed={:?}",
+                recipient.as_str(),
+                linear.path_label(),
+                indexed_resolved.path_label()
+            );
+
+            // Sealed bytes must also match — same wrap selected.
+            let linear_kem = linear.wrapped_key().kem();
+            let indexed_kem = indexed_resolved.wrapped_key().kem();
+            assert_eq!(
+                linear_kem,
+                indexed_kem,
+                "br-vkb3m: KEM tag mismatch between resolvers for recipient `{}`",
+                recipient.as_str()
+            );
+        }
+    }
+
+    /// br-vkb3m: legacy `IndexedZoneKeyManifest::resolved_wrapped_key_for`
+    /// MUST keep returning the same `WrappedKey` payload as the new
+    /// observable variant (just without the variant tag) — back-compat
+    /// for the existing dispatcher call sites that haven't migrated
+    /// to the observable form yet.
+    #[test]
+    fn br_vkb3m_indexed_legacy_wrap_resolution_strips_observable_tag_unchanged() {
+        let (manifest, alice, bob, carol) = vkb3m_three_recipient_manifest();
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("manifest has no duplicates → index builds");
+
+        for recipient in [&alice, &bob, &carol] {
+            let legacy = indexed
+                .resolved_wrapped_key_for(recipient)
+                .expect("legacy resolver returns recipient");
+            let observable_inner = indexed
+                .resolved_wrapped_key_observable_for(recipient)
+                .expect("observable resolver returns recipient")
+                .into_wrapped_key();
+
+            assert_eq!(
+                legacy.kem(),
+                observable_inner.kem(),
+                "br-vkb3m: legacy and observable resolvers MUST return the same KEM \
+                 variant for recipient `{}`",
+                recipient.as_str()
+            );
+        }
     }
 
     /// Verify `ZoneKeyRing` does not change state on failed `set_active_zone_key`.

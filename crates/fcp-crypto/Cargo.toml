@@ -93,3 +93,7 @@ semver.workspace = true
 [[bench]]
 name = "crypto_benchmarks"
 harness = false
+
+[[bench]]
+name = "canonicalize_map_throughput"
+harness = false

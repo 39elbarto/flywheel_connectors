@@ -148,38 +148,90 @@ fn canonicalize_map(
     entries: &mut Vec<(ciborium::value::Value, ciborium::value::Value)>,
     depth: usize,
 ) -> CryptoResult<()> {
-    let mut with_keys = Vec::with_capacity(entries.len());
-    // Reuse a single buffer for serializing map keys instead of allocating per key.
-    let mut key_buf = Vec::with_capacity(64);
-    for (mut key, mut value) in std::mem::take(entries) {
-        canonicalize_value_in_place(&mut key, depth)?;
-        canonicalize_value_in_place(&mut value, depth)?;
+    // br-m7aoz: arena-based sort comparator. Pre-refactor this
+    // function allocated a `Vec<u8>` per map entry just to hold the
+    // serialized sort key (`key_buf.clone()` per iteration); for an
+    // N-entry map the encoder paid N heap allocations purely for
+    // comparator inputs, recursively, on every signed-object encode
+    // in the workspace. The new layout serializes all keys
+    // end-to-end into a SINGLE arena Vec and sorts an index Vec by
+    // borrows into the arena — zero per-entry allocations beyond
+    // the index's `usize` slots.
+    //
+    // Wire format is unchanged: same RFC 8949 §4.2.1 bytewise
+    // lexicographic key order, same duplicate-detection semantics,
+    // same canonical CBOR output bytes (golden-vector tests pin
+    // this).
+    let n = entries.len();
 
-        key_buf.clear();
-        ciborium::into_writer(&key, &mut key_buf)
-            .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
-
-        with_keys.push((key_buf.clone(), key, value));
+    // Pass 1: canonicalize key + value in place so the arena
+    // encoding below sees the canonical form for sort-key derivation.
+    for (key, value) in entries.iter_mut() {
+        canonicalize_value_in_place(key, depth)?;
+        canonicalize_value_in_place(value, depth)?;
     }
 
-    // RFC 8949 §4.2.1: Map keys MUST be sorted in bytewise lexicographic order
-    // of their deterministic encodings.
-    with_keys.sort_by(|(a_bytes, _, _), (b_bytes, _, _)| a_bytes.cmp(b_bytes));
+    // Pass 2: serialize each key into the SHARED arena, recording
+    // its (start, len) slice into a parallel offsets Vec. The
+    // arena owns the bytes; sort-comparator borrows live as long
+    // as the function.
+    //
+    // Pre-allocation heuristic: typical FCP map keys are small
+    // (16-32 bytes for u64 / short text / 32-byte hashes). 64 B
+    // per entry covers the common case without reallocation; the
+    // arena Vec grows naturally for outliers.
+    let mut arena: Vec<u8> = Vec::with_capacity(n.saturating_mul(64));
+    let mut key_offsets: Vec<(usize, usize)> = Vec::with_capacity(n);
+    for (key, _value) in entries.iter() {
+        let start = arena.len();
+        ciborium::into_writer(key, &mut arena)
+            .map_err(|e| CryptoError::SerializationError(e.to_string()))?;
+        let len = arena.len() - start;
+        key_offsets.push((start, len));
+    }
 
-    // Check for duplicates
-    for window in with_keys.windows(2) {
-        if window[0].0 == window[1].0 {
+    // Pass 3: sort an index Vec by bytewise comparison of the
+    // arena slices. RFC 8949 §4.2.1 — pure bytewise lex order over
+    // the deterministic encoded keys (NOT length-then-bytewise; the
+    // workspace uses §4.2.1, not §4.2.3).
+    let mut sort_idx: Vec<usize> = (0..n).collect();
+    sort_idx.sort_by(|&a, &b| {
+        let (a_start, a_len) = key_offsets[a];
+        let (b_start, b_len) = key_offsets[b];
+        arena[a_start..a_start + a_len].cmp(&arena[b_start..b_start + b_len])
+    });
+
+    // Pass 4: duplicate detection. Adjacent post-sort entries with
+    // byte-equal serialized keys are duplicates; the sort makes
+    // duplicates collate so a single linear scan suffices.
+    for w in sort_idx.windows(2) {
+        let (a_start, a_len) = key_offsets[w[0]];
+        let (b_start, b_len) = key_offsets[w[1]];
+        if a_len == b_len && arena[a_start..a_start + a_len] == arena[b_start..b_start + b_len] {
             return Err(CryptoError::SerializationError(format!(
                 "duplicate map key: {}",
-                hex::encode(&window[0].0)
+                hex::encode(&arena[a_start..a_start + a_len])
             )));
         }
     }
 
-    *entries = with_keys
-        .into_iter()
-        .map(|(_, key, value)| (key, value))
-        .collect();
+    // Pass 5: apply the permutation to `entries`. Take the original
+    // out, wrap each slot in `Option`, then build the new Vec by
+    // indexing through `sort_idx`. The Option dance avoids needing
+    // `Clone` on the (Value, Value) pairs and is allocation-cheap
+    // (one Vec per call vs the per-entry clones the pre-refactor
+    // design did).
+    let mut taken: Vec<Option<(ciborium::value::Value, ciborium::value::Value)>> =
+        std::mem::take(entries).into_iter().map(Some).collect();
+    let mut sorted = Vec::with_capacity(n);
+    for &i in &sort_idx {
+        sorted.push(
+            taken[i]
+                .take()
+                .expect("each entry index appears exactly once in the permutation"),
+        );
+    }
+    *entries = sorted;
 
     Ok(())
 }

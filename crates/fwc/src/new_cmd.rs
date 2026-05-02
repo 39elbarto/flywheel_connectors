@@ -19,6 +19,7 @@
 //! fwc new --check connectors/myservice
 //! ```
 
+use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,7 @@ use clap::{Args, ValueEnum};
 use fcp_kernel::validate_canonical_id;
 use fcp_manifest::ConnectorManifest;
 use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types (consolidated from types submodule)
@@ -222,6 +224,58 @@ struct CheckResult {
     suggested_fixes: Vec<SuggestedFix>,
 }
 
+/// Schema dialect detected by the synthesizer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SpecKind {
+    /// OpenAPI 3.x JSON/YAML document.
+    OpenApi,
+    /// AsyncAPI 2.x/3.x JSON/YAML document.
+    AsyncApi,
+    /// GraphQL SDL document.
+    GraphQl,
+}
+
+impl SpecKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenApi => "openapi",
+            Self::AsyncApi => "asyncapi",
+            Self::GraphQl => "graphql",
+        }
+    }
+
+    const fn default_archetype(self) -> ConnectorArchetype {
+        match self {
+            Self::OpenApi | Self::GraphQl => ConnectorArchetype::RequestResponse,
+            Self::AsyncApi => ConnectorArchetype::Webhook,
+        }
+    }
+}
+
+/// Provider operation inferred from a schema.
+#[derive(Debug, Clone)]
+struct SynthOperation {
+    slug: String,
+    summary: String,
+    description: Option<String>,
+    input_schema: Value,
+    output_schema: Value,
+    risk_level: &'static str,
+    safety_tier: &'static str,
+    idempotency: &'static str,
+    approval: &'static str,
+}
+
+/// Normalized schema surface used by code generation.
+#[derive(Debug, Clone)]
+struct SynthSpec {
+    kind: SpecKind,
+    title: String,
+    version: String,
+    description: Option<String>,
+    operations: Vec<SynthOperation>,
+}
+
 /// A suggested fix for a failed check.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SuggestedFix {
@@ -244,7 +298,6 @@ pub(crate) struct NewArgs {
     /// Connector ID (e.g., "fcp.myservice").
     ///
     /// Must start with "fcp." and contain only alphanumeric characters and dots.
-    #[arg(required_unless_present = "check")]
     pub connector_id: Option<String>,
 
     /// Connector archetype.
@@ -264,8 +317,16 @@ pub(crate) struct NewArgs {
     pub dry_run: bool,
 
     /// Validate an existing connector directory instead of creating new.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", conflicts_with = "from_spec")]
     pub check: Option<PathBuf>,
+
+    /// Generate a tier-1 connector skeleton from an OpenAPI, AsyncAPI, or GraphQL schema file.
+    #[arg(long = "from-spec", value_name = "SCHEMA_FILE")]
+    pub from_spec: Option<PathBuf>,
+
+    /// Target connector crate directory for schema synthesis.
+    #[arg(long, value_name = "PATH", requires = "from_spec")]
+    pub target: Option<PathBuf>,
 
     /// Output JSON instead of human-readable format.
     #[arg(long)]
@@ -273,7 +334,7 @@ pub(crate) struct NewArgs {
 }
 
 /// Archetype argument enum (for clap's `ValueEnum` derive).
-#[derive(Debug, Clone, Copy, ValueEnum, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
 pub(crate) enum ArchetypeArg {
     #[default]
     RequestResponse,
@@ -309,11 +370,13 @@ impl From<ArchetypeArg> for ConnectorArchetype {
 pub(crate) fn run(args: &NewArgs) -> Result<()> {
     if let Some(check_path) = &args.check {
         run_check(check_path, args.json)
+    } else if let Some(schema_path) = &args.from_spec {
+        run_spec_synth(schema_path, args)
     } else {
         let connector_id = args
             .connector_id
-            .as_ref()
-            .context("connector_id is required when not using --check")?;
+            .as_deref()
+            .context("connector_id is required when not using --check or --from-spec")?;
         run_scaffold(connector_id, args)
     }
 }
@@ -348,6 +411,23 @@ fn run_scaffold(connector_id: &str, args: &NewArgs) -> Result<()> {
         args.no_e2e,
         args.dry_run,
     )?;
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    } else {
+        print_scaffold_result(&result, args.dry_run);
+    }
+
+    if !result.prechecks.passed {
+        std::process::exit(1);
+    }
+
+    Ok(())
+}
+
+/// Run schema-driven connector synthesis.
+fn run_spec_synth(schema_path: &Path, args: &NewArgs) -> Result<()> {
+    let result = synthesize_connector(schema_path, args)?;
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&result)?);
@@ -620,6 +700,698 @@ fn scaffold_connector(
     })
 }
 
+/// Synthesize a connector crate from an external API schema.
+fn synthesize_connector(schema_path: &Path, args: &NewArgs) -> Result<ScaffoldResult> {
+    let spec = load_synth_spec(schema_path)?;
+    let connector_id = match args.connector_id.as_deref() {
+        Some(connector_id) => connector_id.to_string(),
+        None => format!("fcp.{}", canonical_segment(&spec.title)),
+    };
+    validate_connector_id(&connector_id)?;
+
+    let short_name = extract_short_name(&connector_id);
+    let crate_slug = normalize_crate_slug(short_name);
+    if crate_slug.is_empty() {
+        anyhow::bail!("connector ID must include at least one alphanumeric character");
+    }
+    let crate_name = format!("fcp-{crate_slug}");
+    let workspace_root = find_workspace_root()?;
+    let base_path = match &args.target {
+        Some(target) if target.is_absolute() => target.clone(),
+        Some(target) => workspace_root.join(target),
+        None => workspace_root.join(format!("connectors/{crate_slug}")),
+    };
+    let crate_path = base_path
+        .strip_prefix(&workspace_root)
+        .with_context(|| {
+            format!(
+                "--target must resolve inside workspace root {}",
+                workspace_root.display()
+            )
+        })?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    if base_path.exists() {
+        anyhow::bail!(
+            "connector directory already exists: {}",
+            base_path.display()
+        );
+    }
+
+    let archetype = if args.archetype == ArchetypeArg::RequestResponse {
+        spec.kind.default_archetype()
+    } else {
+        args.archetype.into()
+    };
+
+    let files = generate_synth_files(
+        &connector_id,
+        short_name,
+        &crate_name,
+        archetype,
+        &args.zone,
+        &spec,
+        args.no_e2e,
+        &crate_path,
+    )?;
+
+    if !args.dry_run {
+        fs::create_dir_all(base_path.join("src"))?;
+        fs::create_dir_all(base_path.join("tests"))?;
+
+        for (rel_path, content, _purpose) in &files {
+            let full_path = base_path.join(rel_path);
+            if let Some(parent) = full_path.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut file = fs::File::create(&full_path)
+                .with_context(|| format!("failed to create {}", full_path.display()))?;
+            file.write_all(content.as_bytes())?;
+        }
+    }
+
+    let workspace_update = update_workspace_members(&workspace_root, &crate_path, args.dry_run)?;
+    let mut files_created = files
+        .iter()
+        .map(|(path, content, purpose)| CreatedFile {
+            path: path.clone(),
+            purpose: purpose.clone(),
+            size: content.len(),
+        })
+        .collect::<Vec<_>>();
+    if let Some(update) = workspace_update {
+        files_created.push(update);
+    }
+
+    let prechecks = run_prechecks(&files, &connector_id, &args.zone);
+    let mut next_steps = generate_next_steps(&connector_id, &crate_path, archetype, args.no_e2e);
+    next_steps.insert(
+        1,
+        format!(
+            "Review src/operations.rs: {} operations synthesized from {} {}",
+            spec.operations.len(),
+            spec.kind.as_str(),
+            schema_path.display()
+        ),
+    );
+    next_steps.push(
+        "Wire live provider clients before changing synthesized operations from simulated to invokable."
+            .to_string(),
+    );
+
+    Ok(ScaffoldResult {
+        connector_id,
+        crate_path,
+        files_created,
+        prechecks,
+        next_steps,
+    })
+}
+
+/// Load and normalize an OpenAPI, AsyncAPI, or GraphQL schema file.
+fn load_synth_spec(schema_path: &Path) -> Result<SynthSpec> {
+    let content = fs::read_to_string(schema_path)
+        .with_context(|| format!("failed to read schema file {}", schema_path.display()))?;
+    let source_name = schema_path
+        .file_stem()
+        .and_then(|stem| stem.to_str())
+        .unwrap_or("connector");
+    let extension = schema_path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    if matches!(extension.as_str(), "graphql" | "gql") || looks_like_graphql_sdl(&content) {
+        return parse_graphql_schema(&content, source_name);
+    }
+
+    let root = parse_structured_schema(&content, &extension)?;
+    if root.get("openapi").is_some() {
+        parse_openapi_schema(&root, source_name)
+    } else if root.get("asyncapi").is_some() {
+        parse_asyncapi_schema(&root, source_name)
+    } else {
+        bail!(
+            "unsupported schema file {}; expected OpenAPI, AsyncAPI, or GraphQL SDL",
+            schema_path.display()
+        )
+    }
+}
+
+fn parse_structured_schema(content: &str, extension: &str) -> Result<Value> {
+    if matches!(extension, "yaml" | "yml") {
+        return serde_yaml::from_str(content).context("schema is not valid YAML");
+    }
+
+    serde_json::from_str(content)
+        .or_else(|json_error| {
+            serde_yaml::from_str(content).with_context(|| {
+                format!("schema is not valid JSON, and YAML fallback also failed: {json_error}")
+            })
+        })
+        .context("failed to parse schema")
+}
+
+fn parse_openapi_schema(root: &Value, source_name: &str) -> Result<SynthSpec> {
+    let info = root.get("info").and_then(Value::as_object);
+    let title = info
+        .and_then(|info| string_field(info, "title"))
+        .unwrap_or(source_name)
+        .to_string();
+    let version = info
+        .and_then(|info| string_field(info, "version"))
+        .unwrap_or("0.1.0")
+        .to_string();
+    let description = info
+        .and_then(|info| string_field(info, "description"))
+        .map(str::to_string);
+    let paths = root
+        .get("paths")
+        .and_then(Value::as_object)
+        .context("OpenAPI schema must contain a paths object")?;
+    let mut operations = Vec::new();
+
+    for (path, path_item) in paths {
+        let Some(path_item) = path_item.as_object() else {
+            continue;
+        };
+        let inherited_parameters = path_item.get("parameters");
+        for method in HTTP_METHODS {
+            let Some(operation) = path_item.get(*method).and_then(Value::as_object) else {
+                continue;
+            };
+            let raw_slug = string_field(operation, "operationId")
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{method}_{path}"));
+            let summary = string_field(operation, "summary")
+                .or_else(|| string_field(operation, "description"))
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("{} {}", method.to_ascii_uppercase(), path));
+            let description = string_field(operation, "description").map(str::to_string);
+            let (risk_level, safety_tier, idempotency, approval) = http_operation_contract(method);
+
+            operations.push(SynthOperation {
+                slug: canonical_segment(&raw_slug),
+                summary,
+                description,
+                input_schema: openapi_input_schema(path, inherited_parameters, operation),
+                output_schema: openapi_output_schema(operation),
+                risk_level,
+                safety_tier,
+                idempotency,
+                approval,
+            });
+        }
+    }
+
+    dedupe_operation_slugs(&mut operations);
+    if operations.is_empty() {
+        bail!("OpenAPI schema did not contain any supported HTTP operations");
+    }
+
+    Ok(SynthSpec {
+        kind: SpecKind::OpenApi,
+        title,
+        version,
+        description,
+        operations,
+    })
+}
+
+fn parse_asyncapi_schema(root: &Value, source_name: &str) -> Result<SynthSpec> {
+    let info = root.get("info").and_then(Value::as_object);
+    let title = info
+        .and_then(|info| string_field(info, "title"))
+        .unwrap_or(source_name)
+        .to_string();
+    let version = info
+        .and_then(|info| string_field(info, "version"))
+        .unwrap_or("0.1.0")
+        .to_string();
+    let description = info
+        .and_then(|info| string_field(info, "description"))
+        .map(str::to_string);
+    let mut operations = Vec::new();
+
+    if let Some(operation_map) = root.get("operations").and_then(Value::as_object) {
+        for (name, operation) in operation_map {
+            let operation_obj = operation.as_object();
+            let action = operation_obj
+                .and_then(|operation| string_field(operation, "action"))
+                .unwrap_or("invoke");
+            let summary = operation_obj
+                .and_then(|operation| string_field(operation, "summary"))
+                .or_else(|| {
+                    operation_obj.and_then(|operation| string_field(operation, "description"))
+                })
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("AsyncAPI {action} operation {name}"));
+            let description = operation_obj
+                .and_then(|operation| string_field(operation, "description").map(str::to_string));
+            let (risk_level, safety_tier, idempotency, approval) =
+                asyncapi_operation_contract(action);
+            operations.push(SynthOperation {
+                slug: canonical_segment(name),
+                summary,
+                description,
+                input_schema: asyncapi_payload_schema(operation),
+                output_schema: asyncapi_ack_schema(action),
+                risk_level,
+                safety_tier,
+                idempotency,
+                approval,
+            });
+        }
+    }
+
+    if let Some(channels) = root.get("channels").and_then(Value::as_object) {
+        for (channel, channel_item) in channels {
+            let Some(channel_item) = channel_item.as_object() else {
+                continue;
+            };
+            for direction in ["publish", "subscribe"] {
+                let Some(operation) = channel_item.get(direction) else {
+                    continue;
+                };
+                let operation_obj = operation.as_object();
+                let raw_slug = operation_obj
+                    .and_then(|operation| string_field(operation, "operationId"))
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("{direction}_{channel}"));
+                let summary = operation_obj
+                    .and_then(|operation| string_field(operation, "summary"))
+                    .or_else(|| {
+                        operation_obj.and_then(|operation| string_field(operation, "description"))
+                    })
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("AsyncAPI {direction} on {channel}"));
+                let description = operation_obj
+                    .and_then(|operation| string_field(operation, "description"))
+                    .map(str::to_string);
+                let (risk_level, safety_tier, idempotency, approval) =
+                    asyncapi_operation_contract(direction);
+                operations.push(SynthOperation {
+                    slug: canonical_segment(&raw_slug),
+                    summary,
+                    description,
+                    input_schema: asyncapi_payload_schema(operation),
+                    output_schema: asyncapi_ack_schema(direction),
+                    risk_level,
+                    safety_tier,
+                    idempotency,
+                    approval,
+                });
+            }
+        }
+    }
+
+    dedupe_operation_slugs(&mut operations);
+    if operations.is_empty() {
+        bail!("AsyncAPI schema did not contain operations or publish/subscribe channels");
+    }
+
+    Ok(SynthSpec {
+        kind: SpecKind::AsyncApi,
+        title,
+        version,
+        description,
+        operations,
+    })
+}
+
+fn parse_graphql_schema(content: &str, source_name: &str) -> Result<SynthSpec> {
+    let mut operations = Vec::new();
+    for (type_name, prefix, risk_level, safety_tier, idempotency, approval) in [
+        ("Query", "query", "Low", "Safe", "Strict", "None"),
+        ("Mutation", "mutation", "Medium", "Risky", "None", "Policy"),
+        (
+            "Subscription",
+            "subscription",
+            "Low",
+            "Safe",
+            "Strict",
+            "None",
+        ),
+    ] {
+        for field in graphql_type_fields(content, type_name) {
+            let slug = canonical_segment(&format!("{prefix}_{field}"));
+            operations.push(SynthOperation {
+                slug,
+                summary: format!("GraphQL {type_name}.{field}"),
+                description: Some(format!(
+                    "Generated GraphQL {type_name} field operation for `{field}`."
+                )),
+                input_schema: graphql_input_schema(type_name, &field),
+                output_schema: graphql_output_schema(type_name, &field),
+                risk_level,
+                safety_tier,
+                idempotency,
+                approval,
+            });
+        }
+    }
+
+    dedupe_operation_slugs(&mut operations);
+    if operations.is_empty() {
+        bail!("GraphQL schema did not contain Query, Mutation, or Subscription fields");
+    }
+
+    Ok(SynthSpec {
+        kind: SpecKind::GraphQl,
+        title: source_name.to_string(),
+        version: "0.1.0".to_string(),
+        description: Some("Generated from GraphQL SDL".to_string()),
+        operations,
+    })
+}
+
+const HTTP_METHODS: &[&str] = &[
+    "get", "put", "post", "delete", "patch", "head", "options", "trace",
+];
+
+fn string_field<'a>(object: &'a Map<String, Value>, field: &str) -> Option<&'a str> {
+    object
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn looks_like_graphql_sdl(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("type Query")
+        || trimmed.starts_with("type Mutation")
+        || trimmed.starts_with("schema")
+        || trimmed.contains("\ntype Query")
+        || trimmed.contains("\ntype Mutation")
+}
+
+fn canonical_segment(raw: &str) -> String {
+    let mut segment = String::new();
+    let mut last_sep = false;
+    for ch in raw.chars() {
+        if ch.is_ascii_alphanumeric() {
+            segment.push(ch.to_ascii_lowercase());
+            last_sep = false;
+        } else if !last_sep {
+            segment.push('_');
+            last_sep = true;
+        }
+    }
+    let mut segment = segment.trim_matches('_').to_string();
+    if segment.is_empty() {
+        segment.push_str("operation");
+    }
+    if segment
+        .chars()
+        .next()
+        .is_some_and(|first| !first.is_ascii_alphabetic())
+    {
+        segment.insert_str(0, "op_");
+    }
+    segment
+}
+
+fn capability_namespace(short_name: &str) -> String {
+    canonical_segment(short_name)
+}
+
+fn qualified_operation_id(short_name: &str, operation: &SynthOperation) -> String {
+    format!("{}.{}", capability_namespace(short_name), operation.slug)
+}
+
+fn dedupe_operation_slugs(operations: &mut [SynthOperation]) {
+    let mut seen = HashSet::new();
+    for operation in operations {
+        if seen.insert(operation.slug.clone()) {
+            continue;
+        }
+        let base = operation.slug.clone();
+        for suffix in 2.. {
+            let candidate = format!("{base}_{suffix}");
+            if seen.insert(candidate.clone()) {
+                operation.slug = candidate;
+                break;
+            }
+        }
+    }
+}
+
+fn http_operation_contract(
+    method: &str,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match method {
+        "get" | "head" | "options" | "trace" => ("Low", "Safe", "Strict", "None"),
+        "put" | "delete" => ("Medium", "Risky", "BestEffort", "Policy"),
+        "post" | "patch" => ("Medium", "Risky", "None", "Policy"),
+        _ => ("Medium", "Risky", "None", "Policy"),
+    }
+}
+
+fn asyncapi_operation_contract(
+    action: &str,
+) -> (&'static str, &'static str, &'static str, &'static str) {
+    match action {
+        "send" | "publish" => ("Medium", "Risky", "None", "Policy"),
+        "receive" | "subscribe" => ("Low", "Safe", "Strict", "None"),
+        _ => ("Medium", "Risky", "BestEffort", "Policy"),
+    }
+}
+
+fn openapi_input_schema(
+    path: &str,
+    inherited_parameters: Option<&Value>,
+    operation: &Map<String, Value>,
+) -> Value {
+    let mut properties = Map::new();
+    properties.insert(
+        "path_template".to_string(),
+        serde_json::json!({ "const": path }),
+    );
+    append_openapi_parameter_group(
+        &mut properties,
+        "path_params",
+        inherited_parameters,
+        operation.get("parameters"),
+        "path",
+    );
+    append_openapi_parameter_group(
+        &mut properties,
+        "query",
+        inherited_parameters,
+        operation.get("parameters"),
+        "query",
+    );
+    append_openapi_parameter_group(
+        &mut properties,
+        "headers",
+        inherited_parameters,
+        operation.get("parameters"),
+        "header",
+    );
+    if let Some(schema) = operation
+        .get("requestBody")
+        .and_then(first_openapi_content_schema)
+    {
+        properties.insert("body".to_string(), schema);
+    }
+    object_schema(properties)
+}
+
+fn append_openapi_parameter_group(
+    properties: &mut Map<String, Value>,
+    group_name: &str,
+    inherited_parameters: Option<&Value>,
+    operation_parameters: Option<&Value>,
+    location: &str,
+) {
+    let mut group_properties = Map::new();
+    collect_openapi_parameters(&mut group_properties, inherited_parameters, location);
+    collect_openapi_parameters(&mut group_properties, operation_parameters, location);
+    if !group_properties.is_empty() {
+        properties.insert(group_name.to_string(), object_schema(group_properties));
+    }
+}
+
+fn collect_openapi_parameters(
+    properties: &mut Map<String, Value>,
+    parameters: Option<&Value>,
+    location: &str,
+) {
+    let Some(parameters) = parameters.and_then(Value::as_array) else {
+        return;
+    };
+    for parameter in parameters {
+        let Some(parameter) = parameter.as_object() else {
+            continue;
+        };
+        if parameter
+            .get("in")
+            .and_then(Value::as_str)
+            .is_some_and(|param_location| param_location == location)
+            && let Some(name) = parameter.get("name").and_then(Value::as_str)
+        {
+            let schema = parameter
+                .get("schema")
+                .cloned()
+                .unwrap_or_else(|| serde_json::json!({ "type": "string" }));
+            properties.insert(name.to_string(), schema);
+        }
+    }
+}
+
+fn openapi_output_schema(operation: &Map<String, Value>) -> Value {
+    operation
+        .get("responses")
+        .and_then(Value::as_object)
+        .and_then(|responses| {
+            responses
+                .iter()
+                .find(|(status, _)| status.starts_with('2'))
+                .or_else(|| responses.get_key_value("default"))
+                .and_then(|(_, response)| first_openapi_content_schema(response))
+        })
+        .unwrap_or_else(|| serde_json::json!({ "type": "object" }))
+}
+
+fn first_openapi_content_schema(value: &Value) -> Option<Value> {
+    value
+        .get("content")
+        .and_then(Value::as_object)
+        .and_then(|content| {
+            content
+                .values()
+                .find_map(|media| media.get("schema").cloned())
+        })
+}
+
+fn asyncapi_payload_schema(operation: &Value) -> Value {
+    operation
+        .get("message")
+        .and_then(asyncapi_message_payload_schema)
+        .or_else(|| {
+            operation
+                .get("messages")
+                .and_then(Value::as_array)
+                .and_then(|messages| messages.iter().find_map(asyncapi_message_payload_schema))
+        })
+        .or_else(|| asyncapi_message_payload_schema(operation))
+        .unwrap_or_else(|| serde_json::json!({ "type": "object" }))
+}
+
+fn asyncapi_message_payload_schema(message: &Value) -> Option<Value> {
+    message
+        .get("payload")
+        .cloned()
+        .or_else(|| message.get("schema").cloned())
+}
+
+fn asyncapi_ack_schema(action: &str) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "operation": { "const": action },
+            "accepted": { "type": "boolean" }
+        },
+        "required": ["operation", "accepted"]
+    })
+}
+
+fn object_schema(properties: Map<String, Value>) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": properties,
+    })
+}
+
+fn graphql_type_fields(schema: &str, type_name: &str) -> Vec<String> {
+    let mut fields = Vec::new();
+    for marker in [
+        format!("type {type_name}"),
+        format!("extend type {type_name}"),
+    ] {
+        let mut search_start = 0;
+        while let Some(relative_start) = schema[search_start..].find(&marker) {
+            let block_start = search_start + relative_start;
+            let Some(open_brace) = schema[block_start..].find('{') else {
+                break;
+            };
+            let open_brace = block_start + open_brace;
+            let Some(close_brace) = matching_close_brace(schema, open_brace) else {
+                break;
+            };
+            fields.extend(graphql_fields_from_block(
+                &schema[open_brace + 1..close_brace],
+            ));
+            search_start = close_brace + 1;
+        }
+    }
+    fields
+}
+
+fn matching_close_brace(input: &str, open_brace: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    for (offset, ch) in input[open_brace..].char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return Some(open_brace + offset);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn graphql_fields_from_block(block: &str) -> Vec<String> {
+    block
+        .lines()
+        .filter_map(|line| {
+            let line = line.split('#').next().unwrap_or_default().trim();
+            if line.is_empty() || line.starts_with('@') {
+                return None;
+            }
+            let before_type = line.split_once(':').map(|(field, _)| field).unwrap_or(line);
+            let field_name = before_type
+                .split_once('(')
+                .map(|(field, _)| field)
+                .unwrap_or(before_type)
+                .trim();
+            if field_name.is_empty() {
+                None
+            } else {
+                Some(field_name.to_string())
+            }
+        })
+        .collect()
+}
+
+fn graphql_input_schema(type_name: &str, field: &str) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "variables": { "type": "object" },
+            "selection_set": { "type": "string" },
+            "operation": { "const": format!("{type_name}.{field}") }
+        }
+    })
+}
+
+fn graphql_output_schema(type_name: &str, field: &str) -> Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "data": { "type": "object" },
+            "operation": { "const": format!("{type_name}.{field}") }
+        }
+    })
+}
+
 /// Generate all scaffold files.
 fn generate_files(
     connector_id: &str,
@@ -722,6 +1494,113 @@ fn generate_files(
     Ok(files)
 }
 
+/// Generate schema-synthesized connector files.
+fn generate_synth_files(
+    connector_id: &str,
+    short_name: &str,
+    crate_name: &str,
+    archetype: ConnectorArchetype,
+    zone: &str,
+    spec: &SynthSpec,
+    no_e2e: bool,
+    crate_path: &str,
+) -> Result<Vec<(String, String, String)>> {
+    let crate_ident = crate_name.replace('-', "_");
+    let include_stream = matches!(
+        archetype,
+        ConnectorArchetype::Streaming | ConnectorArchetype::Bidirectional
+    );
+    let include_polling = matches!(archetype, ConnectorArchetype::Polling);
+    let manifest = generate_synth_manifest_toml(connector_id, short_name, archetype, zone, spec)?;
+    let mut files = vec![
+        (
+            "Cargo.toml".to_string(),
+            generate_synth_cargo_toml(crate_name, short_name, crate_path),
+            "Crate manifest".to_string(),
+        ),
+        (
+            "manifest.toml".to_string(),
+            manifest,
+            "Connector manifest with synthesized operation catalog".to_string(),
+        ),
+        (
+            "src/main.rs".to_string(),
+            generate_main_rs(short_name, &crate_ident),
+            "FCP protocol loop entrypoint".to_string(),
+        ),
+        (
+            "src/lib.rs".to_string(),
+            generate_synth_lib_rs(short_name, include_stream, include_polling),
+            "Library exports".to_string(),
+        ),
+        (
+            "src/config.rs".to_string(),
+            generate_config_rs(short_name),
+            "Connector configuration".to_string(),
+        ),
+        (
+            "src/error.rs".to_string(),
+            generate_error_rs(short_name),
+            "Connector error taxonomy".to_string(),
+        ),
+        (
+            "src/connector.rs".to_string(),
+            generate_synth_connector_rs(connector_id, short_name, archetype),
+            "Connector implementation with synthesized operation gating".to_string(),
+        ),
+        (
+            "src/operations.rs".to_string(),
+            generate_operations_rs(short_name, spec),
+            "Operation catalog synthesized from schema".to_string(),
+        ),
+        (
+            "src/limits.rs".to_string(),
+            generate_limits_rs(short_name, archetype),
+            "Connector API limit constants".to_string(),
+        ),
+        (
+            "src/types.rs".to_string(),
+            generate_types_rs(short_name),
+            "Request/response types".to_string(),
+        ),
+        (
+            "tests/unit_tests.rs".to_string(),
+            generate_unit_tests_rs(short_name, &crate_ident),
+            "Unit test scaffolding".to_string(),
+        ),
+        (
+            "tests/connector_suite_happy_path.rs".to_string(),
+            generate_connector_suite_happy_path_rs(short_name, &crate_ident),
+            "Schema-synthesized connector happy-path suite".to_string(),
+        ),
+    ];
+
+    if include_stream {
+        files.push((
+            "src/stream.rs".to_string(),
+            generate_stream_rs(short_name),
+            "Streaming supervisor scaffolding".to_string(),
+        ));
+    }
+    if include_polling {
+        files.push((
+            "src/polling.rs".to_string(),
+            generate_polling_rs(short_name),
+            "Polling cursor/scaffold".to_string(),
+        ));
+    }
+
+    if !no_e2e {
+        files.push((
+            "tests/e2e_tests.rs".to_string(),
+            generate_e2e_tests_rs(connector_id, short_name, crate_name),
+            "E2E test scaffolding".to_string(),
+        ));
+    }
+
+    Ok(files)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // File generators (Cargo.toml, manifest, main.rs, lib.rs, etc.)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -768,6 +1647,24 @@ fcp-crypto = {{ path = "../../crates/fcp-crypto" }}
 wiremock.workspace = true
 "#
     )
+}
+
+fn generate_synth_cargo_toml(crate_name: &str, short_name: &str, crate_path: &str) -> String {
+    let crates_prefix = relative_crates_prefix(crate_path);
+    generate_cargo_toml(crate_name, short_name).replace("../../crates", &crates_prefix)
+}
+
+fn relative_crates_prefix(crate_path: &str) -> String {
+    let depth = Path::new(crate_path)
+        .components()
+        .filter(|component| matches!(component, std::path::Component::Normal(_)))
+        .count();
+    let parent_prefix = if depth == 0 {
+        String::new()
+    } else {
+        "../".repeat(depth)
+    };
+    format!("{parent_prefix}crates")
 }
 
 const INTERFACE_HASH_PLACEHOLDER: &str =
@@ -872,6 +1769,191 @@ deny_ptrace = true
     );
 
     finalize_manifest_toml(&template)
+}
+
+fn generate_synth_manifest_toml(
+    connector_id: &str,
+    short_name: &str,
+    archetype: ConnectorArchetype,
+    zone: &str,
+    spec: &SynthSpec,
+) -> Result<String> {
+    let archetype_str = manifest_archetype(archetype);
+    let title_name = escape_toml_basic(&title_case_words(&spec.title));
+    let description = spec
+        .description
+        .as_deref()
+        .unwrap_or("Generated tier-1 connector skeleton synthesized from an external API schema.");
+    let mut required_capabilities = vec![format!("{short_name}.scaffold_status")];
+    required_capabilities.extend(
+        spec.operations
+            .iter()
+            .map(|operation| qualified_operation_id(short_name, operation)),
+    );
+    required_capabilities.sort();
+    required_capabilities.dedup();
+    let required_capabilities = toml_string_array(&required_capabilities);
+    let operations = spec
+        .operations
+        .iter()
+        .map(|operation| generate_synth_manifest_operation(short_name, operation))
+        .collect::<String>();
+
+    let template = format!(
+        r#"# Flywheel Connector Manifest
+# Generated by `fwc new --from-spec` from a {kind} schema.
+
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 1200
+interface_hash = "{INTERFACE_HASH_PLACEHOLDER}"
+
+[connector]
+id = "{connector_id}"
+name = "{title_name} Connector"
+version = "0.1.0"
+description = "{description}"
+archetypes = ["{archetype_str}"]
+format = "native"
+status = "incubating"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+
+[zones]
+home = "{zone}"
+allowed_sources = ["{zone}"]
+allowed_targets = ["{zone}"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = {required_capabilities}
+optional = []
+forbidden = ["system.exec", "system.privileged"]
+
+[provides.operations.scaffold_status]
+description = "Report the scaffold's incubating status and the synthesized operation catalog."
+capability = "{short_name}.scaffold_status"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = {{ type = "object", properties = {{ include_next_steps = {{ type = "boolean" }} }} }}
+output_schema = {{ type = "object", properties = {{ connector_id = {{ type = "string" }}, manifest_status = {{ type = "string" }}, surface_status = {{ type = "string" }}, live_requests_supported = {{ type = "boolean" }}, implemented_operations = {{ type = "array", items = {{ type = "string" }} }}, next_steps = {{ type = "array", items = {{ type = "string" }} }} }}, required = ["connector_id", "manifest_status", "surface_status", "live_requests_supported", "implemented_operations"] }}
+
+[provides.operations.scaffold_status.ai_hints]
+when_to_use = "Use this to inspect the generated schema-derived connector scaffold."
+common_mistakes = [
+  "Treating synthesized metadata as proof that live upstream calls are already implemented",
+  "Adding network access before a real provider client and verification evidence exist",
+]
+{operations}
+[timeouts]
+request_timeout_ms = 30000
+connect_timeout_ms = 5000
+wall_clock_timeout_ms = 60000
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+"#,
+        kind = spec.kind.as_str(),
+        description = escape_toml_basic(description),
+    );
+
+    finalize_manifest_toml(&template)
+}
+
+fn generate_synth_manifest_operation(short_name: &str, operation: &SynthOperation) -> String {
+    let operation_id = qualified_operation_id(short_name, operation);
+    let approval = operation.approval.to_ascii_lowercase();
+    let risk_level = operation.risk_level.to_ascii_lowercase();
+    let safety_tier = operation.safety_tier.to_ascii_lowercase();
+    let idempotency = idempotency_manifest_value(operation.idempotency);
+    let description = operation
+        .description
+        .as_deref()
+        .unwrap_or(operation.summary.as_str());
+    format!(
+        r#"
+[provides.operations."{operation_id}"]
+description = "{description}"
+capability = "{operation_id}"
+risk_level = "{risk_level}"
+safety_tier = "{safety_tier}"
+requires_approval = "{approval}"
+idempotency = "{idempotency}"
+input_schema = {{ type = "object" }}
+output_schema = {{ type = "object" }}
+
+[provides.operations."{operation_id}".ai_hints]
+when_to_use = "Use after replacing the synthesized placeholder with a verified provider-backed implementation."
+common_mistakes = [
+  "Assuming schema-derived operation metadata performs live upstream calls",
+  "Skipping provider-specific auth, timeout, retry, and network-constraint review",
+]
+"#,
+        description = escape_toml_basic(description),
+    )
+}
+
+fn title_case_words(input: &str) -> String {
+    let title = input
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            chars.next().map_or_else(String::new, |first| {
+                first
+                    .to_uppercase()
+                    .chain(chars.flat_map(char::to_lowercase))
+                    .collect()
+            })
+        })
+        .collect::<Vec<String>>()
+        .join(" ");
+    if title.is_empty() {
+        "Synthesized".to_string()
+    } else {
+        title
+    }
+}
+
+fn toml_string_array(values: &[String]) -> String {
+    let values = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape_toml_basic(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{values}]")
+}
+
+fn escape_toml_basic(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
+        .replace('\t', "\\t")
+}
+
+fn idempotency_manifest_value(idempotency: &str) -> &'static str {
+    match idempotency {
+        "BestEffort" => "best_effort",
+        "Strict" => "strict",
+        _ => "none",
+    }
 }
 
 const fn manifest_archetype(archetype: ConnectorArchetype) -> &'static str {
@@ -1105,6 +2187,35 @@ pub mod config;
 pub mod error;
 {api_module}{stream_module}{polling_module}pub mod connector;
 pub mod limits;
+pub mod types;
+
+pub use connector::{struct_name}Connector;
+"
+    )
+}
+
+fn generate_synth_lib_rs(short_name: &str, include_stream: bool, include_polling: bool) -> String {
+    let struct_name = to_pascal_case(short_name);
+    let stream_module = if include_stream {
+        "pub mod stream;\n"
+    } else {
+        ""
+    };
+    let polling_module = if include_polling {
+        "pub mod polling;\n"
+    } else {
+        ""
+    };
+    format!(
+        r"//! Library exports for synthesized {struct_name} connector.
+
+#![forbid(unsafe_code)]
+
+pub mod config;
+pub mod error;
+{stream_module}{polling_module}pub mod connector;
+pub mod limits;
+pub mod operations;
 pub mod types;
 
 pub use connector::{struct_name}Connector;
@@ -2502,6 +3613,159 @@ mod tests {{
     )
 }
 
+fn generate_synth_connector_rs(
+    connector_id: &str,
+    short_name: &str,
+    archetype: ConnectorArchetype,
+) -> String {
+    generate_connector_rs(connector_id, short_name, archetype)
+        .replace("use crate::limits;\n", "use crate::limits;\nuse crate::operations;\n")
+        .replace(
+            "\"implemented_operations\": [OP_SCAFFOLD_STATUS],",
+            "\"implemented_operations\": operations::implemented_operation_ids(OP_SCAFFOLD_STATUS),",
+        )
+        .replace(
+            "operations: vec![self.scaffold_status_operation()],",
+            "operations: {\n                let mut operations = vec![self.scaffold_status_operation()];\n                operations.extend(operations::operation_infos());\n                operations\n            },",
+        )
+        .replace(
+            "if req.operation.as_str() != OP_SCAFFOLD_STATUS {",
+            "if req.operation.as_str() != OP_SCAFFOLD_STATUS && !operations::has_operation(&req.operation) {",
+        )
+        .replace(
+            "let required_cap = CapabilityId::from_static(CAP_SCAFFOLD_STATUS);",
+            "let required_cap = if req.operation.as_str() == OP_SCAFFOLD_STATUS {\n            CapabilityId::from_static(CAP_SCAFFOLD_STATUS)\n        } else {\n            operations::capability_for_operation(&req.operation).ok_or_else(|| FcpError::InvalidRequest {\n                code: 1004,\n                message: format!(\"Unknown operation: {}\", req.operation.as_str()),\n            })?\n        };",
+        )
+        .replace(
+            "self.enforce_limits(&req.input)?;\n        let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;",
+            "self.enforce_limits(&req.input)?;\n        if req.operation.as_str() != OP_SCAFFOLD_STATUS {\n            return Err(FcpError::ConnectorUnavailable {\n                code: 5002,\n                message: format!(\n                    \"synthesized operation `{}` requires a live provider implementation before invoke is enabled\",\n                    req.operation.as_str()\n                ),\n            });\n        }\n        let runtime = self.runtime.as_ref().ok_or(FcpError::NotConfigured)?;",
+        )
+}
+
+fn generate_operations_rs(short_name: &str, spec: &SynthSpec) -> String {
+    let struct_name = to_pascal_case(short_name);
+    let source_title = rust_string_literal(&spec.title);
+    let source_version = rust_string_literal(&spec.version);
+    let source_kind = spec.kind.as_str();
+    let operation_infos = spec
+        .operations
+        .iter()
+        .map(|operation| generate_operation_info_expr(short_name, operation))
+        .collect::<Vec<_>>()
+        .join(",\n");
+    let operation_ids = spec
+        .operations
+        .iter()
+        .map(|operation| rust_string_literal(&qualified_operation_id(short_name, operation)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let match_arms = spec
+        .operations
+        .iter()
+        .map(|operation| {
+            let operation_id = rust_string_literal(&qualified_operation_id(short_name, operation));
+            format!("{operation_id} => Some(CapabilityId::from_static({operation_id})),")
+        })
+        .collect::<Vec<_>>()
+        .join("\n        ");
+
+    format!(
+        r#"//! Operation catalog synthesized from a {source_kind} schema for {struct_name}.
+//!
+//! This file is generated by `fwc new --from-spec`. It captures schema-derived
+//! operation metadata; live upstream clients still need to be implemented in
+//! `connector.rs` before invoke paths may perform network I/O.
+
+#![allow(dead_code)]
+
+use fcp_sdk::prelude::*;
+
+pub const SOURCE_KIND: &str = "{source_kind}";
+pub const SOURCE_TITLE: &str = {source_title};
+pub const SOURCE_VERSION: &str = {source_version};
+
+pub fn operation_ids() -> Vec<&'static str> {{
+    vec![{operation_ids}]
+}}
+
+pub fn implemented_operation_ids(scaffold_status_operation: &'static str) -> Vec<&'static str> {{
+    let mut ids = Vec::with_capacity(operation_ids().len() + 1);
+    ids.push(scaffold_status_operation);
+    ids.extend(operation_ids());
+    ids
+}}
+
+pub fn has_operation(operation: &OperationId) -> bool {{
+    capability_for_operation(operation).is_some()
+}}
+
+pub fn capability_for_operation(operation: &OperationId) -> Option<CapabilityId> {{
+    match operation.as_str() {{
+        {match_arms}
+        _ => None,
+    }}
+}}
+
+pub fn operation_infos() -> Vec<OperationInfo> {{
+    vec![
+{operation_infos}
+    ]
+}}
+"#
+    )
+}
+
+fn generate_operation_info_expr(short_name: &str, operation: &SynthOperation) -> String {
+    let operation_id = rust_string_literal(&qualified_operation_id(short_name, operation));
+    let summary = rust_string_literal(&operation.summary);
+    let description = operation.description.as_ref().map_or_else(
+        || "None".to_string(),
+        |description| format!("Some({}.to_string())", rust_string_literal(description)),
+    );
+    let input_schema = json_value_literal(&operation.input_schema);
+    let output_schema = json_value_literal(&operation.output_schema);
+    let when_to_use = rust_string_literal(&format!(
+        "Use `{}` after replacing the synthesized placeholder with a verified provider-backed implementation.",
+        qualified_operation_id(short_name, operation)
+    ));
+    format!(
+        r#"        OperationInfo {{
+            id: OperationId::from_static({operation_id}),
+            summary: {summary}.to_string(),
+            description: {description},
+            input_schema: serde_json::json!({input_schema}),
+            output_schema: serde_json::json!({output_schema}),
+            capability: CapabilityId::from_static({operation_id}),
+            risk_level: RiskLevel::{risk_level},
+            safety_tier: SafetyTier::{safety_tier},
+            idempotency: IdempotencyClass::{idempotency},
+            ai_hints: AgentHint {{
+                when_to_use: {when_to_use}.to_string(),
+                common_mistakes: vec![
+                    "Assuming schema-derived metadata means live upstream execution is implemented".to_string(),
+                    "Skipping provider-specific auth, timeout, retry, and network-constraint review".to_string(),
+                ],
+                examples: Vec::new(),
+                related: Vec::new(),
+            }},
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::{approval}),
+        }}"#,
+        risk_level = operation.risk_level,
+        safety_tier = operation.safety_tier,
+        idempotency = operation.idempotency,
+        approval = operation.approval,
+    )
+}
+
+fn rust_string_literal(value: &str) -> String {
+    format!("{value:?}")
+}
+
+fn json_value_literal(value: &Value) -> String {
+    serde_json::to_string_pretty(value).expect("serde_json::Value should serialize")
+}
+
 /// Generate types.rs content.
 fn generate_types_rs(short_name: &str) -> String {
     let struct_name = to_pascal_case(short_name);
@@ -2917,6 +4181,180 @@ async fn test_simulate_allows_scaffold_status() {{
     }};
     let response = connector.simulate(req).await.expect("simulate");
     assert!(response.would_succeed);
+}}
+"#
+    )
+}
+
+fn generate_connector_suite_happy_path_rs(short_name: &str, crate_ident: &str) -> String {
+    let struct_name = to_pascal_case(short_name);
+    format!(
+        r#"//! Happy-path suite for the schema-synthesized {struct_name} connector.
+
+use fcp_sdk::prelude::*;
+use {crate_ident}::{{operations, {struct_name}Connector}};
+
+const OP_SCAFFOLD_STATUS: &str = "{short_name}.scaffold_status";
+const CAP_SCAFFOLD_STATUS: &str = "{short_name}.scaffold_status";
+
+fn test_signing_key() -> fcp_crypto::ed25519::Ed25519SigningKey {{
+    fcp_crypto::ed25519::Ed25519SigningKey::generate()
+}}
+
+fn capability_for(operation: &OperationId) -> CapabilityId {{
+    operations::capability_for_operation(operation)
+        .unwrap_or_else(|| CapabilityId::from_static(CAP_SCAFFOLD_STATUS))
+}}
+
+fn test_capability_token(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    operation: &OperationId,
+) -> CapabilityToken {{
+    let now = chrono::Utc::now();
+    let capability = capability_for(operation);
+    CapabilityToken::from_raw(
+        fcp_crypto::cose::CapabilityTokenBuilder::new()
+            .capability_id(capability.as_str())
+            .zone_id("z:work")
+            .principal("user:test")
+            .issuer("node:test")
+            .operations(&[operation.as_str()])
+            .validity(now, now + chrono::Duration::hours(1))
+            .sign(signing_key)
+            .expect("test capability token should sign"),
+    )
+}}
+
+fn base_handshake(
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+    operation: &OperationId,
+) -> HandshakeRequest {{
+    HandshakeRequest {{
+        protocol_version: "2.0.0".into(),
+        zone: ZoneId::work(),
+        zone_dir: None,
+        host_public_key: signing_key.verifying_key().to_bytes(),
+        nonce: [0u8; 32],
+        capabilities_requested: vec![
+            CapabilityId::from_static(CAP_SCAFFOLD_STATUS),
+            capability_for(operation),
+        ],
+        host: None,
+        transport_caps: None,
+        requested_instance_id: None,
+    }}
+}}
+
+fn base_simulate(
+    connector_id: &ConnectorId,
+    operation: OperationId,
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> SimulateRequest {{
+    SimulateRequest {{
+        r#type: "simulate".into(),
+        id: RequestId::new("sim_schema_1"),
+        connector_id: connector_id.clone(),
+        operation: operation.clone(),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: test_capability_token(signing_key, &operation),
+        estimate_cost: false,
+        check_availability: false,
+        context: None,
+        correlation_id: None,
+    }}
+}}
+
+fn base_invoke(
+    connector_id: &ConnectorId,
+    operation: OperationId,
+    signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+) -> InvokeRequest {{
+    InvokeRequest {{
+        r#type: "invoke".into(),
+        id: RequestId::new("req_schema_1"),
+        connector_id: connector_id.clone(),
+        operation: operation.clone(),
+        zone_id: ZoneId::work(),
+        input: serde_json::json!({{}}),
+        capability_token: test_capability_token(signing_key, &operation),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    }}
+}}
+
+#[test]
+fn synthesized_operations_are_exposed() {{
+    let connector = {struct_name}Connector::new();
+    let first_operation = operations::operation_ids()
+        .into_iter()
+        .next()
+        .expect("synthesized connector must expose at least one operation");
+    let catalog = connector.introspect();
+    assert!(
+        catalog
+            .operations
+            .iter()
+            .any(|operation| operation.id.as_str() == first_operation),
+        "introspection should expose the synthesized schema operation"
+    );
+}}
+
+#[fcp_async_core::runtime::test]
+async fn synthesized_operation_simulates_after_handshake() {{
+    let mut connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
+    let operation = OperationId::from_static(
+        operations::operation_ids()
+            .into_iter()
+            .next()
+            .expect("synthesized connector must expose at least one operation"),
+    );
+
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    connector
+        .handshake(base_handshake(&signing_key, &operation))
+        .await
+        .expect("handshake");
+
+    let response = connector
+        .simulate(base_simulate(connector.id(), operation, &signing_key))
+        .await
+        .expect("simulate");
+    assert!(response.would_succeed);
+}}
+
+#[fcp_async_core::runtime::test]
+async fn synthesized_operation_refuses_live_invoke_until_provider_client_is_wired() {{
+    let mut connector = {struct_name}Connector::new();
+    let signing_key = test_signing_key();
+    let operation = OperationId::from_static(
+        operations::operation_ids()
+            .into_iter()
+            .next()
+            .expect("synthesized connector must expose at least one operation"),
+    );
+
+    connector.configure(serde_json::json!({{}})).await.expect("configure");
+    connector
+        .handshake(base_handshake(&signing_key, &operation))
+        .await
+        .expect("handshake");
+
+    let err = connector
+        .invoke(base_invoke(connector.id(), operation, &signing_key))
+        .await
+        .expect_err("schema-derived operation must not perform live upstream I/O yet");
+    assert!(
+        matches!(err, FcpError::ConnectorUnavailable {{ .. }}),
+        "expected synthesized operation to refuse live invoke, got {{err:?}}"
+    );
 }}
 "#
     )
@@ -4322,6 +5760,203 @@ mod tests {
         assert!(error.contains("Connector-specific errors"));
         assert!(api.contains("RetryLoop"));
         assert!(limits.contains("conservative scaffold limits"));
+    }
+
+    #[test]
+    fn parse_openapi_schema_extracts_operation_catalog() {
+        let root = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": {
+                "title": "Pet Store",
+                "version": "1.2.3",
+                "description": "Pets API"
+            },
+            "paths": {
+                "/pets/{petId}": {
+                    "parameters": [
+                        {
+                            "name": "petId",
+                            "in": "path",
+                            "schema": { "type": "string" }
+                        }
+                    ],
+                    "get": {
+                        "operationId": "listPets",
+                        "summary": "List pets",
+                        "parameters": [
+                            {
+                                "name": "limit",
+                                "in": "query",
+                                "schema": { "type": "integer" }
+                            }
+                        ],
+                        "responses": {
+                            "200": {
+                                "description": "ok",
+                                "content": {
+                                    "application/json": {
+                                        "schema": {
+                                            "type": "object",
+                                            "properties": {
+                                                "pets": { "type": "array" }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let spec = parse_openapi_schema(&root, "petstore").expect("openapi parse");
+        assert_eq!(spec.kind, SpecKind::OpenApi);
+        assert_eq!(spec.title, "Pet Store");
+        assert_eq!(spec.operations.len(), 1);
+        assert_eq!(spec.operations[0].slug, "listpets");
+        assert_eq!(spec.operations[0].risk_level, "Low");
+        assert!(
+            spec.operations[0].input_schema["properties"]
+                .get("query")
+                .is_some()
+        );
+        assert_eq!(
+            spec.operations[0].output_schema["properties"]["pets"]["type"],
+            "array"
+        );
+    }
+
+    #[test]
+    fn parse_asyncapi_schema_extracts_channel_operations() {
+        let root = serde_json::json!({
+            "asyncapi": "2.6.0",
+            "info": {
+                "title": "Events",
+                "version": "1.0.0"
+            },
+            "channels": {
+                "orders/created": {
+                    "subscribe": {
+                        "operationId": "orderCreated",
+                        "message": {
+                            "payload": {
+                                "type": "object",
+                                "properties": {
+                                    "order_id": { "type": "string" }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        let spec = parse_asyncapi_schema(&root, "events").expect("asyncapi parse");
+        assert_eq!(spec.kind, SpecKind::AsyncApi);
+        assert_eq!(spec.operations.len(), 1);
+        assert_eq!(spec.operations[0].slug, "ordercreated");
+        assert_eq!(spec.operations[0].safety_tier, "Safe");
+        assert_eq!(
+            spec.operations[0].input_schema["properties"]["order_id"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn parse_graphql_schema_extracts_query_and_mutation_operations() {
+        let schema = r#"
+            type Query {
+              viewer: User
+              searchPets(query: String!): [Pet!]!
+            }
+
+            type Mutation {
+              createPet(name: String!): Pet!
+            }
+        "#;
+
+        let spec = parse_graphql_schema(schema, "pets").expect("graphql parse");
+        let slugs = spec
+            .operations
+            .iter()
+            .map(|operation| operation.slug.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(spec.kind, SpecKind::GraphQl);
+        assert!(slugs.contains(&"query_viewer"));
+        assert!(slugs.contains(&"query_searchpets"));
+        assert!(slugs.contains(&"mutation_createpet"));
+        assert!(
+            spec.operations
+                .iter()
+                .any(|operation| operation.slug == "mutation_createpet"
+                    && operation.safety_tier == "Risky")
+        );
+    }
+
+    #[test]
+    fn generate_synth_files_emits_operations_and_connector_suite() {
+        let spec = SynthSpec {
+            kind: SpecKind::OpenApi,
+            title: "Pet Store".to_string(),
+            version: "1.0.0".to_string(),
+            description: None,
+            operations: vec![SynthOperation {
+                slug: "list_pets".to_string(),
+                summary: "List pets".to_string(),
+                description: Some("List pets from upstream".to_string()),
+                input_schema: serde_json::json!({ "type": "object" }),
+                output_schema: serde_json::json!({ "type": "object" }),
+                risk_level: "Low",
+                safety_tier: "Safe",
+                idempotency: "Strict",
+                approval: "None",
+            }],
+        };
+
+        let files = generate_synth_files(
+            "fcp.petstore",
+            "petstore",
+            "fcp-petstore",
+            ConnectorArchetype::RequestResponse,
+            "z:project:test",
+            &spec,
+            false,
+            "connectors/petstore",
+        )
+        .expect("synth files");
+        let file_paths = files
+            .iter()
+            .map(|(path, _, _)| path.as_str())
+            .collect::<Vec<_>>();
+        assert!(file_paths.contains(&"src/operations.rs"));
+        assert!(file_paths.contains(&"tests/connector_suite_happy_path.rs"));
+
+        let operations_rs = files
+            .iter()
+            .find(|(path, _, _)| path == "src/operations.rs")
+            .expect("operations.rs")
+            .1
+            .as_str();
+        assert!(operations_rs.contains("petstore.list_pets"));
+        assert!(operations_rs.contains("operation_infos"));
+
+        let connector_rs = files
+            .iter()
+            .find(|(path, _, _)| path == "src/connector.rs")
+            .expect("connector.rs")
+            .1
+            .as_str();
+        assert!(connector_rs.contains("operations::operation_infos()"));
+        assert!(connector_rs.contains("requires a live provider implementation"));
+
+        let manifest = files
+            .iter()
+            .find(|(path, _, _)| path == "manifest.toml")
+            .expect("manifest.toml")
+            .1
+            .as_str();
+        assert!(manifest.contains("[provides.operations.\"petstore.list_pets\"]"));
     }
 
     #[test]

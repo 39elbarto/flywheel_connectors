@@ -617,7 +617,9 @@ pub fn classify_fcp_error(err: &FcpError) -> FcpErrorCode {
         FcpError::Unauthorized { .. } => FcpErrorCode::FcpErrUnauthorized,
         FcpError::TokenExpired | FcpError::TokenNotYetValid => FcpErrorCode::FcpErrTokenExpired,
         FcpError::InvalidSignature => FcpErrorCode::FcpErrInvalidSignature,
-        FcpError::CapabilityDenied { .. } => FcpErrorCode::FcpErrCapabilityDenied,
+        FcpError::CapabilityDenied { .. } | FcpError::CapabilityConstraintDenied { .. } => {
+            FcpErrorCode::FcpErrCapabilityDenied
+        }
         FcpError::RateLimited { .. } => FcpErrorCode::FcpErrRateLimited,
         FcpError::OperationNotGranted { .. } => FcpErrorCode::FcpErrOperationNotGranted,
         FcpError::ResourceNotAllowed { .. } => FcpErrorCode::FcpErrPolicyDenied,
@@ -690,6 +692,17 @@ pub fn structured_from_fcp_error(err: &FcpError) -> StructuredError {
             se.details = Some(serde_json::json!({
                 "capability": capability,
                 "reason": reason,
+            }));
+        }
+        FcpError::CapabilityConstraintDenied {
+            kind,
+            claim_type,
+            detail,
+        } => {
+            se.details = Some(serde_json::json!({
+                "kind": format!("{kind:?}"),
+                "claim_type": claim_type,
+                "detail": detail,
             }));
         }
         _ => {}

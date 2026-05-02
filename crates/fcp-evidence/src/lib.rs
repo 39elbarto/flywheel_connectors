@@ -80,6 +80,15 @@ pub use constraint_receipt::{
     RequestDescriptorHash,
 };
 
+// ── Revocation Cascade (m8j0q.A.9) ─────────────────────────────────
+
+pub mod revocation_cascade;
+
+pub use revocation_cascade::{
+    AttestationChain, CascadeConfig, CascadeHop, CascadeReceipt, CascadeRejection,
+    RevocationRecord, check_revocation_chain,
+};
+
 #[cfg(test)]
 mod tests {
     use super::*;

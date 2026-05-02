@@ -143,6 +143,15 @@ pub use fcp_evidence::{
     ReceiptBody, ReceiptError, ReceiptId, RequestDescriptorHash,
 };
 
+// ── Revocation Cascade (m8j0q.A.9) ────────────────────────────────
+//
+// Re-exported from fcp-evidence (canonical home).
+
+pub use fcp_evidence::{
+    AttestationChain, CascadeConfig, CascadeHop, CascadeReceipt, CascadeRejection,
+    RevocationRecord, check_revocation_chain,
+};
+
 // ── Error Types ────────────────────────────────────────────────────
 
 pub use fcp_core::{FcpError, FcpResult};

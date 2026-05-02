@@ -133,10 +133,7 @@ impl InvokePhase {
                 }
                 meta
             }
-            Self::DispatchError {
-                error,
-                duration_ms,
-            } => vec![
+            Self::DispatchError { error, duration_ms } => vec![
                 ("error".into(), json!(error)),
                 ("duration_ms".into(), json!(duration_ms)),
             ],
@@ -320,19 +317,13 @@ impl InvokeAuditChain {
             //    any lock. This is the dominant cost; running it
             //    lock-free is the load-bearing perf win.
             let mut builder = base_builder.clone().seq(next_seq);
-            if let Some(ref p) = prev_snapshot {
-                builder = builder.prev(p.clone());
+            if let Some(p) = prev_snapshot {
+                builder = builder.prev(p);
             }
-            let provisional = builder
-                .clone()
-                .id("__provisional__")
-                .build()
-                .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
-            let real_id = provisional.computed_id()?;
             let entry = builder
-                .id(real_id.clone())
-                .build()
+                .build_with_computed_id()
                 .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+            let real_id = entry.id.clone();
 
             // 3. Re-lock + CAS commit. If another append landed
             //    on this zone between (1) and (3), our prev /
@@ -341,7 +332,7 @@ impl InvokeAuditChain {
             //    or sequential same-zone) this loop runs once.
             {
                 let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
-                if z.last_id == prev_snapshot {
+                if z.last_id.as_deref() == entry.prev.as_deref() {
                     z.last_seq = Some(next_seq);
                     z.last_id = Some(real_id);
                     z.entries.push(entry.clone());
@@ -432,7 +423,10 @@ mod tests {
         let entry = chain
             .append(&ctx("z:work", "op-1"), InvokePhase::PreflightAllow)
             .unwrap();
-        assert!(entry.is_genesis(), "first entry must be genesis (seq 0, no prev)");
+        assert!(
+            entry.is_genesis(),
+            "first entry must be genesis (seq 0, no prev)"
+        );
         assert_eq!(entry.event_type, event_types::INVOKE_ALLOW);
         assert_eq!(entry.severity, Severity::Info);
         assert_eq!(entry.zone_id, "z:work");
@@ -460,7 +454,10 @@ mod tests {
         assert!(
             second.follows(&first),
             "second entry must hash-link to first: prev={:?} expected_prev={:?}, seq={} expected_seq={}",
-            second.prev, Some(&first.id), second.seq, first.seq + 1
+            second.prev,
+            Some(&first.id),
+            second.seq,
+            first.seq + 1
         );
         assert_eq!(second.event_type, event_types::INVOKE_RESULT);
     }
@@ -671,7 +668,10 @@ mod tests {
                 APPENDS_PER,
                 "zone {zone_id} must have {APPENDS_PER} entries"
             );
-            assert!(entries[0].is_genesis(), "zone {zone_id}: entry 0 is genesis");
+            assert!(
+                entries[0].is_genesis(),
+                "zone {zone_id}: entry 0 is genesis"
+            );
             for i in 1..entries.len() {
                 assert!(
                     entries[i].follows(&entries[i - 1]),
@@ -781,9 +781,7 @@ mod tests {
                         RETRY_BUDGET,
                     ) {
                         Ok(_) => {}
-                        Err(AuditError::ContentionExhausted {
-                            zone_id, attempts,
-                        }) => {
+                        Err(AuditError::ContentionExhausted { zone_id, attempts }) => {
                             failures.fetch_add(1, Ordering::SeqCst);
                             // Operator-diagnostic fields populated.
                             assert_eq!(zone_id, "z:contention-storm");

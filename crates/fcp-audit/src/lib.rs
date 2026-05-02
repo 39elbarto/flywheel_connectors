@@ -718,6 +718,25 @@ impl AuditEntryBuilder {
             signature: None,
         })
     }
+
+    /// Build an [`AuditEntry`] whose id is derived from its canonical payload.
+    ///
+    /// The entry is first materialized with a placeholder id, then its
+    /// canonical id is computed and written back into the public `id` field.
+    /// This avoids the common two-build pattern where callers construct a
+    /// provisional entry only to hash it, then clone the same builder again to
+    /// construct the final entry with the computed id.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AuditError::BuilderMissingField` when required fields are
+    /// absent, or `AuditError::SerializationError` if canonical CBOR
+    /// encoding of the entry payload fails.
+    pub fn build_with_computed_id(self) -> Result<AuditEntry, AuditError> {
+        let mut entry = self.id("__provisional__").build()?;
+        entry.id = entry.computed_id()?;
+        Ok(entry)
+    }
 }
 
 // ============================================================================
@@ -3389,6 +3408,22 @@ mod tests {
         assert!(entry.is_genesis());
         // Severity auto-computed
         assert_eq!(entry.severity, Severity::Info);
+    }
+
+    #[test]
+    fn builder_build_with_computed_id_sets_canonical_id() -> Result<(), AuditError> {
+        let entry = AuditEntryBuilder::new()
+            .event_type(event_types::CAPABILITY_INVOKE)
+            .actor("user:alice")
+            .zone_id("z:work")
+            .seq(0)
+            .occurred_at(1_700_000_000)
+            .build_with_computed_id()?;
+
+        let recomputed = entry.computed_id()?;
+        assert_eq!(entry.id, recomputed);
+        assert_ne!(entry.id, "__provisional__");
+        Ok(())
     }
 
     #[test]

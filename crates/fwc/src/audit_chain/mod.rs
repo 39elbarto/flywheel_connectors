@@ -56,6 +56,8 @@ pub enum AuditCommands {
     Tail(TailArgs),
     /// Verify integrity of an audit chain and head.
     Verify(VerifyArgs),
+    /// Explain a replay bundle as a causal audit narrative.
+    Explain(ExplainArgs),
     /// Render a timeline of audit events.
     Timeline(TimelineArgs),
     /// Show connector compliance matrix (metadata completeness).
@@ -144,6 +146,17 @@ pub struct VerifyArgs {
     pub json: bool,
 }
 
+/// Arguments for the `fcp audit explain` command.
+#[derive(Args, Debug, Clone)]
+pub struct ExplainArgs {
+    /// Replay bundle path. May be a JSON file or a directory of bundle artifacts.
+    pub bundle: PathBuf,
+
+    /// Output JSON instead of human-readable narrative.
+    #[arg(long, default_value_t = false)]
+    pub json: bool,
+}
+
 /// Arguments for the `fcp audit timeline` command.
 #[derive(Args, Debug, Clone)]
 pub struct TimelineArgs {
@@ -199,6 +212,7 @@ pub fn run(args: AuditArgs) -> Result<()> {
     match args.command {
         AuditCommands::Tail(tail_args) => run_tail(&tail_args),
         AuditCommands::Verify(verify_args) => run_verify(&verify_args),
+        AuditCommands::Explain(explain_args) => run_explain(&explain_args),
         AuditCommands::Timeline(timeline_args) => run_timeline(&timeline_args),
         AuditCommands::Matrix(matrix_args) => run_matrix(&matrix_args),
         AuditCommands::Gaps(gaps_args) => run_gaps(&gaps_args),
@@ -379,6 +393,21 @@ fn run_verify(args: &VerifyArgs) -> Result<()> {
     output_verify_report(&report, args.json)
 }
 
+fn run_explain(args: &ExplainArgs) -> Result<()> {
+    let bundle = load_explain_bundle(&args.bundle)?;
+    let explanation = fcp_audit::explain::explain_bundle(&bundle)?;
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&explanation)
+                .context("failed to serialize audit explanation")?
+        );
+    } else {
+        println!("{}", explanation.render_human());
+    }
+    Ok(())
+}
+
 fn run_timeline(args: &TimelineArgs) -> Result<()> {
     let zone_filter = match args.zone.as_deref() {
         Some(zone) => Some(zone.parse::<ZoneId>().context("invalid zone id")?),
@@ -421,6 +450,93 @@ fn read_input(path: &Path) -> Result<String> {
     }
 
     fs::read_to_string(path).with_context(|| format!("failed to read input {}", path.display()))
+}
+
+fn load_explain_bundle(path: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+    if path.is_dir() {
+        return load_explain_bundle_dir(path);
+    }
+
+    let input = read_input(path)?;
+    fcp_audit::explain::parse_replay_bundle(&input)
+        .with_context(|| format!("failed to parse replay bundle {}", path.display()))
+}
+
+fn load_explain_bundle_dir(dir: &Path) -> Result<fcp_audit::explain::ReplayBundle> {
+    if let Some(input) = read_optional_artifact(dir, &["replay_bundle.json", "bundle.json"])? {
+        return fcp_audit::explain::parse_replay_bundle(&input)
+            .with_context(|| format!("failed to parse replay bundle in {}", dir.display()));
+    }
+
+    let audit_entries = read_optional_artifact(
+        dir,
+        &[
+            "audit_events.jsonl",
+            "audit-events.jsonl",
+            "audit_chain.jsonl",
+            "audit-chain.jsonl",
+            "audit_events.json",
+            "audit-events.json",
+            "audit_chain.json",
+            "audit-chain.json",
+            "events.jsonl",
+            "events.json",
+        ],
+    )?
+    .map(|input| fcp_audit::explain::parse_audit_entries(&input))
+    .transpose()
+    .with_context(|| format!("failed to parse audit entries in {}", dir.display()))?
+    .unwrap_or_default();
+
+    let capability_tokens = read_optional_artifact(
+        dir,
+        &[
+            "capability_tokens.json",
+            "capability-tokens.json",
+            "tokens.json",
+            "capability_tokens.jsonl",
+            "capability-tokens.jsonl",
+            "tokens.jsonl",
+        ],
+    )?
+    .map(|input| fcp_audit::explain::parse_capability_tokens(&input))
+    .transpose()
+    .with_context(|| format!("failed to parse capability tokens in {}", dir.display()))?
+    .unwrap_or_default();
+
+    let receipts = read_optional_artifact(
+        dir,
+        &[
+            "receipts.json",
+            "decision_receipts.json",
+            "decision-receipts.json",
+            "receipts.jsonl",
+            "decision_receipts.jsonl",
+            "decision-receipts.jsonl",
+        ],
+    )?
+    .map(|input| fcp_audit::explain::parse_decision_receipts(&input))
+    .transpose()
+    .with_context(|| format!("failed to parse decision receipts in {}", dir.display()))?
+    .unwrap_or_default();
+
+    Ok(fcp_audit::explain::ReplayBundle {
+        audit_entries,
+        capability_tokens,
+        receipts,
+    })
+}
+
+fn read_optional_artifact(dir: &Path, names: &[&str]) -> Result<Option<String>> {
+    for name in names {
+        let path = dir.join(name);
+        if path.is_file() {
+            return fs::read_to_string(&path)
+                .with_context(|| format!("failed to read {}", path.display()))
+                .map(Some);
+        }
+    }
+    Ok(None)
 }
 
 fn parse_event_records(input: &str) -> Result<Vec<AuditEventRecord>> {
@@ -1366,7 +1482,7 @@ fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_audit::{AuditEntry as SignedAuditEntry, Severity};
+    use fcp_audit::{AuditEntry as SignedAuditEntry, Decision, DecisionReceipt, Severity};
     use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
     use std::collections::BTreeMap;
 
@@ -1400,6 +1516,26 @@ mod tests {
         )
     }
 
+    fn explain_receipt(entry: &SignedAuditEntry) -> DecisionReceipt {
+        DecisionReceipt {
+            id: "receipt-explain-1".to_string(),
+            request_id: "request-explain-1".to_string(),
+            decision: Decision::Allow,
+            reason_code: "policy.admitted".to_string(),
+            evidence: vec![entry.id.clone()],
+            audit_entry_id: Some(entry.id.clone()),
+            explanation: Some("admission policy allowed the operation".to_string()),
+            decided_at: entry.occurred_at,
+            zone_id: entry.zone_id.clone(),
+            correlation_id: Some(entry.correlation_id.clone()),
+            trace_context: None,
+            connector_id: entry.connector_id.clone(),
+            operation_id: entry.operation_id.clone(),
+            issuer_kid: None,
+            signature: None,
+        }
+    }
+
     #[test]
     fn format_timestamp_valid() {
         let ts = 1_700_000_000;
@@ -1430,6 +1566,41 @@ mod tests {
         assert!(events.is_ok());
         let events = events.unwrap();
         assert!(!events.is_empty());
+    }
+
+    #[test]
+    fn audit_explain_loads_replay_bundle_file() {
+        let entry = signed_test_entry(0, None);
+        let receipt = explain_receipt(&entry);
+        let bundle = serde_json::json!({
+            "audit_entries": [entry.clone()],
+            "capability_tokens": [{
+                "id": "tok-explain-1",
+                "capability_id": "test.invoke",
+                "connector_id": "fcp.test:base:v1",
+                "operation_id": "send_message",
+                "issuer_kid": "kid-test"
+            }],
+            "receipts": [receipt]
+        });
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bundle.json");
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&bundle).expect("bundle serializes"),
+        )
+        .expect("bundle writes");
+
+        let loaded = load_explain_bundle(&path).expect("bundle loads");
+        let explanation = fcp_audit::explain::explain_bundle(&loaded).expect("bundle explains");
+
+        assert_eq!(explanation.connector_id, "fcp.test:base:v1");
+        assert_eq!(explanation.operation_id, "send_message");
+        assert!(
+            explanation
+                .render_human()
+                .contains("revocation cascade did not trigger")
+        );
     }
 
     #[test]

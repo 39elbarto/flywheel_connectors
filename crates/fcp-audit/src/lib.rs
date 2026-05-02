@@ -26,6 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
 
+pub mod explain;
+
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
 const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =
     b"FCP2-CAPABILITY-CONSTRAINT-DESCRIPTOR-V1";

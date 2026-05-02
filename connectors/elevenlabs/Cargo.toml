@@ -35,4 +35,5 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false }
 wiremock.workspace = true

@@ -67,3 +67,7 @@ harness = false
 [[bench]]
 name = "repair_queue"
 harness = false
+
+[[bench]]
+name = "durable_wal_cursor"
+harness = false

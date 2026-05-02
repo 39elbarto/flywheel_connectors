@@ -15,11 +15,21 @@
 //! ## Design contract (from
 //! `docs/architecture/adr/m8j0q-revocation-cascade.md`)
 //!
-//! - **Bounded walk.** [`CascadeConfig::max_hops`] caps the walk depth
-//!   (default 4: token → issuance_key → node_signing_key → owner_key).
+//! - **Bounded walk.** [`CascadeConfig::max_hops`] caps the per-token walk
+//!   depth and is itself capped by [`MAX_CASCADE_WALK_HOPS`] (default 4:
+//!   token → issuance_key → node_signing_key → owner_key).
 //!   A malformed chain that points at itself transitively can never
 //!   force the verifier into an unbounded loop — it terminates with
 //!   [`CascadeRejection::WalkDepthExceeded`].
+//! - **Bounded chain breadth.** [`MAX_ATTESTATION_CHAIN_EDGES`] caps the
+//!   total per-zone attestation edges admitted by [`AttestationChain`].
+//!   The walker validates the chain before scanning edges, so a malicious
+//!   policy bundle cannot turn each token verification into an unbounded
+//!   linear scan.
+//! - **Shadow-edge rejection.** Duplicate-source edges are rejected instead
+//!   of resolved by insertion order. There is exactly one successor for each
+//!   `(source KID, hop)` pair; a revoked or attacker-controlled shadow edge
+//!   cannot pre-empt the legitimate edge by being inserted first.
 //! - **Cycle detection.** A self-attesting key (or any KID that
 //!   re-appears during the walk) is rejected with
 //!   [`CascadeRejection::CycleDetected`]. Path is small (≤ `max_hops`)
@@ -49,6 +59,19 @@ use thiserror::Error;
 
 use fcp_core::ObjectId;
 use fcp_crypto::kid::KeyId;
+
+/// Hard cap on the per-token cascade walk depth.
+///
+/// The current architecture has exactly three visited KIDs plus one spare hop
+/// for forward-compatible owner-attestation handling. Larger values are a
+/// misconfiguration because they expand the verifier's trusted work budget.
+pub const MAX_CASCADE_WALK_HOPS: usize = 4;
+
+/// Hard cap on total per-zone attestation edges loaded into a cascade chain.
+///
+/// This keeps chain validation and `resolve_next` scans bounded even when a
+/// hostile or malformed owner-signed policy bundle is presented to the host.
+pub const MAX_ATTESTATION_CHAIN_EDGES: usize = 1024;
 
 /// Hop level inside the cascade walk.
 ///
@@ -95,13 +118,19 @@ impl std::fmt::Display for CascadeHop {
 ///
 /// Built once at zone-policy-bundle-change time and held by the host;
 /// walking it at verification time is a small in-memory linear scan
-/// (max 4 hops × 2 lookups), not an I/O round trip.
+/// (max 4 hops × bounded chain breadth), not an I/O round trip.
+///
+/// This is per-zone trust-anchor data. Hosts MUST load it only from
+/// owner-signed sources and MUST call [`Self::validate`] when accepting a
+/// policy bundle. [`check_revocation_chain`] also validates before walking so
+/// raw struct construction cannot bypass the verifier's bounds.
 ///
 /// The chain is intentionally a `Vec<(KeyId, KeyId)>` rather than a
-/// `HashMap`: at the architectural maximum of 4 hops the constant-
-/// factor cost of hashing dominates the linear scan, and `KeyId` does
-/// not implement `std::hash::Hash` today (it derives `ConstantTimeEq`
-/// which is incompatible with the `Hash`-via-`Eq` invariant).
+/// `HashMap`: at the architectural maximum of 4 hops and
+/// [`MAX_ATTESTATION_CHAIN_EDGES`] total edges the constant-factor cost of
+/// hashing dominates the bounded linear scan, and `KeyId` does not implement
+/// `std::hash::Hash` today (it derives `ConstantTimeEq` which is incompatible
+/// with the `Hash`-via-`Eq` invariant).
 #[derive(Debug, Clone, Default)]
 pub struct AttestationChain {
     /// Edges: issuance key (KID inside the CWT `iss`) → node signing key.
@@ -124,26 +153,109 @@ impl AttestationChain {
     }
 
     /// Record that `issuance` was attested by `node`.
-    pub fn attest_issuance(&mut self, issuance: KeyId, node: KeyId) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CascadeRejection::AttestationChainTooLarge`] when inserting
+    /// the edge would exceed [`MAX_ATTESTATION_CHAIN_EDGES`]. Returns
+    /// [`CascadeRejection::ShadowEdgeDetected`] when the same issuance key
+    /// already has an outgoing edge.
+    pub fn attest_issuance(
+        &mut self,
+        issuance: KeyId,
+        node: KeyId,
+    ) -> Result<(), CascadeRejection> {
+        ensure_chain_can_accept_edge(self.edge_count())?;
+        ensure_unique_source(
+            &self.issuance_to_node,
+            CascadeHop::IssuerKey,
+            0,
+            &issuance,
+            &node,
+        )?;
         self.issuance_to_node.push((issuance, node));
+        Ok(())
     }
 
     /// Record that `node` was attested by `owner`.
-    pub fn attest_node(&mut self, node: KeyId, owner: KeyId) {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CascadeRejection::AttestationChainTooLarge`] when inserting
+    /// the edge would exceed [`MAX_ATTESTATION_CHAIN_EDGES`]. Returns
+    /// [`CascadeRejection::ShadowEdgeDetected`] when the same node key already
+    /// has an outgoing edge.
+    pub fn attest_node(&mut self, node: KeyId, owner: KeyId) -> Result<(), CascadeRejection> {
+        ensure_chain_can_accept_edge(self.edge_count())?;
+        ensure_unique_source(
+            &self.node_to_owner,
+            CascadeHop::NodeAttestation,
+            1,
+            &node,
+            &owner,
+        )?;
         self.node_to_owner.push((node, owner));
+        Ok(())
+    }
+
+    /// Validate structural bounds and one-edge-per-source invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CascadeRejection::AttestationChainTooLarge`] when the total
+    /// number of edges exceeds [`MAX_ATTESTATION_CHAIN_EDGES`]. Returns
+    /// [`CascadeRejection::ShadowEdgeDetected`] when any hop contains multiple
+    /// outgoing edges from the same source KID.
+    pub fn validate(&self) -> Result<(), CascadeRejection> {
+        self.validate_bounds()?;
+        detect_shadow_edges(&self.issuance_to_node, CascadeHop::IssuerKey, 0)?;
+        detect_shadow_edges(&self.node_to_owner, CascadeHop::NodeAttestation, 1)?;
+        Ok(())
+    }
+
+    fn validate_bounds(&self) -> Result<(), CascadeRejection> {
+        let edge_count = self.edge_count();
+        if edge_count > MAX_ATTESTATION_CHAIN_EDGES {
+            return Err(CascadeRejection::AttestationChainTooLarge {
+                edge_count,
+                max_edges: MAX_ATTESTATION_CHAIN_EDGES,
+            });
+        }
+        Ok(())
+    }
+
+    /// Total attestation edges in this chain.
+    #[must_use]
+    pub fn edge_count(&self) -> usize {
+        self.issuance_to_node
+            .len()
+            .saturating_add(self.node_to_owner.len())
     }
 
     /// Resolve the next hop from `current` at hop level `hop`.
-    fn resolve_next(&self, current: &KeyId, hop: usize) -> Option<KeyId> {
+    fn resolve_next(&self, current: &KeyId, hop: usize) -> Result<Option<KeyId>, CascadeRejection> {
         let edges = match hop {
             0 => &self.issuance_to_node,
             1 => &self.node_to_owner,
-            _ => return None,
+            _ => return Ok(None),
         };
-        edges
+        let mut matches = edges
             .iter()
-            .find(|(from, _)| from == current)
-            .map(|(_, to)| to.clone())
+            .filter(|(from, _)| from == current)
+            .map(|(_, to)| to);
+        let Some(first_target) = matches.next() else {
+            return Ok(None);
+        };
+        if let Some(shadow_target) = matches.next() {
+            return Err(CascadeRejection::ShadowEdgeDetected {
+                scope: scope_for_hop(hop).unwrap_or(CascadeHop::OwnerAttestation),
+                hop_index: hop,
+                source_kid: current.clone(),
+                first_target_kid: first_target.clone(),
+                shadow_target_kid: shadow_target.clone(),
+            });
+        }
+        Ok(Some(first_target.clone()))
     }
 }
 
@@ -164,7 +276,7 @@ pub struct CascadeConfig {
 impl Default for CascadeConfig {
     fn default() -> Self {
         Self {
-            max_hops: 4,
+            max_hops: MAX_CASCADE_WALK_HOPS,
             max_registry_age_secs: 300,
         }
     }
@@ -214,7 +326,11 @@ pub enum CascadeRejection {
     /// `AttestationChain` does not contain an outgoing edge for
     /// `missing_kid` at the current hop. Indicates the chain is
     /// incomplete relative to the token's claimed issuance key.
-    #[error("attestation chain incomplete: no edge for kid {} at hop {}", missing_kid, hop_index)]
+    #[error(
+        "attestation chain incomplete: no edge for kid {} at hop {}",
+        missing_kid,
+        hop_index
+    )]
     AttestationChainIncomplete {
         /// The KID with no outgoing edge.
         missing_kid: KeyId,
@@ -232,6 +348,47 @@ pub enum CascadeRejection {
         snapshot_age_secs: u64,
         /// Configured maximum (echoed for clarity).
         max_age_secs: u64,
+    },
+    /// Configuration asked the walker to exceed its hard depth budget.
+    #[error(
+        "configured cascade depth {} exceeds hard cap {}",
+        configured_max_hops,
+        max_hops
+    )]
+    ConfiguredDepthTooLarge {
+        /// Requested per-walk hop budget.
+        configured_max_hops: usize,
+        /// Hard architectural maximum.
+        max_hops: usize,
+    },
+    /// Chain contains more edges than the bounded walker admits.
+    #[error("attestation chain has {} edges, max {}", edge_count, max_edges)]
+    AttestationChainTooLarge {
+        /// Number of edges observed in the chain.
+        edge_count: usize,
+        /// Maximum admitted edge count.
+        max_edges: usize,
+    },
+    /// Multiple outgoing edges exist for the same source KID at one hop.
+    #[error(
+        "shadow edge detected at hop {} ({}): source {} has targets {} and {}",
+        hop_index,
+        scope,
+        source_kid,
+        first_target_kid,
+        shadow_target_kid
+    )]
+    ShadowEdgeDetected {
+        /// Hop scope containing the duplicate-source edge.
+        scope: CascadeHop,
+        /// 0-based hop index inside the walk.
+        hop_index: usize,
+        /// Source KID with more than one outgoing edge.
+        source_kid: KeyId,
+        /// First target observed for the source.
+        first_target_kid: KeyId,
+        /// Additional target that makes the edge ambiguous.
+        shadow_target_kid: KeyId,
     },
 }
 
@@ -296,6 +453,12 @@ where
             max_age_secs: config.max_registry_age_secs,
         });
     }
+    if config.max_hops > MAX_CASCADE_WALK_HOPS {
+        return Err(CascadeRejection::ConfiguredDepthTooLarge {
+            configured_max_hops: config.max_hops,
+            max_hops: MAX_CASCADE_WALK_HOPS,
+        });
+    }
 
     // (b) Direct token revocation (cheapest check, runs first).
     if let Some(rec) = direct_lookup(&token_id) {
@@ -305,22 +468,13 @@ where
         });
     }
 
+    chain.validate_bounds()?;
+
     // (c) Walk: token → issuance_key → node_signing_key → owner_key.
     let mut current = issuer_kid;
     let mut path: Vec<KeyId> = Vec::with_capacity(config.max_hops);
 
     for hop_index in 0..config.max_hops {
-        // Cycle detection FIRST so a self-attesting key can't slip a
-        // revocation check by collapsing into the registry-lookup arm.
-        if let Some(idx) = path.iter().position(|kid| kid == &current) {
-            path.push(current.clone());
-            return Err(CascadeRejection::CycleDetected {
-                repeated_kid: current,
-                cycle_started_at: idx,
-            });
-        }
-        path.push(current.clone());
-
         // Per-hop revocation check. Only hops 0..=2 map to a
         // `CascadeHop`; deeper hops would only happen if `max_hops > 3`
         // is configured for forward extension.
@@ -335,13 +489,24 @@ where
             });
         }
 
+        // Cycle detection runs after the revocation probe so forensic output
+        // preserves a concrete revocation when a repeated KID is also revoked.
+        if let Some(idx) = path.iter().position(|kid| kid == &current) {
+            path.push(current.clone());
+            return Err(CascadeRejection::CycleDetected {
+                repeated_kid: current,
+                cycle_started_at: idx,
+            });
+        }
+        path.push(current.clone());
+
         // Owner-key reached → walk complete.
         if current == chain.owner_key {
             return Ok(CascadeReceipt { token_id, path });
         }
 
         // Hop forward.
-        current = chain.resolve_next(&current, hop_index).ok_or_else(|| {
+        current = chain.resolve_next(&current, hop_index)?.ok_or_else(|| {
             CascadeRejection::AttestationChainIncomplete {
                 missing_kid: current.clone(),
                 hop_index,
@@ -365,12 +530,68 @@ const fn scope_for_hop(hop: usize) -> Option<CascadeHop> {
     }
 }
 
+fn ensure_chain_can_accept_edge(edge_count: usize) -> Result<(), CascadeRejection> {
+    let new_edge_count = edge_count.saturating_add(1);
+    if new_edge_count > MAX_ATTESTATION_CHAIN_EDGES {
+        return Err(CascadeRejection::AttestationChainTooLarge {
+            edge_count: new_edge_count,
+            max_edges: MAX_ATTESTATION_CHAIN_EDGES,
+        });
+    }
+    Ok(())
+}
+
+fn ensure_unique_source(
+    edges: &[(KeyId, KeyId)],
+    scope: CascadeHop,
+    hop_index: usize,
+    source: &KeyId,
+    new_target: &KeyId,
+) -> Result<(), CascadeRejection> {
+    if let Some((_, existing_target)) = edges.iter().find(|(from, _)| from == source) {
+        return Err(CascadeRejection::ShadowEdgeDetected {
+            scope,
+            hop_index,
+            source_kid: source.clone(),
+            first_target_kid: existing_target.clone(),
+            shadow_target_kid: new_target.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn detect_shadow_edges(
+    edges: &[(KeyId, KeyId)],
+    scope: CascadeHop,
+    hop_index: usize,
+) -> Result<(), CascadeRejection> {
+    for (index, (source, first_target)) in edges.iter().enumerate() {
+        if let Some((_, shadow_target)) = edges[index.saturating_add(1)..]
+            .iter()
+            .find(|(candidate_source, _)| candidate_source == source)
+        {
+            return Err(CascadeRejection::ShadowEdgeDetected {
+                scope,
+                hop_index,
+                source_kid: source.clone(),
+                first_target_kid: first_target.clone(),
+                shadow_target_kid: shadow_target.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn kid(byte: u8) -> KeyId {
         KeyId::from_bytes([byte; 8])
+    }
+
+    fn kid_u64(value: u64) -> KeyId {
+        KeyId::from_bytes(value.to_le_bytes())
     }
 
     fn token_id(seed: u8) -> ObjectId {
@@ -386,8 +607,12 @@ mod tests {
     /// Build a 3-hop healthy chain: issuance(1) → node(2) → owner(3).
     fn healthy_chain() -> AttestationChain {
         let mut chain = AttestationChain::rooted_at(kid(3));
-        chain.attest_issuance(kid(1), kid(2));
-        chain.attest_node(kid(2), kid(3));
+        chain
+            .attest_issuance(kid(1), kid(2))
+            .expect("healthy issuance edge");
+        chain
+            .attest_node(kid(2), kid(3))
+            .expect("healthy node edge");
         chain
     }
 
@@ -557,7 +782,9 @@ mod tests {
     fn self_attesting_issuance_key_is_rejected_as_cycle() {
         // Malicious chain: kid(1) attests itself (issuance → node = same).
         let mut chain = AttestationChain::rooted_at(kid(99));
-        chain.attest_issuance(kid(1), kid(1));
+        chain
+            .attest_issuance(kid(1), kid(1))
+            .expect("self-attesting edge is structurally single-source");
         let err = check_revocation_chain(
             token_id(0x10),
             kid(1),
@@ -584,8 +811,10 @@ mod tests {
     fn three_hop_cycle_is_rejected() {
         // Chain with a 3-hop cycle: 1 → 2 → 1 (returns to start)
         let mut chain = AttestationChain::rooted_at(kid(99));
-        chain.attest_issuance(kid(1), kid(2));
-        chain.attest_node(kid(2), kid(1));
+        chain
+            .attest_issuance(kid(1), kid(2))
+            .expect("issuance edge");
+        chain.attest_node(kid(2), kid(1)).expect("node edge");
         let err = check_revocation_chain(
             token_id(0x10),
             kid(1),
@@ -599,14 +828,142 @@ mod tests {
         assert!(matches!(err, CascadeRejection::CycleDetected { .. }));
     }
 
+    #[test]
+    fn cascade_walker_cycle_with_revoked_kid_surfaces_revocation_first() {
+        // Self-attesting issuance key: hop 1 would be a cycle, but the same
+        // KID is also revoked at that hop. Revocation evidence wins for audit.
+        let mut chain = AttestationChain::rooted_at(kid(99));
+        chain
+            .attest_issuance(kid(1), kid(1))
+            .expect("self-attesting edge is structurally single-source");
+        let err = check_revocation_chain(
+            token_id(0x10),
+            kid(1),
+            &chain,
+            &CascadeConfig::default(),
+            0,
+            no_direct_revocation,
+            |k, scope| {
+                if scope == CascadeHop::NodeAttestation && *k == kid(1) {
+                    Some(rec(11))
+                } else {
+                    None
+                }
+            },
+        )
+        .expect_err("revocation wins over cycle");
+        match err {
+            CascadeRejection::HopRevoked {
+                scope,
+                hop_index,
+                kid: rejected_kid,
+                revoked_at_unix_ms,
+            } => {
+                assert_eq!(scope, CascadeHop::NodeAttestation);
+                assert_eq!(hop_index, 1);
+                assert_eq!(rejected_kid, kid(1));
+                assert_eq!(revoked_at_unix_ms, 11);
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    // ── Shadow-edge and breadth bounding ────────────────────────────────────
+
+    #[test]
+    fn cascade_walker_shadow_edge_pre_emption_detected() {
+        let mut chain = AttestationChain::rooted_at(kid(3));
+        // Bypass checked insertion to simulate a hostile decoded bundle where
+        // the attacker-controlled edge appears first.
+        chain.issuance_to_node.push((kid(1), kid(9)));
+        chain.issuance_to_node.push((kid(1), kid(2)));
+        chain.attest_node(kid(2), kid(3)).expect("node edge");
+
+        let err = check_revocation_chain(
+            token_id(0x10),
+            kid(1),
+            &chain,
+            &CascadeConfig::default(),
+            0,
+            no_direct_revocation,
+            no_hop_revocation,
+        )
+        .expect_err("duplicate-source edge must not be first-edge-wins");
+        match err {
+            CascadeRejection::ShadowEdgeDetected {
+                scope,
+                hop_index,
+                source_kid,
+                first_target_kid,
+                shadow_target_kid,
+            } => {
+                assert_eq!(scope, CascadeHop::IssuerKey);
+                assert_eq!(hop_index, 0);
+                assert_eq!(source_kid, kid(1));
+                assert_eq!(first_target_kid, kid(9));
+                assert_eq!(shadow_target_kid, kid(2));
+            }
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn cascade_walker_chain_size_cap_rejects_above_max_attestation_chain_edges() {
+        let mut chain = AttestationChain::rooted_at(kid(3));
+        for i in 0..=MAX_ATTESTATION_CHAIN_EDGES {
+            let source = kid_u64(10_000 + u64::try_from(i).expect("test bound fits u64"));
+            let target = kid_u64(20_000 + u64::try_from(i).expect("test bound fits u64"));
+            chain.issuance_to_node.push((source, target));
+        }
+
+        let err = check_revocation_chain(
+            token_id(0x10),
+            kid(1),
+            &chain,
+            &CascadeConfig::default(),
+            0,
+            no_direct_revocation,
+            no_hop_revocation,
+        )
+        .expect_err("oversized chain must be rejected before scan");
+        assert!(matches!(
+            err,
+            CascadeRejection::AttestationChainTooLarge {
+                edge_count,
+                max_edges: MAX_ATTESTATION_CHAIN_EDGES,
+            } if edge_count == MAX_ATTESTATION_CHAIN_EDGES + 1
+        ));
+    }
+
+    #[test]
+    fn checked_insertion_rejects_shadow_edge() {
+        let mut chain = AttestationChain::rooted_at(kid(3));
+        chain
+            .attest_issuance(kid(1), kid(9))
+            .expect("first edge accepted");
+        let err = chain
+            .attest_issuance(kid(1), kid(2))
+            .expect_err("duplicate-source insertion rejected");
+        assert!(matches!(
+            err,
+            CascadeRejection::ShadowEdgeDetected {
+                scope: CascadeHop::IssuerKey,
+                hop_index: 0,
+                ..
+            }
+        ));
+    }
+
     // ── Walk-depth bounding ───────────────────────────────────────────────
 
     #[test]
     fn walk_depth_exceeded_when_chain_too_deep() {
         // Build a chain whose owner_key isn't reachable within max_hops.
         let mut chain = AttestationChain::rooted_at(kid(99));
-        chain.attest_issuance(kid(1), kid(2));
-        chain.attest_node(kid(2), kid(3));
+        chain
+            .attest_issuance(kid(1), kid(2))
+            .expect("issuance edge");
+        chain.attest_node(kid(2), kid(3)).expect("node edge");
         // Owner key is kid(99) but resolve_next only handles hops 0/1,
         // so even at max_hops=4 the walk can't reach kid(99).
         let cfg = CascadeConfig {
@@ -665,7 +1022,9 @@ mod tests {
         // Chain has issuance edge but no node edge: walk hits hop 1 with
         // no outgoing edge for kid(2).
         let mut chain = AttestationChain::rooted_at(kid(3));
-        chain.attest_issuance(kid(1), kid(2));
+        chain
+            .attest_issuance(kid(1), kid(2))
+            .expect("issuance edge");
         let err = check_revocation_chain(
             token_id(0x10),
             kid(1),
@@ -763,8 +1122,10 @@ mod tests {
         // to the chain does NOT increase the lookup count.
         let mut chain = healthy_chain();
         for i in 0_u32..1000 {
-            let a = u8::try_from(i & 0xFF).unwrap();
-            chain.attest_issuance(kid(a.wrapping_add(10)), kid(a.wrapping_add(11)));
+            let base = 1_000_u64 + u64::from(i);
+            chain
+                .attest_issuance(kid_u64(base), kid_u64(base + 10_000))
+                .expect("unique padding edge");
         }
         let mut calls = 0_usize;
         let _receipt = check_revocation_chain(

@@ -29,11 +29,17 @@ fn kid(byte: u8) -> KeyId {
     KeyId::from_bytes([byte; 8])
 }
 
+fn kid_u64(value: u64) -> KeyId {
+    KeyId::from_bytes(value.to_le_bytes())
+}
+
 /// Build a healthy 3-hop chain rooted at `owner_kid`.
 fn chain_through(issuer_kid: KeyId, node_kid: KeyId, owner_kid: KeyId) -> AttestationChain {
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid, node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid, node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
     chain
 }
 
@@ -111,8 +117,10 @@ fn cost_is_constant_in_unrelated_attestation_count() {
 
     // Pad with 1000 unrelated edges.
     for i in 0_u32..1000 {
-        let a = u8::try_from(i & 0xFF).unwrap();
-        chain.attest_issuance(kid(a.wrapping_add(50)), kid(a.wrapping_add(51)));
+        let base = 1_000_u64 + u64::from(i);
+        chain
+            .attest_issuance(kid_u64(base), kid_u64(base + 10_000))
+            .expect("unique padding edge");
     }
 
     let token_id = ObjectId::from_unscoped_bytes(b"single-token");

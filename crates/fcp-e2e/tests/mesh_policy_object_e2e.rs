@@ -18,6 +18,12 @@ use fcp_audit::{
     AuditEntryBuilder, CapabilityConstraintDenied as AuditDenialPayload, Severity,
     capability_constraint_request_descriptor_hash, event_types,
 };
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, kid::KeyId};
+use fcp_evidence::{
+    AttestationChain, CascadeConfig, CascadeHop, CascadeRejection, RevocationRecord,
+    check_revocation_chain,
+};
+use fcp_mesh::{DeviceProfile, GossipMessage, MeshNode, MeshNodeConfig, ObjectAdmissionClass};
 use fcp_prelude::{
     CapabilityId, ConnectorId, Decision, DecisionReasonCode, EpochId, NodeId as CoreNodeId,
     NodeSignature, ObjectHeader, ObjectId, ObjectIdKey, OperationId, POLICY_BUNDLE_SIGNED_FIELDS,
@@ -27,12 +33,6 @@ use fcp_prelude::{
     RevocationScope, SafetyTier, StorageMeta, StoredObject, TailscaleNodeId, TransportMode, ZoneId,
     ZonePolicyObject, ZoneTransportPolicy, compute_policy_bundle_hash,
 };
-use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, kid::KeyId};
-use fcp_evidence::{
-    AttestationChain, CascadeConfig, CascadeHop, CascadeRejection, RevocationRecord,
-    check_revocation_chain,
-};
-use fcp_mesh::{DeviceProfile, GossipMessage, MeshNode, MeshNodeConfig, ObjectAdmissionClass};
 use fcp_store::{
     KeyedObjectIdVerifier, MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore,
     MemorySymbolStoreConfig, ObjectAdmissionPolicy, ObjectStore, QuarantineStore,
@@ -671,8 +671,10 @@ async fn mesh_policy_object_lifecycle_gossip_admission_revocation_and_integrity(
     let node_kid = kid_from_label("o9t0e-policy-node");
     let owner_kid = kid_from_label("o9t0e-owner");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     let direct_revocation = check_revocation_chain(
         policy_object.object_id,

@@ -39,20 +39,20 @@ use fcp_audit::{
     AuditEntryBuilder, CapabilityConstraintDenied as AuditDenialPayload, Severity,
     capability_constraint_request_descriptor_hash, event_types,
 };
-use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, ObjectId,
-    OperationId, ZoneId,
-};
 use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder, kid::KeyId};
 use fcp_e2e::evidence::{
-    FORMAL_INVARIANTS_WITNESS_PATH, FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION,
-    FORMAL_INVARIANT_THEOREMS,
+    FORMAL_INVARIANT_THEOREMS, FORMAL_INVARIANTS_WITNESS_PATH,
+    FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION,
 };
 use fcp_evidence::{
     AttestationChain, CascadeConfig, CascadeHop, CascadeRejection, RevocationRecord,
     check_revocation_chain,
 };
 use fcp_mesh::emergency_revocation::RevocationWitness;
+use fcp_prelude::{
+    CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, ObjectId,
+    OperationId, ZoneId,
+};
 
 const REVOCATION_LEAN_THEOREM: &str =
     "Fcp.Invariants.Revocation.revocation_seal_check_use_atomicity";
@@ -166,8 +166,10 @@ fn revocation_cascade_e2e_happy_path() {
     let node_kid = kid_from_label("node-N");
     let owner_kid = kid_from_label("owner-O");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     let token_id = token_id_for("happy-path-token");
 
@@ -178,7 +180,7 @@ fn revocation_cascade_e2e_happy_path() {
         &chain,
         &CascadeConfig::default(),
         0,
-        |_| None, // no direct revocation
+        |_| None,    // no direct revocation
         |_, _| None, // no hop revocation
     )
     .expect("clean chain must walk to owner");
@@ -230,8 +232,10 @@ fn revocation_cascade_e2e_direct_token_revocation_within_sla() {
     let node_kid = kid_from_label("node-N");
     let owner_kid = kid_from_label("owner-O");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     log_event(scenario, "post_revocation_use", "running", None);
     let err = check_revocation_chain(
@@ -259,7 +263,12 @@ fn revocation_cascade_e2e_direct_token_revocation_within_sla() {
         }
         other => panic!("expected TokenRevoked, got {other:?}"),
     };
-    log_event(scenario, "post_revocation_use", "rejected", Some(reason_tag));
+    log_event(
+        scenario,
+        "post_revocation_use",
+        "rejected",
+        Some(reason_tag),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -280,8 +289,10 @@ fn revocation_cascade_e2e_issuer_key_cascade_rejects_all_minted_tokens() {
     let node_kid = kid_from_label("node-N");
     let owner_kid = kid_from_label("owner-O");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     // Mint 5 tokens from the same issuer (the "tokens issued during the
     // compromise window" the bead's threat model describes).
@@ -378,8 +389,10 @@ fn revocation_cascade_e2e_registry_freshness_sla_breach() {
     let node_kid = kid_from_label("node-N");
     let owner_kid = kid_from_label("owner-O");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     let cfg = CascadeConfig::default();
     let token_id = token_id_for("sla-breach-token");
@@ -440,8 +453,10 @@ fn revocation_cascade_e2e_audit_event_emitted_on_denial() {
     let node_kid = kid_from_label("node-N");
     let owner_kid = kid_from_label("owner-O");
     let mut chain = AttestationChain::rooted_at(owner_kid.clone());
-    chain.attest_issuance(issuer_kid.clone(), node_kid.clone());
-    chain.attest_node(node_kid, owner_kid);
+    chain
+        .attest_issuance(issuer_kid.clone(), node_kid.clone())
+        .expect("issuance edge");
+    chain.attest_node(node_kid, owner_kid).expect("node edge");
 
     let token_id = token_id_for("audit-event-token");
     let revoked_at_unix_ms = 1_700_000_000_000_u64;
@@ -481,13 +496,12 @@ fn revocation_cascade_e2e_audit_event_emitted_on_denial() {
                 token_id_hex: String,
                 attempted_op: &'a str,
             }
-            let descriptor_hash = capability_constraint_request_descriptor_hash(
-                &RedactedDescriptor {
+            let descriptor_hash =
+                capability_constraint_request_descriptor_hash(&RedactedDescriptor {
                     token_id_hex: token_id.to_string(),
                     attempted_op: "op.read",
-                },
-            )
-            .expect("descriptor hash computes");
+                })
+                .expect("descriptor hash computes");
             AuditDenialPayload::new(
                 format!("{scope}_revoked"),
                 format!("kid={}", kid.to_hex()),

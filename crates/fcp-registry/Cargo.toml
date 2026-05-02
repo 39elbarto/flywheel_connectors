@@ -54,6 +54,7 @@ sigstore-trust-root = { workspace = true, optional = true }
 [dev-dependencies]
 insta = { workspace = true, features = ["json"] }
 tempfile = "3"
+tracing.workspace = true
 uuid = { workspace = true }
 
 # Integration test that exercises the Mock*Verifier fixtures only runs when

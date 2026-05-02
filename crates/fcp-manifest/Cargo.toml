@@ -27,5 +27,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+fcp-crypto = { path = "../fcp-crypto" }
 insta = { workspace = true, features = ["json"] }
+tracing.workspace = true
 uuid.workspace = true

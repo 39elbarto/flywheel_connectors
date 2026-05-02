@@ -141,6 +141,20 @@ pub use async_trait::async_trait;
 pub use chrono::{DateTime, Utc};
 pub use uuid::Uuid;
 
+// ── Production-hardening helpers (ptb6n) ───────────────────────────
+//
+// `log_redaction` is a tactical addition for the H.3 audit closure:
+// connector retry-logging code historically logged full request URLs
+// at debug level, which can carry user/account/resource IDs in the
+// path or query. The [`log_redaction::redact_url`] helper produces an
+// operator-safe rendering (scheme://host + path-prefix only — no
+// query, no fragment, opaque-id path components replaced with
+// `<id>`). Future production-hardening cycles may move this into a
+// dedicated `fcp-redaction` crate; today it lives in fcp-prelude
+// because every workspace consumer (connectors + platform) already
+// imports the prelude after y1daf.1+orw5s.
+pub mod log_redaction;
+
 #[cfg(test)]
 mod tests {
     //! Smoke tests proving the re-export surface compiles and

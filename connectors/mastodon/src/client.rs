@@ -1,5 +1,6 @@
 //! Mastodon API client.
 
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
@@ -98,7 +99,7 @@ impl MastodonClient {
             let client = self.client.clone();
             let token = self.access_token.clone();
             async move {
-                debug!(attempt, url = %url, "Mastodon GET request");
+                debug!(attempt, url = %redact_url(&url), "Mastodon GET request");
                 let mut request = if token.is_empty() {
                     client.get(&url)
                 } else {
@@ -185,7 +186,7 @@ impl MastodonClient {
             let client = self.client.clone();
             let token = self.access_token.clone();
             async move {
-                debug!(attempt, url = %url, "Mastodon POST request");
+                debug!(attempt, url = %redact_url(&url), "Mastodon POST request");
                 let request = if token.is_empty() {
                     client.post(&url)
                 } else {
@@ -267,7 +268,7 @@ impl MastodonClient {
             let client = self.client.clone();
             let token = self.access_token.clone();
             async move {
-                debug!(attempt, url = %url, "Mastodon DELETE request");
+                debug!(attempt, url = %redact_url(&url), "Mastodon DELETE request");
                 let request = if token.is_empty() {
                     client.delete(&url)
                 } else {

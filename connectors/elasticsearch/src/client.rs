@@ -4,6 +4,7 @@ use std::fmt;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
@@ -207,7 +208,7 @@ impl ElasticsearchClient {
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| async move {
-            debug!(attempt, method = http_method, url, "elasticsearch request");
+            debug!(attempt, method = http_method, url = %redact_url(&url), "elasticsearch request");
 
             let req = match http_method {
                 "GET" => self.client.get(url),

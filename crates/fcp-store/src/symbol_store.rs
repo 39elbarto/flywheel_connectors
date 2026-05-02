@@ -1,6 +1,9 @@
 //! Symbol store interface for FCPS durable repair data.
 //!
 //! Provides storage for `RaptorQ` symbols to enable partial object availability.
+//! `MemorySymbolStore` uses nested locks; the only supported acquisition order
+//! is `objects` -> per-object `ObjectSymbols` -> `used_bytes`. Never acquire a
+//! later lock and then call back into a path that can take an earlier one.
 
 use std::collections::HashMap;
 #[cfg(test)]
@@ -732,12 +735,14 @@ impl SymbolStore for MemorySymbolStore {
 mod tests {
     use std::panic::{self, AssertUnwindSafe};
     use std::sync::{Arc, Barrier, mpsc};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     use super::*;
     use crate::coverage::CoverageEvaluation;
     use chrono::Utc;
     use jsonschema::Validator;
+    use proptest::prelude::*;
+    use proptest::test_runner::{Config as ProptestConfig, TestRunner};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -852,6 +857,265 @@ mod tests {
             },
             data: Bytes::from(vec![0_u8; 64]),
         }
+    }
+
+    #[derive(Clone, Debug)]
+    enum SymbolStoreConcurrencyOp {
+        PutMeta { object: u8 },
+        PutSymbol { object: u8, esi: u8 },
+        GetSymbol { object: u8, esi: u8 },
+        GetAllSymbols { object: u8 },
+        SymbolCount { object: u8 },
+        DeleteSymbol { object: u8, esi: u8 },
+        DeleteObject { object: u8 },
+        ListZone { zone: u8 },
+        Distribution { object: u8 },
+        CanReconstruct { object: u8 },
+    }
+
+    fn symbol_store_concurrency_op_strategy() -> impl Strategy<Value = SymbolStoreConcurrencyOp> {
+        prop_oneof![
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::PutMeta { object }),
+            (0_u8..4, 0_u8..12)
+                .prop_map(|(object, esi)| SymbolStoreConcurrencyOp::PutSymbol { object, esi }),
+            (0_u8..4, 0_u8..12)
+                .prop_map(|(object, esi)| SymbolStoreConcurrencyOp::GetSymbol { object, esi }),
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::GetAllSymbols { object }),
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::SymbolCount { object }),
+            (0_u8..4, 0_u8..12)
+                .prop_map(|(object, esi)| SymbolStoreConcurrencyOp::DeleteSymbol { object, esi }),
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::DeleteObject { object }),
+            (0_u8..2).prop_map(|zone| SymbolStoreConcurrencyOp::ListZone { zone }),
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::Distribution { object }),
+            (0_u8..4).prop_map(|object| SymbolStoreConcurrencyOp::CanReconstruct { object }),
+        ]
+    }
+
+    fn concurrency_zone(zone: u8) -> ZoneId {
+        match zone % 2 {
+            0 => "z:test".parse().unwrap(),
+            _ => "z:other".parse().unwrap(),
+        }
+    }
+
+    fn concurrency_object_id(object: u8) -> ObjectId {
+        ObjectId::from_bytes([object.wrapping_add(17); 32])
+    }
+
+    fn concurrency_meta(object: u8) -> ObjectSymbolMeta {
+        ObjectSymbolMeta {
+            object_id: concurrency_object_id(object),
+            zone_id: concurrency_zone(object),
+            oti: ObjectTransmissionInfo {
+                transfer_length: 512,
+                symbol_size: 64,
+                source_blocks: 1,
+                sub_blocks: 1,
+                alignment: 8,
+                payload_hash: None,
+            },
+            source_symbols: 8,
+            first_symbol_at: 1_700_000_000_000,
+        }
+    }
+
+    fn concurrency_symbol(object: u8, esi: u8) -> StoredSymbol {
+        let mut data = vec![object; 64];
+        data[0] = object;
+        data[1] = esi;
+        StoredSymbol {
+            meta: SymbolMeta {
+                object_id: concurrency_object_id(object),
+                esi: u32::from(esi),
+                zone_id: concurrency_zone(object),
+                source_node: Some(u64::from((esi % 4) + 1)),
+                stored_at: 1_700_000_000_000 + u64::from(esi),
+            },
+            data: Bytes::from(data),
+        }
+    }
+
+    async fn apply_symbol_store_concurrency_op(
+        store: &MemorySymbolStore,
+        op: SymbolStoreConcurrencyOp,
+    ) {
+        match op {
+            SymbolStoreConcurrencyOp::PutMeta { object } => {
+                let _ = store.put_object_meta(concurrency_meta(object)).await;
+            }
+            SymbolStoreConcurrencyOp::PutSymbol { object, esi } => {
+                let _ = store.put_symbol(concurrency_symbol(object, esi)).await;
+            }
+            SymbolStoreConcurrencyOp::GetSymbol { object, esi } => {
+                let _ = store
+                    .get_symbol(&concurrency_object_id(object), u32::from(esi))
+                    .await;
+            }
+            SymbolStoreConcurrencyOp::GetAllSymbols { object } => {
+                let _ = store.get_all_symbols(&concurrency_object_id(object)).await;
+            }
+            SymbolStoreConcurrencyOp::SymbolCount { object } => {
+                let _ = store.symbol_count(&concurrency_object_id(object)).await;
+            }
+            SymbolStoreConcurrencyOp::DeleteSymbol { object, esi } => {
+                let _ = store
+                    .delete_symbol(&concurrency_object_id(object), u32::from(esi))
+                    .await;
+            }
+            SymbolStoreConcurrencyOp::DeleteObject { object } => {
+                let _ = store.delete_object(&concurrency_object_id(object)).await;
+            }
+            SymbolStoreConcurrencyOp::ListZone { zone } => {
+                let _ = store.list_zone(&concurrency_zone(zone)).await;
+            }
+            SymbolStoreConcurrencyOp::Distribution { object } => {
+                let _ = store.get_distribution(&concurrency_object_id(object)).await;
+            }
+            SymbolStoreConcurrencyOp::CanReconstruct { object } => {
+                let _ = store.can_reconstruct(&concurrency_object_id(object)).await;
+            }
+        }
+    }
+
+    async fn seed_symbol_store_concurrency_case(store: &MemorySymbolStore) {
+        for object in 0_u8..4 {
+            store
+                .put_object_meta(concurrency_meta(object))
+                .await
+                .unwrap();
+            for esi in 0_u8..3 {
+                store
+                    .put_symbol(concurrency_symbol(object, esi))
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    fn symbol_store_concurrency_forced_ops(worker: usize) -> Vec<SymbolStoreConcurrencyOp> {
+        let object = u8::try_from(worker % 4).expect("worker object slot fits in u8");
+        let esi = u8::try_from((worker % 8) + 3).expect("worker ESI fits in u8");
+        vec![
+            SymbolStoreConcurrencyOp::PutSymbol { object, esi },
+            SymbolStoreConcurrencyOp::GetSymbol { object, esi },
+            SymbolStoreConcurrencyOp::ListZone { zone: object % 2 },
+            SymbolStoreConcurrencyOp::DeleteSymbol { object, esi },
+            SymbolStoreConcurrencyOp::PutSymbol { object, esi },
+        ]
+    }
+
+    fn assert_symbol_store_not_corrupt(store: &MemorySymbolStore) {
+        let mut expected_used = 0_u64;
+        let objects = store.objects.read();
+        for (object_id, obj_lock) in objects.iter() {
+            let obj = obj_lock.read();
+            assert_eq!(
+                *object_id, obj.meta.object_id,
+                "object map key must match stored object metadata"
+            );
+            validate_source_symbols(&obj.meta).expect("stored object metadata must stay valid");
+            for (esi, symbol) in &obj.symbols {
+                assert_eq!(
+                    *esi, symbol.meta.esi,
+                    "symbol map key must match stored symbol metadata"
+                );
+                assert!(
+                    MemorySymbolStore::symbol_matches_meta(&obj.meta, symbol),
+                    "stored symbol must match object metadata"
+                );
+                expected_used =
+                    expected_used.saturating_add(MemorySymbolStore::symbol_size(symbol));
+            }
+        }
+        drop(objects);
+
+        let actual_used = *store.used_bytes.read();
+        assert_eq!(
+            actual_used, expected_used,
+            "used_bytes must equal the sum of live symbol sizes"
+        );
+    }
+
+    fn run_symbol_store_concurrency_case(worker_count: usize, ops: Vec<SymbolStoreConcurrencyOp>) {
+        let store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
+            max_bytes: 4 * 1024 * 1024,
+            local_node_id: 99,
+        }));
+        fcp_async_core::runtime::block_on_sync(seed_symbol_store_concurrency_case(&store))
+            .expect("runtime");
+
+        let ready = Arc::new(Barrier::new(worker_count + 1));
+        let start = Arc::new(Barrier::new(worker_count + 1));
+        let (done_tx, done_rx) = mpsc::channel();
+        let mut handles = Vec::with_capacity(worker_count);
+
+        for worker in 0..worker_count {
+            let worker_store = Arc::clone(&store);
+            let worker_ready = Arc::clone(&ready);
+            let worker_start = Arc::clone(&start);
+            let worker_done = done_tx.clone();
+            let mut worker_ops = symbol_store_concurrency_forced_ops(worker);
+            worker_ops.extend(ops.iter().skip(worker).step_by(worker_count).cloned());
+
+            handles.push(std::thread::spawn(move || {
+                worker_ready.wait();
+                worker_start.wait();
+                let result = fcp_async_core::runtime::block_on_sync(async move {
+                    for op in worker_ops {
+                        apply_symbol_store_concurrency_op(&worker_store, op).await;
+                    }
+                })
+                .map(|_| ());
+                worker_done
+                    .send((worker, result))
+                    .expect("send worker result");
+            }));
+        }
+        drop(done_tx);
+
+        ready.wait();
+        let started_at = Instant::now();
+        start.wait();
+        for _ in 0..worker_count {
+            let (worker, result) = done_rx.recv_timeout(Duration::from_secs(5)).expect(
+                "symbol store concurrency worker timed out; possible nested RwLock deadlock",
+            );
+            assert!(
+                result.is_ok(),
+                "worker {worker} runtime failed: {:?}",
+                result.err()
+            );
+        }
+        assert!(
+            started_at.elapsed() < Duration::from_secs(5),
+            "symbol store concurrency case exceeded the deadlock budget"
+        );
+
+        for handle in handles {
+            handle.join().expect("symbol store worker thread panicked");
+        }
+
+        assert_symbol_store_not_corrupt(&store);
+    }
+
+    #[test]
+    fn symbol_store_concurrency_proptest_no_deadlock_or_corruption() {
+        let mut runner = TestRunner::new(ProptestConfig {
+            cases: 24,
+            max_shrink_iters: 64,
+            ..ProptestConfig::default()
+        });
+        let strategy = (
+            2_usize..=8,
+            proptest::collection::vec(symbol_store_concurrency_op_strategy(), 24..96),
+        );
+
+        runner
+            .run(&strategy, |(worker_count, ops)| {
+                run_symbol_store_concurrency_case(worker_count, ops);
+                Ok(())
+            })
+            .expect("symbol store concurrency proptest failed");
     }
 
     #[test]

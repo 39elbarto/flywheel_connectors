@@ -38,6 +38,7 @@ serde_json.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 rand.workspace = true
+proptest.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
 

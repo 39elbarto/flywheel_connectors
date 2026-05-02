@@ -21,7 +21,10 @@
 
 #![forbid(unsafe_code)]
 
-use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId};
+use fcp_crypto::{
+    Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId,
+    ed25519::SIGNATURE_SIZE as ED25519_SIGNATURE_SIZE,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use thiserror::Error;
@@ -902,11 +905,11 @@ impl ChainHead {
     ///
     /// # Errors
     ///
-    /// - [`AuditError::SignerMissing`] — the head carries no signatures
-    ///   at all (caller explicitly requested head auth).
+    /// - [`AuditError::EmptySignedHead`] — the head carries no
+    ///   signatures, or a signature entry carries empty bytes.
     /// - [`AuditError::UnknownIssuer`] — a signature references an
     ///   `issuer_kid` that `key_lookup` does not resolve.
-    /// - [`AuditError::SignatureInvalid`] — a signature either has
+    /// - [`AuditError::SignatureInvalid`] — a non-empty signature has
     ///   wrong-length bytes, the kid does not match the verifying key,
     ///   or the Ed25519 verify fails against [`Self::signing_bytes`].
     pub fn verify_signatures(
@@ -914,7 +917,7 @@ impl ChainHead {
         key_lookup: &impl Fn(&KeyId) -> Option<Ed25519VerifyingKey>,
     ) -> Result<(), AuditError> {
         if self.signatures.is_empty() {
-            return Err(AuditError::SignerMissing { seq: self.head_seq });
+            return Err(AuditError::EmptySignedHead { seq: self.head_seq });
         }
         let transcript = self.signing_bytes();
         for sig in &self.signatures {
@@ -923,6 +926,12 @@ impl ChainHead {
             let verifying_key =
                 key_lookup(&kid).ok_or(AuditError::UnknownIssuer { seq: self.head_seq })?;
             if verifying_key.key_id().as_slice() != kid.as_slice() {
+                return Err(AuditError::SignatureInvalid { seq: self.head_seq });
+            }
+            if sig.signature.is_empty() {
+                return Err(AuditError::EmptySignedHead { seq: self.head_seq });
+            }
+            if sig.signature.len() < ED25519_SIGNATURE_SIZE {
                 return Err(AuditError::SignatureInvalid { seq: self.head_seq });
             }
             let signature = Ed25519Signature::try_from_slice(&sig.signature)
@@ -1873,8 +1882,9 @@ pub fn verify_chain_with_precomputed_ids(
 ///
 /// # Errors
 ///
-/// Returns `AuditError::SignerMissing`, `AuditError::UnknownIssuer`, or
-/// `AuditError::SignatureInvalid` on the first offending entry.
+/// Returns `AuditError::SignerMissing`, `AuditError::EmptySignedHead`,
+/// `AuditError::UnknownIssuer`, or `AuditError::SignatureInvalid` on the
+/// first offending entry/head.
 pub fn verify_chain_with_signers(
     entries: &[AuditEntry],
     head: Option<&ChainHead>,
@@ -1928,6 +1938,35 @@ pub fn verify_chain_with_signers(
         zone_id,
         &precomputed_ids,
     ))
+}
+
+/// Verify a signed audit chain and require a non-empty, authenticated head.
+///
+/// This is the strict production/operator-health entrypoint for contexts where
+/// a clean [`VerifyReport`] must mean both the entries and the chain head were
+/// present, signed, and authenticated. It rejects empty chains before integrity
+/// verification and rejects a missing or empty signed head with
+/// [`AuditError::EmptySignedHead`].
+///
+/// # Errors
+///
+/// Returns [`AuditError::VerificationFailed`] for an empty entry chain,
+/// [`AuditError::EmptySignedHead`] for a missing/empty signed head, or the
+/// signer-authentication errors returned by [`verify_chain_with_signers`].
+pub fn verify_chain_with_required_signed_head(
+    entries: &[AuditEntry],
+    head: Option<&ChainHead>,
+    zone_id: Option<&str>,
+    key_lookup: impl Fn(&KeyId) -> Option<Ed25519VerifyingKey>,
+) -> Result<VerifyReport, AuditError> {
+    if entries.is_empty() {
+        return Err(AuditError::VerificationFailed(
+            "signed-head verification requires a non-empty audit chain".to_string(),
+        ));
+    }
+
+    let head = head.ok_or(AuditError::EmptySignedHead { seq: 0 })?;
+    verify_chain_with_signers(entries, Some(head), zone_id, key_lookup)
 }
 
 /// Verify an audit chain AND reject entries timestamped implausibly far in
@@ -2038,6 +2077,14 @@ pub enum AuditError {
         seq: u64,
     },
 
+    /// A strict signed-head verifier received no signed head bytes, or
+    /// a [`HeadSignature`] carried an empty signature byte string.
+    #[error("signed audit chain head at seq {seq} is empty")]
+    EmptySignedHead {
+        /// Sequence number of the chain head that lacked signature bytes.
+        seq: u64,
+    },
+
     /// `verify_chain_with_signers` could not resolve the entry's
     /// `issuer_kid` to a known verifying key.
     #[error("unknown issuer_kid at seq {seq}")]
@@ -2063,6 +2110,7 @@ impl AuditError {
             Self::SignerMissing { .. } => "FCP-5015",
             Self::SignatureInvalid { .. } => "FCP-5016",
             Self::UnknownIssuer { .. } => "FCP-5017",
+            Self::EmptySignedHead { .. } => "FCP-5018",
         }
     }
 }
@@ -3108,7 +3156,7 @@ mod tests {
         // The bead scenario: an attacker-tampered head with
         // signature_count claimed but signatures list emptied out.
         // Old behavior: verify_chain_with_signers returned Ok(report).
-        // New behavior (br-ax97w): SignerMissing at head_seq.
+        // New behavior (eah6j): EmptySignedHead at head_seq.
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
         let (entries, head) = signed_chain_and_head(&signing_key);
@@ -3119,10 +3167,84 @@ mod tests {
 
         let resolver =
             |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
-        match verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver) {
-            Err(AuditError::SignerMissing { .. }) => {}
-            other => panic!("expected SignerMissing for unsigned head, got {other:?}"),
-        }
+        let result = verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver);
+        assert!(
+            matches!(result, Err(AuditError::EmptySignedHead { .. })),
+            "expected EmptySignedHead for unsigned head, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_head_with_empty_signature_bytes() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, mut head) = signed_chain_and_head(&signing_key);
+        head.signatures = vec![HeadSignature {
+            issuer_kid: signing_key.key_id().to_hex(),
+            signature: Vec::new(),
+        }];
+        head.signature_count = 1;
+
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let result = verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver);
+        assert!(
+            matches!(result, Err(AuditError::EmptySignedHead { .. })),
+            "expected EmptySignedHead for empty head signature, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_chain_with_signers_rejects_head_signature_below_length_floor() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, mut head) = signed_chain_and_head(&signing_key);
+        head.signatures = vec![HeadSignature {
+            issuer_kid: signing_key.key_id().to_hex(),
+            signature: vec![0xAA; ED25519_SIGNATURE_SIZE - 1],
+        }];
+        head.signature_count = 1;
+
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let result = verify_chain_with_signers(&entries, Some(&head), Some("z:work"), resolver);
+        assert!(
+            matches!(result, Err(AuditError::SignatureInvalid { .. })),
+            "expected SignatureInvalid for short head signature, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_chain_with_required_signed_head_rejects_missing_head() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (entries, _head) = signed_chain_and_head(&signing_key);
+
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let result =
+            verify_chain_with_required_signed_head(&entries, None, Some("z:work"), resolver);
+        assert!(
+            matches!(result, Err(AuditError::EmptySignedHead { .. })),
+            "expected EmptySignedHead for missing signed head, got {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_chain_with_required_signed_head_rejects_empty_chain() {
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let (_entries, mut head) = signed_chain_and_head(&signing_key);
+        sign_head(&mut head, &signing_key);
+
+        let resolver =
+            |_kid: &KeyId| -> Option<Ed25519VerifyingKey> { Some(verifying_key.clone()) };
+        let result =
+            verify_chain_with_required_signed_head(&[], Some(&head), Some("z:work"), resolver);
+        assert!(
+            matches!(result, Err(AuditError::VerificationFailed(ref message)) if message.contains("non-empty audit chain")),
+            "expected VerificationFailed for empty signed chain, got {result:?}"
+        );
     }
 
     #[test]

@@ -36,6 +36,13 @@
       "source_hash": "sha256:9551740e6ea5170b256ca7a08f84f71a8d61f53cf01519feab73d3944f0df72d",
       "lake_target": "Fcp",
       "verified_at": "2026-05-02"
+    },
+    {
+      "theorem": "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
+      "source_path": "lean/Fcp/Invariants/LatticeDelegation.lean",
+      "source_hash": "sha256:de7af5752e96c8ec5d84221c7daafd17256ada2a8141b9417c63ca30e4863492",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
     }
   ]
 }

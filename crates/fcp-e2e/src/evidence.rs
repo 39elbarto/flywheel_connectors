@@ -30,6 +30,7 @@ pub const FORMAL_INVARIANT_THEOREMS: &[&str] = &[
     "Fcp.Invariants.Audit.audit_chain_hash_link_fork_resistance",
     "Fcp.Invariants.Zone.merge_preserves_integrity_and_confidentiality",
     "Fcp.Invariants.Symbol.symbol_fungibility_reconstruction_guarantee",
+    "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
 ];
 
 // ── Scenario metadata ───────────────────────────────────────────────────

@@ -769,6 +769,141 @@ impl UnsignedV4Manifest {
     }
 }
 
+/// O(1)-recipient-lookup view over a [`ZoneKeyManifest`] (br-d2oa0).
+///
+/// The base manifest stores recipient wraps in `Vec<WrappedZoneKey>` /
+/// `Vec<WrappedZoneKeyV4>` / `Vec<WrappedObjectIdKey>` because the
+/// owner signature commits to a stable serialisation order. The
+/// matching `wrapped_key_for` / `wrapped_key_v4_for` /
+/// `wrapped_object_id_key_for` lookups on `ZoneKeyManifest` are
+/// therefore `O(n)` linear scans — fine for one-shot inspection but
+/// expensive on the dispatcher hot path that resolves wraps per
+/// request.
+///
+/// `IndexedZoneKeyManifest` builds three `HashMap<TailscaleNodeId,
+/// usize>` indices once on construction and exposes the same
+/// lookup surface in `O(1)`. The base manifest stays unchanged
+/// (no breaking serde shape; no `#[serde(skip)]` field required;
+/// existing callers continue to use the linear-scan methods).
+///
+/// Wire format: an `IndexedZoneKeyManifest` does NOT serialise — it
+/// is an in-memory view. Use [`Self::manifest`] / [`Self::into_inner`]
+/// to round-trip back to the base manifest for canonical encoding.
+///
+/// # When to use
+///
+/// - **Use** when you will perform multiple recipient lookups on the
+///   same manifest (e.g. dispatcher resolving a wrap per inbound
+///   request, batch validators iterating recipients).
+/// - **Don't use** for one-shot single-recipient lookups: the
+///   `IndexedZoneKeyManifest::new` constructor pays an `O(n)`
+///   index build, so for a single lookup it is no faster than the
+///   linear scan and adds memory.
+#[derive(Debug, Clone)]
+pub struct IndexedZoneKeyManifest {
+    inner: ZoneKeyManifest,
+    /// `recipient → index in inner.wrapped_keys`
+    wrapped_keys_index: HashMap<TailscaleNodeId, usize>,
+    /// `recipient → index in inner.wrapped_keys_v4`
+    wrapped_keys_v4_index: HashMap<TailscaleNodeId, usize>,
+    /// `recipient → index in inner.wrapped_object_id_keys`
+    wrapped_object_id_keys_index: HashMap<TailscaleNodeId, usize>,
+}
+
+impl IndexedZoneKeyManifest {
+    /// Build the indexed view, paying the `O(n_total)` index-construction
+    /// cost once. The base manifest is consumed; reach back to it via
+    /// [`Self::manifest`] (borrow) or [`Self::into_inner`] (consume).
+    ///
+    /// **Duplicate recipient handling:** if the same recipient appears
+    /// in `wrapped_keys` more than once (which the manifest schema
+    /// allows in principle, though it is a malformed state), the
+    /// **last** occurrence wins for the lookup index. This matches
+    /// the implicit "last-writer-wins" semantics of `add_xwing_wrap`
+    /// and similar mutation helpers.
+    #[must_use]
+    pub fn new(manifest: ZoneKeyManifest) -> Self {
+        let wrapped_keys_index = manifest
+            .wrapped_keys
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.recipient.clone(), i))
+            .collect();
+        let wrapped_keys_v4_index = manifest
+            .wrapped_keys_v4
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.recipient.clone(), i))
+            .collect();
+        let wrapped_object_id_keys_index = manifest
+            .wrapped_object_id_keys
+            .iter()
+            .enumerate()
+            .map(|(i, e)| (e.recipient.clone(), i))
+            .collect();
+        Self {
+            inner: manifest,
+            wrapped_keys_index,
+            wrapped_keys_v4_index,
+            wrapped_object_id_keys_index,
+        }
+    }
+
+    /// Borrow the underlying [`ZoneKeyManifest`] for fields that are
+    /// not lookup-critical (e.g. `kem`, `valid_from`, `signature`).
+    #[must_use]
+    pub fn manifest(&self) -> &ZoneKeyManifest {
+        &self.inner
+    }
+
+    /// Consume the wrapper and return the base manifest, dropping the
+    /// indices. Useful when handing the manifest off to a
+    /// canonical-CBOR encode + sign step.
+    #[must_use]
+    pub fn into_inner(self) -> ZoneKeyManifest {
+        self.inner
+    }
+
+    /// `O(1)` equivalent of [`ZoneKeyManifest::wrapped_key_for`].
+    #[must_use]
+    pub fn wrapped_key_for(&self, node_id: &TailscaleNodeId) -> Option<&WrappedZoneKey> {
+        self.wrapped_keys_index
+            .get(node_id)
+            .and_then(|&i| self.inner.wrapped_keys.get(i))
+    }
+
+    /// `O(1)` equivalent of [`ZoneKeyManifest::wrapped_object_id_key_for`].
+    #[must_use]
+    pub fn wrapped_object_id_key_for(
+        &self,
+        node_id: &TailscaleNodeId,
+    ) -> Option<&WrappedObjectIdKey> {
+        self.wrapped_object_id_keys_index
+            .get(node_id)
+            .and_then(|&i| self.inner.wrapped_object_id_keys.get(i))
+    }
+
+    /// `O(1)` equivalent of [`ZoneKeyManifest::wrapped_key_v4_for`].
+    #[must_use]
+    pub fn wrapped_key_v4_for(&self, node_id: &TailscaleNodeId) -> Option<&WrappedZoneKeyV4> {
+        self.wrapped_keys_v4_index
+            .get(node_id)
+            .and_then(|&i| self.inner.wrapped_keys_v4.get(i))
+    }
+
+    /// `O(1)` equivalent of [`ZoneKeyManifest::resolved_wrapped_key_for`].
+    /// V4 first, V3 fallback — same precedence as the linear-scan
+    /// version.
+    #[must_use]
+    pub fn resolved_wrapped_key_for(&self, node_id: &TailscaleNodeId) -> Option<WrappedKey> {
+        if let Some(v4) = self.wrapped_key_v4_for(node_id) {
+            return Some(v4.sealed.clone());
+        }
+        self.wrapped_key_for(node_id)
+            .map(|v3| WrappedKey::from_hpke(v3.sealed.clone()))
+    }
+}
+
 /// Zone key ring storing active/known keys by id.
 #[derive(Debug, Clone)]
 pub struct ZoneKeyRing {

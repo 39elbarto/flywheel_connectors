@@ -48,3 +48,7 @@ trybuild = "1"
 [[bench]]
 name = "pcs_benchmarks"
 harness = false
+
+[[bench]]
+name = "zone_key_manifest_lookup"
+harness = false

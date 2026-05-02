@@ -34,7 +34,7 @@
 //! swapped in without touching the call sites.
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, RwLock};
 
 use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
 use serde_json::json;
@@ -168,10 +168,40 @@ struct ZoneChain {
 ///
 /// Partitioned by zone — each zone has its own monotonic `seq` and
 /// `prev`-linked chain so two zones cannot interfere with each other's
-/// hash linkage. Cheap to construct, cheap to clone (via `Arc`).
+/// hash linkage.
+///
+/// # Concurrency model (br-uwlj5)
+///
+/// Two-layer locking, sharded by zone:
+///
+/// - **Outer `RwLock<HashMap<String, Arc<Mutex<ZoneChain>>>>`** —
+///   read-locked on the hot path to look up the per-zone Mutex
+///   (multiple zones can be looked up concurrently); write-locked
+///   only on the COLD path that inserts a new zone (rare, dominated
+///   by the lifetime of the host).
+/// - **Inner per-zone `Mutex<ZoneChain>`** — held only for the
+///   short bookkeeping window: snapshot `(last_seq, last_id)` →
+///   drop → encode canonical CBOR + compute id OUTSIDE the lock →
+///   re-lock + CAS-style verify the head still matches the
+///   snapshot → push.
+///
+/// Net effect: N concurrent invokes targeting N distinct zones run
+/// in parallel (each on its own per-zone Mutex). Same-zone invokes
+/// still serialise on the per-zone Mutex but pay only the
+/// constant-time bookkeeping cost inside the lock — the dominant
+/// canonical-CBOR + BLAKE3 work happens lock-free, with an
+/// optimistic-CAS retry on the rare case where another append to
+/// the same zone landed between snapshot and commit.
+///
+/// Pre-uwlj5 design used a single global `Mutex<HashMap<...>>`
+/// holding canonical CBOR + BLAKE3 inside the critical section —
+/// throughput bottleneck on the per-`/rpc/invoke` audit hot path.
 #[derive(Debug, Default)]
 pub struct InvokeAuditChain {
-    chains: Mutex<HashMap<String, ZoneChain>>,
+    /// Outer map of per-zone chain handles. Read-locked on the
+    /// hot path; write-locked only when a new zone is first
+    /// observed.
+    chains: RwLock<HashMap<String, Arc<Mutex<ZoneChain>>>>,
 }
 
 impl InvokeAuditChain {
@@ -179,6 +209,31 @@ impl InvokeAuditChain {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Get-or-insert the per-zone handle. Optimised for the
+    /// already-present case (single read-lock, no allocation).
+    fn zone_handle(&self, zone_id: &str) -> Arc<Mutex<ZoneChain>> {
+        // Fast path: zone already present, single read-lock.
+        if let Some(handle) = self
+            .chains
+            .read()
+            .expect("InvokeAuditChain outer rwlock poisoned")
+            .get(zone_id)
+        {
+            return Arc::clone(handle);
+        }
+        // Slow path: insert under the write lock. Re-check after
+        // upgrading because another writer may have raced us in.
+        let mut chains = self
+            .chains
+            .write()
+            .expect("InvokeAuditChain outer rwlock poisoned");
+        Arc::clone(
+            chains
+                .entry(zone_id.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(ZoneChain::default()))),
+        )
     }
 
     /// Append a phase event for `ctx` and return the resulting entry.
@@ -196,81 +251,129 @@ impl InvokeAuditChain {
         let severity = phase.severity();
         let metadata = phase.into_metadata();
 
-        // Hold the lock for the whole append so seq + prev stay
-        // monotonic against concurrent invokes.
-        let mut chains = self
-            .chains
-            .lock()
-            .expect("InvokeAuditChain mutex poisoned — host process is in a bad state");
-        let zone = chains.entry(ctx.zone_id.clone()).or_default();
-
-        let next_seq = zone.last_seq.map_or(0u64, |s| s.saturating_add(1));
-        let prev = zone.last_id.clone();
-
-        let mut builder = AuditEntryBuilder::new()
+        // Build the immutable parts of the entry once; only seq +
+        // prev change between retries.
+        let base_builder = AuditEntryBuilder::new()
             .event_type(event_type)
             .severity(severity)
             .actor(&ctx.actor)
             .zone_id(&ctx.zone_id)
-            .seq(next_seq)
             .occurred_at(ctx.occurred_at)
             .connector_id(&ctx.connector_id)
             .operation_id(&ctx.operation_id)
             .meta("operation", json!(ctx.operation));
-        if let Some(p) = prev {
-            builder = builder.prev(p);
-        }
-        if let Some(cid) = ctx.correlation_id.clone() {
-            builder = builder.correlation_id(cid);
-        }
-        for (k, v) in metadata {
-            builder = builder.meta(k, v);
-        }
+        let base_builder = if let Some(cid) = ctx.correlation_id.clone() {
+            base_builder.correlation_id(cid)
+        } else {
+            base_builder
+        };
+        let base_builder = metadata
+            .into_iter()
+            .fold(base_builder, |b, (k, v)| b.meta(k, v));
 
-        // Compute the canonical id ourselves so the entry's `id` field
-        // matches `computed_id` — required for downstream chain
-        // verification via `fcp_audit::verify_chain`.
-        // We need a temporary entry with placeholder id to compute the
-        // canonical id (id is excluded from the canonical bytes), then
-        // rebuild with the real id.
-        let provisional = builder
-            .clone()
-            .id("__provisional__")
-            .build()
-            .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
-        let real_id = provisional.computed_id()?;
-        let entry = builder
-            .id(real_id.clone())
-            .build()
-            .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+        let zone = self.zone_handle(&ctx.zone_id);
 
-        zone.last_seq = Some(next_seq);
-        zone.last_id = Some(real_id);
-        zone.entries.push(entry.clone());
+        // br-uwlj5 optimistic-CAS retry loop. Constant in practice:
+        // contention only happens when N appends to the SAME zone
+        // race, which is bounded by per-zone request rate.
+        let mut attempts: usize = 0;
+        loop {
+            attempts = attempts.saturating_add(1);
+            // 1. Snapshot (last_seq, last_id) under the per-zone
+            //    Mutex — short critical section, no allocation
+            //    beyond the optional String clone of last_id.
+            let (next_seq, prev_snapshot) = {
+                let z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
+                (
+                    z.last_seq.map_or(0u64, |s| s.saturating_add(1)),
+                    z.last_id.clone(),
+                )
+            };
 
-        Ok(entry)
+            // 2. Build entry + encode canonical + hash OUTSIDE
+            //    any lock. This is the dominant cost; running it
+            //    lock-free is the load-bearing perf win.
+            let mut builder = base_builder.clone().seq(next_seq);
+            if let Some(ref p) = prev_snapshot {
+                builder = builder.prev(p.clone());
+            }
+            let provisional = builder
+                .clone()
+                .id("__provisional__")
+                .build()
+                .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+            let real_id = provisional.computed_id()?;
+            let entry = builder
+                .id(real_id.clone())
+                .build()
+                .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+
+            // 3. Re-lock + CAS commit. If another append landed
+            //    on this zone between (1) and (3), our prev /
+            //    seq snapshot is stale — retry with the fresh
+            //    head. In the uncontended case (different zones
+            //    or sequential same-zone) this loop runs once.
+            {
+                let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
+                if z.last_id == prev_snapshot {
+                    z.last_seq = Some(next_seq);
+                    z.last_id = Some(real_id);
+                    z.entries.push(entry.clone());
+                    return Ok(entry);
+                }
+                // Else: another writer raced us; retry with the
+                // fresh head. Drop the lock and loop.
+            }
+            // Defence in depth against pathological retry storms
+            // (should be impossible without thousands of concurrent
+            // same-zone appenders): bail with an error after a
+            // reasonable bound rather than spinning forever.
+            if attempts > 64 {
+                return Err(AuditError::SerializationError(
+                    "invoke audit append: 64 CAS retries exhausted under same-zone contention"
+                        .into(),
+                ));
+            }
+        }
     }
 
     /// Snapshot of the entries appended for `zone_id`. Empty if the
     /// zone has had no invokes yet.
     #[must_use]
     pub fn entries_for_zone(&self, zone_id: &str) -> Vec<AuditEntry> {
-        self.chains
-            .lock()
-            .expect("InvokeAuditChain mutex poisoned")
+        let Some(handle) = self
+            .chains
+            .read()
+            .expect("InvokeAuditChain outer rwlock poisoned")
             .get(zone_id)
-            .map(|c| c.entries.clone())
-            .unwrap_or_default()
+            .cloned()
+        else {
+            return Vec::new();
+        };
+        handle
+            .lock()
+            .expect("InvokeAuditChain zone mutex poisoned")
+            .entries
+            .clone()
     }
 
     /// Number of entries appended for `zone_id`.
     #[must_use]
     pub fn len_for_zone(&self, zone_id: &str) -> usize {
-        self.chains
-            .lock()
-            .expect("InvokeAuditChain mutex poisoned")
+        let Some(handle) = self
+            .chains
+            .read()
+            .expect("InvokeAuditChain outer rwlock poisoned")
             .get(zone_id)
-            .map_or(0, |c| c.entries.len())
+            .cloned()
+        else {
+            return 0;
+        };
+        handle
+            .lock()
+            .expect("InvokeAuditChain zone mutex poisoned")
+            .entries
+            .len()
     }
 }
 
@@ -478,5 +581,129 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[1].event_type, event_types::INVOKE_ERROR);
         assert!(entries[1].follows(&entries[0]));
+    }
+
+    // ── br-uwlj5: per-zone sharding regressions ──────────────────────
+
+    #[test]
+    fn invoke_audit_chain_concurrent_appends_to_distinct_zones_do_not_serialise() {
+        // br-uwlj5: under per-zone sharding, two threads appending to
+        // different zones MUST be able to land their entries
+        // independently of each other's lock state. The pre-uwlj5
+        // single-Mutex design would force one thread to wait on the
+        // other's canonical-CBOR + BLAKE3 critical section.
+        //
+        // Functional check: spawn N threads each appending APPENDS_PER
+        // events to a unique zone, then assert every chain has the
+        // expected length and each entry's prev hash-links to the
+        // previous one. Concurrency-safety + zone isolation in one
+        // test.
+        use std::thread;
+
+        const ZONES: usize = 8;
+        const APPENDS_PER: usize = 32;
+
+        let chain = std::sync::Arc::new(InvokeAuditChain::new());
+        let mut handles = Vec::with_capacity(ZONES);
+        for z in 0..ZONES {
+            let chain_arc = std::sync::Arc::clone(&chain);
+            handles.push(thread::spawn(move || {
+                let zone_id = format!("z:zone-{z}");
+                for i in 0..APPENDS_PER {
+                    let c = InvokeAuditContext {
+                        zone_id: zone_id.clone(),
+                        actor: format!("agent:t-{z}"),
+                        connector_id: "github".into(),
+                        operation: "list_repos".into(),
+                        operation_id: format!("op-{z}-{i}"),
+                        correlation_id: None,
+                        occurred_at: 1_700_000_000 + i as u64,
+                    };
+                    chain_arc
+                        .append(&c, InvokePhase::PreflightAllow)
+                        .expect("append must not fail under per-zone sharding");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        // Each zone got APPENDS_PER entries, each correctly hash-linked.
+        for z in 0..ZONES {
+            let zone_id = format!("z:zone-{z}");
+            let entries = chain.entries_for_zone(&zone_id);
+            assert_eq!(
+                entries.len(),
+                APPENDS_PER,
+                "zone {zone_id} must have {APPENDS_PER} entries"
+            );
+            assert!(entries[0].is_genesis(), "zone {zone_id}: entry 0 is genesis");
+            for i in 1..entries.len() {
+                assert!(
+                    entries[i].follows(&entries[i - 1]),
+                    "zone {zone_id}: entry {i} must hash-link to entry {}: prev={:?} expected={:?}, seq={} expected={}",
+                    i - 1,
+                    entries[i].prev,
+                    Some(&entries[i - 1].id),
+                    entries[i].seq,
+                    entries[i - 1].seq + 1,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invoke_audit_chain_concurrent_same_zone_appends_preserve_chain_integrity() {
+        // br-uwlj5: same-zone appends still serialise on the per-zone
+        // Mutex, but the optimistic-CAS retry pattern means concurrent
+        // appenders DO retry and DO produce a correctly hash-linked
+        // chain. This test pins the property: N threads × M appends to
+        // ONE zone produces N×M entries with monotonic seq and
+        // pairwise prev-link.
+        use std::thread;
+
+        const THREADS: usize = 8;
+        const APPENDS_PER: usize = 16;
+
+        let chain = std::sync::Arc::new(InvokeAuditChain::new());
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let chain_arc = std::sync::Arc::clone(&chain);
+            handles.push(thread::spawn(move || {
+                for i in 0..APPENDS_PER {
+                    let c = InvokeAuditContext {
+                        zone_id: "z:contended".into(),
+                        actor: format!("agent:t-{t}"),
+                        connector_id: "github".into(),
+                        operation: "list_repos".into(),
+                        operation_id: format!("op-{t}-{i}"),
+                        correlation_id: None,
+                        occurred_at: 1_700_000_000,
+                    };
+                    chain_arc
+                        .append(&c, InvokePhase::PreflightAllow)
+                        .expect("same-zone append must succeed via CAS retry");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        let entries = chain.entries_for_zone("z:contended");
+        assert_eq!(entries.len(), THREADS * APPENDS_PER);
+        // Monotonic seq: 0, 1, 2, ..., THREADS*APPENDS_PER - 1.
+        for (i, e) in entries.iter().enumerate() {
+            assert_eq!(e.seq, i as u64, "monotonic seq broken at index {i}");
+        }
+        // Pairwise hash links.
+        assert!(entries[0].is_genesis());
+        for i in 1..entries.len() {
+            assert!(
+                entries[i].follows(&entries[i - 1]),
+                "entry {i} must hash-link under contention"
+            );
+        }
     }
 }

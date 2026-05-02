@@ -71,6 +71,7 @@ reqwest.workspace = true
 tempfile = "3"
 insta.workspace = true
 criterion.workspace = true
+proptest = { workspace = true }
 
 [[bench]]
 name = "cold_start"
@@ -90,4 +91,8 @@ harness = false
 
 [[bench]]
 name = "cpu_overhead"
+harness = false
+
+[[bench]]
+name = "invoke_audit_throughput"
 harness = false

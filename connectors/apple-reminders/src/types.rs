@@ -98,6 +98,22 @@ mod tests {
     }
 
     #[test]
+    fn timeout_zero_rejected_at_config_parse() {
+        let result = AppleRemindersConfig::from_value(serde_json::json!({
+            "subprocess_timeout_secs": 0
+        }));
+
+        assert!(
+            matches!(
+                result,
+                Err(FcpError::InvalidRequest { code: 1003, ref message })
+                    if message.contains("subprocess_timeout_secs must be > 0")
+            ),
+            "expected InvalidRequest timeout error, got {result:?}"
+        );
+    }
+
+    #[test]
     fn config_accepts_empty_json() {
         assert!(AppleRemindersConfig::from_value(serde_json::json!({})).is_ok());
     }

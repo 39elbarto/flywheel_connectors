@@ -24,7 +24,10 @@
 //! run under [`WasiRuntime`](crate::WasiRuntime) (no host syscalls
 //! reach the kernel from WASI guests). Tightening this to
 //! `ProfileLevel` via AppContainer / integrity-level enforcement is
-//! tracked in bead `flywheel_connectors-459lp`.
+//! tracked in bead `flywheel_connectors-r4qcg` (filed 2026-05-02 by
+//! the /mock-code-finder audit; the prior `flywheel_connectors-459lp`
+//! reference here was a forward-pointer to a bead that was never
+//! filed at that id).
 //!
 //! # AppContainer
 //!

@@ -10,10 +10,21 @@ pub struct AppleNotesConfig {
     pub default_folder: Option<String>,
     #[serde(default = "default_osascript_path")]
     pub osascript_path: String,
+    /// Per-invocation timeout in seconds for the `osascript`
+    /// subprocess. The default of 30s matches the H.1 production
+    /// hardening bead's recommended bound (krxpn). Hitting the
+    /// timeout kills the child via SIGKILL and surfaces
+    /// [`crate::error::AppleNotesError::Timeout`].
+    #[serde(default = "default_subprocess_timeout_secs")]
+    pub subprocess_timeout_secs: u64,
 }
 
 fn default_osascript_path() -> String {
     "/usr/bin/osascript".to_string()
+}
+
+const fn default_subprocess_timeout_secs() -> u64 {
+    30
 }
 
 impl AppleNotesConfig {
@@ -32,6 +43,12 @@ impl AppleNotesConfig {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: "osascript_path must not be empty".into(),
+            });
+        }
+        if self.subprocess_timeout_secs == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "subprocess_timeout_secs must be > 0".into(),
             });
         }
         Ok(())

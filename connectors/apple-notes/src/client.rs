@@ -1,11 +1,21 @@
 //! `Apple Notes` process client based on `osascript`.
+//!
+//! Subprocess invocations are bounded by the
+//! [`crate::types::AppleNotesConfig::subprocess_timeout_secs`] field
+//! (default 30s) per H.1 production hardening (krxpn). The
+//! [`bounded_subprocess`] module owns the timeout / kill-on-expiry /
+//! stderr-truncation contract; see its module docs for the wire
+//! semantics.
 
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
 use crate::error::{AppleNotesError, AppleNotesResult};
 use crate::types::AppleNotesConfig;
+
+use crate::bounded_subprocess::{self, BoundedOutput, run_with_timeout};
 
 const LIST_NOTES_SCRIPT: &str = r#"
 on run argv
@@ -95,6 +105,7 @@ pub struct ScriptInvocation {
 pub struct AppleNotesClient {
     osascript_path: String,
     default_folder: Option<String>,
+    subprocess_timeout: Duration,
 }
 
 impl AppleNotesClient {
@@ -102,6 +113,7 @@ impl AppleNotesClient {
         Ok(Self {
             osascript_path: config.osascript_path.clone(),
             default_folder: config.default_folder.clone(),
+            subprocess_timeout: Duration::from_secs(config.subprocess_timeout_secs),
         })
     }
 
@@ -170,9 +182,8 @@ impl AppleNotesClient {
         for arg in invocation.args {
             command.arg(arg);
         }
-        let output = command
-            .output()
-            .map_err(|error| AppleNotesError::Process(error.to_string()))?;
+        let output: BoundedOutput =
+            run_with_timeout(command, self.subprocess_timeout).map_err(map_subprocess_error)?;
         if !output.status.success() {
             return Err(AppleNotesError::Process(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -253,6 +264,20 @@ impl AppleNotesClient {
     }
 }
 
+/// Map a [`bounded_subprocess::SubprocessError`] into the
+/// connector-facing [`AppleNotesError`]. Centralizes the
+/// translation so the bounded-runner contract is the single source
+/// of truth for what counts as a timeout vs a process-launch error.
+fn map_subprocess_error(err: bounded_subprocess::SubprocessError) -> AppleNotesError {
+    match err {
+        bounded_subprocess::SubprocessError::Spawn(msg) => AppleNotesError::Process(msg),
+        bounded_subprocess::SubprocessError::Wait(msg) => AppleNotesError::Process(msg),
+        bounded_subprocess::SubprocessError::Timeout { timeout_secs } => {
+            AppleNotesError::Timeout { timeout_secs }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -261,6 +286,7 @@ mod tests {
         AppleNotesClient::from_config(&AppleNotesConfig {
             default_folder: Some("Inbox".into()),
             osascript_path: "/usr/bin/osascript".into(),
+            subprocess_timeout_secs: 30,
         })
         .unwrap()
     }
@@ -269,6 +295,7 @@ mod tests {
         AppleNotesClient::from_config(&AppleNotesConfig {
             default_folder: None,
             osascript_path: "/usr/bin/osascript".into(),
+            subprocess_timeout_secs: 30,
         })
         .unwrap()
     }

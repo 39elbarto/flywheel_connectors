@@ -10,10 +10,20 @@ pub struct AppleRemindersConfig {
     pub default_list: Option<String>,
     #[serde(default = "default_osascript_path")]
     pub osascript_path: String,
+    /// Per-invocation timeout in seconds for the `osascript`
+    /// subprocess. Default 30s per H.1 production hardening
+    /// (krxpn). Hitting the timeout kills the child and surfaces
+    /// [`crate::error::AppleRemindersError::Timeout`].
+    #[serde(default = "default_subprocess_timeout_secs")]
+    pub subprocess_timeout_secs: u64,
 }
 
 fn default_osascript_path() -> String {
     "/usr/bin/osascript".to_string()
+}
+
+const fn default_subprocess_timeout_secs() -> u64 {
+    30
 }
 
 impl AppleRemindersConfig {
@@ -32,6 +42,12 @@ impl AppleRemindersConfig {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
                 message: "osascript_path must not be empty".into(),
+            });
+        }
+        if self.subprocess_timeout_secs == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "subprocess_timeout_secs must be > 0".into(),
             });
         }
         Ok(())

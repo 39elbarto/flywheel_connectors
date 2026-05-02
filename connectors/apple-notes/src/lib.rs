@@ -8,6 +8,7 @@
     clippy::too_many_lines
 )]
 
+mod bounded_subprocess;
 pub mod client;
 pub mod connector;
 pub mod error;

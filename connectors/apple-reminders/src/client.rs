@@ -1,9 +1,17 @@
 //! `Apple Reminders` process client based on `osascript`.
+//!
+//! Subprocess invocations are bounded by the
+//! [`crate::types::AppleRemindersConfig::subprocess_timeout_secs`]
+//! field (default 30s) per H.1 production hardening (krxpn). The
+//! [`crate::bounded_subprocess`] module owns the timeout / kill-on-
+//! expiry / stderr-truncation contract.
 
 use std::process::Command;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
+use crate::bounded_subprocess::{self, BoundedOutput, run_with_timeout};
 use crate::error::{AppleRemindersError, AppleRemindersResult};
 use crate::types::AppleRemindersConfig;
 
@@ -80,6 +88,7 @@ pub struct ScriptInvocation {
 pub struct AppleRemindersClient {
     osascript_path: String,
     default_list: Option<String>,
+    subprocess_timeout: Duration,
 }
 
 fn normalize_script_output(raw: &str) -> String {
@@ -124,6 +133,7 @@ impl AppleRemindersClient {
         Ok(Self {
             osascript_path: config.osascript_path.clone(),
             default_list: config.default_list.clone(),
+            subprocess_timeout: Duration::from_secs(config.subprocess_timeout_secs),
         })
     }
 
@@ -193,9 +203,8 @@ impl AppleRemindersClient {
                 command.arg(arg);
             }
         }
-        let output = command
-            .output()
-            .map_err(|error| AppleRemindersError::Process(error.to_string()))?;
+        let output: BoundedOutput =
+            run_with_timeout(command, self.subprocess_timeout).map_err(map_subprocess_error)?;
         if !output.status.success() {
             return Err(AppleRemindersError::Process(
                 String::from_utf8_lossy(&output.stderr).trim().to_string(),
@@ -252,6 +261,20 @@ impl AppleRemindersClient {
     }
 }
 
+/// Map a [`bounded_subprocess::SubprocessError`] into the
+/// connector-facing [`AppleRemindersError`]. Centralizes the
+/// translation so the bounded-runner contract is the single source
+/// of truth for what counts as a timeout vs a process-launch error.
+fn map_subprocess_error(err: bounded_subprocess::SubprocessError) -> AppleRemindersError {
+    match err {
+        bounded_subprocess::SubprocessError::Spawn(msg) => AppleRemindersError::Process(msg),
+        bounded_subprocess::SubprocessError::Wait(msg) => AppleRemindersError::Process(msg),
+        bounded_subprocess::SubprocessError::Timeout { timeout_secs } => {
+            AppleRemindersError::Timeout { timeout_secs }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,6 +283,7 @@ mod tests {
         AppleRemindersClient::from_config(&AppleRemindersConfig {
             default_list: Some("Personal".into()),
             osascript_path: "/usr/bin/osascript".into(),
+            subprocess_timeout_secs: 30,
         })
         .unwrap()
     }
@@ -268,6 +292,7 @@ mod tests {
         AppleRemindersClient::from_config(&AppleRemindersConfig {
             default_list: None,
             osascript_path: "/usr/bin/osascript".into(),
+            subprocess_timeout_secs: 30,
         })
         .unwrap()
     }

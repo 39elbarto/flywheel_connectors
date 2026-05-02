@@ -16,6 +16,13 @@ pub enum AppleRemindersError {
 
     #[error("parse error: {0}")]
     Parse(String),
+
+    /// `osascript` did not return within the configured per-invocation
+    /// timeout. The connector kills the child on expiry to bound
+    /// resource usage; see `bounded_subprocess` for the kill-on-
+    /// expiry contract (krxpn).
+    #[error("osascript invocation exceeded {timeout_secs}s timeout (PID killed)")]
+    Timeout { timeout_secs: u64 },
 }
 
 pub type AppleRemindersResult<T> = Result<T, AppleRemindersError>;
@@ -34,6 +41,11 @@ impl AppleRemindersError {
             },
             Self::Process(message) | Self::Parse(message) => FcpError::Internal {
                 message: message.clone(),
+            },
+            Self::Timeout { timeout_secs } => FcpError::Internal {
+                message: format!(
+                    "osascript invocation exceeded {timeout_secs}s timeout (PID killed)"
+                ),
             },
         }
     }

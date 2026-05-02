@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use fcp_core::{
+use fcp_prelude::{
     PolicyBundle, ProvisioningRecipe, ProvisioningState, ProvisioningValidation, SetupDescriptor,
 };
 use fcp_host::{

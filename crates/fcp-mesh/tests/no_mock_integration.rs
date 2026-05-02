@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use fcp_core::{
+use fcp_prelude::{
     ConnectorId, EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId,
     ZoneTransportPolicy,
 };

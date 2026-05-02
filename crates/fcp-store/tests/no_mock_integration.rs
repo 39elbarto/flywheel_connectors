@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use bytes::Bytes;
-use fcp_core::{
+use fcp_prelude::{
     ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
     ConnectorManifestObject, ConnectorTarget, ObjectHeader, ObjectId, ObjectIdKey,
     ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,

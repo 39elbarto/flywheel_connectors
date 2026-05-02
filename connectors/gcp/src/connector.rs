@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -1261,7 +1261,7 @@ impl GcpConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityToken, RequestId, ZoneId};
 
     fn tc() -> serde_json::Value {
         json!({"mode": "access_token", "access_token": "ya29.test", "project_id": "test-project"})

@@ -17,6 +17,7 @@ bytes.workspace = true
 chrono.workspace = true
 constant_time_eq = "0.4"
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-policy = { path = "../fcp-policy" }
 fcp-protocol = { path = "../fcp-protocol" }

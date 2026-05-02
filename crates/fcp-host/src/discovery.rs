@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::RwLock;
-use fcp_core::{ApprovalToken, CapabilityId, CapabilityToken, RiskLevel, SafetyTier, ZoneId};
+use fcp_prelude::{ApprovalToken, CapabilityId, CapabilityToken, RiskLevel, SafetyTier, ZoneId};
 use fcp_kernel::{
     AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
     OperationInfo, RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
@@ -2671,7 +2671,7 @@ mod tests {
 
     #[test]
     fn preflight_response_serialization_roundtrip() {
-        use fcp_core::ZoneId;
+        use fcp_prelude::ZoneId;
         use fcp_kernel::{BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind};
 
         let mut resp = PreflightResponse::denied("rate limited");
@@ -2826,7 +2826,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn make_operation(id: &str, description: Option<&str>) -> OperationInfo {
-        use fcp_core::RateLimit;
+        use fcp_prelude::RateLimit;
         use fcp_kernel::OperationId;
         OperationInfo {
             id: OperationId::new(id).expect("valid operation id"),
@@ -2907,7 +2907,7 @@ mod tests {
 
     #[test]
     fn tool_descriptor_from_operation_rate_limit_without_pool_name_has_no_named_pools() {
-        use fcp_core::RateLimit;
+        use fcp_prelude::RateLimit;
         let mut op = make_operation("op2", None);
         op.rate_limit = Some(RateLimit {
             max: 10,
@@ -5361,7 +5361,7 @@ mod tests {
 
     #[test]
     fn tool_descriptor_from_operation_rate_limit_no_pool_no_scope() {
-        use fcp_core::RateLimit;
+        use fcp_prelude::RateLimit;
         let mut op = make_operation("op_empty_rl", None);
         op.rate_limit = Some(RateLimit {
             max: 50,

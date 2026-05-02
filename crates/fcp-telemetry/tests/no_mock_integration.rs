@@ -60,7 +60,7 @@ use fcp_telemetry::{
     },
 };
 
-use fcp_core::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
+use fcp_prelude::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
 use fcp_telemetry::{CapabilityUsageEvent, CapabilityUsageKey, CapabilityUsageOutcome};
 
 // ============================================================================

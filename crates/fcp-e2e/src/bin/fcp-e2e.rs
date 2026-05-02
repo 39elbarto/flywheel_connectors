@@ -8,7 +8,7 @@ use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::{env, process};
 
-use fcp_core::CorrelationId;
+use fcp_prelude::CorrelationId;
 use fcp_e2e::{
     AssertionsSummary, ConnectorProcessRunner, E2eArtifactRecord, E2eCommandMetadata,
     E2eFailureSummary, E2eLogEntry, E2eLogger, E2ePrerequisiteState, E2eReport, E2eRunReport,

@@ -8,7 +8,7 @@ use fcp_bootstrap::{
     BootstrapConfig, BootstrapError, BootstrapMode, BootstrapWorkflow, ColdRecovery, DetectedToken,
     GenesisState, GenesisValidationError, RecoveryPhrase, RecoveryPhraseError,
 };
-use fcp_core::Uuid;
+use fcp_prelude::Uuid;
 use fcp_crypto::Ed25519SigningKey;
 use serde::Serialize;
 use std::path::PathBuf;

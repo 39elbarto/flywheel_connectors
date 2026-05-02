@@ -21,7 +21,7 @@
 use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
-use fcp_core::{ConnectorId, NodeSignature, PrincipalId, ZoneId};
+use fcp_prelude::{ConnectorId, NodeSignature, PrincipalId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -454,7 +454,7 @@ pub fn request_digest(request: &EmergencyRevocationRequest) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::NodeId;
+    use fcp_prelude::NodeId;
     use fcp_crypto::Ed25519SigningKey;
 
     fn signing_key_from_seed(seed: u8) -> Ed25519SigningKey {

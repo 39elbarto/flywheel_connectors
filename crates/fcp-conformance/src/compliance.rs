@@ -3,7 +3,7 @@
 //! Static checks validate connector manifests. Dynamic checks execute standard
 //! methods against an in-process connector implementation.
 
-use fcp_core::{
+use fcp_prelude::{
     FcpConnector, FcpError, HandshakeRequest, HealthState, InvokeRequest, InvokeStatus,
     SimulateRequest,
 };
@@ -641,7 +641,7 @@ mod tests {
 
     use std::collections::HashMap;
 
-    use fcp_core::{
+    use fcp_prelude::{
         CapabilityToken, ConnectorId, ConnectorMetrics, FcpError, FcpResult, HandshakeRequest,
         HandshakeResponse, HealthSnapshot, HealthState, Introspection, InvokeRequest,
         InvokeResponse, OperationId, RequestId, ShutdownRequest, SimulateRequest, SimulateResponse,

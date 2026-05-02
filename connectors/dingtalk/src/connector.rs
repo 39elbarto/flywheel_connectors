@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
@@ -750,7 +750,7 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

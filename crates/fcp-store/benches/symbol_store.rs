@@ -6,7 +6,7 @@
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fcp_async_core::runtime::Runtime;
-use fcp_core::{ObjectId, ZoneId};
+use fcp_prelude::{ObjectId, ZoneId};
 use fcp_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
     StoredSymbol, SymbolMeta, SymbolStore,

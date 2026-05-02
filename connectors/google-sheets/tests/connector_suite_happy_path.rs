@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use fcp_async_core::sync::Mutex;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
     InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,

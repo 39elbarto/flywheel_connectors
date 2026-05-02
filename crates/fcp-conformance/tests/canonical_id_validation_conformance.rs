@@ -40,7 +40,7 @@
 //! 13. **`ConnectorId::new` composes `name:archetype:version`** with
 //!     literal colons. Components MUST themselves be canonical-compatible.
 
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, ConnectorId, IdValidationError, InstanceId, OperationId, validate_canonical_id,
 };
 use std::str::FromStr;

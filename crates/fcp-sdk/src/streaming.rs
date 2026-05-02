@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
-use fcp_core::{
+use fcp_prelude::{
     EventAck, EventCaps, EventData, EventEnvelope, EventNack, ReplayBufferInfo, RequestId,
     SubscribeRequest, SubscribeResponse, SubscribeResult,
 };
@@ -764,7 +764,7 @@ mod tests {
     use std::thread;
 
     use super::*;
-    use fcp_core::{ConnectorId, InstanceId, Principal, TrustLevel, ZoneId};
+    use fcp_prelude::{ConnectorId, InstanceId, Principal, TrustLevel, ZoneId};
     use serde_json::json;
 
     fn sample_event_data() -> EventData {

@@ -19,7 +19,7 @@
 #[cfg(test)]
 mod tests {
     use fcp_cbor::SchemaId;
-    use fcp_core::{
+    use fcp_prelude::{
         EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId, Provenance, SignatureSet,
         ZoneCheckpoint, ZoneId,
     };

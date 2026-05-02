@@ -1315,19 +1315,29 @@ impl RemediationOutput {
 /// that zone. This guarantees that two operators in the same zone always
 /// resolve the same query to the same answer.
 ///
-/// # Default Precedence
+/// # Default Precedence (br-4la3k)
 ///
-/// The default V1 (host-first) precedence is:
+/// The current operational default is V2 (mesh-native):
+///
+/// ```text
+/// MeshBacked > HostBacked > NodeLocal > Offline
+/// ```
+///
+/// V1 (host-first) is retained as the legacy / evaluation policy and is
+/// returned by [`TruthPrecedencePolicy::v1_default`] for callers that
+/// explicitly need pre-cutover behaviour:
 ///
 /// ```text
 /// HostBacked > MeshBacked > NodeLocal > Offline
 /// ```
 ///
-/// The future V2 (mesh-native) precedence will be:
+/// # Backward-Compatibility Override
 ///
-/// ```text
-/// MeshBacked > HostBacked > NodeLocal > Offline
-/// ```
+/// Setting the environment variable [`TRUTH_PRECEDENCE_DEFAULT_ENV`]
+/// to `v1` / `v1-host-first` / `host-first` forces
+/// [`TruthPrecedencePolicy::default`] to return the legacy V1 policy.
+/// This is intended for back-compat tests and operator-mediated rollback
+/// during a phased deployment; it should NOT be set in production.
 ///
 /// # Zone-Specific Overrides
 ///
@@ -1368,8 +1378,48 @@ impl fmt::Display for OperationalModelVersion {
     }
 }
 
+/// Environment variable that, when set to `v1` / `v1-host-first` /
+/// `host-first` (case-insensitive), forces
+/// [`TruthPrecedencePolicy::default`] to return the legacy V1
+/// host-first policy instead of the post-cutover V2 mesh-native default.
+///
+/// Intended for back-compat tests and operator-mediated rollback during a
+/// phased deployment. SHOULD NOT be set in production. Any other value
+/// (including unset) leaves the default at V2.
+pub const TRUTH_PRECEDENCE_DEFAULT_ENV: &str = "FCP_TRUTH_PRECEDENCE_DEFAULT";
+
+/// Pure-function classifier: given the raw `FCP_TRUTH_PRECEDENCE_DEFAULT`
+/// environment-variable value (or `None` when unset), return `true` if it
+/// names a legacy-V1 rollback request.
+///
+/// Exposed so tests can exercise the override-recognition matrix without
+/// mutating process-wide environment state (the workspace forbids
+/// `unsafe`, and `std::env::set_var` is `unsafe` on edition 2024). The
+/// `Default` impl below composes this with `std::env::var` lookup.
+#[must_use]
+pub fn truth_precedence_env_requests_v1(raw: Option<&str>) -> bool {
+    match raw {
+        Some(value) => matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "v1" | "v1-host-first" | "v1_host_first" | "host-first" | "host_first"
+        ),
+        None => false,
+    }
+}
+
+/// Inspect [`TRUTH_PRECEDENCE_DEFAULT_ENV`] from the live process
+/// environment and return `true` when the caller has requested the
+/// legacy V1 default.
+#[must_use]
+pub fn truth_precedence_default_env_requests_v1() -> bool {
+    let raw = std::env::var(TRUTH_PRECEDENCE_DEFAULT_ENV).ok();
+    truth_precedence_env_requests_v1(raw.as_deref())
+}
+
 impl TruthPrecedencePolicy {
-    /// Default V1 (host-first) policy — the current operational default.
+    /// V1 (host-first) policy — the legacy / evaluation default. Retained
+    /// for callers that explicitly need pre-cutover behaviour or for
+    /// `FCP_TRUTH_PRECEDENCE_DEFAULT=v1` rollback (br-4la3k).
     ///
     /// Precedence: HostBacked > MeshBacked > NodeLocal > Offline.
     /// Accepts anything down to Offline. Fallback allowed.
@@ -1389,9 +1439,12 @@ impl TruthPrecedencePolicy {
         }
     }
 
-    /// Future V2 (mesh-native) policy — NOT YET OPERATIONAL.
+    /// V2 (mesh-native) policy — the current operational default
+    /// post-cutover (br-4la3k, hr0rr-track-C).
     ///
     /// Precedence: MeshBacked > HostBacked > NodeLocal > Offline.
+    /// Returned by [`TruthPrecedencePolicy::default`] unless the
+    /// `FCP_TRUTH_PRECEDENCE_DEFAULT=v1` rollback override is set.
     #[must_use]
     pub fn v2_default() -> Self {
         Self {
@@ -1466,8 +1519,16 @@ impl TruthPrecedencePolicy {
 }
 
 impl Default for TruthPrecedencePolicy {
+    /// Returns the V2 (mesh-native) policy by default (br-4la3k —
+    /// hr0rr-track-C cutover). The `FCP_TRUTH_PRECEDENCE_DEFAULT=v1`
+    /// environment variable forces the legacy V1 (host-first) policy
+    /// for back-compat tests and operator-mediated rollback.
     fn default() -> Self {
-        Self::v1_default()
+        if truth_precedence_default_env_requests_v1() {
+            Self::v1_default()
+        } else {
+            Self::v2_default()
+        }
     }
 }
 
@@ -3592,6 +3653,144 @@ mod tests {
         assert_eq!(
             policy.to_resolution_strategy(),
             ResolutionStrategy::BestAvailable
+        );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // br-4la3k — V2 mesh-native cutover acceptance tests
+    //
+    // Pin the post-cutover invariant. The rollback-override matrix is
+    // exercised against the pure-function classifier
+    // `truth_precedence_env_requests_v1` so tests don't have to mutate
+    // process-wide environment state (workspace forbids `unsafe` and
+    // `std::env::set_var` is unsafe on edition 2024).
+    //
+    // The live `Default::default()` is verified separately under the
+    // assumption that the test binary inherits an unset env var. CI
+    // and `cargo test -p fwc` MUST run with FCP_TRUTH_PRECEDENCE_DEFAULT
+    // unset; if it's set, the v2-default test will fail loudly with a
+    // diagnostic rather than silently passing under the wrong default.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Skip-or-assert helper: if the live env var is set to a v1 synonym,
+    /// CI is misconfigured for this test binary. Surface that loudly so
+    /// the test failure points operators at the right fix instead of a
+    /// confusing "default was wrong" assertion.
+    fn require_unset_truth_default_env() {
+        if let Ok(value) = std::env::var(TRUTH_PRECEDENCE_DEFAULT_ENV) {
+            assert!(
+                !truth_precedence_env_requests_v1(Some(&value)),
+                "CI/test environment misconfigured: {TRUTH_PRECEDENCE_DEFAULT_ENV}={value:?} \
+                 forces V1 rollback. Unset it to run the V2-default acceptance suite."
+            );
+        }
+    }
+
+    #[test]
+    fn truth_precedence_default_is_v2_mesh_native_post_cutover() {
+        require_unset_truth_default_env();
+        let policy = TruthPrecedencePolicy::default();
+        assert_eq!(policy.precedence[0], KnowledgeState::MeshBacked);
+        assert_eq!(policy.model_version, OperationalModelVersion::V2MeshNative);
+        assert_eq!(
+            policy.to_resolution_strategy(),
+            ResolutionStrategy::BestAvailable
+        );
+    }
+
+    #[test]
+    fn truth_precedence_default_unset_env_requests_v2() {
+        // The rollback classifier MUST treat an unset env as "no
+        // rollback requested" — V2 stays the default.
+        assert!(!truth_precedence_env_requests_v1(None));
+    }
+
+    #[test]
+    fn truth_precedence_env_v1_synonyms_all_request_rollback() {
+        // Every documented synonym MUST be recognized. Adding a new
+        // accepted spelling requires extending this matrix in the same
+        // commit so the documentation, code, and test stay in sync.
+        for value in &[
+            "v1",
+            "V1",
+            "v1-host-first",
+            "V1-Host-First",
+            "v1_host_first",
+            "V1_HOST_FIRST",
+            "host-first",
+            "Host-First",
+            "host_first",
+            "HOST_FIRST",
+            // Whitespace MUST be trimmed.
+            "  v1  ",
+            "\thost-first\n",
+        ] {
+            assert!(
+                truth_precedence_env_requests_v1(Some(value)),
+                "env value {value:?} MUST be recognized as v1 rollback"
+            );
+        }
+    }
+
+    #[test]
+    fn truth_precedence_env_unknown_value_does_not_request_rollback() {
+        // Anything that isn't a documented v1 synonym MUST NOT be
+        // misread as a rollback signal — silent typos cannot
+        // accidentally roll back the cutover.
+        for value in &[
+            "v2",
+            "mesh-native",
+            "yes",
+            "true",
+            "1",
+            "garbage",
+            "v1-something-else",
+            "",
+        ] {
+            assert!(
+                !truth_precedence_env_requests_v1(Some(value)),
+                "env value {value:?} MUST NOT be misread as a rollback signal"
+            );
+        }
+    }
+
+    #[test]
+    fn truth_precedence_env_classifier_matches_default_resolution() {
+        // The exposed classifier MUST agree with what Default::default()
+        // does for the same input. We verify this by composing the two
+        // primitives: if classifier says "V1", building a policy from
+        // that branch MUST produce V1HostFirst, and vice versa. Pure
+        // function — no env mutation needed.
+        for raw in &[Some("v1"), Some("host-first"), Some("v2"), Some(""), None] {
+            let wants_v1 = truth_precedence_env_requests_v1(*raw);
+            let policy = if wants_v1 {
+                TruthPrecedencePolicy::v1_default()
+            } else {
+                TruthPrecedencePolicy::v2_default()
+            };
+            let expected = if wants_v1 {
+                OperationalModelVersion::V1HostFirst
+            } else {
+                OperationalModelVersion::V2MeshNative
+            };
+            assert_eq!(
+                policy.model_version, expected,
+                "classifier disagrees with default-resolution for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn truth_precedence_v1_default_still_available_for_legacy_callers() {
+        // The legacy V1 policy MUST remain explicitly constructible so
+        // back-compat tests and operator rollback can opt in without
+        // touching environment variables.
+        let policy = TruthPrecedencePolicy::v1_default();
+        assert_eq!(policy.precedence[0], KnowledgeState::HostBacked);
+        assert_eq!(policy.model_version, OperationalModelVersion::V1HostFirst);
+        assert_eq!(
+            policy.to_resolution_strategy(),
+            ResolutionStrategy::PreferHost
         );
     }
 

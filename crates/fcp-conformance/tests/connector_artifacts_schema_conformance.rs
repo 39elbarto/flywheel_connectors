@@ -28,7 +28,7 @@
 //! pre-payload-hash artifacts.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
     ConnectorManifestObject, ConnectorTarget, ObjectId, connector_manifest_signing_view_schema,
 };

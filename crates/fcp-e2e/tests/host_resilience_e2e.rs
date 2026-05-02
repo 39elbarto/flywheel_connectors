@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use fcp_core::{ConnectorHealth, ConnectorId};
+use fcp_prelude::{ConnectorHealth, ConnectorId};
 use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BulkheadConfig, CircuitBreakerConfig, CircuitState, FailurePredicate, HealthRouterConfig,

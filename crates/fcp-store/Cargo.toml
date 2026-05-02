@@ -26,6 +26,7 @@ semver.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-raptorq = { path = "../fcp-raptorq" }
 fcp-telemetry = { path = "../fcp-telemetry" }

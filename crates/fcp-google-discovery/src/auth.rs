@@ -7,7 +7,7 @@ use std::collections::BTreeSet;
 use std::future::Future;
 use std::pin::Pin;
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_oauth::{AuthStyle, OAuth2Client, OAuth2Config};
 use reqwest::Url;
 

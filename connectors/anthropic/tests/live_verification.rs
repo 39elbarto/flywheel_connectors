@@ -9,7 +9,7 @@
 //! key and confirms structured FCP error mapping.
 
 use fcp_anthropic::connector::AnthropicConnector;
-use fcp_core::{CapabilityConstraints, CapabilityToken};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 

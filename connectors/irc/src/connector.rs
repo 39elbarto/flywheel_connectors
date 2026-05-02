@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
@@ -658,7 +658,7 @@ mod tests {
     use super::*;
     use crate::types::{DEFAULT_PORT_PLAIN, DEFAULT_PORT_TLS};
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, SelfCheckStatus, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, SelfCheckStatus, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     fn handshake_request_for(host_public_key: [u8; 32]) -> HandshakeRequest {

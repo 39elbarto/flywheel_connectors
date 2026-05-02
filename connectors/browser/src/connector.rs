@@ -3,8 +3,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
-use fcp_core::ApprovalScope::Execution;
-use fcp_core::{
+use fcp_prelude::ApprovalScope::Execution;
+use fcp_prelude::{
     AgentHint, ApprovalMode, ApprovalToken, BaseConnector, CapabilityGrant, CapabilityId,
     CapabilityToken, CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
@@ -1971,7 +1971,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;

@@ -1,7 +1,7 @@
 //! Integration tests for the Google Places connector.
 
 use chrono::Utc;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
     IdempotencyClass, InvokeRequest, OperationId, RequestId, RiskLevel, SafetyTier, ZoneId,
 };

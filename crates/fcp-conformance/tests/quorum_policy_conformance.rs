@@ -26,7 +26,7 @@
 //!    Dangerous = CriticalWrite. The lattice is what makes the
 //!    risk classification meaningful.
 
-use fcp_core::{QuorumPolicy, RiskTier, ZoneId, required_quorum};
+use fcp_prelude::{QuorumPolicy, RiskTier, ZoneId, required_quorum};
 
 #[test]
 fn safe_tier_requires_one_signature_regardless_of_n_and_f() {

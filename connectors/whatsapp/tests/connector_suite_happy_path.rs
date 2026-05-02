@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, ZoneId,
 };

@@ -14,7 +14,7 @@ use crate::error::LifecycleSnapshotError;
 use crate::gc::GcRoots;
 use crate::object_id_verifier::ObjectIdVerifier;
 use crate::symbol_store::SymbolStore;
-use fcp_core::{ObjectHeader, ObjectId, RetentionClass, StorageMeta, StoredObject, ZoneId};
+use fcp_prelude::{ObjectHeader, ObjectId, RetentionClass, StorageMeta, StoredObject, ZoneId};
 use parking_lot::RwLock;
 
 use crate::error::ObjectStoreError;
@@ -602,7 +602,7 @@ mod tests {
     use bytes::Bytes;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
-    use fcp_core::Provenance;
+    use fcp_prelude::Provenance;
     use semver::Version;
     use serde_json::json;
     use uuid::Uuid;
@@ -2416,7 +2416,7 @@ mod tests {
             2,
             || async {
                 use crate::object_id_verifier::KeyedObjectIdVerifier;
-                use fcp_core::ObjectIdKey;
+                use fcp_prelude::ObjectIdKey;
 
                 let zone = test_zone();
                 let key = ObjectIdKey::from_bytes([0x5Au8; 32]);

@@ -17,7 +17,7 @@
 //! that fast-fail behaviour AND the AAD/nonce binding for every
 //! identity-mixed field.
 
-use fcp_core::{ObjectId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId};
+use fcp_prelude::{ObjectId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId};
 use fcp_raptorq::{SymbolEnvelope, SymbolEnvelopeError};
 use fcp_tailscale::NodeId;
 

@@ -19,7 +19,7 @@
 //! 6. **Per-zone isolation** — one zone exhausting their budget MUST
 //!    NOT affect another zone's evaluation.
 
-use fcp_core::{
+use fcp_prelude::{
     BudgetEnforcement, BudgetStatus, FcpError, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric,
     UsageMetricKind, ZoneId,
 };

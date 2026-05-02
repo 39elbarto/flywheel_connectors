@@ -32,7 +32,7 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use fcp_core::{ConnectorId, ObjectId, ZoneId};
+use fcp_prelude::{ConnectorId, ObjectId, ZoneId};
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
 

@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use chrono::Utc;
 use fcp_async_core::ExecutionContext;
-use fcp_core::{
+use fcp_prelude::{
     ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_raptorq::{DecodeAdmissionController, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};

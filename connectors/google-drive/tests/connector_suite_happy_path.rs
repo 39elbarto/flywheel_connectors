@@ -1,7 +1,7 @@
 use std::sync::Once;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
     InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,

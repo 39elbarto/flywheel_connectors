@@ -502,7 +502,7 @@ fn normalize_chat_id(id: &str) -> Result<String, TelegramError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
     use std::collections::HashMap;
     use std::io::{Read, Write};
     use std::net::TcpListener as StdTcpListener;

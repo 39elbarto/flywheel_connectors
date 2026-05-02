@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use fcp_core::{ObjectId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId};
+use fcp_prelude::{ObjectId, ZoneId, ZoneKey, ZoneKeyAlgorithm, ZoneKeyId};
 use fcp_raptorq::{
     ChunkError, ChunkedObjectManifest, DecodeAdmissionController, DecodeError, EncodeError,
     EncodingDecision, ObjectTransmissionInformation, RaptorQConfig, RaptorQDecoder, RaptorQEncoder,

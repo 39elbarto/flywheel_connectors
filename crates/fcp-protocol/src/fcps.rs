@@ -27,7 +27,7 @@
 //! ```
 
 use bitflags::bitflags;
-use fcp_core::{ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
+use fcp_prelude::{ObjectHeader, ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -1655,7 +1655,7 @@ mod tests {
     #[test]
     fn decode_status_sign_and_verify() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -1696,7 +1696,7 @@ mod tests {
     #[test]
     fn decode_status_rejects_wrong_key() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -1809,7 +1809,7 @@ mod tests {
     #[test]
     fn symbol_request_verify_rejects_oversized_hint_cheaply() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -1851,7 +1851,7 @@ mod tests {
     #[test]
     fn symbol_request_verify_rejects_max_symbols_above_hard_cap() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn symbol_request_verify_accepts_max_symbols_at_hard_cap() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -1927,7 +1927,7 @@ mod tests {
     #[test]
     fn symbol_request_try_new_rejects_above_hard_cap() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:try-new-cap".parse().expect("zone parse");
@@ -1974,7 +1974,7 @@ mod tests {
     #[test]
     fn symbol_ack_sign_and_verify() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2010,7 +2010,7 @@ mod tests {
     #[test]
     fn symbol_ack_rejects_wrong_key() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2068,7 +2068,7 @@ mod tests {
     #[test]
     fn symbol_request_sign_and_verify() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2104,7 +2104,7 @@ mod tests {
     #[test]
     fn symbol_request_with_missing_hint() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let signing_key = Ed25519SigningKey::generate();
@@ -2144,7 +2144,7 @@ mod tests {
     #[test]
     fn symbol_request_validates_hint_bounds() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:req-bounds".parse().expect("zone parse");
@@ -2189,7 +2189,7 @@ mod tests {
     #[test]
     fn symbol_request_validates_max_symbols_unauthenticated() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:req-unauth".parse().expect("zone parse");
@@ -2248,7 +2248,7 @@ mod tests {
     #[test]
     fn symbol_request_proof_of_need_detection() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:req-pon".parse().expect("zone parse");
@@ -2479,7 +2479,7 @@ mod tests {
     #[test]
     fn decode_status_transcript_deterministic() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:det-test".parse().expect("zone parse");
@@ -2517,7 +2517,7 @@ mod tests {
     #[test]
     fn decode_status_no_hint_transcript_differs() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:no-hint".parse().expect("zone parse");
@@ -2598,7 +2598,7 @@ mod tests {
     #[test]
     fn symbol_request_validate_bounds_authenticated_exceeds() {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
 
         let zone_id: ZoneId = "z:auth-exceed".parse().expect("zone parse");
@@ -2809,7 +2809,7 @@ mod tests {
 
     fn make_test_object_header() -> ObjectHeader {
         use fcp_cbor::SchemaId;
-        use fcp_core::Provenance;
+        use fcp_prelude::Provenance;
         use semver::Version;
         let zone_id: ZoneId = "z:test".parse().unwrap();
         ObjectHeader {

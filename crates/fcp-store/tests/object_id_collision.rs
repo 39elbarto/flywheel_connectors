@@ -25,7 +25,7 @@
 
 use fcp_async_core::runtime;
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ObjectHeader, ObjectId, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_store::{MemoryObjectStore, MemoryObjectStoreConfig, ObjectStore, ObjectStoreError};

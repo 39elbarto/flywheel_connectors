@@ -1,6 +1,6 @@
 //! Configuration types for the `Sonos` connector.
 
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;

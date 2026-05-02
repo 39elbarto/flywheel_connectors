@@ -696,7 +696,7 @@ impl LinearWebhook {
 mod tests {
     use super::*;
     use crate::{EventRouter, EventSubscription, WebhookHandler};
-    use fcp_core::TaintFlag;
+    use fcp_prelude::TaintFlag;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

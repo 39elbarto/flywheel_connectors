@@ -32,7 +32,7 @@ pub mod types;
 mod tests {
     use std::time::Duration;
 
-    use fcp_core::{CredentialId, FcpError};
+    use fcp_prelude::{CredentialId, FcpError};
     use serde_json::json;
     use wiremock::matchers::{body_json, method};
     use wiremock::{Mock, MockServer, ResponseTemplate};

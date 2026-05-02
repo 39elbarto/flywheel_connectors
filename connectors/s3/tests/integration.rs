@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_core::{
+use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
     ZoneId,
 };

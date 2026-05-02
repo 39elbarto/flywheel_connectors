@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]

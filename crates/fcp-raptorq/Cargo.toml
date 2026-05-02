@@ -21,6 +21,7 @@ thiserror.workspace = true
 # Internal crates
 fcp-async-core = { workspace = true }
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-tailscale = { path = "../fcp-tailscale" }

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::{Value, json};
 use tracing::info;

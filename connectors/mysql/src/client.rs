@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
@@ -351,7 +351,7 @@ impl MysqlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
 
     #[test]
     fn auth_api_key_redacts_in_debug() {

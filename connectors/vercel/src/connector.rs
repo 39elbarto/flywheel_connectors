@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -987,7 +987,7 @@ impl FcpConnector for VercelConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityToken, RequestId, ZoneId};
 
     fn valid_config() -> serde_json::Value {
         json!({

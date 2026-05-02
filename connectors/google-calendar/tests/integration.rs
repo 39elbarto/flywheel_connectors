@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_core::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_google_calendar::{

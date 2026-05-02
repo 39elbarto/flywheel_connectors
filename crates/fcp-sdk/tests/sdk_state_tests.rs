@@ -9,10 +9,10 @@
 use std::sync::Arc;
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectHeader, Signature};
+use fcp_prelude::{ObjectHeader, Signature};
 
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_core::{ConnectorStateObject, ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+use fcp_prelude::{ConnectorStateObject, ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 use fcp_sdk::prelude::*;
 use semver::Version;
 

@@ -26,7 +26,7 @@
 //!    the policy + invocation_succeeded fields they carry through.
 
 use chrono::Utc;
-use fcp_core::RolloutPolicy;
+use fcp_prelude::RolloutPolicy;
 use fcp_host::{RolloutControllerConfig, RolloutDecision, RolloutObservation};
 
 // ─── RolloutControllerConfig defaults ──────────────────────────────

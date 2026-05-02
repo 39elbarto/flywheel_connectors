@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 
 /// Google AI API error.
 #[derive(Debug, thiserror::Error)]

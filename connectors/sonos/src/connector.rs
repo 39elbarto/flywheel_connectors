@@ -3,7 +3,7 @@
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -524,7 +524,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     use super::*;

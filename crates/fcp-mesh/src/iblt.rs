@@ -7,7 +7,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
 
 /// The production IBLT uses three independent hash positions per key.

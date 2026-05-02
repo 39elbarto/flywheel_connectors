@@ -2,7 +2,7 @@
 //!
 //! Covers the `BlueBubbles` REST API types for `iMessage` bridging.
 
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 

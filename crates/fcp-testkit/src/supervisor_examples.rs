@@ -26,7 +26,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 
 use fcp_async_core::channel::watch;
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ConnectorId, ConnectorStateSnapshot, CursorState, ObjectHeader, ObjectId, Provenance,
     Signature, TaintLevel, ZoneId,
 };

@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};

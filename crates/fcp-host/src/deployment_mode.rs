@@ -73,7 +73,7 @@
 //! `EMERGENCY_QUORUM_WITNESSES = 3` (which is about
 //! after-the-fact quorum proof, not about routine availability).
 
-use fcp_core::SafetyTier;
+use fcp_prelude::SafetyTier;
 use serde::{Deserialize, Serialize};
 
 /// Minimum number of healthy mesh peers required to transition out

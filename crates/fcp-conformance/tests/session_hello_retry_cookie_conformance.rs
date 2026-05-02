@@ -14,7 +14,7 @@
 //! one of the bound fields from the MAC input would silently allow an
 //! attacker to replay a cookie issued for a different Hello.
 
-use fcp_core::TailscaleNodeId;
+use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use fcp_protocol::session::{
     MeshSessionHello, SESSION_COOKIE_SIZE, SessionCookie, SessionCryptoSuite, SessionError,

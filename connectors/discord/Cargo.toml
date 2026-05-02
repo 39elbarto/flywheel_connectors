@@ -18,6 +18,7 @@ workspace = true
 [dependencies]
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
+fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 fcp-streaming = { path = "../../crates/fcp-streaming" }
 asupersync = { version = "0.3.1", default-features = false, features = ["tls", "tls-native-roots"] }

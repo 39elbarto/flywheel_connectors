@@ -11,7 +11,7 @@
 )]
 
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, IdempotencyClass, InvokeRequest, OperationId, RequestId, SafetyTier, ZoneId,
 };

@@ -13,7 +13,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     DecisionReceipt, ObjectHeader, POLICY_BUNDLE_SIGNED_FIELDS, PolicyPreviewSample,
     PolicySimulationError, PolicySimulationInput, compute_policy_bundle_hash, diff_policy_bundles,
     preview_policy_bundles, simulate_policy_decision,
@@ -32,7 +32,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-use fcp_core::NodeId;
+use fcp_prelude::NodeId;
 #[cfg(test)]
 use fcp_kernel::{NodeSignature, RequestId};
 #[cfg(test)]

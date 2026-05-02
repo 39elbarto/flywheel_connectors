@@ -100,7 +100,7 @@ impl HelloRetryGoldenVector {
     ///
     /// Returns an error message if verification fails.
     pub fn verify(&self) -> Result<(), String> {
-        use fcp_core::TailscaleNodeId;
+        use fcp_prelude::TailscaleNodeId;
         use fcp_protocol::{MeshSessionHelloRetry, SessionCookie};
 
         // Parse cookie
@@ -239,7 +239,7 @@ impl TransportLimitsGoldenVector {
     ///
     /// Returns an error message if verification fails.
     pub fn verify(&self) -> Result<(), String> {
-        use fcp_core::TailscaleNodeId;
+        use fcp_prelude::TailscaleNodeId;
         use fcp_crypto::x25519::X25519SecretKey;
         use fcp_protocol::{
             MeshSessionHello, SessionCookie, SessionCryptoSuite, SessionNonce, TransportLimits,
@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn hello_retry_cbor_is_deterministic() {
-        use fcp_core::TailscaleNodeId;
+        use fcp_prelude::TailscaleNodeId;
         use fcp_protocol::{MeshSessionHelloRetry, SessionCookie};
 
         let msg = MeshSessionHelloRetry {

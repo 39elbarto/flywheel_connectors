@@ -31,7 +31,7 @@ use fcp_conformance::vecgen::{
     GeneratedVector, PayloadVector, SchemaRegistration, VecGenError, core_schema_registrations,
     generate_schema_hash, serialize_to_canonical_cbor, write_vectors_to_file,
 };
-use fcp_core::{
+use fcp_prelude::{
     AuditEvent, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityObject,
     ConnectorId, CorrelationId, EventData, EventEnvelope, InstanceId, NodeId, NodeSignature,
     ObjectHeader, ObjectId, OperationId, OperationIntent, OperationReceipt, Principal, PrincipalId,

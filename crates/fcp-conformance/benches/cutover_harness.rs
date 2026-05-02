@@ -25,7 +25,7 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use std::hint::black_box;
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ObjectHeader, ObjectId, Provenance, RevocationDecision, RevocationFreshnessClass,
     RevocationObject, RevocationRegistry, RevocationScope, RevocationSlaChecker, ZoneId,
 };

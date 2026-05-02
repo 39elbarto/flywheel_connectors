@@ -15,7 +15,7 @@
 //!    at or below `renew_threshold_bps` (basis points × 10⁻⁴ of the
 //!    reference TTL), and `false` when ample time remains.
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::{
     ConflictSeverity, HeldLease, LeaseCoordinator, LeaseCoordinatorConfig, LeasePurpose,
     ObservedLeaseAuthority,

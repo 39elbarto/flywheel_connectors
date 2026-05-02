@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use fcp_async_core::ExecutionContext;
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };

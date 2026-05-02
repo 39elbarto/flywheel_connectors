@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use fcp_async_core::runtime::{self, Builder as AsyncRuntimeBuilder};
-use fcp_core::{CapabilityToken, ConnectorHealth, InvokeResponse, RequestId};
+use fcp_prelude::{CapabilityToken, ConnectorHealth, InvokeResponse, RequestId};
 use fcp_host::{
     EventQueryRequest as HostEventQueryRequest, HostAdminStateStore, HostEventKind,
     PreflightResponse as HostPreflightResponse,

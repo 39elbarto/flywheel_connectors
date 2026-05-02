@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,

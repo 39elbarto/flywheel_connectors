@@ -15,7 +15,7 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_browser::connector::BrowserConnector;
 use fcp_conformance::DynamicSuite;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalScope, ApprovalToken, CapabilityId, CapabilityToken, ConnectorId,
     ConnectorMetrics, ExecutionScope, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,

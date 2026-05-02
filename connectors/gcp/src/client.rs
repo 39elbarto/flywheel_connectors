@@ -101,7 +101,10 @@ impl GcpClient {
             if !key.trim().is_empty() {
                 // Validate the PEM is parseable (fail fast, not at first API call)
                 jwt::build_jwt_assertion(email, key, DEFAULT_GCP_SCOPES, None)?;
-                info!(client_email = email, "service-account JWT auth configured");
+                info!(
+                    service_account_client_email_present = true,
+                    "service-account JWT auth configured"
+                );
             }
         }
 

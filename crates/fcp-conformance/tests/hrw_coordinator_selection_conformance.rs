@@ -26,7 +26,7 @@
 //!    eligible set distribute across nodes (probabilistic, but
 //!    asserted on a small set of known-different subjects).
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, rank_nodes_by_hrw, select_coordinator};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, rank_nodes_by_hrw, select_coordinator};
 
 fn nodes(names: &[&str]) -> Vec<TailscaleNodeId> {
     names.iter().map(|n| TailscaleNodeId::new(*n)).collect()

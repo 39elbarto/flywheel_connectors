@@ -8,6 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -21,7 +22,7 @@ use axum::{
 use bytes::Bytes;
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, SerializationError};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
     RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
     connector_manifest_signing_view_schema,
@@ -644,6 +645,18 @@ pub enum SupplyChainVerificationError {
     TufExpired,
     #[error("TUF target not found: {target}")]
     TufTargetNotFound { target: String },
+    #[error("TUF target hash mismatch for {target} (expected {expected}, got {actual})")]
+    TufTargetHashMismatch {
+        target: String,
+        expected: String,
+        actual: String,
+    },
+    #[error("TUF target length mismatch for {target} (expected {expected}, got {actual})")]
+    TufTargetLengthMismatch {
+        target: String,
+        expected: u64,
+        actual: u64,
+    },
     #[error("TUF rollback detected (got version {got}, expected > {current})")]
     TufRollback { current: u32, got: u32 },
     #[error("TUF freeze attack detected: timestamp metadata unchanged")]
@@ -790,6 +803,411 @@ impl SigstoreVerifier for NoOpSigstoreVerifier {
     ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError> {
         Err(SupplyChainVerificationError::NotConfigured)
     }
+}
+
+/// Verifies a local TUF repository metadata set against a pinned root.
+///
+/// The verifier reads real TUF role files (`root.json` and `targets.json`)
+/// from `metadata_dir`, validates root pinning, expiry, rollback, target
+/// length, and SHA-256 target hash, then returns a private
+/// [`TufVerificationResult`] that can promote [`SupplyChainEvidence`].
+#[derive(Debug, Clone)]
+pub struct LocalTufVerifier {
+    metadata_dir: PathBuf,
+}
+
+impl LocalTufVerifier {
+    #[must_use]
+    pub fn new(metadata_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            metadata_dir: metadata_dir.into(),
+        }
+    }
+
+    /// Verify a target and its bytes against local TUF metadata.
+    ///
+    /// # Errors
+    /// Returns [`SupplyChainVerificationError`] when metadata cannot be read,
+    /// does not match the pinned root, is expired/rolled back, or the target
+    /// bytes do not match the metadata.
+    pub fn verify_target_bytes(
+        &self,
+        pinned_root: &TufRootMetadata,
+        target_path: &str,
+        target_bytes: &[u8],
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        self.verify_target_inner(pinned_root, target_path, Some(target_bytes))
+    }
+
+    fn verify_target_inner(
+        &self,
+        pinned_root: &TufRootMetadata,
+        target_path: &str,
+        target_bytes: Option<&[u8]>,
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        let root_path = self.metadata_dir.join("root.json");
+        let root_bytes = std::fs::read(&root_path).map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to read TUF root metadata `{}`: {source}",
+                root_path.display()
+            ))
+        })?;
+        let actual_root_hash = hash_bytes(&root_bytes);
+        if pinned_root.root_hash != actual_root_hash {
+            return Err(SupplyChainVerificationError::TufRootMismatch {
+                expected: pinned_root.root_hash.clone(),
+                actual: actual_root_hash,
+            });
+        }
+
+        let root: TufSignedEnvelope<TufRootSigned> =
+            serde_json::from_slice(&root_bytes).map_err(|source| {
+                SupplyChainVerificationError::Network(format!(
+                    "failed to parse TUF root metadata `{}`: {source}",
+                    root_path.display()
+                ))
+            })?;
+        root.require_role("root")?;
+        ensure_not_expired(&root.signed.expires)?;
+        if root.signed.version < pinned_root.version {
+            return Err(SupplyChainVerificationError::TufRollback {
+                current: pinned_root.version,
+                got: root.signed.version,
+            });
+        }
+        if let Some(root_role) = root.signed.roles.get("root") {
+            if root_role.threshold != pinned_root.threshold
+                || !pinned_root
+                    .key_ids
+                    .iter()
+                    .all(|key_id| root_role.keyids.iter().any(|candidate| candidate == key_id))
+            {
+                return Err(SupplyChainVerificationError::TufRootMismatch {
+                    expected: format!(
+                        "threshold={} keyids={}",
+                        pinned_root.threshold,
+                        pinned_root.key_ids.join(",")
+                    ),
+                    actual: format!(
+                        "threshold={} keyids={}",
+                        root_role.threshold,
+                        root_role.keyids.join(",")
+                    ),
+                });
+            }
+        }
+
+        let targets_path = self.metadata_dir.join("targets.json");
+        let targets_bytes = std::fs::read(&targets_path).map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to read TUF targets metadata `{}`: {source}",
+                targets_path.display()
+            ))
+        })?;
+        let targets: TufSignedEnvelope<TufTargetsSigned> = serde_json::from_slice(&targets_bytes)
+            .map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to parse TUF targets metadata `{}`: {source}",
+                targets_path.display()
+            ))
+        })?;
+        targets.require_role("targets")?;
+        ensure_not_expired(&targets.signed.expires)?;
+
+        let target = targets.signed.targets.get(target_path).ok_or_else(|| {
+            SupplyChainVerificationError::TufTargetNotFound {
+                target: target_path.to_string(),
+            }
+        })?;
+        let expected_hash = target.hashes.get("sha256").ok_or_else(|| {
+            SupplyChainVerificationError::TufTargetHashMismatch {
+                target: target_path.to_string(),
+                expected: "sha256 hash entry".to_string(),
+                actual: "missing".to_string(),
+            }
+        })?;
+        let expected_hash = normalize_sha256(expected_hash);
+
+        if let Some(bytes) = target_bytes {
+            let actual_len = u64::try_from(bytes.len()).map_err(|_| {
+                SupplyChainVerificationError::Network(
+                    "target length does not fit into u64".to_string(),
+                )
+            })?;
+            if target.length != actual_len {
+                return Err(SupplyChainVerificationError::TufTargetLengthMismatch {
+                    target: target_path.to_string(),
+                    expected: target.length,
+                    actual: actual_len,
+                });
+            }
+            let actual_hash = hash_bytes(bytes);
+            if expected_hash != actual_hash {
+                return Err(SupplyChainVerificationError::TufTargetHashMismatch {
+                    target: target_path.to_string(),
+                    expected: expected_hash,
+                    actual: actual_hash,
+                });
+            }
+        }
+
+        Ok(TufVerificationResult {
+            verified: true,
+            root_version: root.signed.version,
+            target: Some(TufTargetInfo {
+                target_path: target_path.to_string(),
+                hash: expected_hash,
+                length: target.length,
+                delegations: vec!["root".to_string(), "targets".to_string()],
+            }),
+        })
+    }
+}
+
+#[async_trait]
+impl TufVerifier for LocalTufVerifier {
+    async fn verify_target(
+        &self,
+        pinned_root: &TufRootMetadata,
+        target_path: &str,
+    ) -> Result<TufVerificationResult, SupplyChainVerificationError> {
+        self.verify_target_inner(pinned_root, target_path, None)
+    }
+
+    async fn fetch_root(&self) -> Result<TufRootMetadata, SupplyChainVerificationError> {
+        let root_path = self.metadata_dir.join("root.json");
+        let root_bytes = std::fs::read(&root_path).map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to read TUF root metadata `{}`: {source}",
+                root_path.display()
+            ))
+        })?;
+        let root: TufSignedEnvelope<TufRootSigned> =
+            serde_json::from_slice(&root_bytes).map_err(|source| {
+                SupplyChainVerificationError::Network(format!(
+                    "failed to parse TUF root metadata `{}`: {source}",
+                    root_path.display()
+                ))
+            })?;
+        let root_role = root.signed.roles.get("root");
+        Ok(TufRootMetadata {
+            version: root.signed.version,
+            root_hash: hash_bytes(&root_bytes),
+            expires: unix_expiry(&root.signed.expires)?,
+            key_ids: root_role
+                .map(|role| role.keyids.clone())
+                .unwrap_or_default(),
+            threshold: root_role.map_or(1, |role| role.threshold),
+        })
+    }
+}
+
+/// Verifies connector blobs with the real `cosign verify-blob` CLI.
+#[derive(Debug, Clone)]
+pub struct CosignBlobVerifier {
+    cosign_binary: PathBuf,
+    key_path: PathBuf,
+    signature_path: PathBuf,
+    require_transparency_log: bool,
+}
+
+impl CosignBlobVerifier {
+    #[must_use]
+    pub fn new(key_path: impl Into<PathBuf>, signature_path: impl Into<PathBuf>) -> Self {
+        Self {
+            cosign_binary: PathBuf::from("cosign"),
+            key_path: key_path.into(),
+            signature_path: signature_path.into(),
+            require_transparency_log: true,
+        }
+    }
+
+    #[must_use]
+    pub fn with_cosign_binary(mut self, cosign_binary: impl Into<PathBuf>) -> Self {
+        self.cosign_binary = cosign_binary.into();
+        self
+    }
+
+    #[must_use]
+    pub const fn require_transparency_log(mut self, require: bool) -> Self {
+        self.require_transparency_log = require;
+        self
+    }
+
+    /// Verify a signed blob and return a private Sigstore result.
+    ///
+    /// # Errors
+    /// Returns [`SupplyChainVerificationError`] if the local artifact hash does
+    /// not match `expected_artifact_hash` or the cosign process fails.
+    pub fn verify_blob_path(
+        &self,
+        artifact_path: &Path,
+        expected_artifact_hash: &str,
+        identity: Option<String>,
+        issuer: Option<String>,
+    ) -> Result<SigstoreVerificationResult, SupplyChainVerificationError> {
+        let artifact = std::fs::read(artifact_path).map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to read cosign artifact `{}`: {source}",
+                artifact_path.display()
+            ))
+        })?;
+        let actual_hash = hash_bytes(&artifact);
+        if actual_hash != expected_artifact_hash {
+            return Err(SupplyChainVerificationError::SigstoreSignatureInvalid);
+        }
+
+        let mut command = Command::new(&self.cosign_binary);
+        command
+            .arg("verify-blob")
+            .arg("--key")
+            .arg(&self.key_path)
+            .arg("--signature")
+            .arg(&self.signature_path);
+        if !self.require_transparency_log {
+            command.arg("--insecure-ignore-tlog=true");
+        }
+        command.arg(artifact_path);
+
+        let output = command.output().map_err(|source| {
+            SupplyChainVerificationError::Network(format!(
+                "failed to execute `{}` verify-blob: {source}",
+                self.cosign_binary.display()
+            ))
+        })?;
+        if !output.status.success() {
+            return Err(SupplyChainVerificationError::Network(format!(
+                "`{} verify-blob` failed with status {}: {}",
+                self.cosign_binary.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
+
+        Ok(SigstoreVerificationResult {
+            verified: true,
+            identity,
+            issuer,
+            rekor_log_index: None,
+        })
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TufSignedEnvelope<T> {
+    signed: T,
+    #[serde(default)]
+    signatures: Vec<TufMetadataSignature>,
+}
+
+impl<T> TufSignedEnvelope<T>
+where
+    T: TufRoleName,
+{
+    fn require_role(&self, expected: &str) -> Result<(), SupplyChainVerificationError> {
+        if self.signed.role_name() != expected {
+            return Err(SupplyChainVerificationError::Network(format!(
+                "TUF metadata role mismatch: expected `{expected}`, got `{}`",
+                self.signed.role_name()
+            )));
+        }
+        if self.signatures.is_empty() {
+            return Err(SupplyChainVerificationError::Network(format!(
+                "TUF {expected} metadata carries no signatures"
+            )));
+        }
+        if self
+            .signatures
+            .iter()
+            .any(|signature| signature.keyid.trim().is_empty() || signature.sig.trim().is_empty())
+        {
+            return Err(SupplyChainVerificationError::Network(format!(
+                "TUF {expected} metadata carries an empty signature"
+            )));
+        }
+        Ok(())
+    }
+}
+
+trait TufRoleName {
+    fn role_name(&self) -> &str;
+}
+
+#[derive(Debug, Deserialize)]
+struct TufMetadataSignature {
+    keyid: String,
+    sig: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TufRootSigned {
+    #[serde(rename = "_type")]
+    role_type: String,
+    version: u32,
+    expires: String,
+    #[serde(default)]
+    roles: HashMap<String, TufRoleMetadata>,
+}
+
+impl TufRoleName for TufRootSigned {
+    fn role_name(&self) -> &str {
+        &self.role_type
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TufRoleMetadata {
+    #[serde(default)]
+    keyids: Vec<String>,
+    threshold: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct TufTargetsSigned {
+    #[serde(rename = "_type")]
+    role_type: String,
+    expires: String,
+    #[serde(default)]
+    targets: HashMap<String, TufTargetMetadata>,
+}
+
+impl TufRoleName for TufTargetsSigned {
+    fn role_name(&self) -> &str {
+        &self.role_type
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TufTargetMetadata {
+    length: u64,
+    #[serde(default)]
+    hashes: HashMap<String, String>,
+}
+
+fn normalize_sha256(value: &str) -> String {
+    if value.starts_with("sha256:") {
+        value.to_string()
+    } else {
+        format!("sha256:{value}")
+    }
+}
+
+fn ensure_not_expired(expires: &str) -> Result<(), SupplyChainVerificationError> {
+    let expires_at = unix_expiry(expires)?;
+    let now = u64::try_from(Utc::now().timestamp()).expect("system clock before year 2262");
+    if expires_at <= now {
+        return Err(SupplyChainVerificationError::TufExpired);
+    }
+    Ok(())
+}
+
+fn unix_expiry(expires: &str) -> Result<u64, SupplyChainVerificationError> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(expires).map_err(|source| {
+        SupplyChainVerificationError::Network(format!(
+            "invalid TUF expires timestamp `{expires}`: {source}"
+        ))
+    })?;
+    u64::try_from(parsed.timestamp()).map_err(|_| SupplyChainVerificationError::TufExpired)
 }
 
 /// Mock transparency log verifier for controlled testing.
@@ -2582,7 +3000,7 @@ mod tests {
     use base64::Engine;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
-    use fcp_core::{DecisionReceiptPolicy, ZoneTransportPolicy};
+    use fcp_prelude::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::PolicySection;
     use fcp_store::{

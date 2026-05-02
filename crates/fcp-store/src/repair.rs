@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
-use fcp_core::{ObjectId, ObjectPlacementPolicy, ZoneId};
+use fcp_prelude::{ObjectId, ObjectPlacementPolicy, ZoneId};
 use fcp_telemetry::metrics;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

@@ -89,7 +89,7 @@ impl FcpsGoldenVector {
     /// # Errors
     /// Returns an error description if verification fails.
     pub fn verify(&self) -> Result<(), String> {
-        use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
+        use fcp_prelude::{ObjectId, ZoneIdHash, ZoneKeyId};
         use fcp_protocol::{FCPS_VERSION, FcpsFrame, FcpsFrameHeader, FrameFlags};
 
         // Parse expected values

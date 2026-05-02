@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use fcp_core::{CredentialId, FcpError, FcpResult};
+use fcp_prelude::{CredentialId, FcpError, FcpResult};
 use reqwest::Url;
 use serde::{Deserialize, Deserializer, Serialize, de};
 

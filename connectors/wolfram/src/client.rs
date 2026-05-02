@@ -9,6 +9,7 @@ use crate::types::{QueryResult, WolframConfig};
 
 /// Wolfram Alpha API client.
 pub struct WolframClient {
+    client: reqwest::Client,
     base_url: String,
     timeout: std::time::Duration,
     #[allow(dead_code)]
@@ -27,9 +28,11 @@ impl WolframClient {
             } else {
                 format!("https://{}", config.base_url)
             };
+        let timeout = std::time::Duration::from_millis(config.timeout_ms);
         Self {
+            client: reqwest::Client::new(),
             base_url,
-            timeout: std::time::Duration::from_millis(config.timeout_ms),
+            timeout,
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -42,6 +45,7 @@ impl WolframClient {
     #[must_use]
     pub fn with_base_url(base_url: String) -> Self {
         Self {
+            client: reqwest::Client::new(),
             base_url,
             timeout: std::time::Duration::from_secs(30),
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
@@ -61,10 +65,13 @@ impl WolframClient {
         }
 
         let url = format!("{}/v2/query", self.base_url);
-        info!(input = input, "Wolfram Alpha full query");
+        info!(
+            input_len = input.chars().count(),
+            "Wolfram Alpha full query"
+        );
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .client
             .get(&url)
             .query(&[
                 ("input", input),
@@ -107,10 +114,13 @@ impl WolframClient {
         }
 
         let url = format!("{}/v1/result", self.base_url);
-        info!(input = input, "Wolfram Alpha short answer");
+        info!(
+            input_len = input.chars().count(),
+            "Wolfram Alpha short answer"
+        );
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .client
             .get(&url)
             .query(&[("i", input), ("appid", app_id)])
             .timeout(self.timeout)
@@ -145,10 +155,13 @@ impl WolframClient {
         }
 
         let url = format!("{}/v1/spoken", self.base_url);
-        info!(input = input, "Wolfram Alpha spoken result");
+        info!(
+            input_len = input.chars().count(),
+            "Wolfram Alpha spoken result"
+        );
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let resp = self
+            .client
             .get(&url)
             .query(&[("i", input), ("appid", app_id)])
             .timeout(self.timeout)
@@ -171,10 +184,10 @@ impl WolframClient {
 
     /// Health check — validates the base URL is reachable.
     pub async fn health_check(&self) -> Result<(), WolframError> {
-        let client = reqwest::Client::new();
         let url = format!("{}/v1/result", self.base_url);
         // Simple connectivity check with a known query
-        let resp = client
+        let resp = self
+            .client
             .get(&url)
             .query(&[("i", "1+1"), ("appid", "DEMO")])
             .timeout(std::time::Duration::from_secs(5))

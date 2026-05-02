@@ -185,6 +185,7 @@ whisper = ["dep:fcp-whisper"]
 
 [dependencies]
 fcp-core = { workspace = true }
+fcp-prelude = { workspace = true }
 fcp-async-core = { workspace = true }
 fcp-conformance = { workspace = true }
 fcp-testkit = { workspace = true }
@@ -301,6 +302,7 @@ toml = { workspace = true }
 ciborium = { workspace = true }
 base64 = { workspace = true }
 fcp-host = { workspace = true }
+fcp-registry = { workspace = true }
 fcp-store = { workspace = true }
 fcp-raptorq = { workspace = true }
 fcp-audit = { workspace = true }

@@ -7,7 +7,7 @@
 //! All operations are READ-ONLY (`stripe.list_customers`, `stripe.get_balance`) and
 //! do not create or mutate any resources.
 
-use fcp_core::{CapabilityConstraints, CapabilityToken};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 

@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use url::Url;

@@ -24,7 +24,7 @@
 //! 8. Each outcome enum rejects unknown tag values.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
+use fcp_prelude::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
 use fcp_mesh::{
     AcquireOutcome, ConflictSeverity, ConflictingHolder, LeaseConflict, LeaseCoordinatorConfig,
     LeasePurpose, ReleaseOutcome, RenewOutcome,

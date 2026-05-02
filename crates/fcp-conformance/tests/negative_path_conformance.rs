@@ -24,7 +24,7 @@
 
 use fcp_cbor::SchemaId;
 use fcp_conformance::{CapabilityTokenGoldenVector, DatagramMacGoldenVector};
-use fcp_core::{
+use fcp_prelude::{
     DeviceSelector, ObjectHeader, ObjectIdKey, ObjectPlacementPolicy, Provenance, StoredObject,
     TaintLevel, ZoneId,
 };

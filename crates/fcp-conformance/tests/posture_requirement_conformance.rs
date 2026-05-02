@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     NodeId, PostureAttestation, PostureAttributeKey, PostureAttributeValue, PostureRequirement,
 };
 

@@ -1,4 +1,4 @@
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use serde::{Deserialize, Serialize};
 
 // ── Auth ──

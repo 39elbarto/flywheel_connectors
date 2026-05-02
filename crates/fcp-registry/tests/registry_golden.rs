@@ -1,7 +1,7 @@
 //! Golden artifact snapshots for fcp-registry wire formats.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     EpochId, NodeId, NodeSignature, ObjectHeader, ObjectId, Provenance, RevocationHead,
     RevocationObject, RevocationScope, SignatureSet, ZoneId,
 };

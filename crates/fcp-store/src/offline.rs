@@ -23,7 +23,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
 
 /// Per-object offline availability tracking.

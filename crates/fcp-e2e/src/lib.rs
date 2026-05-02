@@ -25,7 +25,7 @@ use fcp_conformance::{
     CheckStatus, ComplianceFinding, DynamicSuite, StaticCompliance, run_all_interop_tests,
     run_dynamic_checks,
 };
-use fcp_core::{
+use fcp_prelude::{
     CorrelationId, FcpConnector, FcpError, HandshakeRequest, HealthSnapshot, Introspection,
     InvokeRequest, InvokeResponse, InvokeStatus, ObjectId,
 };
@@ -1305,7 +1305,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use fcp_core::{
+    use fcp_prelude::{
         AgentHint, BaseConnector, CapabilityId, CapabilityToken, ConnectorId, EventCaps, FcpError,
         HandshakeResponse, HealthSnapshot, InstanceId, InvokeContext, InvokeResponse, LimitType,
         ObjectId, OperationId, OperationInfo, RateLimit, RiskLevel, SafetyTier, SessionId,
@@ -3341,7 +3341,7 @@ mod openai_e2e_tests {
 
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_conformance::DynamicSuite;
-    use fcp_core::{
+    use fcp_prelude::{
         AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
         FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
         InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,
@@ -3869,7 +3869,7 @@ mod openai_e2e_tests {
 mod slack_e2e_tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_conformance::DynamicSuite;
-    use fcp_core::{
+    use fcp_prelude::{
         AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
         FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
         InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,

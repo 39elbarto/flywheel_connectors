@@ -39,7 +39,7 @@
 //!   moving to lower ones.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     DecisionReasonCode, ObjectId, ObjectIdKey, TransportMode, ZoneId, ZoneTransportPolicy,
 };
 use fcp_mesh::{TransportPath, TransportPathKind, TransportSelector};

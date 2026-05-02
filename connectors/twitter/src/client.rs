@@ -22,7 +22,7 @@ const QUERY_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'=')
     .add(b'+');
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 
 use crate::{
     config::{RateLimitInfo, TwitterConfig},

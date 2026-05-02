@@ -27,7 +27,7 @@ use std::sync::Once;
 use std::time::Duration;
 
 use fcp_brave_search::BraveSearchConnector;
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

@@ -11,7 +11,7 @@ use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cbc::Decryptor;
 use fcp_async_core::sync::Mutex;
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use quick_xml::{Reader, escape::unescape, events::Event};
 use reqwest::{Url, header, multipart};
 use serde_json::Value;

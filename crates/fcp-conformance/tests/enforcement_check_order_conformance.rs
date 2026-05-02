@@ -29,7 +29,7 @@
 //! 9. **`CheckOutcome::is_allow` / `is_deny` are mutually exclusive**
 //!    and reflect their variants.
 
-use fcp_core::{CheckOutcome, EnforcementCheckId, EnforcementCheckOrder};
+use fcp_prelude::{CheckOutcome, EnforcementCheckId, EnforcementCheckOrder};
 
 #[test]
 fn canonical_order_returns_documented_eleven_check_sequence() {

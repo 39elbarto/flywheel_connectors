@@ -3,7 +3,7 @@
 use std::io::{BufRead, Write};
 
 use anyhow::Result;
-use fcp_core::{FcpError, FcpResult, SimulateRequest};
+use fcp_prelude::{FcpError, FcpResult, SimulateRequest};
 use fcp_sdk::prelude::*;
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 

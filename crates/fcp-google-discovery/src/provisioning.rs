@@ -6,7 +6,7 @@
 
 use std::collections::BTreeSet;
 
-use fcp_core::{
+use fcp_prelude::{
     HumanPrompt, HumanPromptType, OAuthRecipe, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, SetupDescriptor, StepId,
 };

@@ -8,7 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,

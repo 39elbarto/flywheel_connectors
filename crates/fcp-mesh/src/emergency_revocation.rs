@@ -12,7 +12,7 @@
 //!
 //! [`PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES`]: super::gossip::PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES
 
-use fcp_core::{NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_prelude::{NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use serde::{Deserialize, Serialize};
 
@@ -217,7 +217,7 @@ pub const fn effective_quorum_target(online_peers: u32) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::NodeId;
+    use fcp_prelude::NodeId;
     use fcp_crypto::Ed25519SigningKey;
 
     fn signing_key_from_seed(seed: u8) -> Ed25519SigningKey {

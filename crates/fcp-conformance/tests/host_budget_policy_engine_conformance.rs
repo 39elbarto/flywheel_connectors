@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 use fcp_async_core::runtime::test as runtime_test;
-use fcp_core::{
+use fcp_prelude::{
     BudgetEnforcement, BudgetStatus, UsageBudgetLimit, UsageBudgetPolicy, UsageMetric,
     UsageMetricKind, ZoneId,
 };

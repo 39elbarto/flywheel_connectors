@@ -11,7 +11,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_coda::connector::{CodaConnector, operations_info};
-use fcp_core::{
+use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
     SafetyTier, ZoneId,

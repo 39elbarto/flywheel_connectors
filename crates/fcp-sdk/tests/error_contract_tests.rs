@@ -10,7 +10,7 @@
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_core::{ErrorCategory, FcpError};
+use fcp_prelude::{ErrorCategory, FcpError};
 use fcp_sdk::migration::{HttpRetryConfig, classify_http_status, map_async_to_fcp_error};
 use fcp_sdk::retry::RetryDecision;
 

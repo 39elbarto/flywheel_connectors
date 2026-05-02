@@ -7,7 +7,7 @@
 //! - [`NodeKeyAttestation`] - Owner-signed binding of `node_id` ↔ keys ↔ tags
 
 use chrono::{DateTime, Utc};
-use fcp_core::TailscaleNodeId;
+use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::canonicalize::to_deterministic_cbor;
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,

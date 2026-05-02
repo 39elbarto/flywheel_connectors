@@ -45,7 +45,7 @@
 //!    worst transport AND the slowest class).
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ConnectorId, ObjectId, ObjectIdKey, ZoneId};
+use fcp_prelude::{ConnectorId, ObjectId, ObjectIdKey, ZoneId};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, DeviceProfileBuilder, FitnessContext,
     FitnessScore, GpuProfile, GpuVendor, InstalledConnector, LatencyClass, PowerSource, TpuProfile,

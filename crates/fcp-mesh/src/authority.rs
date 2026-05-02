@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, rank_nodes_by_hrw, select_coordinator};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, rank_nodes_by_hrw, select_coordinator};
 use serde::{Deserialize, Serialize};
 
 use crate::planner::{HeldLease, LeasePurpose};

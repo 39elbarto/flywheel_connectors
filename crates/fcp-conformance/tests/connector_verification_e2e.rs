@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use fcp_conformance::{
     CheckStatus, ComplianceReport, DynamicSuite, StaticCompliance, run_dynamic_checks,
 };
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
     FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState,
     IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,

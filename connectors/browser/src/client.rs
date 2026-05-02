@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };

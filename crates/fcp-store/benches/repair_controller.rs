@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fcp_core::{ObjectId, ObjectPlacementPolicy, ZoneId};
+use fcp_prelude::{ObjectId, ObjectPlacementPolicy, ZoneId};
 use fcp_store::{
     MemorySymbolStore, MemorySymbolStoreConfig, ObjectSymbolMeta, ObjectTransmissionInfo,
     RepairController, RepairControllerConfig, RepairCycleBudget, RepairPlanningOptions,

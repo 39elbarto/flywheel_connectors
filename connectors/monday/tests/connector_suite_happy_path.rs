@@ -1,5 +1,5 @@
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId,
     ConnectorMetrics, EventCaps, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,

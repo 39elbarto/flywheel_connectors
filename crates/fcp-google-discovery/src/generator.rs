@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, CapabilityId, EventInfo, IdValidationError, IdempotencyClass,
     Introspection, OperationId, OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier,
 };

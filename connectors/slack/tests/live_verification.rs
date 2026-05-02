@@ -7,7 +7,7 @@
 //! All operations are READ-ONLY (`slack.list_channels`) and target the
 //! workspace's public channels — no side effects or write permissions needed.
 
-use fcp_core::{CapabilityConstraints, CapabilityToken};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_slack::connector::SlackConnector;

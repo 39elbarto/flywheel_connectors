@@ -12,7 +12,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, SecondsFormat, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpError, HandshakeRequest,
     IdempotencyClass, InstanceId, RiskLevel, SafetyTier, ZoneId,
 };

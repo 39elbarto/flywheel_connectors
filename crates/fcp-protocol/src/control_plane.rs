@@ -6,7 +6,7 @@
 //! classification for auditability.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectHeader, ObjectId, ObjectIdKey};
+use fcp_prelude::{ObjectHeader, ObjectId, ObjectIdKey};
 use serde::{Deserialize, Serialize};
 
 /// Retention requirement for control-plane objects (NORMATIVE).
@@ -142,7 +142,7 @@ pub fn requires_storage(schema: &SchemaId) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{Provenance, ZoneId};
+    use fcp_prelude::{Provenance, ZoneId};
     use semver::Version;
 
     fn test_schema(namespace: &str, name: &str) -> SchemaId {

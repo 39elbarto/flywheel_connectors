@@ -15,7 +15,7 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_async_core::sync::Mutex;
 use fcp_conformance::DynamicSuite;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
     InstanceId, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId,

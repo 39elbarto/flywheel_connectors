@@ -10,7 +10,7 @@
 //! - `fcp-cbor`: Canonical CBOR serialization
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityToken, ConnectorId, FcpError, InvokeRequest, InvokeResponse, InvokeStatus,
     ObjectHeader, ObjectId, OperationId, Provenance, RequestId, ZoneId,
 };

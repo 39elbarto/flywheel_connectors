@@ -32,7 +32,7 @@
 //! observable reason without updating these regressions.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityId, ConfidentialityLevel, ConnectorId, Decision,
     DecisionReasonCode, DecisionReceiptPolicy, DeclassificationScope, ElevationScope,
     IntegrityLevel, ObjectHeader, ObjectId, OperationId, PolicyDecisionInput, PolicyEngine,

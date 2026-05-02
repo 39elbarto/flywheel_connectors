@@ -1,6 +1,6 @@
 //! FCPC/FCPS length-prefix wire-format conformance.
 
-use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
+use fcp_prelude::{ObjectId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
     DEFAULT_MAX_FCPC_PAYLOAD_LEN, FCPC_HEADER_LEN, FCPC_MAGIC, FCPC_TAG_LEN, FCPC_VERSION,
     FCPS_HEADER_LEN, FCPS_MAGIC, FCPS_VERSION, FcpcFrame, FcpcFrameFlags, FcpsFrame,

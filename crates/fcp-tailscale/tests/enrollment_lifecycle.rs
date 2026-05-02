@@ -1,6 +1,6 @@
 use chrono::Utc;
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceMetadata, NodeSignature, ObjectHeader,
     ObjectIdKey, ObjectIdKeyId, Provenance, RevocationObject, RevocationRegistry, RevocationScope,
     StoredObject, ZoneId, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,

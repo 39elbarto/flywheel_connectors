@@ -18,7 +18,7 @@ use fcp_audit::{
     AuditEntryBuilder, CapabilityConstraintDenied as AuditDenialPayload, Severity,
     capability_constraint_request_descriptor_hash, event_types,
 };
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, ConnectorId, Decision, DecisionReasonCode, EpochId, NodeId as CoreNodeId,
     NodeSignature, ObjectHeader, ObjectId, ObjectIdKey, OperationId, POLICY_BUNDLE_SIGNED_FIELDS,
     PolicyBundle, PolicyBundleObject, PolicyBundlePolicyRef, PolicyBundleResolved,

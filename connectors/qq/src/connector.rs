@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
@@ -649,7 +649,7 @@ fn operation(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     fn build_token(signing_key: &Ed25519SigningKey, cap: &str, operation: &str) -> CapabilityToken {

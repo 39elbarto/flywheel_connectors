@@ -16,7 +16,7 @@
 //! tests an attacker could re-attribute a captured ciphertext to a
 //! different epoch, frame, ESI, or sender.
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::AeadKey;
 use fcp_protocol::{
     AUTH_TAG_SIZE, SymbolContext, SymbolEnvelopeError, ZoneKeyAlgorithm, decrypt_symbol,

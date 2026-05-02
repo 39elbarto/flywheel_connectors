@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
     FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,

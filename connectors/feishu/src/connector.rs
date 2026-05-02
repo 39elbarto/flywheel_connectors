@@ -6,7 +6,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityGrant, CapabilityId,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -1672,7 +1672,7 @@ impl FeishuConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 
     fn signed_token(

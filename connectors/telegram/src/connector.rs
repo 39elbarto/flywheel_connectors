@@ -2008,7 +2008,7 @@ mod tests {
     }
 
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_testkit::LogCapture;

@@ -16,6 +16,7 @@ workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-conformance = { path = "../fcp-conformance" }
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-sdk = { path = "../fcp-sdk" }
 
 # Async runtime

@@ -24,7 +24,7 @@
 #![forbid(unsafe_code)]
 
 use crate::admission::{AdmissionController, AdmissionError};
-use fcp_core::{ObjectId, ZoneId, ZoneKeyId};
+use fcp_prelude::{ObjectId, ZoneId, ZoneKeyId};
 use fcp_protocol::{
     DEFAULT_MAX_SYMBOLS_UNAUTHENTICATED, DecodeStatus, MAX_MISSING_HINT_ENTRIES, SymbolAck,
     SymbolRequest,
@@ -837,7 +837,7 @@ impl SymbolRequestMetrics {
 mod tests {
     use super::*;
     use fcp_cbor::SchemaId;
-    use fcp_core::{ObjectHeader, Provenance};
+    use fcp_prelude::{ObjectHeader, Provenance};
     use fcp_protocol::SymbolAckReason;
     use proptest::prelude::*;
     use semver::Version;

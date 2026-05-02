@@ -12,7 +12,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use fcp_core::{
+use fcp_prelude::{
     ApprovalScope, ApprovalToken, ConfidentialityLevel, DeclassificationScope, ElevationScope,
     ExecutionScope, FlowCheckResult, InputConstraint, IntegrityLevel, ObjectId, ProvenanceRecord,
     ProvenanceViolation, SafetyTier, SanitizerReceipt, TaintDecision, TaintFlag, TaintFlags,

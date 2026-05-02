@@ -22,7 +22,7 @@ pub use fcp_imessage::BlueBubblesConnector as SharedBlueBubblesConnector;
 
 #[cfg(test)]
 mod tests {
-    use fcp_core::FcpConnector;
+    use fcp_prelude::FcpConnector;
 
     use super::*;
 

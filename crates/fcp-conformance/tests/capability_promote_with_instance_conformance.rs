@@ -31,7 +31,7 @@
 
 use chrono::{Duration, Utc};
 use ciborium::Value as CborValue;
-use fcp_core::{
+use fcp_prelude::{
     BoundVerified, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError, InstanceId,
     OperationId, UnboundVerified, ZoneId,
 };

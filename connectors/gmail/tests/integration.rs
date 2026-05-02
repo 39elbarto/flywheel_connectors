@@ -12,8 +12,8 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_core::ApprovalMode;
-use fcp_core::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::ApprovalMode;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_discovery::{
     DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,

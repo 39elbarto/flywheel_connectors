@@ -25,7 +25,7 @@
 //! - `SelfCheckStatus::Failed → DescriptorStatus::Failed`
 //! - `SelfCheckStatus::Unsupported → DescriptorStatus::Unsupported`
 
-use fcp_core::{ConnectorHealth, DescriptorStatus, SelfCheckReport};
+use fcp_prelude::{ConnectorHealth, DescriptorStatus, SelfCheckReport};
 
 const ALL_VARIANTS: &[DescriptorStatus] = &[
     DescriptorStatus::Ready,

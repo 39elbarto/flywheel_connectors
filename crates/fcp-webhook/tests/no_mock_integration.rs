@@ -30,7 +30,7 @@ use std::thread;
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_core::TaintFlag;
+use fcp_prelude::TaintFlag;
 use fcp_webhook::{
     DEFAULT_MAX_PAYLOAD_SIZE, DEFAULT_TIMESTAMP_TOLERANCE, DeadLetterQueue, DeliveryStatus,
     Ed25519Verifier, EventRouter, EventSubscription, GitHubWebhook, HmacSha1Verifier,

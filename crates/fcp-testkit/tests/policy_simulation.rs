@@ -2,7 +2,7 @@
 
 use chrono::Utc;
 use fcp_conformance::schemas::validate_e2e_log_jsonl;
-use fcp_core::{
+use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityId, DecisionReasonCode, InvokeRequest, OperationId,
     PolicySimulationInput, ProvenanceRecord, SafetyTier, TransportMode, ZoneId, ZonePolicyObject,
     ZoneTransportPolicy, simulate_policy_decision,

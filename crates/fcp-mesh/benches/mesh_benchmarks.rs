@@ -8,7 +8,7 @@
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use fcp_core::{ConnectorId, ObjectId};
+use fcp_prelude::{ConnectorId, ObjectId};
 use fcp_mesh::{
     admission::{AdmissionController, AdmissionPolicy},
     device::{

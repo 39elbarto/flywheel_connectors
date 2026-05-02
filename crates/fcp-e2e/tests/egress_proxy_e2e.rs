@@ -37,7 +37,7 @@ use serde_json::json;
 use fcp_audit::{
     AuditEntryBuilder, Severity, capability_constraint_request_descriptor_hash, event_types,
 };
-use fcp_core::ZoneId;
+use fcp_prelude::ZoneId;
 use fcp_manifest::NetworkConstraints;
 use fcp_sandbox::{
     DenyReason, EgressError, EgressGuard, EgressHttpRequest, EgressRequest,

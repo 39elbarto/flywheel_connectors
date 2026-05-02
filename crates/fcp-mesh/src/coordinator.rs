@@ -23,7 +23,7 @@
 
 use std::cmp::Ordering;
 
-use fcp_core::{ObjectId, TailscaleNodeId, ZoneId, select_coordinator};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId, select_coordinator};
 use serde::{Deserialize, Serialize};
 
 use crate::authority::{AuthorityReasonCode, AuthorityTimelineEvent, ObservedLeaseAuthority};

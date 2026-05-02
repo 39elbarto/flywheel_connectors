@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use fcp_core::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use serde_json::{Value, json};
 
 const CONNECTOR_ID: &str = "fcp.tlon";

@@ -23,8 +23,8 @@ use std::time::Duration;
 use fcp_cbor::SchemaId;
 use fcp_conformance::harness::{LogCollector, LogEntry, TestHarness};
 #[allow(unused_imports)]
-use fcp_core::RiskTier;
-use fcp_core::{
+use fcp_prelude::RiskTier;
+use fcp_prelude::{
     AuditEvent, AuditHead, ConnectorId, CorrelationId, Decision, DecisionReceipt,
     EVENT_CAPABILITY_INVOKE, EVENT_REVOCATION_ISSUED, EVENT_SECRET_ACCESS,
     EVENT_SECURITY_VIOLATION, EpochId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,

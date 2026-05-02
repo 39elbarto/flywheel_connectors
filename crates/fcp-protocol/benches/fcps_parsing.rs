@@ -6,7 +6,7 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use std::hint::black_box;
 
-use fcp_core::{ObjectId, ZoneIdHash, ZoneKeyId};
+use fcp_prelude::{ObjectId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
     FCPS_HEADER_LEN, FcpsDatagram, FcpsFrame, FcpsFrameHeader, FcpsFrameRefs, FrameFlags,
     MeshSessionId, SYMBOL_RECORD_OVERHEAD, SymbolRecord,

@@ -7,7 +7,7 @@
 //! All operations are READ-ONLY (health check calls `getMe`, `get_file` with a
 //! nonexistent ID) — no messages are sent.
 
-use fcp_core::{CapabilityConstraints, CapabilityToken};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_telegram::connector::TelegramConnector;

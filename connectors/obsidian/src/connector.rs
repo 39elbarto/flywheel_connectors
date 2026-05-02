@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
@@ -1082,7 +1082,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_allowed() {
-        use fcp_core::{CapabilityToken, ZoneId};
+        use fcp_prelude::{CapabilityToken, ZoneId};
         let connector = ObsidianConnector::new();
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.obsidian"),
@@ -1120,7 +1120,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn subscribe_not_supported() {
-        use fcp_core::RequestId;
+        use fcp_prelude::RequestId;
         let connector = ObsidianConnector::new();
         let req = SubscribeRequest {
             r#type: "subscribe".into(),

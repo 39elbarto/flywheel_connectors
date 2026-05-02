@@ -6,7 +6,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::fmt;
 
-use fcp_core::{ObjectId, RetentionClass, StoredObject, ZoneId};
+use fcp_prelude::{ObjectId, RetentionClass, StoredObject, ZoneId};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{GcError, ObjectStoreError, SymbolStoreError};
@@ -586,7 +586,7 @@ mod tests {
     use bytes::Bytes;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
-    use fcp_core::{ObjectHeader, Provenance, StorageMeta, StoredObject};
+    use fcp_prelude::{ObjectHeader, Provenance, StorageMeta, StoredObject};
     use semver::Version;
     use serde_json::json;
     use uuid::Uuid;

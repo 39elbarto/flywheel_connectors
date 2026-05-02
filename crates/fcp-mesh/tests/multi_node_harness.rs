@@ -9,7 +9,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::{AsyncError, TaskGroup, task, time};
-use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, X25519PublicKey, X25519SecretKey};
 use fcp_mesh::{
     AvailabilityProfile, CpuArch, DeviceProfile, GossipMessage, GossipRequest, LatencyClass,

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ObjectId, ObjectPlacementPolicy, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
     ZoneKeyId,
 };

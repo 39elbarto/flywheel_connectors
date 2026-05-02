@@ -11,7 +11,7 @@ use super::{
     SBOM_V1_SCHEMA, SUPPLY_CHAIN_ATTESTATION_V1_SCHEMA, TRACE_V1_SCHEMA,
 };
 use fcp_cbor::to_canonical_cbor;
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use jsonschema::Validator;
 use serde_json::Value;
 

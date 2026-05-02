@@ -16,7 +16,7 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use fcp_async_core::time;
-use fcp_core::ZoneId;
+use fcp_prelude::ZoneId;
 use fcp_kernel::{ConnectorHealth, ConnectorId};
 use serde::{Deserialize, Serialize};
 

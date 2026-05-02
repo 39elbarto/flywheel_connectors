@@ -36,7 +36,7 @@
 //! 10. **`ResilienceMetricsSnapshot::default`** is all zero — fresh
 //!     layer state has no observed traffic.
 
-use fcp_core::ConnectorId;
+use fcp_prelude::ConnectorId;
 use fcp_host::{
     BulkheadConfig, CircuitBreakerConfig, CircuitState, FailurePredicate, HealthRouterConfig,
     LoadShedConfig, RequestPriority, ResilienceConfig, ResilienceError, ResilienceLayer,

@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use fcp_async_core::AsyncError;
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 
 /// Twilio API error.
@@ -145,7 +145,7 @@ impl ConnectorErrorMapping for TwilioError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
 
     // ── Display message tests ────────────────────────────────────────────
 

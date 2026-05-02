@@ -7,7 +7,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use serde_json::json;
 
 use fcp_youtube::{connector::YouTubeConnector, error::YouTubeError};

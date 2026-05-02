@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -1231,7 +1231,7 @@ mod tests {
 
     #[test]
     fn simulate_returns_allowed() {
-        use fcp_core::{CapabilityToken, ZoneId};
+        use fcp_prelude::{CapabilityToken, ZoneId};
         let c = NetlifyConnector::new();
         let req = SimulateRequest::new(
             ConnectorId::from_static("fcp.netlify"),

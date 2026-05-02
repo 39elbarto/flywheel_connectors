@@ -290,7 +290,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use fcp_core::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
+use fcp_prelude::{ApprovalToken, CapabilityToken, ConnectorTarget, ZoneId};
 use fcp_crypto::{
     Ed25519Signature, Ed25519VerifyingKey, canonicalize::to_deterministic_cbor, cose::CoseToken,
 };
@@ -25571,7 +25571,7 @@ mod tests {
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
-    use fcp_core::{
+    use fcp_prelude::{
         BudgetEnforcement, BudgetStatus, ConnectorHealth, ConnectorTarget, InvokeResponse,
         RequestId, UsageBudgetSnapshot, UsageBudgetUsage, UsageMetricKind, ZoneId,
     };

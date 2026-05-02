@@ -15,6 +15,7 @@ workspace = true
 # Internal crates
 fcp-crypto.workspace = true
 fcp-core.workspace = true
+fcp-prelude.workspace = true
 
 # Async runtime
 fcp-async-core = { path = "../fcp-async-core" }

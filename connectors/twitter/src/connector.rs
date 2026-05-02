@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
@@ -1816,7 +1816,7 @@ fn tw_op(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, SelfCheckStatus, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, SelfCheckStatus, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 

@@ -9,7 +9,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use fcp_core::TaintFlag;
+use fcp_prelude::TaintFlag;
 use fcp_webhook::{
     GitHubWebhook, HmacSha256Verifier, SignatureVerifier, StripeWebhook, WebhookConfig,
     WebhookError, WebhookHandler,

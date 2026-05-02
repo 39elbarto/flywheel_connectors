@@ -15,7 +15,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use base64::Engine;
 use fcp_async_core::sync::RwLock;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, CapabilityToken, ConnectorHealth, ConnectorId, Decision,
     DecisionReceiptPolicy, IdempotencyClass, Introspection, InvokeRequest, ObjectHeader,
     OperationId, OperationInfo, PolicySimulationInput, Provenance, RequestId, RiskLevel,

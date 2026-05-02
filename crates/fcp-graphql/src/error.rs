@@ -3,7 +3,7 @@
 use std::time::Duration;
 
 use fcp_async_core::http::{HttpClientError, StatusCode};
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

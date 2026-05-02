@@ -3,7 +3,7 @@
 use std::fmt;
 use std::time::Duration;
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::{Client, Response, StatusCode};
 use tracing::{debug, instrument};
@@ -361,7 +361,7 @@ fn redact_credential_id(id: &CredentialId) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
 
     #[test]
     fn auth_debug_redacts_key() {

@@ -14,7 +14,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_core::{CapabilityConstraints, FcpError};
+use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::{AsyncTestContext, MockApiServer};

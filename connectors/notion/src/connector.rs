@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
@@ -1511,7 +1511,7 @@ mod tests {
         cap: &str,
         operations: &[&str],
     ) -> CapabilityToken {
-        use fcp_core::CapabilityConstraints;
+        use fcp_prelude::CapabilityConstraints;
 
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],

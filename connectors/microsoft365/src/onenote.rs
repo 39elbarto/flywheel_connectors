@@ -1,6 +1,6 @@
 //! OneNote-specific request models and content helpers.
 
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 
 const MAX_LIST_TOP: u32 = 100;

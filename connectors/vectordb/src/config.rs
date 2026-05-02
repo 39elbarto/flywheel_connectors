@@ -3,7 +3,7 @@
 //! Supports multiple vector database providers (Pinecone, Qdrant) with
 //! secretless credential handling via `CredentialId` references.
 
-use fcp_core::{CredentialId, FcpError, FcpResult};
+use fcp_prelude::{CredentialId, FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 
 /// Supported vector database providers.

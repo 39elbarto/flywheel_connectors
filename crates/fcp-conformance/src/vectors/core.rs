@@ -177,7 +177,7 @@ impl ObjectIdGoldenVector {
     /// Returns an error if the golden vector fails verification.
     pub fn verify(&self) -> Result<(), String> {
         use fcp_cbor::SchemaId;
-        use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+        use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId};
         use semver::Version;
 
         let zone: ZoneId = self
@@ -409,7 +409,7 @@ mod tests {
     #[test]
     fn object_id_different_zones_different_ids() {
         use fcp_cbor::SchemaId;
-        use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+        use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId};
         use semver::Version;
 
         let schema = SchemaId::new("fcp.core", "CapabilityObject", Version::new(1, 0, 0));
@@ -437,7 +437,7 @@ mod tests {
     // failures should narrow to a single violated invariant.
 
     use fcp_cbor::{CanonicalSerializer, SchemaId};
-    use fcp_core::{ObjectId, ObjectIdKey, ZoneId};
+    use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId};
     use semver::Version;
 
     #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
@@ -2701,7 +2701,7 @@ fn decode_embedded_json<T: DeserializeOwned>(value: Option<&Value>) -> Option<T>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId};
+    use fcp_prelude::{CapabilityToken, RequestId};
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn invoke_request(

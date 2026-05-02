@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use thiserror::Error;
 
 /// Twitter-specific errors.
@@ -181,7 +181,7 @@ pub type TwitterResult<T> = Result<T, TwitterError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
 
     #[test]
     fn test_api_error_maps_to_capability_denied() {

@@ -13,7 +13,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 
-use fcp_core::{
+use fcp_prelude::{
     CapabilityVerifier, FcpError, InvokeRequest, InvokeValidationError, ObjectId, OperationIntent,
     OperationReceipt, RevocationRegistry, TailscaleNodeId, ZoneId, ZoneKey, ZoneKeyAlgorithm,
     ZoneTransportPolicy,
@@ -2264,7 +2264,7 @@ mod tests {
     use crate::device::DeviceProfileBuilder;
     use crate::planner::{LeasePurpose, PlannerContext};
     use bytes::Bytes;
-    use fcp_core::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
+    use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId, ZoneKeyId};
     use fcp_crypto::Ed25519SigningKey;
     use fcp_protocol::session::{
         MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,

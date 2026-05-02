@@ -10,7 +10,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration as ChronoDuration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector,
     FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
     Introspection, InvokeRequest, InvokeResponse, InvokeStatus, OperationId, OperationInfo,

@@ -4,7 +4,7 @@
 //! Uses real crypto keys for signature/encryption roundtrips without
 //! external dependencies.
 
-use fcp_core::{
+use fcp_prelude::{
     ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKeyId,
 };
 use fcp_crypto::{AeadKey, Ed25519SigningKey, X25519SecretKey};

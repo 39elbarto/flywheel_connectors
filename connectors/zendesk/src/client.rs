@@ -7,7 +7,7 @@ use std::fmt;
 use std::time::Duration;
 
 use base64::Engine;
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };

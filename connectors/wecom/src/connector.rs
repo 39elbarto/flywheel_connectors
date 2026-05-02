@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, EventData, EventEnvelope, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
@@ -1419,7 +1419,7 @@ mod tests {
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, OrderingPolicy, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, OrderingPolicy, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use serde_json::Value;
     use wiremock::{

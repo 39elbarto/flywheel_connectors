@@ -13,7 +13,7 @@
 
 use chrono::{Duration, Utc};
 use fcp_cloudflare::connector::CloudflareConnector;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, OperationId, RequestId, ZoneId,
 };

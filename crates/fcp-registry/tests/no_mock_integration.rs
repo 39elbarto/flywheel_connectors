@@ -6,7 +6,7 @@
 
 use base64::Engine;
 use fcp_cbor::MAX_CANONICAL_OBJECT_BYTES;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, DecisionReceiptPolicy, ObjectIdKey, Provenance, ZoneId, ZonePolicyObject,
     ZoneTransportPolicy,
 };

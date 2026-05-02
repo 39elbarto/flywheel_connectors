@@ -49,7 +49,7 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
 
-use fcp_core::{ObjectIdKey, StoredObject, ZoneId};
+use fcp_prelude::{ObjectIdKey, StoredObject, ZoneId};
 
 use crate::error::ObjectStoreError;
 
@@ -128,7 +128,7 @@ impl ObjectIdVerifier for KeyedObjectIdVerifier {
 mod tests {
     use super::*;
     use fcp_cbor::SchemaId;
-    use fcp_core::{ObjectHeader, ObjectId, Provenance, RetentionClass, StorageMeta};
+    use fcp_prelude::{ObjectHeader, ObjectId, Provenance, RetentionClass, StorageMeta};
 
     fn test_key() -> ObjectIdKey {
         ObjectIdKey::from_bytes([7u8; 32])

@@ -26,6 +26,7 @@ rand_chacha = "0.3"
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-protocol = { path = "../fcp-protocol" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-auth-schema = { path = "../fcp-auth-schema" }

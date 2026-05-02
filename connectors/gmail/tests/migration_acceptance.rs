@@ -8,7 +8,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use fcp_core::{CredentialId, FcpError};
+use fcp_prelude::{CredentialId, FcpError};
 use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use fcp_google_discovery::{
     DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,

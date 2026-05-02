@@ -7,7 +7,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 
-use fcp_core::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
+use fcp_prelude::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
 
 /// Capability usage format identifier.
 pub const CAPABILITY_USAGE_FORMAT: &str = "fcp-capability-usage";
@@ -496,7 +496,7 @@ pub fn recommend_capabilities(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityId, ConnectorId, OperationId, PrincipalId, ZoneId};
+    use fcp_prelude::{CapabilityId, ConnectorId, OperationId, PrincipalId, ZoneId};
     use rand::SeedableRng;
     use rand::seq::SliceRandom;
 

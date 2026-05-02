@@ -27,7 +27,7 @@ use xorf::Filter as _;
 
 use crate::admission::ObjectAdmissionClass;
 use crate::iblt::{Iblt, IbltDecodeResult};
-use fcp_core::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
+use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 
 // ─────────────────────────────────────────────────────────────────────────────

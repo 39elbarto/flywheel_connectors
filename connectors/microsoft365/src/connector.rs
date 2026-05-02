@@ -14,7 +14,7 @@ use base64::{
     Engine,
     engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD as BASE64_URL},
 };
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
@@ -4378,7 +4378,7 @@ fn build_operations() -> Vec<OperationInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;

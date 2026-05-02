@@ -32,7 +32,7 @@
 //!    surfaces to triage.
 
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::Engine;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,
@@ -3314,7 +3314,7 @@ impl Default for OpenAIConnector {
 mod tests {
     use super::*;
     use chrono::{Duration, SecondsFormat, Utc};
-    use fcp_core::CredentialId;
+    use fcp_prelude::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_testkit::LogCapture;

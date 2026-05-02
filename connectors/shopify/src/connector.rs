@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, CredentialId, EventCaps, FcpConnector, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
@@ -1568,7 +1568,7 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;

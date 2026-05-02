@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
     PrincipalId, RevocationRegistry, ZoneIdError,
 };

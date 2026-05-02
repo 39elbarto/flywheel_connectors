@@ -35,7 +35,7 @@
 //!   keywords for each variant
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectId, ObjectIdKey, ZoneId, ZoneKeyId};
+use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId, ZoneKeyId};
 use fcp_mesh::{
     ControlPlaneEnvelope, ControlPlaneHandler, DegradedTransportError, InMemoryControlPlaneHandler,
     RetentionClass,

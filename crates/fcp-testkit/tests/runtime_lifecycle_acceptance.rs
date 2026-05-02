@@ -19,7 +19,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
-use fcp_core::HealthState;
+use fcp_prelude::HealthState;
 use fcp_sdk::runtime::{
     HealthTracker, HealthTransition, InMemoryPollingCursor, InMemoryStreamingSession, PollResult,
     StreamingSession, SupervisorConfig,

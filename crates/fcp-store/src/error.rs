@@ -1,6 +1,6 @@
 //! Error types for FCP2 stores.
 
-use fcp_core::{ObjectId, ZoneId};
+use fcp_prelude::{ObjectId, ZoneId};
 use thiserror::Error;
 
 /// Errors for object store operations.

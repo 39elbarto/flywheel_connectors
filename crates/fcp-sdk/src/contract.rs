@@ -641,7 +641,7 @@ mod tests {
         SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, SubscribeResult,
         UnsubscribeRequest,
     };
-    use fcp_core::{CapabilityGrant, SafetyTier, ZoneId};
+    use fcp_prelude::{CapabilityGrant, SafetyTier, ZoneId};
 
     #[derive(Debug)]
     struct ContractTestConnector {

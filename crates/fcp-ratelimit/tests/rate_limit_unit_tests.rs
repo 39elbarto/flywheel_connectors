@@ -9,7 +9,7 @@
 use std::time::Duration;
 
 use fcp_async_core::time::sleep;
-use fcp_core::{BackpressureLevel, LimitType, ThrottleViolation, ThrottleViolationInput};
+use fcp_prelude::{BackpressureLevel, LimitType, ThrottleViolation, ThrottleViolationInput};
 use fcp_ratelimit::{
     BackpressureThresholds, ConcurrencyLimiter, RateLimitConfig, RateLimiter, ThrottleContext,
     TokenBucket, config_from_core, enforce,

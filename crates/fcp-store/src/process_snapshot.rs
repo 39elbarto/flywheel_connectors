@@ -6,7 +6,7 @@
 //! the snapshot chunks remain regular content-addressed mesh objects.
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
-use fcp_core::{
+use fcp_prelude::{
     ObjectHeader, ObjectId, ObjectIdKey, Provenance, RetentionClass, StorageMeta, StoredObject,
     ZoneId,
 };

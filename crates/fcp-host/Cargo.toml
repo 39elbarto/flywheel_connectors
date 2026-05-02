@@ -14,6 +14,8 @@ unsafe_code = "deny"
 [dependencies]
 # Core FCP types
 fcp-core = { path = "../fcp-core" }
+# Canonical type-import surface (orw5s migration target).
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-evidence = { path = "../fcp-evidence" }
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-policy = { path = "../fcp-policy" }

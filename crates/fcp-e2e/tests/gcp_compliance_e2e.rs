@@ -13,7 +13,7 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest, InstanceId, InvokeRequest,
     InvokeStatus, OperationId, RequestId, ZoneId,
 };

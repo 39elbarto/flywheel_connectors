@@ -29,7 +29,7 @@
 //! 7. **`ZoneRegistry`** — register/get_zone round-trip; absent tool
 //!    returns None.
 
-use fcp_core::ZoneId;
+use fcp_prelude::ZoneId;
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOptions,
     BatchStatus, ExecutionPlan, ExecutionTier, OperationResultStatus, ZoneRegistry,

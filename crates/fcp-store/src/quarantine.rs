@@ -6,7 +6,7 @@
 use std::collections::{BTreeSet, HashMap};
 
 use bytes::Bytes;
-use fcp_core::{ObjectId, ZoneId};
+use fcp_prelude::{ObjectId, ZoneId};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 

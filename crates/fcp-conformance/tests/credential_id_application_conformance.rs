@@ -23,7 +23,7 @@
 //! 7. **HttpHeader.prefix is optional and omitted when None.**
 //! 8. **Each variant round-trips cleanly via JSON.**
 
-use fcp_core::{CredentialApplication, CredentialId};
+use fcp_prelude::{CredentialApplication, CredentialId};
 use uuid::Uuid;
 
 #[test]

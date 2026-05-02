@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fcp_core::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier, ZoneId};
+use fcp_prelude::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier, ZoneId};
 use fcp_host::ConnectorArchetype;
 use fcp_kernel::{
     AgentHint, ApprovalMode, AuthCaps, ConnectorId, EventCaps, FcpError, HandshakeRequest,
@@ -808,7 +808,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, ZoneId};
+    use fcp_prelude::{CapabilityToken, ZoneId};
     use fcp_kernel::RequestId;
 
     fn test_profile(require_handshake: bool) -> TestConnectorProfile {

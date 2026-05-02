@@ -1,7 +1,7 @@
 //! Integration tests for the Synology Chat connector.
 
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };

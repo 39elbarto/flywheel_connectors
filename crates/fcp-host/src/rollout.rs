@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use fcp_core::RolloutPolicy;
+use fcp_prelude::RolloutPolicy;
 use fcp_kernel::{
     CanaryPolicy, ConnectorHealth, ConnectorId, CrashLoopDetector, LifecycleError,
     LifecycleManager, LifecycleRecord, LifecycleState, SelfCheckReport, SelfCheckStatus,
@@ -847,7 +847,7 @@ mod tests {
 
     use async_trait::async_trait;
     use fcp_async_core::sync::RwLock;
-    use fcp_core::{CapabilityId, RiskLevel, SafetyTier};
+    use fcp_prelude::{CapabilityId, RiskLevel, SafetyTier};
     use fcp_kernel::{
         AgentHint, ApprovalMode, ConnectorId, IdempotencyClass, Introspection, LifecycleStatus,
         OperationId, OperationInfo, RateLimitDeclarations,

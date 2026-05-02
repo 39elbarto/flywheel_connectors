@@ -379,7 +379,7 @@ pub fn outcome_digest(outcome: &GateOutcome) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use fcp_core::{
+    use fcp_prelude::{
         AttestationMaterial, AttestationMetadata, AttestationPredicateType, SBOM_SIGNED_FIELDS,
         SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
     };

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use fcp_raptorq::{
     DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder, RaptorQSymbolFrame,
 };

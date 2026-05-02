@@ -20,7 +20,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use fcp_core::{
+use fcp_prelude::{
     ObjectId, TailscaleNodeId, ZoneId, ZoneIdHash, ZoneKey,
     ZoneKeyAlgorithm as CoreZoneKeyAlgorithm, ZoneKeyId,
 };

@@ -28,7 +28,7 @@
 //!    `DecisionReason::SelectedAsBest { rank: 1 }` reason on every
 //!    invocation.
 
-use fcp_core::{ConnectorId, ObjectId};
+use fcp_prelude::{ConnectorId, ObjectId};
 use fcp_mesh::{
     AvailabilityProfile, DecisionReason, DeviceProfile, ExecutionPlanner, HeldLease,
     InstalledConnector, LatencyClass, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,

@@ -12,7 +12,7 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_core::{CapabilityConstraints, CapabilityToken, FcpError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use serde_json::json;
 use wiremock::{

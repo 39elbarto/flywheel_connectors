@@ -17,7 +17,7 @@
 //! uses snake_case wire form (`gateway` / `per_key` / `unordered`).
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     ConnectorId, CorrelationId, EventData, EventEnvelope, InstanceId, OrderingPolicy, Principal,
     TrustLevel, ZoneId,
 };

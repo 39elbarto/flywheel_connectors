@@ -14,7 +14,7 @@ use std::path::{Component, Path};
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use fcp_core::{
+use fcp_prelude::{
     ApprovalMode as CoreApprovalMode, CapabilityId, ConnectorId, IdValidationError,
     IdempotencyClass, ObjectId, RateLimitDeclarationError, RateLimitDeclarations, RateLimitPool,
     RevocationFreshnessClass, RiskLevel, SafetyTier, ZoneId, ZoneIdError, validate_canonical_id,
@@ -1865,7 +1865,7 @@ impl RateLimitsSection {
     /// Convert to the canonical `RateLimitDeclarations` type.
     #[must_use]
     pub fn to_declarations(&self) -> RateLimitDeclarations {
-        use fcp_core::{RateLimitConfig, RateLimitEnforcement, RateLimitScope, RateLimitUnit};
+        use fcp_prelude::{RateLimitConfig, RateLimitEnforcement, RateLimitScope, RateLimitUnit};
         use std::time::Duration;
 
         let limits =
@@ -4569,7 +4569,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_unit_mapping() {
-        use fcp_core::RateLimitUnit;
+        use fcp_prelude::RateLimitUnit;
         let make_section = |unit: &str| RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -4611,7 +4611,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_enforcement_mapping() {
-        use fcp_core::RateLimitEnforcement;
+        use fcp_prelude::RateLimitEnforcement;
         let make_section = |enforcement: &str| RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -4641,7 +4641,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_scope_mapping() {
-        use fcp_core::RateLimitScope;
+        use fcp_prelude::RateLimitScope;
         let make_section = |scope: &str| RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6482,7 +6482,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_default_unit_is_requests() {
-        use fcp_core::RateLimitUnit;
+        use fcp_prelude::RateLimitUnit;
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6504,7 +6504,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_default_enforcement_is_hard() {
-        use fcp_core::RateLimitEnforcement;
+        use fcp_prelude::RateLimitEnforcement;
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),
@@ -6526,7 +6526,7 @@ deny_ptrace = true
 
     #[test]
     fn rate_limits_section_default_scope_is_instance() {
-        use fcp_core::RateLimitScope;
+        use fcp_prelude::RateLimitScope;
         let section = RateLimitsSection {
             pools: vec![RateLimitPoolSection {
                 id: "test".into(),

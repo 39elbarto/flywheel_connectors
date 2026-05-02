@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, ProvisioningRecipe, ProvisioningStep,
     ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport, StepId,

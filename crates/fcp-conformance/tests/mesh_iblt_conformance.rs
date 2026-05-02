@@ -8,7 +8,7 @@
 //! (capacity-exceeded returns a partial decode rather than silently
 //! truncating).
 
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use fcp_mesh::iblt::{IBLT_HASH_COUNT, Iblt, IbltError};
 
 fn obj(label: &str) -> ObjectId {

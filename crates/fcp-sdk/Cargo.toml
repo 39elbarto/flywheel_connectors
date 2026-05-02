@@ -19,6 +19,7 @@ hmac.workspace = true
 sha2.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-core = { path = "../fcp-core" }
+fcp-prelude = { path = "../fcp-prelude" }
 fcp-evidence = { path = "../fcp-evidence" }
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-cbor = { path = "../fcp-cbor", optional = true }

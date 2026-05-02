@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
@@ -1186,7 +1186,7 @@ mod tests {
     use super::*;
 
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityConstraints, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 

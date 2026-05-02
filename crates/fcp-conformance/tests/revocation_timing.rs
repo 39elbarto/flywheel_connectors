@@ -8,7 +8,7 @@
 //! - Priority gossip (C1.5): push latency bounds
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     FreshnessPolicy, ObjectHeader, ObjectId, Provenance, RevocationDecision,
     RevocationFreshnessClass, RevocationObject, RevocationRegistry, RevocationScope,
     RevocationSlaChecker, RevocationSlaStatus, TailscaleNodeId, ZoneId,

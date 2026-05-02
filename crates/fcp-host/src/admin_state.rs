@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
-use fcp_core::{
+use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
     CredentialId, ObjectPlacementPolicy, OperationId,
 };
@@ -5106,7 +5106,7 @@ const fn is_false(value: &bool) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use fcp_core::SafetyTier;
+    use fcp_prelude::SafetyTier;
     use fcp_crypto::cose::CoseToken;
     use fcp_kernel::{CanaryPolicy, ConnectorHealth, HealthMetrics};
 

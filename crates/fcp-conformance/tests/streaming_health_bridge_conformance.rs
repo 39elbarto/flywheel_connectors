@@ -22,7 +22,7 @@
 //!    optional time fields). Drift here breaks every existing
 //!    consumer of streaming-health JSON.
 
-use fcp_core::ConnectorHealth;
+use fcp_prelude::ConnectorHealth;
 use fcp_streaming::{
     StreamHealthConfig, StreamHealthSnapshot, StreamHealthState, StreamHealthTracker,
 };

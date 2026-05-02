@@ -40,12 +40,12 @@ use serde::{Deserialize, Serialize};
 
 #[cfg(feature = "cursor-store-object-store")]
 use fcp_cbor::CanonicalSerializer;
-use fcp_core::{
+use fcp_prelude::{
     ConnectorId, ConnectorStateObject, CursorState, HealthSnapshot, HealthState, InstanceId,
     ObjectHeader, ObjectId, Signature, ZoneId,
 };
 #[cfg(feature = "cursor-store-object-store")]
-use fcp_core::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
+use fcp_prelude::{ObjectIdKey, RetentionClass, StorageMeta, StoredObject};
 
 /// Produce a pseudo-random jitter factor in [0.0, 1.0) using stdlib hashing.
 ///

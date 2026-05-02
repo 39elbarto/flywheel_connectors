@@ -18,7 +18,7 @@
 
 use std::time::Duration;
 
-use fcp_core::{FcpError, UsageMetricKind};
+use fcp_prelude::{FcpError, UsageMetricKind};
 
 #[test]
 fn token_expired_code_is_2002() {

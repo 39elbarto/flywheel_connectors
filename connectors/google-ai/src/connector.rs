@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
     HandshakeRequest, HandshakeResponse, IdempotencyClass, Introspection, OperationId,

@@ -19,7 +19,7 @@
 //! ACCEPT semantics and the out-of-window REJECT semantics.
 
 use chrono::{Duration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CAPABILITY_TOKEN_CLOCK_SKEW_SECS, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };

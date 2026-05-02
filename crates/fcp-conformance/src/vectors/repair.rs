@@ -19,7 +19,7 @@
 mod tests {
     use std::time::Duration;
 
-    use fcp_core::ObjectPlacementPolicy;
+    use fcp_prelude::ObjectPlacementPolicy;
     use fcp_raptorq::{RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
     use fcp_store::{
         GcConfig, GcDecisionAction, GcReasonCode, RepairControllerConfig, RepairReasonCode,

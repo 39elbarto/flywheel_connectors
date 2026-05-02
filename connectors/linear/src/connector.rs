@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 use chrono::Utc;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
@@ -1433,7 +1433,7 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
+    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
@@ -1887,7 +1887,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_not_configured() {
-        use fcp_core::SelfCheckStatus;
+        use fcp_prelude::SelfCheckStatus;
         let connector = LinearConnector::new();
         let result = connector.handle_self_check().await.unwrap();
         let report: SelfCheckReport = serde_json::from_value(result).unwrap();
@@ -1896,7 +1896,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_credential_id_mode() {
-        use fcp_core::SelfCheckStatus;
+        use fcp_prelude::SelfCheckStatus;
         let mut connector = LinearConnector::new();
         connector
             .handle_configure(json!({
@@ -1916,7 +1916,7 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_self_check_unreachable_api() {
-        use fcp_core::SelfCheckStatus;
+        use fcp_prelude::SelfCheckStatus;
         let mut connector = LinearConnector::new();
         connector
             .handle_configure(json!({

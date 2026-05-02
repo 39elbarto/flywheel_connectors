@@ -24,7 +24,7 @@
 //!    - `Error { reason }` → `Unavailable { reason }`
 //! 5. **JSON serde** uses the documented internal-tag format.
 
-use fcp_core::{ConnectorHealth, HealthState};
+use fcp_prelude::{ConnectorHealth, HealthState};
 
 #[test]
 fn health_state_as_str_matches_snake_case_for_each_variant() {

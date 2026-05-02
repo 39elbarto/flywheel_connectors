@@ -3,7 +3,7 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -650,7 +650,7 @@ impl FcpConnector for OutlookConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpConnector;
+    use fcp_prelude::FcpConnector;
 
     #[test]
     fn connector_id_is_correct() {

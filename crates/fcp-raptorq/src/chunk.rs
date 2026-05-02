@@ -6,7 +6,7 @@
 // Allow truncation casts - object sizes are bounded and these are capacity hints
 #![allow(clippy::cast_possible_truncation)]
 
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::ChunkError;

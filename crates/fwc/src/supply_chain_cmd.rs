@@ -7,7 +7,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Args, Subcommand};
-use fcp_core::{
+use fcp_prelude::{
     AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorTarget,
     SUPPLY_CHAIN_ATTESTATION_FORMAT, SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION,
     SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SupplyChainSignature, TrustRootBinding,

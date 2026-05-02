@@ -23,6 +23,7 @@ workspace = true
 anyhow.workspace = true
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-core = { path = "../../crates/fcp-core" }
+fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-imessage = { path = "../imessage" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 reqwest = { workspace = true, features = ["json"] }

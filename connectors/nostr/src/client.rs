@@ -3,7 +3,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_streaming::{StreamError, WsClient, WsConnection, WsMessage};
 use secp256k1::{Keypair, Message, Secp256k1, SecretKey, XOnlyPublicKey, schnorr::Signature};

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use chrono::{DateTime, Utc};
-use fcp_core::{TaintFlag, TaintFlags};
+use fcp_prelude::{TaintFlag, TaintFlags};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -266,7 +266,7 @@ impl Default for EventSubscription {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use fcp_core::TaintFlag;
+    use fcp_prelude::TaintFlag;
 
     fn test_event() -> WebhookEvent {
         WebhookEvent::new("evt_123", "push", "github").with_payload(serde_json::json!({

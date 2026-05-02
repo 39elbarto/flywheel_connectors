@@ -19,7 +19,7 @@
 //! `ObjectIdKey::Debug` MUST redact the key bytes — it's a secret.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{ObjectId, ObjectIdKey, ObjectIdParseError, ZoneId};
+use fcp_prelude::{ObjectId, ObjectIdKey, ObjectIdParseError, ZoneId};
 use semver::Version;
 
 fn key_a() -> ObjectIdKey {

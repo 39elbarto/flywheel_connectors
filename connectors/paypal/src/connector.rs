@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, FixedOffset, TimeDelta};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
@@ -1126,7 +1126,7 @@ impl PayPalConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::{CapabilityToken, RequestId, ZoneId};
+    use fcp_prelude::{CapabilityToken, RequestId, ZoneId};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},

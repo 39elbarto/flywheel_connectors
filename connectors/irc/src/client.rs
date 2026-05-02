@@ -5,7 +5,7 @@ use fcp_async_core::{
     net::TcpStream,
     tls::TlsConnectorBuilder,
 };
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 
 use crate::error::IrcError;
 use crate::types::{IrcConfig, validate_irc_atom, validate_irc_value};

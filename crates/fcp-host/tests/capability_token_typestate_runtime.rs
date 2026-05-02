@@ -136,9 +136,7 @@ fn bound_only_executor_accepts_promoted_token() {
     let unbound = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work())
         .verify_unbound(token, &cap, &op, &[])
         .expect("verify unbound");
-    let bound = unbound
-        .promote_with_instance(&instance)
-        .expect("promote");
+    let bound = unbound.promote_with_instance(&instance).expect("promote");
 
     assert_eq!(
         bound_only_executor(&bound),
@@ -205,10 +203,7 @@ fn unbound_to_bound_roundtrip_claims_match_direct_bound_verify() {
 
     // Capability + zone parity (already covered in the existing test,
     // but pin again to anchor the property).
-    assert_eq!(
-        claims_a.get_capability_id(),
-        claims_b.get_capability_id()
-    );
+    assert_eq!(claims_a.get_capability_id(), claims_b.get_capability_id());
     assert_eq!(claims_a.get_zone_id(), claims_b.get_zone_id());
 }
 

@@ -11,7 +11,7 @@
 #[cfg(test)]
 mod tests {
     use fcp_cbor::SchemaId;
-    use fcp_core::{
+    use fcp_prelude::{
         AuditEvent, ConnectorId, CorrelationId, Decision, DecisionReceipt, EpochId, IntentStatus,
         NodeId, NodeSignature, ObjectHeader, ObjectId, OperationId, OperationIntent,
         OperationReceipt, PrincipalId, Provenance, SignatureSet, TailscaleNodeId, TraceContext,

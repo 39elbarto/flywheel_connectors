@@ -13,8 +13,8 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
-use fcp_core::InvokeStatus;
-use fcp_core::{
+use fcp_prelude::InvokeStatus;
+use fcp_prelude::{
     CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
     InstanceId, Introspection, InvokeRequest, InvokeResponse, ObjectId, OperationId, RequestId,

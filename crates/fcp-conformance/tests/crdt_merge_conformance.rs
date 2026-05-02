@@ -5,7 +5,7 @@
 //! assertions for associativity, commutativity, idempotence, and observed-remove
 //! tombstone behavior.
 
-use fcp_core::{CrdtActorId, OrSet, OrSetTag};
+use fcp_prelude::{CrdtActorId, OrSet, OrSetTag};
 
 const ALL_ORDERS: [[usize; 3]; 6] = [
     [0, 1, 2],

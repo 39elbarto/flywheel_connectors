@@ -19,7 +19,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use fcp_core::{ObjectId, ObjectPlacementPolicy, RetentionClass, StoredObject, ZoneId};
+use fcp_prelude::{ObjectId, ObjectPlacementPolicy, RetentionClass, StoredObject, ZoneId};
 use parking_lot::{Mutex, RwLock};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -1438,7 +1438,7 @@ mod tests {
     use super::*;
 
     use crate::symbol_store::ObjectTransmissionInfo;
-    use fcp_core::{ObjectHeader, Provenance, StorageMeta};
+    use fcp_prelude::{ObjectHeader, Provenance, StorageMeta};
     use tempfile::TempDir;
 
     fn test_zone() -> ZoneId {
@@ -1673,7 +1673,7 @@ mod tests {
         use std::io::Write;
 
         use crate::object_id_verifier::KeyedObjectIdVerifier;
-        use fcp_core::ObjectIdKey;
+        use fcp_prelude::ObjectIdKey;
 
         let temp_dir = TempDir::new().expect("temp dir");
         let mut config = DurableObjectStoreConfig::new(temp_dir.path());

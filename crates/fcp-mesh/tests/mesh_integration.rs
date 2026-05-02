@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
 use chrono::{SecondsFormat, Utc};
-use fcp_core::{
+use fcp_prelude::{
     ConnectorId, DecisionReasonCode, EpochId, ObjectId, TailscaleNodeId, ZoneId,
     ZoneTransportPolicy,
 };
@@ -207,7 +207,7 @@ mod meshnode {
 
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
-    use fcp_core::{
+    use fcp_prelude::{
         CheckpointTransferEncoding, ComputationCheckpoint, ComputationMigrationError, Lease,
         LeaseHandoff, LeaseParams, LeasePurpose as CoreLeasePurpose, MigratableComputation,
         MigratableComputationState, MigrationCapabilityContext, ObjectHeader, Provenance,
@@ -5500,7 +5500,7 @@ mod real_component_integration {
 
     use bytes::Bytes;
     use fcp_cbor::SchemaId;
-    use fcp_core::{
+    use fcp_prelude::{
         Decision, DecisionReasonCode, EpochId, NodeSignature, ObjectHeader, Provenance, ZoneKeyId,
     };
     use fcp_crypto::Ed25519SigningKey;

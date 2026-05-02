@@ -21,7 +21,7 @@
 //! immediately.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use fcp_core::{
+use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };

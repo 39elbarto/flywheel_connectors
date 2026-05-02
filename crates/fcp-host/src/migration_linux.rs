@@ -12,7 +12,7 @@ use std::process::{Command, Output};
 use std::time::Instant;
 
 use chrono::{DateTime, Utc};
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 

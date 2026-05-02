@@ -156,7 +156,7 @@ mod tests {
 #[cfg(test)]
 mod connector_unit_tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
     use serde_json::json;
 
     fn make_connector() -> TwitterConnector {
@@ -596,7 +596,7 @@ mod connector_unit_tests {
 
     #[fcp_async_core::runtime::test]
     async fn simulate_denies_when_not_configured() {
-        use fcp_core::{CapabilityToken, ConnectorId, SimulateRequest, ZoneId};
+        use fcp_prelude::{CapabilityToken, ConnectorId, SimulateRequest, ZoneId};
 
         let connector = make_connector();
         let req = SimulateRequest::new(

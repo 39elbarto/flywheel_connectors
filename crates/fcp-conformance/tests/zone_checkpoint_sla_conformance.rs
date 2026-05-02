@@ -38,7 +38,7 @@
 //! `default_revocation_sla()` shows up here.
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     EpochId, ObjectHeader, ObjectId, Provenance, RevocationFreshnessClass, RevocationSlaChecker,
     RevocationSlaStatus, SignatureSet, ZoneCheckpoint, ZoneId,
 };

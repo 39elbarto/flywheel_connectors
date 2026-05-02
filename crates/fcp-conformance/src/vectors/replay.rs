@@ -51,7 +51,7 @@ mod tests {
     #[test]
     fn idempotency_class_variants_exhaustive() {
         // FCP defines exactly three idempotency classes.
-        use fcp_core::IdempotencyClass;
+        use fcp_prelude::IdempotencyClass;
         let classes = [
             IdempotencyClass::None,
             IdempotencyClass::BestEffort,
@@ -65,7 +65,7 @@ mod tests {
         // Normative: operations with Strict idempotency class MUST have
         // an idempotency_key. Operations with SafetyTier::Risky or higher
         // MUST use Strict idempotency.
-        use fcp_core::SafetyTier;
+        use fcp_prelude::SafetyTier;
         let risky_tiers = [
             SafetyTier::Risky,
             SafetyTier::Dangerous,
@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn intent_status_state_machine() {
         // IntentStatus state machine: Pending → InProgress → Completed|Failed
-        use fcp_core::IntentStatus;
+        use fcp_prelude::IntentStatus;
         let states = [
             IntentStatus::Pending,
             IntentStatus::InProgress,
@@ -110,7 +110,7 @@ mod tests {
 
     #[test]
     fn intent_status_serialization_roundtrip() {
-        use fcp_core::IntentStatus;
+        use fcp_prelude::IntentStatus;
         for status in [
             IntentStatus::Pending,
             IntentStatus::InProgress,

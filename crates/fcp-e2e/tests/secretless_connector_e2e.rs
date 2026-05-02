@@ -53,7 +53,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use fcp_core::CredentialId;
+use fcp_prelude::CredentialId;
 use fcp_testkit::MockApiServer;
 use zeroize::Zeroizing;
 

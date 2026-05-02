@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use fcp_core::{ObjectId, ZoneId};
+use fcp_prelude::{ObjectId, ZoneId};
 use fcp_raptorq::ObjectTransmissionInformation;
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};

@@ -9,7 +9,7 @@
 //! passes a missing-capability request through to dispatch, that is a
 //! default-deny regression.
 
-use fcp_core::ZoneId;
+use fcp_prelude::ZoneId;
 use fcp_host::{
     EnforcementContext, EnforcementContextBuilder, EnforcementDecision, EnforcementPipeline,
     PipelineOutcome,

@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
@@ -1969,8 +1969,8 @@ fn build_raw_message_from_fields(input: &serde_json::Value) -> FcpResult<String>
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::CapabilityConstraints;
-    use fcp_core::CredentialId;
+    use fcp_prelude::CapabilityConstraints;
+    use fcp_prelude::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::{

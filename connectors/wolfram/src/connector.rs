@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
@@ -623,7 +623,7 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use ciborium::into_writer;
-    use fcp_core::{CapabilityConstraints, InstanceId, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, InstanceId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use wiremock::matchers::{method, path};

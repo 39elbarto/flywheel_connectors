@@ -16,7 +16,7 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-use fcp_core::SimulateResponse;
+use fcp_prelude::SimulateResponse;
 use fcp_monday::connector::MondayConnector;
 
 /// Helper: GraphQL response wrapper for Monday.com API.

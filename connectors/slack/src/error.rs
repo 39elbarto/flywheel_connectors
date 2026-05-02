@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use fcp_async_core::AsyncError;
 use fcp_async_core::http::HttpClientError;
-use fcp_core::FcpError;
+use fcp_prelude::FcpError;
 use thiserror::Error;
 
 /// Slack-specific errors.
@@ -240,7 +240,7 @@ pub type SlackResult<T> = Result<T, SlackError>;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_core::FcpError;
+    use fcp_prelude::FcpError;
 
     #[test]
     fn test_not_authed_maps_to_unauthorized() {

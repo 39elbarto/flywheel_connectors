@@ -1,6 +1,6 @@
 use chrono::{Duration, Utc};
 use fcp_arxiv::connector::ArxivConnector;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
     InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,

@@ -226,7 +226,7 @@ fn test_suite_negotiation() -> Result<(), String> {
 /// that had no relationship to the on-the-wire CBOR-encoded retry
 /// envelope production uses.
 fn test_hello_retry_cookie() -> Result<(), String> {
-    use fcp_core::TailscaleNodeId;
+    use fcp_prelude::TailscaleNodeId;
     use fcp_protocol::session::{MeshSessionHelloRetry, SessionCookie, current_timestamp};
 
     let cookie_bytes = [0xA5u8; fcp_protocol::session::SESSION_COOKIE_SIZE];
@@ -417,7 +417,7 @@ fn test_session_id_binding() -> Result<(), String> {
 /// This rewrite asserts that production behavior, not the local
 /// over-strict approximation.
 fn test_nonce_freshness() -> Result<(), String> {
-    use fcp_core::TailscaleNodeId;
+    use fcp_prelude::TailscaleNodeId;
     use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
     use fcp_protocol::session::{
         HelloReplayWindow, MeshSessionHello, SessionCryptoSuite, SessionNonce, current_timestamp,

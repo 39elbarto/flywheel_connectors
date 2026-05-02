@@ -35,7 +35,7 @@
 //!    depend on "invalid zone id" / "invalid connector id" /
 //!    "invalid operation id" prefixes.
 
-use fcp_core::{ConnectorId, OperationId};
+use fcp_prelude::{ConnectorId, OperationId};
 use fcp_host::{AllowedConnector, AllowedOperation, EnforcementConfig, EnforcementConfigError};
 
 // ─── EnforcementConfig::default ────────────────────────────────────

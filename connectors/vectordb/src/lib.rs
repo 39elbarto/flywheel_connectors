@@ -32,7 +32,7 @@ pub mod error;
 use std::sync::Arc;
 
 use chrono::Utc;
-use fcp_core::{
+use fcp_prelude::{
     BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
@@ -1271,7 +1271,7 @@ fn vectordb_operations() -> Vec<OperationInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
-    use fcp_core::{
+    use fcp_prelude::{
         CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass, InstanceId, ZoneId,
     };
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
@@ -3617,7 +3617,7 @@ mod tests {
 
     #[test]
     fn test_fcp_error_categories() {
-        use fcp_core::ErrorCategory;
+        use fcp_prelude::ErrorCategory;
 
         assert_eq!(FcpError::NotConfigured.category(), ErrorCategory::Connector);
         assert_eq!(FcpError::NotHandshaken.category(), ErrorCategory::Connector);

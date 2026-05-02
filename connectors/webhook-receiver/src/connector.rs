@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::DateTime;
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
     OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };

@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use fcp_core::ObjectId;
+use fcp_prelude::ObjectId;
 use serde::{Deserialize, Serialize};
 
 /// Symbol distribution across nodes.

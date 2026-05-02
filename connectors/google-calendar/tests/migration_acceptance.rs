@@ -7,7 +7,7 @@
 
 #![allow(clippy::too_many_lines)]
 
-use fcp_core::{CredentialId, FcpError};
+use fcp_prelude::{CredentialId, FcpError};
 use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use serde_json::json;
 

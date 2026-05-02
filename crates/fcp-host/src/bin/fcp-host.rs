@@ -34,14 +34,14 @@ use fcp_async_core::net::UnixListener;
 use fcp_async_core::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use fcp_async_core::sync::{Mutex, RwLock};
 use fcp_async_core::task::{self, JoinHandle};
-use fcp_core::{
+use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
     ObjectId, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
     TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
     simulate_policy_decision,
 };
 #[cfg(test)]
-use fcp_core::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
 use fcp_crypto::{
     canonicalize::to_deterministic_cbor,
     cose::fcp2_claims,

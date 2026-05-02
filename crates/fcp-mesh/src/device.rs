@@ -30,8 +30,8 @@
 //! ```
 
 #[cfg(test)]
-use fcp_core::CapabilityId;
-use fcp_core::{CapabilityGrant, ConnectorId, ObjectId};
+use fcp_prelude::CapabilityId;
+use fcp_prelude::{CapabilityGrant, ConnectorId, ObjectId};
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
 

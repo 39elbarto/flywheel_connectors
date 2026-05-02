@@ -1,6 +1,6 @@
 //! Nostr connector types, configuration, and input-parsing helpers.
 
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use fcp_core::{FcpError, FcpResult};
+use fcp_prelude::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 
 // ── Port defaults ──

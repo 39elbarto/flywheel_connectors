@@ -10,7 +10,7 @@ use std::{
 };
 
 use fcp_async_core::channel::{broadcast, watch};
-use fcp_core::{
+use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo,
@@ -2423,7 +2423,7 @@ fn discord_thread_info(payload: &serde_json::Value) -> Option<ThreadInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_core::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
+    use fcp_prelude::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
     use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use uuid::Uuid;

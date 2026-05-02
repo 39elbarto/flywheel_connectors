@@ -434,7 +434,7 @@ mod tests {
     }
 
     fn test_response(result: Option<serde_json::Value>) -> InvokeResponse {
-        use fcp_core::RequestId;
+        use fcp_prelude::RequestId;
         let mut resp = InvokeResponse::ok(RequestId::new("test-req"), serde_json::json!(null));
         resp.result = result;
         resp

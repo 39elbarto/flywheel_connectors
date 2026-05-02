@@ -21,7 +21,7 @@
 //! (zone-and-capability orthogonality).
 
 use fcp_cbor::SchemaId;
-use fcp_core::{
+use fcp_prelude::{
     CapabilityId, ConnectorId, Decision, DecisionReasonCode, NodeId, NodeSignature, ObjectHeader,
     ObjectId, OperationId, PolicyDecisionInput, PolicyEngine, PolicyPattern, PrincipalId,
     Provenance, ProvenanceRecord, SafetyTier, TransportMode, ZoneId, ZonePolicyObject,

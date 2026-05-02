@@ -43,8 +43,10 @@ that crosses the boundary into the subprocess sandbox) requires
 `CapabilityToken<ConstraintsEnforced>` in its signature. A
 `CapabilityToken<BoundVerified>` does **not** satisfy that signature:
 the only legal way to obtain `ConstraintsEnforced` is to call
-`CapabilityConstraintEnforcer::evaluate(constraints, request)` and
-short-circuit on `ConstraintEvaluation::Deny(_)`.
+`promote_with_constraints` with an evaluator that has returned allow from
+`CapabilityConstraintEnforcer::evaluate(constraints, request)`. The concrete
+`fcp_policy::DefaultConstraintEnforcer` implements the `fcp-core` bridge trait
+used by the promotion API.
 
 A future refactor that silently widens the dispatch surface to accept
 `BoundVerified` tokens — bypassing constraint enforcement — fails at
@@ -68,11 +70,14 @@ Promotion shape:
 
 ```rust
 impl CapabilityToken<BoundVerified> {
-    pub fn promote_with_constraints<E: CapabilityConstraintEnforcer>(
+    pub fn promote_with_constraints<E, Request>(
         self,
         enforcer: &E,
-        request: &RequestDescriptor,
-    ) -> Result<CapabilityToken<ConstraintsEnforced>, ConstraintDenialReason>;
+        constraints: &CapabilityConstraints,
+        request: &Request,
+    ) -> Result<CapabilityToken<ConstraintsEnforced>, E::Denial>
+    where
+        E: CapabilityConstraintEvaluator<Request>;
 }
 ```
 
@@ -161,16 +166,15 @@ impl CapabilityToken<BoundVerified> {
     /// token alongside the enforced one.
     ///
     /// # Errors
-    /// Returns the `ConstraintDenialReason` from the enforcer if any
-    /// constraint check denies the request.
-    pub fn promote_with_constraints<E>(
+    /// Returns the evaluator denial if any constraint check denies the request.
+    pub fn promote_with_constraints<E, Request>(
         self,
         enforcer: &E,
         constraints: &CapabilityConstraints,
-        request: &RequestDescriptor,
-    ) -> Result<CapabilityToken<ConstraintsEnforced>, ConstraintDenialReason>
+        request: &Request,
+    ) -> Result<CapabilityToken<ConstraintsEnforced>, E::Denial>
     where
-        E: fcp_policy::CapabilityConstraintEnforcer;
+        E: fcp_core::CapabilityConstraintEvaluator<Request>;
 }
 ```
 
@@ -295,10 +299,7 @@ contract is:
 
 ```rust
 use fcp_core::{BoundVerified, CapabilityToken, ConstraintsEnforced, InvokeRequest};
-use fcp_policy::{
-    CapabilityConstraintEnforcer, ConstraintDenialReason, DefaultConstraintEnforcer,
-    RequestDescriptor,
-};
+use fcp_policy::{DefaultConstraintEnforcer, RequestDescriptor};
 
 fn enforce_and_dispatch(
     token: CapabilityToken<BoundVerified>,

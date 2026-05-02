@@ -26,7 +26,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use fcp_core::{CapabilityConstraints, ObjectId, OperationId, PrincipalId};
+use fcp_core::{
+    CapabilityConstraintEvaluator, CapabilityConstraints, ObjectId, OperationId, PrincipalId,
+};
 
 /// Description of a request being checked against [`CapabilityConstraints`].
 ///
@@ -484,6 +486,21 @@ fn pattern_matches(pattern: &str, observed: &str) -> bool {
     }
 }
 
+impl CapabilityConstraintEvaluator<RequestDescriptor> for DefaultConstraintEnforcer {
+    type Denial = ConstraintDenialReason;
+
+    fn evaluate_constraints(
+        &self,
+        constraints: &CapabilityConstraints,
+        request: &RequestDescriptor,
+    ) -> Result<(), Self::Denial> {
+        match self.evaluate(constraints, request) {
+            ConstraintEvaluation::Allow => Ok(()),
+            ConstraintEvaluation::Deny(reason) => Err(reason),
+        }
+    }
+}
+
 fn log_evaluation(
     constraints: &CapabilityConstraints,
     request: &RequestDescriptor,
@@ -559,6 +576,29 @@ mod tests {
             kind.observed_value(),
             "observed_calls=1,observed_bytes=512,max_calls=Some(0),max_bytes=Some(256)"
         );
+    }
+
+    #[test]
+    fn default_enforcer_implements_typestate_promotion_evaluator() {
+        let enforcer = DefaultConstraintEnforcer::new();
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["/v1/messages".to_string()],
+            ..CapabilityConstraints::default()
+        };
+
+        assert!(
+            enforcer
+                .evaluate_constraints(&constraints, &descriptor("/v1/messages"))
+                .is_ok()
+        );
+
+        let denial = enforcer
+            .evaluate_constraints(
+                &CapabilityConstraints::default(),
+                &descriptor("/v1/messages"),
+            )
+            .unwrap_err();
+        assert_eq!(denial.kind, ConstraintDenialKind::EmptyConstraintSet);
     }
 
     // ── evaluate(): default-deny on empty constraint set ──────────────────

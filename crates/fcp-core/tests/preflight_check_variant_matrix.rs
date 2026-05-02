@@ -57,6 +57,10 @@ fn preflight_check_display_and_serde_tags_are_pinned() -> TestResult {
         ),
         (EnforcementCheckId::TaintApproval, "taint_approval"),
         (EnforcementCheckId::PolicyCeiling, "policy_ceiling"),
+        (
+            EnforcementCheckId::CapabilityConstraints,
+            "capability_constraints",
+        ),
         (EnforcementCheckId::ConnectorManifest, "connector_manifest"),
         (EnforcementCheckId::Budget, "budget"),
         (EnforcementCheckId::RateLimit, "rate_limit"),

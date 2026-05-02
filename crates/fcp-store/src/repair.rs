@@ -3,7 +3,8 @@
 //! Implements bounded, convergent repair from `FCP_Specification_V3.md` §11.5
 //! (Offline and Repair Behavior) and Appendix Z (Coverage and Repair Playbook).
 
-use std::collections::{BTreeSet, HashMap};
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
@@ -637,6 +638,130 @@ impl QueuedRepair {
     }
 }
 
+/// Ordering key for queued repairs.
+///
+/// `BTreeMap::pop_last` returns the largest key, so higher effective
+/// priority sorts larger. For equal priority, the lower object id sorts
+/// larger to preserve the previous sorted-Vec tie-break.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RepairQueueKey {
+    effective_priority: u32,
+    object_id: ObjectId,
+}
+
+impl RepairQueueKey {
+    fn for_entry(entry: &QueuedRepair) -> Self {
+        Self {
+            effective_priority: entry.effective_priority(),
+            object_id: entry.request.object_id,
+        }
+    }
+}
+
+impl Ord for RepairQueueKey {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.effective_priority
+            .cmp(&other.effective_priority)
+            .then_with(|| other.object_id.cmp(&self.object_id))
+    }
+}
+
+impl PartialOrd for RepairQueueKey {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Debug, Default)]
+struct RepairQueue {
+    entries: BTreeMap<RepairQueueKey, QueuedRepair>,
+    object_keys: HashMap<ObjectId, RepairQueueKey>,
+}
+
+impl RepairQueue {
+    fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    fn insert_entry(&mut self, entry: QueuedRepair) {
+        let key = RepairQueueKey::for_entry(&entry);
+        self.object_keys.insert(entry.request.object_id, key);
+        self.entries.insert(key, entry);
+    }
+
+    fn upsert(&mut self, request: RepairRequest) -> RepairQueueAction {
+        if let Some(existing_key) = self.object_keys.remove(&request.object_id)
+            && let Some(mut existing) = self.entries.remove(&existing_key)
+        {
+            // Refresh: preserve and advance the deferral counter so an
+            // item that evaluate_zone keeps noticing but that
+            // next_repair keeps deferring climbs the queue over time.
+            // Starvation-prevention: under heavy churn where fresh
+            // high-priority items continuously arrive, this is the
+            // only thing keeping a low-priority-but-persistently-queued
+            // item from waiting forever.
+            existing.request = request;
+            existing.deferral_count = existing
+                .deferral_count
+                .saturating_add(1)
+                .min(MAX_DEFERRAL_COUNT);
+            self.insert_entry(existing);
+            RepairQueueAction::Refresh
+        } else {
+            self.insert_entry(QueuedRepair {
+                request,
+                deferral_count: 0,
+            });
+            RepairQueueAction::Queue
+        }
+    }
+
+    fn pop_next(&mut self) -> Option<RepairRequest> {
+        let (_, entry) = self.entries.pop_last()?;
+        self.object_keys.remove(&entry.request.object_id);
+        Some(entry.request)
+    }
+
+    fn remove_object(&mut self, object_id: &ObjectId) -> bool {
+        let Some(key) = self.object_keys.remove(object_id) else {
+            return false;
+        };
+        self.entries.remove(&key).is_some()
+    }
+
+    fn prune_zone_repairs(
+        &mut self,
+        zone_id: &ZoneId,
+        tracked_objects: &BTreeSet<ObjectId>,
+    ) -> usize {
+        let stale: Vec<_> = self
+            .entries
+            .iter()
+            .filter_map(|(key, entry)| {
+                (entry.request.zone_id == *zone_id
+                    && !tracked_objects.contains(&entry.request.object_id))
+                .then_some((*key, entry.request.object_id))
+            })
+            .collect();
+
+        for (key, object_id) in &stale {
+            self.entries.remove(key);
+            self.object_keys.remove(object_id);
+        }
+
+        stale.len()
+    }
+
+    fn clear(&mut self) {
+        self.entries.clear();
+        self.object_keys.clear();
+    }
+}
+
 /// Repair controller for maintaining coverage across the mesh.
 ///
 /// Implements bounded, rate-limited repair with convergent behavior.
@@ -645,7 +770,7 @@ pub struct RepairController {
     semaphore: Arc<Semaphore>,
     rate_limiter: RateLimiter,
     stats: RwLock<RepairStats>,
-    queue: RwLock<Vec<QueuedRepair>>,
+    queue: RwLock<RepairQueue>,
     /// Latest observed host power state. Defaults to
     /// [`PowerState::Ac`] — i.e. legacy behaviour (no deferral) until
     /// a caller explicitly reports battery state via
@@ -656,26 +781,13 @@ pub struct RepairController {
 }
 
 impl RepairController {
-    fn sort_queue(queue: &mut [QueuedRepair]) {
-        // Highest effective priority first (priority + aging boost),
-        // then stable object-id tie-break.
-        queue.sort_by(|left, right| {
-            right
-                .effective_priority()
-                .cmp(&left.effective_priority())
-                .then_with(|| left.request.object_id.cmp(&right.request.object_id))
-        });
-    }
-
     fn sync_queue_depth(&self, queue_depth: usize) {
         self.stats.write().queue_depth = queue_depth;
     }
 
     fn remove_queued_repair(&self, object_id: &ObjectId) -> bool {
         let mut queue = self.queue.write();
-        let original_len = queue.len();
-        queue.retain(|queued| queued.request.object_id != *object_id);
-        let removed = queue.len() != original_len;
+        let removed = queue.remove_object(object_id);
         if removed {
             self.sync_queue_depth(queue.len());
         }
@@ -684,12 +796,7 @@ impl RepairController {
 
     fn prune_zone_repairs(&self, zone_id: &ZoneId, tracked_objects: &BTreeSet<ObjectId>) -> usize {
         let mut queue = self.queue.write();
-        let original_len = queue.len();
-        queue.retain(|queued| {
-            queued.request.zone_id != *zone_id
-                || tracked_objects.contains(&queued.request.object_id)
-        });
-        let removed = original_len.saturating_sub(queue.len());
+        let removed = queue.prune_zone_repairs(zone_id, tracked_objects);
         if removed > 0 {
             self.sync_queue_depth(queue.len());
         }
@@ -707,7 +814,7 @@ impl RepairController {
             semaphore,
             rate_limiter,
             stats: RwLock::new(RepairStats::default()),
-            queue: RwLock::new(Vec::new()),
+            queue: RwLock::new(RepairQueue::default()),
             power_state: RwLock::new(PowerState::default()),
         }
     }
@@ -735,33 +842,7 @@ impl RepairController {
 
     fn upsert_repair(&self, request: RepairRequest) -> RepairQueueAction {
         let mut queue = self.queue.write();
-
-        let action = if let Some(existing) = queue
-            .iter_mut()
-            .find(|queued| queued.request.object_id == request.object_id)
-        {
-            // Refresh: preserve and advance the deferral counter so an
-            // item that evaluate_zone keeps noticing but that
-            // next_repair keeps deferring climbs the queue over time.
-            // Starvation-prevention: under heavy churn where fresh
-            // high-priority items continuously arrive, this is the
-            // only thing keeping a low-priority-but-persistently-queued
-            // item from waiting forever.
-            existing.request = request;
-            existing.deferral_count = existing
-                .deferral_count
-                .saturating_add(1)
-                .min(MAX_DEFERRAL_COUNT);
-            RepairQueueAction::Refresh
-        } else {
-            queue.push(QueuedRepair {
-                request,
-                deferral_count: 0,
-            });
-            RepairQueueAction::Queue
-        };
-
-        Self::sort_queue(&mut queue);
+        let action = queue.upsert(request);
         self.sync_queue_depth(queue.len());
         action
     }
@@ -820,7 +901,7 @@ impl RepairController {
             return None;
         }
 
-        let request = Some(queue.remove(0).request);
+        let request = queue.pop_next();
         self.stats.write().queue_depth = queue.len();
         request
     }

@@ -63,3 +63,7 @@ harness = false
 [[bench]]
 name = "repair_controller"
 harness = false
+
+[[bench]]
+name = "repair_queue"
+harness = false

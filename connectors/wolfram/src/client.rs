@@ -119,19 +119,20 @@ impl WolframClient {
         );
 
         let value: serde_json::Value = self
-            .send_with_retry(&url, &[
-                ("input", input.to_string()),
-                ("appid", app_id.to_string()),
-                ("output", "json".to_string()),
-                ("format", "plaintext,image".to_string()),
-            ], ResponseShape::Json)
+            .send_with_retry(
+                &url,
+                &[
+                    ("input", input.to_string()),
+                    ("appid", app_id.to_string()),
+                    ("output", "json".to_string()),
+                    ("format", "plaintext,image".to_string()),
+                ],
+                ResponseShape::Json,
+            )
             .await?;
 
         // Wolfram wraps the result in a "queryresult" key.
-        let query_result = value
-            .get("queryresult")
-            .cloned()
-            .unwrap_or(value);
+        let query_result = value.get("queryresult").cloned().unwrap_or(value);
 
         serde_json::from_value(query_result).map_err(|e| WolframError::Serialization(e.to_string()))
     }
@@ -242,13 +243,7 @@ impl WolframClient {
             let client = self.client.clone();
             async move {
                 tracing::debug!(attempt, "Wolfram retry-budget attempt");
-                let resp = match client
-                    .get(&url)
-                    .query(&query)
-                    .timeout(timeout)
-                    .send()
-                    .await
-                {
+                let resp = match client.get(&url).query(&query).timeout(timeout).send().await {
                     Ok(r) => r,
                     Err(e) => {
                         if e.is_timeout() || e.is_connect() {
@@ -273,8 +268,7 @@ impl WolframClient {
                         error: WolframError::RateLimited {
                             retry_after_ms: retry_after
                                 .unwrap_or(Duration::from_secs(60))
-                                .as_millis()
-                                as u64,
+                                .as_millis() as u64,
                         },
                         retry_after,
                     };
@@ -385,8 +379,8 @@ impl std::fmt::Debug for WolframClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
@@ -408,6 +402,20 @@ mod tests {
             max_delay_ms: 20,
             jitter_enabled: false,
             ..HttpRetryConfig::default()
+        }
+    }
+
+    fn client_with_timeout(
+        base_url: String,
+        retry_config: HttpRetryConfig,
+        timeout: Duration,
+    ) -> WolframClient {
+        WolframClient {
+            client: reqwest::Client::new(),
+            base_url,
+            timeout,
+            runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
+            retry_config,
         }
     }
 
@@ -649,6 +657,38 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn retry_budget_connect_timeout_refuses_after_budget() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/result"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(150))
+                    .set_body_string("eventual answer"),
+            )
+            .expect(2)
+            .mount(&server)
+            .await;
+
+        let client = client_with_timeout(server.uri(), fast_retry(1), Duration::from_millis(25));
+        let err = client
+            .short_answer("slow upstream", "test-id")
+            .await
+            .unwrap_err();
+
+        assert!(
+            matches!(err, WolframError::Http(ref e) if e.is_timeout()),
+            "expected timeout HTTP error, got {err:?}"
+        );
+        let requests = server.received_requests().await.expect("request log");
+        assert_eq!(
+            requests.len(),
+            2,
+            "one initial timeout plus one budgeted retry should be sent"
+        );
     }
 
     // ── Existing behavior preserved ──────────────────────────────────

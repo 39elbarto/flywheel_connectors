@@ -20,17 +20,22 @@
 //!   by [`CapabilityVerifier::verify_bound`] or by calling
 //!   [`CapabilityToken::promote_with_instance`] on an unbound token with
 //!   a matching `InstanceId`.
+//! - [`CapabilityToken<ConstraintsEnforced>`] — bound verification passed
+//!   and request-level capability constraints were evaluated with an allow
+//!   result. Produced by [`CapabilityToken::promote_with_constraints`].
 //! - [`CapabilityToken<CryptographicallyVerified>`] — legacy marker, still
 //!   returned by the older [`CapabilityVerifier::verify`]. New code should
 //!   pick `verify_bound` / `verify_unbound` and demand the appropriate
 //!   marker in downstream function signatures.
 //!
 //! The gateway produces `UnboundVerified`. The connector runtime receives
-//! it, calls `promote_with_instance` with its own `InstanceId`, and passes
-//! the resulting `BoundVerified` to any operation executor. Executors that
-//! require full enforcement declare `fn(_: CapabilityToken<BoundVerified>)`
-//! and the compiler refuses to pass them an unbound token. See
-//! `docs/architecture/adr/jkcka-typestate-split.md`.
+//! it, calls `promote_with_instance` with its own `InstanceId`, evaluates
+//! request constraints with `promote_with_constraints`, and passes the
+//! resulting `ConstraintsEnforced` token to the connector boundary.
+//! Executors that require full enforcement declare
+//! `fn(_: CapabilityToken<ConstraintsEnforced>)` and the compiler refuses
+//! to pass them a weaker token. See
+//! `docs/architecture/adr/m8j0q-constraint-typestate.md`.
 
 use std::fmt;
 use std::time::Duration;
@@ -1075,19 +1080,40 @@ pub struct BoundVerified;
 #[derive(Debug, Clone, Copy)]
 pub struct UnboundVerified;
 
+/// Marker type: token passed `BoundVerified` AND its
+/// `CapabilityConstraints` claims were evaluated against a request via a
+/// `CapabilityConstraintEnforcer` with outcome `Allow` (m8j0q.A.6).
+///
+/// Hold a `CapabilityToken<ConstraintsEnforced>` to prove at compile time
+/// that every check on the token — cryptographic AND semantic — completed
+/// successfully before the request reached the boundary.
+///
+/// Produced exclusively by
+/// [`CapabilityToken::<BoundVerified>::promote_with_constraints`], which
+/// CONSUMES the `BoundVerified` witness so the un-enforced token cannot
+/// reach the dispatch boundary alongside the enforced one.
+///
+/// Operation executors and dispatch entry points that cross the
+/// host→subprocess boundary should require this variant in their
+/// signatures: a `CapabilityToken<BoundVerified>` (or weaker) does NOT
+/// satisfy `CapabilityToken<ConstraintsEnforced>`. See
+/// `docs/architecture/adr/m8j0q-constraint-typestate.md`.
+#[derive(Debug, Clone, Copy)]
+pub struct ConstraintsEnforced;
+
 mod verified_sealed {
     /// Sealed marker trait: prevents external crates from inventing new
-    /// "verified" markers. Only `BoundVerified` and `UnboundVerified`
-    /// implement it.
+    /// "verified" markers. Only the in-crate states implement it.
     pub trait Sealed {}
     impl Sealed for super::BoundVerified {}
     impl Sealed for super::UnboundVerified {}
+    impl Sealed for super::ConstraintsEnforced {}
     #[allow(deprecated)]
     impl Sealed for super::CryptographicallyVerified {}
 }
 
-/// Marker bound for state-agnostic helpers that accept either
-/// `BoundVerified` or `UnboundVerified`.
+/// Marker bound for state-agnostic helpers that accept any of
+/// `BoundVerified`, `UnboundVerified`, or `ConstraintsEnforced`.
 ///
 /// The deprecated legacy marker [`CryptographicallyVerified`] is intentionally
 /// EXCLUDED so new generic helpers cannot silently widen back to the ambiguous
@@ -1097,6 +1123,30 @@ mod verified_sealed {
 pub trait AnyVerified: verified_sealed::Sealed {}
 impl AnyVerified for BoundVerified {}
 impl AnyVerified for UnboundVerified {}
+impl AnyVerified for ConstraintsEnforced {}
+
+/// Bridge trait for promoting a bound token after request-level constraint
+/// evaluation.
+///
+/// `fcp-core` owns the typestate and token internals, while `fcp-policy` owns
+/// the concrete constraint semantics. Policy enforcers implement this trait for
+/// their request descriptor type, and
+/// [`CapabilityToken::promote_with_constraints`] consumes the bound token only
+/// after this evaluator returns `Ok(())`.
+pub trait CapabilityConstraintEvaluator<Request> {
+    /// Structured denial type returned when the request is not allowed.
+    type Denial;
+
+    /// Evaluate `constraints` against `request`.
+    ///
+    /// Returning `Ok(())` is the only success witness accepted by
+    /// [`CapabilityToken::promote_with_constraints`].
+    fn evaluate_constraints(
+        &self,
+        constraints: &CapabilityConstraints,
+        request: &Request,
+    ) -> Result<(), Self::Denial>;
+}
 
 /// Convenience alias for an unverified capability token.
 pub type UnverifiedToken = CapabilityToken<Unverified>;
@@ -1403,6 +1453,66 @@ impl CapabilityToken<BoundVerified> {
         self.verified_claims
             .as_ref()
             .expect("BoundVerified token must carry claims (invariant)")
+    }
+
+    /// Run capability-constraint enforcement and promote to
+    /// [`ConstraintsEnforced`] (m8j0q.A.6).
+    ///
+    /// Consumes `self`: the `BoundVerified` witness is invalidated by the
+    /// promotion so a single token cannot be dispatched along both an
+    /// un-enforced and an enforced code path. This is the type-level seat
+    /// belt that prevents constraint enforcement from being silently
+    /// bypassed.
+    ///
+    /// `evaluator` is supplied by the caller (typically
+    /// `fcp_policy::DefaultConstraintEnforcer`) and runs the actual
+    /// constraint evaluation against the request descriptor. fcp-core stays
+    /// unaware of the policy crate so the typestate ladder lives here while
+    /// the enforcement semantics live in fcp-policy. Returning `Ok(())` from
+    /// [`CapabilityConstraintEvaluator::evaluate_constraints`] is the explicit
+    /// witness that `ConstraintEvaluation::Allow` was produced.
+    ///
+    /// # Errors
+    /// Propagates any denial returned by `evaluator`. Typical callers return a
+    /// `fcp_policy::ConstraintDenialReason`; the denial type is generic so
+    /// downstream consumers can use the structured rejection variant natural
+    /// to their own error taxonomy.
+    pub fn promote_with_constraints<E, Request>(
+        self,
+        evaluator: &E,
+        constraints: &CapabilityConstraints,
+        request: &Request,
+    ) -> Result<CapabilityToken<ConstraintsEnforced>, E::Denial>
+    where
+        E: CapabilityConstraintEvaluator<Request>,
+    {
+        evaluator.evaluate_constraints(constraints, request)?;
+        Ok(CapabilityToken {
+            raw: self.raw,
+            verified_claims: self.verified_claims,
+            _state: std::marker::PhantomData,
+        })
+    }
+}
+
+impl CapabilityToken<ConstraintsEnforced> {
+    /// Access the verified claims.
+    ///
+    /// All five cryptographic checks plus capability-constraint
+    /// enforcement have passed. Holding a
+    /// `CapabilityToken<ConstraintsEnforced>` is compile-time proof that
+    /// every gate succeeded before the request reached this scope.
+    ///
+    /// # Panics
+    /// Panics if constructed without verified claims (invariant:
+    /// `promote_with_constraints` always carries them forward from the
+    /// consumed `BoundVerified` token).
+    #[must_use]
+    #[allow(clippy::missing_const_for_fn)] // Cannot be const: calls Option::as_ref + expect
+    pub fn claims(&self) -> &CwtClaims {
+        self.verified_claims
+            .as_ref()
+            .expect("ConstraintsEnforced token must carry claims (invariant)")
     }
 }
 
@@ -3978,7 +4088,122 @@ mod tests {
 
         assert_any_verified::<BoundVerified>();
         assert_any_verified::<UnboundVerified>();
+        assert_any_verified::<ConstraintsEnforced>();
     }
+
+    // ─────────────────────────────────────────────────────────────────────────
+    // m8j0q.A.6 — promote_with_constraints runtime tests
+    //
+    // Compile-fail proofs live in tests/ui/. These tests pin the runtime
+    // semantics: Allow promotes, Deny propagates the rejection, claims
+    // remain accessible after promotion, and the BoundVerified token is
+    // consumed (move semantics — re-use is a compile error).
+    // ─────────────────────────────────────────────────────────────────────────
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct ToyDenial(&'static str);
+
+    struct AllowConstraintEvaluator;
+
+    impl CapabilityConstraintEvaluator<()> for AllowConstraintEvaluator {
+        type Denial = ToyDenial;
+
+        fn evaluate_constraints(
+            &self,
+            constraints: &CapabilityConstraints,
+            _request: &(),
+        ) -> Result<(), Self::Denial> {
+            if constraints.resource_allow.is_empty() {
+                Err(ToyDenial("resource_allow_empty"))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    struct DenyConstraintEvaluator;
+
+    impl CapabilityConstraintEvaluator<()> for DenyConstraintEvaluator {
+        type Denial = ToyDenial;
+
+        fn evaluate_constraints(
+            &self,
+            _constraints: &CapabilityConstraints,
+            _request: &(),
+        ) -> Result<(), Self::Denial> {
+            Err(ToyDenial("host_not_in_allowlist"))
+        }
+    }
+
+    fn allow_all_constraints() -> CapabilityConstraints {
+        CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn promote_with_constraints_allow_returns_constraints_enforced() {
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        let bound = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work())
+            .verify_unbound(token, &cap, &op, &[])
+            .unwrap()
+            .promote_with_instance(&instance)
+            .unwrap();
+        let constraints = allow_all_constraints();
+
+        let enforced: CapabilityToken<ConstraintsEnforced> = bound
+            .promote_with_constraints(&AllowConstraintEvaluator, &constraints, &())
+            .expect("Allow evaluator must produce ConstraintsEnforced");
+
+        // Claims survive the promotion intact.
+        assert_eq!(enforced.claims().get_zone_id(), Some("z:work"));
+    }
+
+    #[test]
+    fn promote_with_constraints_deny_propagates_structured_reason() {
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        let bound = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work())
+            .verify_unbound(token, &cap, &op, &[])
+            .unwrap()
+            .promote_with_instance(&instance)
+            .unwrap();
+        let constraints = allow_all_constraints();
+
+        let err = bound
+            .promote_with_constraints(&DenyConstraintEvaluator, &constraints, &())
+            .expect_err("Deny evaluator must propagate the rejection");
+
+        assert_eq!(err, ToyDenial("host_not_in_allowlist"));
+    }
+
+    #[test]
+    fn promote_with_constraints_evaluator_observes_constraints() {
+        // The evaluator receives the constraint set selected by the caller
+        // and must allow before the typestate can advance.
+        let (token, pub_bytes, instance, cap, op) = mk_token_with_instance();
+        let bound = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work())
+            .verify_unbound(token, &cap, &op, &[])
+            .unwrap()
+            .promote_with_instance(&instance)
+            .unwrap();
+
+        let constraints = allow_all_constraints();
+        let enforced = bound
+            .promote_with_constraints(&AllowConstraintEvaluator, &constraints, &())
+            .unwrap();
+
+        assert_eq!(enforced.claims().get_zone_id(), Some("z:work"));
+    }
+
+    // The "consume self" guarantee is asserted at compile time by the
+    // borrow checker: any test that tries to use `bound` after passing
+    // it to `promote_with_constraints` would fail to compile. The
+    // signature `fn promote_with_constraints(self, ...) -> ...` is the
+    // proof; a runtime test cannot assert a move-out the way the
+    // compiler can. The trybuild fixture
+    // `bound_cannot_reach_constraints_enforced_api.rs` covers the
+    // dispatch-boundary half of the same guarantee.
 
     // ─────────────────────────────────────────────────────────────────────────
     // CapabilityConstraints Credential Allow Tests

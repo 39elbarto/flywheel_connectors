@@ -1,0 +1,25 @@
+warning: unreachable statement
+  --> tests/ui/unbound_cannot_reach_constraints_enforced_api.rs:17:5
+   |
+16 |     let t: CapabilityToken<UnboundVerified> = unimplemented!();
+   |                                               ---------------- any code following this expression is unreachable
+17 |     takes_constraints_enforced(t);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ unreachable statement
+   |
+   = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+error[E0308]: mismatched types
+  --> tests/ui/unbound_cannot_reach_constraints_enforced_api.rs:17:32
+   |
+17 |     takes_constraints_enforced(t);
+   |     -------------------------- ^ expected `CapabilityToken<ConstraintsEnforced>`, found `CapabilityToken<UnboundVerified>`
+   |     |
+   |     arguments to this function are incorrect
+   |
+   = note: expected struct `CapabilityToken<ConstraintsEnforced>`
+              found struct `CapabilityToken<UnboundVerified>`
+note: function defined here
+  --> tests/ui/unbound_cannot_reach_constraints_enforced_api.rs:13:4
+   |
+13 | fn takes_constraints_enforced(_: CapabilityToken<ConstraintsEnforced>) {}
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^ ---------------------------------------

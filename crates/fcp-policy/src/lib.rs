@@ -41,9 +41,17 @@ pub use fcp_core::{
 // ── Capability Tokens & Grants ─────────────────────────────────────
 
 pub use fcp_core::{
-    CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityObject, CapabilityToken,
-    CapabilityVerifier, RoleAssignment, RoleObject,
+    CapabilityConstraintEvaluator, CapabilityConstraints, CapabilityGrant, CapabilityId,
+    CapabilityObject, CapabilityToken, CapabilityVerifier, RoleAssignment, RoleObject,
 };
+
+// ── Capability-Token Typestate Ladder ─────────────────────────────
+//
+// Exposes the phantom-type markers so consumers can write
+// `fcp_policy::CapabilityToken<ConstraintsEnforced>` in their dispatch
+// signatures without importing fcp-core directly.
+
+pub use fcp_core::{AnyVerified, BoundVerified, ConstraintsEnforced, UnboundVerified, Unverified};
 
 // ── Identity & Trust ───────────────────────────────────────────────
 

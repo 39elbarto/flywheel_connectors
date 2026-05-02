@@ -453,6 +453,36 @@ mod tests {
     }
 
     #[test]
+    fn hybrid_owner_production_rejects_missing_v3_attestation_context() {
+        let case = HybridObjectTestCase::new();
+        let mut context = case.context();
+        context.prior_v3_attestation_bytes = b"missing-v3-owner-state".to_vec();
+        let transcript = HybridOwnerObjectTranscript::new(
+            HybridOwnerObjectKind::CapabilityToken,
+            ZoneId::work(),
+            b"capability-token-cose",
+        );
+        let signatures = case.sign_object(&transcript);
+
+        let error = verify_hybrid_owner_object(
+            &transcript,
+            &signatures,
+            &case.migration_attestation,
+            &case.v4_verifying_key,
+            &context,
+            &FcpCryptoMlDsa65Verifier,
+        )
+        .expect_err("missing prior V3 owner-state attestation must reject production objects");
+
+        assert_eq!(
+            error,
+            HybridOwnerObjectVerificationError::Migration(
+                OwnerMigrationVerificationError::PriorV3AttestationHashMismatch,
+            ),
+        );
+    }
+
+    #[test]
     fn hybrid_owner_objects_reject_replayed_migration_epoch() {
         let case = HybridObjectTestCase::new();
         let mut context = case.context();

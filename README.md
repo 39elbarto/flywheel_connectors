@@ -62,10 +62,10 @@ _Audit note:_ In the current host-backed path, `allowed_zones` is opt-in. An emp
 | **Offline Access** | `IMPLEMENTED` | `ObjectPlacementPolicy` and repair controllers exist for SLO-driven object durability and recovery. | `fcp-store/src/offline.rs` (185+ tests incl. E2E repair) |
 | **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. | `fcp-core/src/policy.rs` (128 tests) |
 | **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. | `fcp-raptorq/` (96+ tests, golden vectors) |
-| **Mesh-Native Architecture** | `IMPLEMENTED` | **Steady-state target (converging).** Every device is a peer and the mesh is the center of gravity. Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested; production cutover gating is in progress. | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
+| **Mesh-Native Architecture** | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested as building blocks, but the production `fwc → fcp-host → connector subprocess` invoke path remains host-first (see [Operational Model Versions](#operational-model-versions) — V1, the only operational model today). The mesh-native cutover is the target steady state and has zero production evidence. Pinned by `crates/fwc/tests/readme_status_pinning.rs` (br-lvz4t). | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
 | **Computation Migration** | `IMPLEMENTED` | Reference migrate-and-resume proof exists for a connector operation, including CRIU-format checkpoint handoff, lease transfer, replay, and byte-equivalent completion; automatic optimal-device execution is still hardening. | `fcp-core/src/migration.rs`, `crates/fcp-e2e/tests/computation_migration_reference.rs` |
 
-> **Audit status**: All 16 feature status labels verified accurate as of 2026-04-10. See [docs/Claims_vs_Reality_Audit_C2_4.md](docs/Claims_vs_Reality_Audit_C2_4.md) for the full reconciliation table with evidence.
+> **Audit status**: All 16 feature status labels last reconciled 2026-05-02 (br-lvz4t downgraded "Mesh-Native Architecture" from `IMPLEMENTED` to `STEADY-STATE TARGET (NOT YET OPERATIONAL)` to match the actual production invoke path). See [docs/Claims_vs_Reality_Audit_C2_4.md](docs/Claims_vs_Reality_Audit_C2_4.md) for the full reconciliation table with evidence.
 
 ### Quick Example: Current Provisioning Path (Host-First, transitional)
 
@@ -1392,7 +1392,14 @@ FCP defines two operational model versions. **All operators should assume V1 tod
 Delivers the core safety story ("zones + explicit authority + auditable operations") with minimal moving parts.
 
 - FCPC over QUIC for control plane
-- CapabilityToken (COSE/CWT) + grant_object_ids verification
+- CapabilityToken (COSE/CWT) + grant_object_ids verification — typestate
+  enforcement (Unverified → UnboundVerified → BoundVerified → ConstraintsEnforced)
+  is **partially adopted across connector boundaries** as of 2026-05-02:
+  49 connectors already use `verify_bound` / `promote_with_*`, 29 still use
+  the deprecated `verifier.verify(...)` alias. Forward-only ratchet enforced
+  by `crates/fcp-conformance/tests/capability_typestate_connector_boundary_dja9u.rs`
+  (br-dja9u) — new connectors must use the typestate path; existing
+  enforced connectors cannot regress.
 - ZoneKeyManifest (HPKE sealing) + per-zone encryption
 - Egress proxy with NetworkConstraints + CIDR deny defaults
 - OperationIntent + OperationReceipt for Risky/Dangerous

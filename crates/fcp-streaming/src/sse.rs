@@ -10,6 +10,7 @@ use std::task::{Context, Poll, ready};
 use std::time::Duration;
 
 use bytes::{Buf, Bytes, BytesMut};
+use chrono::{DateTime, Utc};
 use fcp_async_core::bytes::Buf as _;
 use fcp_async_core::http::body::Body as _;
 use fcp_async_core::http::client_io::ClientIo;
@@ -18,13 +19,74 @@ use fcp_async_core::time;
 use futures_util::stream::Stream;
 use pin_project_lite::pin_project;
 
-use crate::{StreamError, StreamResult};
+use crate::{
+    FCP_BACKPRESSURE_REASON_HEADER, FCP_BACKPRESSURE_RETRY_AFTER_HEADER, HOST_BACKPRESSURE_STATUS,
+    HostBackpressureSignal, StreamError, StreamResult,
+};
 
 const ACCEPT_HEADER: &str = "Accept";
 const CACHE_CONTROL_HEADER: &str = "Cache-Control";
 const LAST_EVENT_ID_HEADER: &str = "Last-Event-ID";
 const NO_CACHE_VALUE: &str = "no-cache";
 const SSE_MIME_TYPE: &str = "text/event-stream";
+
+fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        wait.to_std().ok().or(Some(Duration::from_secs(u64::MAX)))
+    }
+}
+
+fn max_retry_after(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn http_error_from_head(status: u16, reason: String, headers: &[(String, String)]) -> StreamError {
+    if status == HOST_BACKPRESSURE_STATUS {
+        if let Some(backpressure_reason) = header_value(headers, FCP_BACKPRESSURE_REASON_HEADER) {
+            let retry_after = max_retry_after(
+                header_value(headers, "retry-after").and_then(parse_retry_after),
+                header_value(headers, FCP_BACKPRESSURE_RETRY_AFTER_HEADER)
+                    .and_then(parse_retry_after),
+            );
+
+            return StreamError::HostBackpressure {
+                status,
+                message: reason,
+                signal: HostBackpressureSignal::new(backpressure_reason, retry_after),
+            };
+        }
+    }
+
+    StreamError::HttpError {
+        status,
+        message: reason,
+        retry_after: None,
+    }
+}
 
 /// SSE event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -498,11 +560,12 @@ impl SseClient {
         };
 
         if !(200..300).contains(&response.head.status) {
-            return Err(StreamError::HttpError {
-                status: response.head.status,
-                message: response.head.reason,
-                retry_after: None,
-            });
+            let head = response.head;
+            return Err(http_error_from_head(
+                head.status,
+                head.reason,
+                &head.headers,
+            ));
         }
 
         Ok(SseStream::new(response.body, self.config.max_buffer_size))
@@ -640,6 +703,26 @@ impl Stream for SseStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_503_budget_backpressure_refuses_retry() {
+        let headers = vec![
+            (
+                FCP_BACKPRESSURE_REASON_HEADER.to_string(),
+                crate::FCP_BACKPRESSURE_BUDGET_EXHAUSTED.to_string(),
+            ),
+            ("Retry-After".to_string(), "3".to_string()),
+            (
+                FCP_BACKPRESSURE_RETRY_AFTER_HEADER.to_string(),
+                "9".to_string(),
+            ),
+        ];
+
+        let err = http_error_from_head(503, "Service Unavailable".to_string(), &headers);
+
+        assert!(err.is_terminal_backpressure());
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(9)));
+    }
 
     #[test]
     fn test_parse_simple_event() {

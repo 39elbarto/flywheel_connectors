@@ -4,6 +4,55 @@ use std::time::Duration;
 
 use fcp_async_core::http::{HttpClientError, HttpError};
 
+/// HTTP status used by the host when connector budgets are exhausted.
+pub const HOST_BACKPRESSURE_STATUS: u16 = 503;
+/// Header carrying host backpressure reason for connector clients.
+pub const FCP_BACKPRESSURE_REASON_HEADER: &str = "X-FCP-Backpressure-Reason";
+/// Header carrying the host-computed retry floor in whole seconds.
+pub const FCP_BACKPRESSURE_RETRY_AFTER_HEADER: &str = "X-FCP-Backpressure-Retry-After";
+/// Canonical host backpressure reason for exhausted zone budgets.
+pub const FCP_BACKPRESSURE_BUDGET_EXHAUSTED: &str = "budget-exhausted";
+
+/// Host-supplied backpressure signal for connector retry loops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBackpressureSignal {
+    /// Machine-readable reason supplied by the host.
+    pub reason: String,
+    /// Optional retry floor supplied by `Retry-After` or FCP backpressure headers.
+    pub retry_after: Option<Duration>,
+}
+
+impl HostBackpressureSignal {
+    /// Create a host backpressure signal.
+    #[must_use]
+    pub fn new(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            reason: reason.into(),
+            retry_after,
+        }
+    }
+
+    /// Return whether connector retry loops should back off.
+    #[must_use]
+    pub const fn should_back_off(&self) -> bool {
+        true
+    }
+
+    /// Return the host-supplied retry floor.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    /// Return true for canonical budget-exhaustion backpressure.
+    #[must_use]
+    pub fn is_budget_exhausted(&self) -> bool {
+        self.reason
+            .trim()
+            .eq_ignore_ascii_case(FCP_BACKPRESSURE_BUDGET_EXHAUSTED)
+    }
+}
+
 /// Streaming errors.
 #[derive(Debug, thiserror::Error)]
 pub enum StreamError {
@@ -29,6 +78,17 @@ pub enum StreamError {
         message: String,
         /// Optional `Retry-After` guidance from the upstream server.
         retry_after: Option<Duration>,
+    },
+
+    /// Host refused work due to connector backpressure.
+    #[error("Host backpressure: {status} - {message}: {signal:?}")]
+    HostBackpressure {
+        /// HTTP status code.
+        status: u16,
+        /// Error message.
+        message: String,
+        /// Host-supplied backpressure signal.
+        signal: HostBackpressureSignal,
     },
 
     /// Parse error.
@@ -89,8 +149,22 @@ impl StreamError {
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::HttpError { retry_after, .. } => *retry_after,
+            Self::HostBackpressure { signal, .. } => signal.retry_after(),
             _ => None,
         }
+    }
+
+    /// Return true when retrying would hammer a host that has exhausted budget.
+    #[must_use]
+    pub fn is_terminal_backpressure(&self) -> bool {
+        matches!(
+            self,
+            Self::HostBackpressure {
+                status: HOST_BACKPRESSURE_STATUS,
+                signal,
+                ..
+            } if signal.is_budget_exhausted()
+        )
     }
 }
 
@@ -130,6 +204,22 @@ mod tests {
             retry_after: None,
         };
         assert_eq!(e.to_string(), "HTTP error: 404 - Not Found");
+    }
+
+    #[test]
+    fn host_backpressure_budget_exhaustion_is_terminal() {
+        let e = StreamError::HostBackpressure {
+            status: 503,
+            message: "Service Unavailable".into(),
+            signal: HostBackpressureSignal::new(
+                FCP_BACKPRESSURE_BUDGET_EXHAUSTED,
+                Some(Duration::from_secs(30)),
+            ),
+        };
+
+        assert!(e.is_terminal_backpressure());
+        assert_eq!(e.retry_after(), Some(Duration::from_secs(30)));
+        assert!(e.to_string().contains(FCP_BACKPRESSURE_BUDGET_EXHAUSTED));
     }
 
     #[test]

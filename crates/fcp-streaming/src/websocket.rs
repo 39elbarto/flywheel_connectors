@@ -26,7 +26,10 @@ use fcp_async_core::{
 use futures_util::stream::Stream;
 
 use crate::reconnect::ReconnectHandler;
-use crate::{StreamError, StreamResult};
+use crate::{
+    FCP_BACKPRESSURE_REASON_HEADER, FCP_BACKPRESSURE_RETRY_AFTER_HEADER, HOST_BACKPRESSURE_STATUS,
+    HostBackpressureSignal, StreamError, StreamResult,
+};
 
 /// Hard ceiling for inbound WebSocket payloads, regardless of caller config.
 pub const MAX_WEBSOCKET_MESSAGE_SIZE: usize = 16 * 1024 * 1024;
@@ -75,7 +78,41 @@ fn parse_retry_after(value: &str) -> Option<Duration> {
     }
 }
 
+fn max_retry_after(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+fn host_backpressure_signal_from_response(
+    response: &HttpResponse,
+) -> Option<HostBackpressureSignal> {
+    if response.status != HOST_BACKPRESSURE_STATUS {
+        return None;
+    }
+
+    let reason = response.header(FCP_BACKPRESSURE_REASON_HEADER)?;
+    let retry_after = max_retry_after(
+        response.header("retry-after").and_then(parse_retry_after),
+        response
+            .header(FCP_BACKPRESSURE_RETRY_AFTER_HEADER)
+            .and_then(parse_retry_after),
+    );
+
+    Some(HostBackpressureSignal::new(reason, retry_after))
+}
+
 fn http_error_from_response(response: &HttpResponse) -> StreamError {
+    if let Some(signal) = host_backpressure_signal_from_response(response) {
+        return StreamError::HostBackpressure {
+            status: response.status,
+            message: response.reason.clone(),
+            signal,
+        };
+    }
+
     let retry_after = if response.status == 429 {
         response.header("retry-after").and_then(parse_retry_after)
     } else {
@@ -1824,6 +1861,22 @@ mod tests {
                 ..
             } if delay == Duration::from_secs(7)
         ));
+    }
+
+    #[test]
+    fn http_error_from_503_budget_backpressure_is_terminal() {
+        let response = HttpResponse::parse(
+            b"HTTP/1.1 503 Service Unavailable\r\n\
+              X-FCP-Backpressure-Reason: budget-exhausted\r\n\
+              Retry-After: 4\r\n\
+              X-FCP-Backpressure-Retry-After: 12\r\n\r\n",
+        )
+        .unwrap();
+
+        let err = http_error_from_response(&response);
+
+        assert!(err.is_terminal_backpressure());
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(12)));
     }
 
     #[test]

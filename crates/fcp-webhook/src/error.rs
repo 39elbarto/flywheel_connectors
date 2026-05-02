@@ -1,6 +1,146 @@
 //! Webhook error types.
 
+use std::collections::HashMap;
 use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+
+/// HTTP status used by the host when connector budgets are exhausted.
+pub const HOST_BACKPRESSURE_STATUS: u16 = 503;
+/// Header carrying host backpressure reason for connector clients.
+pub const FCP_BACKPRESSURE_REASON_HEADER: &str = "X-FCP-Backpressure-Reason";
+/// Header carrying the host-computed retry floor in whole seconds.
+pub const FCP_BACKPRESSURE_RETRY_AFTER_HEADER: &str = "X-FCP-Backpressure-Retry-After";
+/// Canonical host backpressure reason for exhausted zone budgets.
+pub const FCP_BACKPRESSURE_BUDGET_EXHAUSTED: &str = "budget-exhausted";
+
+/// Host-supplied backpressure signal for webhook retry loops.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBackpressureSignal {
+    /// Machine-readable reason supplied by the host.
+    pub reason: String,
+    /// Optional retry floor supplied by `Retry-After` or FCP backpressure headers.
+    pub retry_after: Option<Duration>,
+}
+
+impl HostBackpressureSignal {
+    /// Create a host backpressure signal.
+    #[must_use]
+    pub fn new(reason: impl Into<String>, retry_after: Option<Duration>) -> Self {
+        Self {
+            reason: reason.into(),
+            retry_after,
+        }
+    }
+
+    /// Return whether connector retry loops should back off.
+    #[must_use]
+    pub const fn should_back_off(&self) -> bool {
+        true
+    }
+
+    /// Return the host-supplied retry floor.
+    #[must_use]
+    pub const fn retry_after(&self) -> Option<Duration> {
+        self.retry_after
+    }
+
+    /// Return true for canonical budget-exhaustion backpressure.
+    #[must_use]
+    pub fn is_budget_exhausted(&self) -> bool {
+        self.reason
+            .trim()
+            .eq_ignore_ascii_case(FCP_BACKPRESSURE_BUDGET_EXHAUSTED)
+    }
+}
+
+/// Retry decision for webhook deliveries after a host response.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WebhookRetryDecision {
+    /// Retry after the supplied delay.
+    RetryAfter(Duration),
+    /// Refuse retry because the host signaled terminal backpressure.
+    RefuseRetry(HostBackpressureSignal),
+}
+
+fn header_value_case_insensitive<'a>(
+    headers: &'a HashMap<String, String>,
+    name: &str,
+) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.as_str())
+}
+
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    if let Ok(seconds) = value.parse::<u128>() {
+        return Some(Duration::from_secs(
+            u64::try_from(seconds).unwrap_or(u64::MAX),
+        ));
+    }
+
+    let retry_at = DateTime::parse_from_rfc2822(value).ok()?;
+    let wait = retry_at
+        .with_timezone(&Utc)
+        .signed_duration_since(Utc::now());
+    if wait <= chrono::Duration::zero() {
+        Some(Duration::ZERO)
+    } else {
+        wait.to_std().ok().or(Some(Duration::from_secs(u64::MAX)))
+    }
+}
+
+fn max_retry_after(left: Option<Duration>, right: Option<Duration>) -> Option<Duration> {
+    match (left, right) {
+        (Some(left), Some(right)) => Some(left.max(right)),
+        (Some(value), None) | (None, Some(value)) => Some(value),
+        (None, None) => None,
+    }
+}
+
+/// Extract host backpressure metadata from a response status and headers.
+#[must_use]
+pub fn host_backpressure_signal_from_response(
+    status: u16,
+    headers: &HashMap<String, String>,
+) -> Option<HostBackpressureSignal> {
+    if status != HOST_BACKPRESSURE_STATUS {
+        return None;
+    }
+
+    let reason = header_value_case_insensitive(headers, FCP_BACKPRESSURE_REASON_HEADER)?;
+    let retry_after = max_retry_after(
+        header_value_case_insensitive(headers, "retry-after").and_then(parse_retry_after),
+        header_value_case_insensitive(headers, FCP_BACKPRESSURE_RETRY_AFTER_HEADER)
+            .and_then(parse_retry_after),
+    );
+
+    Some(HostBackpressureSignal::new(reason, retry_after))
+}
+
+/// Decide whether a webhook delivery may retry after a host response.
+#[must_use]
+pub fn host_retry_decision_from_response(
+    status: u16,
+    headers: &HashMap<String, String>,
+    default_delay: Duration,
+) -> WebhookRetryDecision {
+    let Some(signal) = host_backpressure_signal_from_response(status, headers) else {
+        return WebhookRetryDecision::RetryAfter(default_delay);
+    };
+
+    if signal.is_budget_exhausted() {
+        WebhookRetryDecision::RefuseRetry(signal)
+    } else {
+        WebhookRetryDecision::RetryAfter(
+            signal
+                .retry_after()
+                .map_or(default_delay, |delay| default_delay.max(delay)),
+        )
+    }
+}
 
 /// Webhook errors.
 #[derive(Debug, thiserror::Error)]
@@ -176,6 +316,49 @@ mod tests {
     fn delivery_failed_display() {
         let e = WebhookError::DeliveryFailed("timeout".into());
         assert_eq!(e.to_string(), "Webhook delivery failed: timeout");
+    }
+
+    #[test]
+    fn host_backpressure_signal_uses_max_retry_after() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            FCP_BACKPRESSURE_REASON_HEADER.to_string(),
+            FCP_BACKPRESSURE_BUDGET_EXHAUSTED.to_string(),
+        );
+        headers.insert("Retry-After".to_string(), "5".to_string());
+        headers.insert(
+            FCP_BACKPRESSURE_RETRY_AFTER_HEADER.to_string(),
+            "20".to_string(),
+        );
+
+        let signal = host_backpressure_signal_from_response(503, &headers)
+            .expect("503 budget response should expose backpressure");
+
+        assert!(signal.should_back_off());
+        assert!(signal.is_budget_exhausted());
+        assert_eq!(signal.retry_after(), Some(Duration::from_secs(20)));
+    }
+
+    #[test]
+    fn host_retry_decision_refuses_budget_exhaustion() {
+        let mut headers = HashMap::new();
+        headers.insert(
+            FCP_BACKPRESSURE_REASON_HEADER.to_string(),
+            FCP_BACKPRESSURE_BUDGET_EXHAUSTED.to_string(),
+        );
+        headers.insert(
+            FCP_BACKPRESSURE_RETRY_AFTER_HEADER.to_string(),
+            "60".to_string(),
+        );
+
+        let decision = host_retry_decision_from_response(503, &headers, Duration::from_secs(1));
+
+        assert!(matches!(
+            decision,
+            WebhookRetryDecision::RefuseRetry(signal)
+                if signal.is_budget_exhausted()
+                    && signal.retry_after() == Some(Duration::from_secs(60))
+        ));
     }
 
     #[test]

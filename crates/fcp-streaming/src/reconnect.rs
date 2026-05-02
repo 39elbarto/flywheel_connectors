@@ -241,6 +241,15 @@ impl ReconnectHandler {
                     return Ok(result);
                 }
                 Err(e) => {
+                    if e.is_terminal_backpressure() {
+                        warn!(
+                            error = %e,
+                            attempt = self.attempts,
+                            "Operation failed with host budget backpressure; refusing retry"
+                        );
+                        return Err(e);
+                    }
+
                     warn!(
                         error = %e,
                         attempt = self.attempts,
@@ -362,6 +371,36 @@ mod tests {
 
         assert_eq!(result.unwrap(), 42);
         assert_eq!(attempts, 2);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_with_retry_refuses_budget_backpressure() {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(3)
+            .with_initial_delay(Duration::from_millis(1));
+        let mut attempts = 0;
+
+        let result: StreamResult<()> = with_retry(config, || {
+            attempts += 1;
+            async move {
+                Err(StreamError::HostBackpressure {
+                    status: crate::HOST_BACKPRESSURE_STATUS,
+                    message: "Service Unavailable".into(),
+                    signal: crate::HostBackpressureSignal::new(
+                        crate::FCP_BACKPRESSURE_BUDGET_EXHAUSTED,
+                        Some(Duration::from_secs(10)),
+                    ),
+                })
+            }
+        })
+        .await;
+
+        assert_eq!(attempts, 1);
+        assert!(matches!(
+            result,
+            Err(StreamError::HostBackpressure { signal, .. })
+                if signal.is_budget_exhausted()
+        ));
     }
 
     #[fcp_async_core::runtime::test]

@@ -96,6 +96,16 @@ impl WebhookConfig {
         self.max_retries = retries;
         self
     }
+
+    /// Decide whether a host response should be retried.
+    #[must_use]
+    pub fn retry_decision_for_host_response(
+        &self,
+        status: u16,
+        headers: &HashMap<String, String>,
+    ) -> crate::WebhookRetryDecision {
+        crate::host_retry_decision_from_response(status, headers, self.retry_delay)
+    }
 }
 
 /// Generic webhook handler.
@@ -656,6 +666,29 @@ mod tests {
         assert_eq!(config.idempotency_ttl, Duration::from_secs(3600));
         assert_eq!(config.ip_allowlist, vec!["1.2.3.4"]);
         assert_eq!(config.max_retries, 5);
+    }
+
+    #[test]
+    fn test_webhook_config_refuses_host_budget_backpressure() {
+        let config = WebhookConfig::default();
+        let mut headers = HashMap::new();
+        headers.insert(
+            crate::FCP_BACKPRESSURE_REASON_HEADER.to_string(),
+            crate::FCP_BACKPRESSURE_BUDGET_EXHAUSTED.to_string(),
+        );
+        headers.insert(
+            crate::FCP_BACKPRESSURE_RETRY_AFTER_HEADER.to_string(),
+            "300".to_string(),
+        );
+
+        let decision = config.retry_decision_for_host_response(503, &headers);
+
+        assert!(matches!(
+            decision,
+            crate::WebhookRetryDecision::RefuseRetry(signal)
+                if signal.is_budget_exhausted()
+                    && signal.retry_after() == Some(Duration::from_secs(300))
+        ));
     }
 
     #[test]

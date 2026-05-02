@@ -16,6 +16,13 @@ use serde::{Deserialize, Serialize};
 
 use crate::{PolicyEngine, PreflightRequest, PreflightResponse};
 
+/// Header carrying host backpressure reason for connector clients.
+pub const FCP_BACKPRESSURE_REASON_HEADER: &str = "X-FCP-Backpressure-Reason";
+/// Header carrying the host-computed retry floor in whole seconds.
+pub const FCP_BACKPRESSURE_RETRY_AFTER_HEADER: &str = "X-FCP-Backpressure-Retry-After";
+/// Canonical host backpressure reason for exhausted zone budgets.
+pub const FCP_BACKPRESSURE_BUDGET_EXHAUSTED: &str = "budget-exhausted";
+
 /// Request payload for reporting current budget state.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct BudgetReportRequest {
@@ -60,6 +67,15 @@ pub struct BudgetEvaluation {
     pub snapshot: UsageBudgetSnapshot,
 }
 
+/// Connector-visible signal emitted when the host refuses work due to budget exhaustion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetBackpressureSignal {
+    /// Canonical reason value for [`FCP_BACKPRESSURE_REASON_HEADER`].
+    pub reason: &'static str,
+    /// Retry floor for [`FCP_BACKPRESSURE_RETRY_AFTER_HEADER`].
+    pub retry_after_seconds: u64,
+}
+
 impl BudgetEvaluation {
     /// Convert a denial into an FCP error.
     #[must_use]
@@ -82,6 +98,27 @@ impl BudgetEvaluation {
             used: exceeded.used,
             limit: exceeded.limit,
             window_seconds,
+        })
+    }
+
+    /// Return connector-facing backpressure metadata for denied budget exhaustion.
+    #[must_use]
+    pub fn backpressure_signal(&self) -> Option<BudgetBackpressureSignal> {
+        if self.action != BudgetAction::Deny {
+            return None;
+        }
+
+        let retry_after_seconds = self
+            .snapshot
+            .budgets
+            .iter()
+            .filter(|b| b.status == BudgetStatus::Exceeded)
+            .map(|b| b.window_resets_at.saturating_sub(self.snapshot.updated_at))
+            .max()?;
+
+        Some(BudgetBackpressureSignal {
+            reason: FCP_BACKPRESSURE_BUDGET_EXHAUSTED,
+            retry_after_seconds,
         })
     }
 }
@@ -924,6 +961,67 @@ mod tests {
         };
         // No exceeded entry to find, returns None even though action is Deny
         assert!(eval.to_error().is_none());
+    }
+
+    #[test]
+    fn budget_backpressure_signal_uses_max_reset_window() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Deny,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Deny,
+                budgets: vec![
+                    UsageBudgetUsage {
+                        metric: UsageMetricKind::Tokens,
+                        used: 20,
+                        limit: 10,
+                        remaining: 0,
+                        window_started_at: 90,
+                        window_resets_at: 150,
+                        status: BudgetStatus::Exceeded,
+                    },
+                    UsageBudgetUsage {
+                        metric: UsageMetricKind::Requests,
+                        used: 50,
+                        limit: 10,
+                        remaining: 0,
+                        window_started_at: 90,
+                        window_resets_at: 190,
+                        status: BudgetStatus::Exceeded,
+                    },
+                ],
+                updated_at: 100,
+            },
+        };
+
+        let signal = eval
+            .backpressure_signal()
+            .expect("denied budget exhaustion should signal backpressure");
+        assert_eq!(signal.reason, FCP_BACKPRESSURE_BUDGET_EXHAUSTED);
+        assert_eq!(signal.retry_after_seconds, 90);
+    }
+
+    #[test]
+    fn budget_backpressure_signal_none_for_warn_only() {
+        let eval = BudgetEvaluation {
+            action: BudgetAction::Warn,
+            snapshot: UsageBudgetSnapshot {
+                zone_id: ZoneId::work(),
+                enforcement: BudgetEnforcement::Warn,
+                budgets: vec![UsageBudgetUsage {
+                    metric: UsageMetricKind::Tokens,
+                    used: 20,
+                    limit: 10,
+                    remaining: 0,
+                    window_started_at: 90,
+                    window_resets_at: 150,
+                    status: BudgetStatus::Exceeded,
+                }],
+                updated_at: 100,
+            },
+        };
+
+        assert!(eval.backpressure_signal().is_none());
     }
 
     // ── BudgetPolicyEngine async tests ──

@@ -74,7 +74,8 @@ use fcp_host::{
     SimulateCostConfidence, SimulateCostEstimate, SimulatePhase, SimulateReceipt,
     SimulateReceiptQueryRequest, SimulateReceiptQueryResponse, SimulateResourceAvailability,
     StartupReconciliationReport, SupplyChainGate, SupplyChainGateConfig,
-    diff_sanitized_config_values, merge_connector_health,
+    capability_constraint_audit_descriptor, diff_sanitized_config_values,
+    emit_capability_constraint_denial_audit_event, merge_connector_health,
 };
 use fcp_host::{HostError, HostResult};
 use fcp_kernel::{
@@ -1810,10 +1811,25 @@ fn enforce_live_capability_constraints(
 
     match DefaultConstraintEnforcer::new().evaluate(&constraints, &descriptor) {
         ConstraintEvaluation::Allow => Ok(()),
-        ConstraintEvaluation::Deny(reason) => Err(HostError::PreflightFailed(format!(
-            "capability constraint denied during live execution ({:?}): {}",
-            reason.kind, reason.explanation
-        ))),
+        ConstraintEvaluation::Deny(reason) => {
+            let audit_descriptor = capability_constraint_audit_descriptor(
+                request.id.0.as_str(),
+                request.connector_id.as_str(),
+                request.operation.as_str(),
+                request.zone_id.as_str(),
+                &descriptor,
+            );
+            emit_capability_constraint_denial_audit_event(
+                &audit_descriptor,
+                &reason.kind,
+                "fcp-host.live",
+            );
+
+            Err(HostError::PreflightFailed(format!(
+                "capability constraint denied during live execution ({:?}): {}",
+                reason.kind, reason.explanation
+            )))
+        }
     }
 }
 

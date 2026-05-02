@@ -31,8 +31,10 @@ use fcp_core::{
 };
 use fcp_kernel::{ConnectorId, OperationId};
 use fcp_policy::{
-    CapabilityConstraintEnforcer, DefaultConstraintEnforcer, RequestDescriptor, ZoneId,
+    CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
+    RequestDescriptor, ZoneId,
 };
+use serde::Serialize;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Enforcement configuration
@@ -714,6 +716,115 @@ fn parse_operation_id_for_check(operation: &str) -> Result<OperationId, CheckOut
         })
 }
 
+/// Audit event type emitted when capability constraints deny a request.
+pub const CAPABILITY_CONSTRAINT_DENIED_AUDIT_EVENT_TYPE: &str = "capability.constraint_denied";
+const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =
+    b"FCP2-CAPABILITY-CONSTRAINT-DESCRIPTOR-V1";
+
+/// Redacted descriptor used to hash capability-constraint denial context.
+#[derive(Debug, Clone, Serialize)]
+pub struct ConstraintDenialAuditDescriptor<'a> {
+    request_id: &'a str,
+    connector_id: &'a str,
+    operation: &'a str,
+    zone_id: &'a str,
+    principal: &'a str,
+    object_id: String,
+    host: &'a str,
+    resource_uri: &'a str,
+    requested_at_unix_ms: u64,
+    observed_calls: u32,
+    observed_bytes: u64,
+}
+
+impl ConstraintDenialAuditDescriptor<'_> {
+    const fn timestamp_unix_seconds(&self) -> u64 {
+        self.requested_at_unix_ms / 1_000
+    }
+}
+
+/// Build the redacted request descriptor used by constraint-denial audit events.
+#[must_use]
+pub fn capability_constraint_audit_descriptor<'a>(
+    request_id: &'a str,
+    connector_id: &'a str,
+    operation: &'a str,
+    zone_id: &'a str,
+    descriptor: &'a RequestDescriptor,
+) -> ConstraintDenialAuditDescriptor<'a> {
+    ConstraintDenialAuditDescriptor {
+        request_id,
+        connector_id,
+        operation,
+        zone_id,
+        principal: descriptor.principal.as_str(),
+        object_id: descriptor.object_id.to_string(),
+        host: descriptor.host.as_str(),
+        resource_uri: descriptor.resource_uri.as_str(),
+        requested_at_unix_ms: descriptor.requested_at_unix_ms,
+        observed_calls: descriptor.observed_calls,
+        observed_bytes: descriptor.observed_bytes,
+    }
+}
+
+/// Hash a redacted constraint-denial descriptor with the audit domain separator.
+///
+/// # Errors
+///
+/// Returns an error string if canonical CBOR encoding fails.
+pub fn capability_constraint_descriptor_hash(
+    descriptor: &ConstraintDenialAuditDescriptor<'_>,
+) -> Result<String, String> {
+    let canonical = fcp_cbor::to_canonical_cbor(descriptor)
+        .map_err(|err| format!("failed to canonicalize audit descriptor: {err}"))?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN);
+    hasher.update(&canonical);
+    Ok(hex::encode(hasher.finalize().as_bytes()))
+}
+
+/// Emit structured audit fields for a capability-constraint denial.
+///
+/// The event contains `request_descriptor_hash`, never the raw request payload.
+pub fn emit_capability_constraint_denial_audit_event(
+    descriptor: &ConstraintDenialAuditDescriptor<'_>,
+    denial_kind: &ConstraintDenialKind,
+    denying_node: &str,
+) {
+    match capability_constraint_descriptor_hash(descriptor) {
+        Ok(request_descriptor_hash) => {
+            tracing::warn!(
+                audit_event_type = CAPABILITY_CONSTRAINT_DENIED_AUDIT_EVENT_TYPE,
+                constraint_kind = denial_kind.as_str(),
+                observed_value = %denial_kind.observed_value(),
+                request_descriptor_hash = %request_descriptor_hash,
+                denying_node = denying_node,
+                timestamp = descriptor.timestamp_unix_seconds(),
+                request_id = descriptor.request_id,
+                connector_id = descriptor.connector_id,
+                operation = descriptor.operation,
+                zone_id = descriptor.zone_id,
+                "capability_constraint_denied_audit_event"
+            );
+        }
+        Err(error) => {
+            tracing::warn!(
+                audit_event_type = CAPABILITY_CONSTRAINT_DENIED_AUDIT_EVENT_TYPE,
+                constraint_kind = denial_kind.as_str(),
+                observed_value = %denial_kind.observed_value(),
+                denying_node = denying_node,
+                timestamp = descriptor.timestamp_unix_seconds(),
+                request_id = descriptor.request_id,
+                connector_id = descriptor.connector_id,
+                operation = descriptor.operation,
+                zone_id = descriptor.zone_id,
+                request_descriptor_hash_error = %error,
+                "capability_constraint_denied_audit_event_hash_failed"
+            );
+        }
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Concrete checks
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1050,10 +1161,25 @@ impl EnforcementCheck for CapabilityConstraintsCheck {
 
         match DefaultConstraintEnforcer::new().evaluate(constraints, &descriptor) {
             fcp_policy::ConstraintEvaluation::Allow => CheckOutcome::Allow,
-            fcp_policy::ConstraintEvaluation::Deny(reason) => CheckOutcome::Deny {
-                reason_code: "CAPABILITY_CONSTRAINT_DENIED".into(),
-                explanation: reason.explanation,
-            },
+            fcp_policy::ConstraintEvaluation::Deny(reason) => {
+                let fcp_policy::ConstraintDenialReason { kind, explanation } = reason;
+                let audit_descriptor = capability_constraint_audit_descriptor(
+                    ctx.request_id.as_str(),
+                    ctx.connector_id.as_str(),
+                    ctx.operation.as_str(),
+                    ctx.zone_id.as_str(),
+                    &descriptor,
+                );
+                emit_capability_constraint_denial_audit_event(
+                    &audit_descriptor,
+                    &kind,
+                    "fcp-host.enforcement_pipeline",
+                );
+                CheckOutcome::Deny {
+                    reason_code: "CAPABILITY_CONSTRAINT_DENIED".into(),
+                    explanation,
+                }
+            }
         }
     }
 }
@@ -2790,6 +2916,49 @@ mod tests {
         if let CheckOutcome::Deny { reason_code, .. } = &outcome {
             assert_eq!(reason_code, "CAPABILITY_CONSTRAINT_DENIED");
         }
+    }
+
+    #[test]
+    fn capability_constraint_denial_audit_descriptor_hash_is_redacted_and_stable()
+    -> Result<(), String> {
+        let mut ctx = test_context();
+        let resource_uri = "/messages/secret-thread".to_string();
+        let host = "api.example.com".to_string();
+        ctx.constraint_resource_uri = Some(resource_uri.clone());
+        ctx.constraint_host = Some(host.clone());
+        ctx.constraint_observed_calls = 1;
+        ctx.constraint_observed_bytes = 256;
+
+        let descriptor = RequestDescriptor {
+            object_id: constraint_object_id(),
+            operation: parse_operation_id_for_check(&ctx.operation)
+                .map_err(|outcome| format!("operation parse failed: {outcome:?}"))?,
+            principal: PrincipalId::new(ctx.principal.as_str())
+                .map_err(|err| format!("principal parse failed: {err}"))?,
+            host,
+            resource_uri,
+            requested_at_unix_ms: ctx.timestamp_ms,
+            observed_calls: ctx.constraint_observed_calls,
+            observed_bytes: ctx.constraint_observed_bytes,
+        };
+        let audit_descriptor = capability_constraint_audit_descriptor(
+            ctx.request_id.as_str(),
+            ctx.connector_id.as_str(),
+            ctx.operation.as_str(),
+            ctx.zone_id.as_str(),
+            &descriptor,
+        );
+
+        let first = capability_constraint_descriptor_hash(&audit_descriptor)?;
+        let second = capability_constraint_descriptor_hash(&audit_descriptor)?;
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+
+        let serialized = serde_json::to_string(&audit_descriptor).map_err(|err| err.to_string())?;
+        assert!(!serialized.contains("raw_payload"));
+        assert!(!serialized.contains("secret payload body"));
+        Ok(())
     }
 
     #[test]

@@ -156,6 +156,61 @@ pub enum ConstraintDenialKind {
     },
 }
 
+impl ConstraintDenialKind {
+    /// Stable machine label used by logs and audit events.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::EmptyConstraintSet => "empty_constraint_set",
+            Self::ObjectIdNotInAllowlist { .. } => "object_id_not_in_allowlist",
+            Self::HostNotInAllowlist { .. } => "host_not_in_allowlist",
+            Self::ResourceUriNotInAllowlist { .. } => "resource_uri_not_in_allowlist",
+            Self::ResourceUriDeniedByDenylist { .. } => "resource_uri_denied_by_denylist",
+            Self::OutsideTimeWindow { .. } => "outside_time_window",
+            Self::ScopeCeilingExceeded { .. } => "scope_ceiling_exceeded",
+            Self::PrincipalNotBound { .. } => "principal_not_bound",
+        }
+    }
+
+    /// Narrow observed value that failed enforcement.
+    ///
+    /// This intentionally avoids serializing the full request descriptor or raw
+    /// payload; audit events combine this value with a descriptor hash.
+    #[must_use]
+    pub fn observed_value(&self) -> String {
+        match self {
+            Self::EmptyConstraintSet => "constraint_set=empty".to_string(),
+            Self::ObjectIdNotInAllowlist { observed } => format!("object_id={observed}"),
+            Self::HostNotInAllowlist { observed } => format!("host={observed}"),
+            Self::ResourceUriNotInAllowlist { observed } => {
+                format!("resource_uri={observed}")
+            }
+            Self::ResourceUriDeniedByDenylist {
+                observed,
+                matched_pattern,
+            } => format!("resource_uri={observed},matched_pattern={matched_pattern}"),
+            Self::OutsideTimeWindow {
+                observed_unix_ms,
+                not_before_unix_ms,
+                not_after_unix_ms,
+            } => format!(
+                "requested_at_unix_ms={observed_unix_ms},not_before_unix_ms={not_before_unix_ms:?},not_after_unix_ms={not_after_unix_ms:?}"
+            ),
+            Self::ScopeCeilingExceeded {
+                observed_calls,
+                observed_bytes,
+                max_calls,
+                max_bytes,
+            } => format!(
+                "observed_calls={observed_calls},observed_bytes={observed_bytes},max_calls={max_calls:?},max_bytes={max_bytes:?}"
+            ),
+            Self::PrincipalNotBound { observed, expected } => {
+                format!("principal={observed},expected={expected}")
+            }
+        }
+    }
+}
+
 /// Mechanically enforce [`CapabilityConstraints`] claims against a request.
 ///
 /// Implementations MUST short-circuit at the first denial and MUST treat an
@@ -438,18 +493,7 @@ fn log_evaluation(
         ConstraintEvaluation::Allow => "allow",
         ConstraintEvaluation::Deny(_) => "deny",
     };
-    let reason_kind = outcome.deny_reason().map(|r| match &r.kind {
-        ConstraintDenialKind::EmptyConstraintSet => "empty_constraint_set",
-        ConstraintDenialKind::ObjectIdNotInAllowlist { .. } => "object_id_not_in_allowlist",
-        ConstraintDenialKind::HostNotInAllowlist { .. } => "host_not_in_allowlist",
-        ConstraintDenialKind::ResourceUriNotInAllowlist { .. } => "resource_uri_not_in_allowlist",
-        ConstraintDenialKind::ResourceUriDeniedByDenylist { .. } => {
-            "resource_uri_denied_by_denylist"
-        }
-        ConstraintDenialKind::OutsideTimeWindow { .. } => "outside_time_window",
-        ConstraintDenialKind::ScopeCeilingExceeded { .. } => "scope_ceiling_exceeded",
-        ConstraintDenialKind::PrincipalNotBound { .. } => "principal_not_bound",
-    });
+    let reason_kind = outcome.deny_reason().map(|reason| reason.kind.as_str());
 
     let constraint_count = constraints.resource_allow.len()
         + constraints.resource_deny.len()
@@ -499,6 +543,22 @@ mod tests {
             observed_calls: 0,
             observed_bytes: 0,
         }
+    }
+
+    #[test]
+    fn denial_kind_labels_and_observed_values_are_audit_stable() {
+        let kind = ConstraintDenialKind::ScopeCeilingExceeded {
+            observed_calls: 1,
+            observed_bytes: 512,
+            max_calls: Some(0),
+            max_bytes: Some(256),
+        };
+
+        assert_eq!(kind.as_str(), "scope_ceiling_exceeded");
+        assert_eq!(
+            kind.observed_value(),
+            "observed_calls=1,observed_bytes=512,max_calls=Some(0),max_bytes=Some(256)"
+        );
     }
 
     // ── evaluate(): default-deny on empty constraint set ──────────────────

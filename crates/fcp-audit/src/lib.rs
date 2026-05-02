@@ -27,6 +27,8 @@ use std::fmt;
 use thiserror::Error;
 
 const AUDIT_ENTRY_ID_DOMAIN: &[u8] = b"FCP2-AUDIT-ENTRY-V1";
+const CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN: &[u8] =
+    b"FCP2-CAPABILITY-CONSTRAINT-DESCRIPTOR-V1";
 const DECISION_RECEIPT_ID_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-V1";
 const DECISION_RECEIPT_SIG_DOMAIN: &[u8] = b"FCP2-DECISION-RECEIPT-SIG-V1";
 
@@ -51,6 +53,8 @@ pub mod event_types {
     pub const SECRET_ACCESS: &str = "secret.access";
     /// Capability was invoked.
     pub const CAPABILITY_INVOKE: &str = "capability.invoke";
+    /// Capability constraints denied a request before connector dispatch.
+    pub const CAPABILITY_CONSTRAINT_DENIED: &str = "capability.constraint_denied";
     /// Privilege elevation was granted.
     pub const ELEVATION_GRANTED: &str = "elevation.granted";
     /// Declassification was granted.
@@ -92,6 +96,7 @@ impl Severity {
     pub fn for_event_type(event_type: &str) -> Self {
         match event_type {
             event_types::SECRET_ACCESS
+            | event_types::CAPABILITY_CONSTRAINT_DENIED
             | event_types::ELEVATION_GRANTED
             | event_types::DECLASSIFICATION_GRANTED => Self::Warning,
             event_types::REVOCATION_ISSUED | event_types::SECURITY_VIOLATION => Self::Error,
@@ -172,6 +177,87 @@ impl fmt::Display for TraceContext {
 // ============================================================================
 // AuditEntry
 // ============================================================================
+
+/// Structured payload for a capability-constraint denial audit event.
+///
+/// The audit entry records a hash of the request descriptor instead of the raw
+/// request payload. `observed_value` is the narrow value that failed the
+/// constraint check, such as a resource URI or usage counter summary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CapabilityConstraintDenied {
+    /// Machine-readable constraint kind that denied the request.
+    pub constraint_kind: String,
+    /// Narrow observed value that failed the constraint check.
+    pub observed_value: String,
+    /// Domain-separated BLAKE3 hash of the redacted request descriptor.
+    pub request_descriptor_hash: String,
+    /// Node that made the denial decision.
+    pub denying_node: String,
+    /// Event timestamp in Unix seconds.
+    pub timestamp: u64,
+}
+
+impl CapabilityConstraintDenied {
+    /// Create a new capability-constraint denial payload.
+    #[must_use]
+    pub fn new(
+        constraint_kind: impl Into<String>,
+        observed_value: impl Into<String>,
+        request_descriptor_hash: impl Into<String>,
+        denying_node: impl Into<String>,
+        timestamp: u64,
+    ) -> Self {
+        Self {
+            constraint_kind: constraint_kind.into(),
+            observed_value: observed_value.into(),
+            request_descriptor_hash: request_descriptor_hash.into(),
+            denying_node: denying_node.into(),
+            timestamp,
+        }
+    }
+
+    #[must_use]
+    fn into_metadata(self) -> std::collections::BTreeMap<String, serde_json::Value> {
+        let mut metadata = std::collections::BTreeMap::new();
+        metadata.insert("constraint_kind".to_string(), self.constraint_kind.into());
+        metadata.insert("observed_value".to_string(), self.observed_value.into());
+        metadata.insert(
+            "request_descriptor_hash".to_string(),
+            self.request_descriptor_hash.into(),
+        );
+        metadata.insert("denying_node".to_string(), self.denying_node.into());
+        metadata.insert("timestamp".to_string(), self.timestamp.into());
+        metadata
+    }
+}
+
+/// Hash a redacted request descriptor for capability-constraint audit events.
+///
+/// The descriptor should contain routing and constraint-relevant fields only,
+/// never the raw request payload. The returned hash is domain-separated from
+/// audit-entry IDs and receipt IDs.
+///
+/// # Errors
+///
+/// Returns [`AuditError::SerializationError`] when canonical CBOR encoding of
+/// the descriptor fails.
+pub fn capability_constraint_request_descriptor_hash<T>(
+    descriptor: &T,
+) -> Result<String, AuditError>
+where
+    T: Serialize,
+{
+    let canonical = fcp_cbor::to_canonical_cbor(descriptor).map_err(|err| {
+        AuditError::SerializationError(format!(
+            "failed to canonicalize capability-constraint request descriptor: {err}"
+        ))
+    })?;
+
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(CAPABILITY_CONSTRAINT_DESCRIPTOR_HASH_DOMAIN);
+    hasher.update(&canonical);
+    Ok(hex::encode(hasher.finalize().as_bytes()))
+}
 
 /// A single entry in the audit chain.
 ///
@@ -564,6 +650,19 @@ impl AuditEntryBuilder {
     #[must_use]
     pub fn meta(mut self, key: impl Into<String>, value: serde_json::Value) -> Self {
         self.metadata.insert(key.into(), value);
+        self
+    }
+
+    /// Mark this entry as a capability-constraint denial audit event.
+    ///
+    /// This populates the normative event type, warning severity, and redacted
+    /// structured metadata. Callers still supply the chain-specific fields
+    /// (`id`, `seq`, and optional `prev`) through the normal builder methods.
+    #[must_use]
+    pub fn capability_constraint_denied(mut self, denial: CapabilityConstraintDenied) -> Self {
+        self.event_type = Some(event_types::CAPABILITY_CONSTRAINT_DENIED.to_string());
+        self.severity = Some(Severity::Warning);
+        self.metadata.extend(denial.into_metadata());
         self
     }
 
@@ -2250,6 +2349,10 @@ mod tests {
     fn event_type_constants_are_valid() {
         assert_eq!(event_types::SECRET_ACCESS, "secret.access");
         assert_eq!(event_types::CAPABILITY_INVOKE, "capability.invoke");
+        assert_eq!(
+            event_types::CAPABILITY_CONSTRAINT_DENIED,
+            "capability.constraint_denied"
+        );
         assert_eq!(event_types::ELEVATION_GRANTED, "elevation.granted");
         assert_eq!(
             event_types::DECLASSIFICATION_GRANTED,
@@ -2266,6 +2369,7 @@ mod tests {
         let types = [
             event_types::SECRET_ACCESS,
             event_types::CAPABILITY_INVOKE,
+            event_types::CAPABILITY_CONSTRAINT_DENIED,
             event_types::ELEVATION_GRANTED,
             event_types::DECLASSIFICATION_GRANTED,
             event_types::ZONE_TRANSITION,
@@ -2304,6 +2408,10 @@ mod tests {
         assert_eq!(
             Severity::for_event_type(event_types::CAPABILITY_INVOKE),
             Severity::Info
+        );
+        assert_eq!(
+            Severity::for_event_type(event_types::CAPABILITY_CONSTRAINT_DENIED),
+            Severity::Warning
         );
         assert_eq!(
             Severity::for_event_type(event_types::ZONE_TRANSITION),
@@ -6390,6 +6498,146 @@ mod tests {
         assert!(!filter_error.matches(&e0)); // Info
         assert!(!filter_error.matches(&e1)); // Warning
         assert!(filter_error.matches(&e2)); // Error
+    }
+
+    #[derive(serde::Serialize)]
+    struct TestConstraintDescriptor<'a> {
+        request_id: &'a str,
+        connector_id: &'a str,
+        operation_id: &'a str,
+        zone_id: &'a str,
+        resource_uri: &'a str,
+        payload_hash: &'a str,
+        observed_calls: u32,
+    }
+
+    fn test_constraint_descriptor() -> TestConstraintDescriptor<'static> {
+        TestConstraintDescriptor {
+            request_id: "req-constraint-001",
+            connector_id: "fcp.test.audit:utility:1.0.0",
+            operation_id: "test.echo",
+            zone_id: "z:work",
+            resource_uri: "/messages/123",
+            payload_hash: "payload-hash-only",
+            observed_calls: 1,
+        }
+    }
+
+    #[test]
+    fn capability_constraint_descriptor_hash_is_deterministic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let descriptor = test_constraint_descriptor();
+        let first = capability_constraint_request_descriptor_hash(&descriptor)?;
+        let second = capability_constraint_request_descriptor_hash(&descriptor)?;
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 64);
+        assert!(first.chars().all(|ch| ch.is_ascii_hexdigit()));
+        Ok(())
+    }
+
+    #[test]
+    fn capability_constraint_denied_entry_is_redacted() -> Result<(), Box<dyn std::error::Error>> {
+        let descriptor = test_constraint_descriptor();
+        let request_descriptor_hash = capability_constraint_request_descriptor_hash(&descriptor)?;
+        let raw_payload = "secret input body that must never appear in audit metadata";
+
+        let entry = AuditEntryBuilder::new()
+            .id("entry-constraint-denied")
+            .actor("agent:auditor")
+            .zone_id("z:work")
+            .seq(1)
+            .occurred_at(1_700_000_060)
+            .correlation_id("req-constraint-001")
+            .connector_id("fcp.test.audit:utility:1.0.0")
+            .operation_id("test.echo")
+            .capability_constraint_denied(CapabilityConstraintDenied::new(
+                "scope_ceiling_exceeded",
+                "calls=1,max_calls=0",
+                request_descriptor_hash.clone(),
+                "node:fcp-host-1",
+                1_700_000_060,
+            ))
+            .build()?;
+
+        assert_eq!(entry.event_type, event_types::CAPABILITY_CONSTRAINT_DENIED);
+        assert_eq!(entry.severity, Severity::Warning);
+        assert_eq!(
+            entry.metadata.get("request_descriptor_hash"),
+            Some(&serde_json::json!(request_descriptor_hash))
+        );
+        assert!(!entry.metadata.contains_key("payload"));
+        assert!(!entry.metadata.contains_key("raw_payload"));
+
+        let json = serde_json::to_string(&entry)?;
+        assert!(!json.contains(raw_payload));
+        Ok(())
+    }
+
+    #[test]
+    fn capability_constraint_denied_entry_preserves_hash_link_continuity()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let genesis = with_computed_id(
+            AuditEntryBuilder::new()
+                .id("constraint-chain-0")
+                .event_type(event_types::CAPABILITY_INVOKE)
+                .actor("agent:auditor")
+                .zone_id("z:work")
+                .seq(0)
+                .occurred_at(1_700_000_000)
+                .build()?,
+        );
+        let request_descriptor_hash =
+            capability_constraint_request_descriptor_hash(&test_constraint_descriptor())?;
+        let denial = with_computed_id(
+            AuditEntryBuilder::new()
+                .id("constraint-chain-1")
+                .actor("agent:auditor")
+                .zone_id("z:work")
+                .seq(1)
+                .occurred_at(1_700_000_060)
+                .prev(&genesis.id)
+                .capability_constraint_denied(CapabilityConstraintDenied::new(
+                    "scope_ceiling_exceeded",
+                    "calls=1,max_calls=0",
+                    request_descriptor_hash,
+                    "node:fcp-host-1",
+                    1_700_000_060,
+                ))
+                .build()?,
+        );
+
+        assert!(denial.follows(&genesis));
+        let report = verify_chain(&[genesis, denial], None, Some("z:work"));
+        assert!(report.status.is_ok(), "{report:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn capability_constraint_denied_entry_cbor_is_deterministic()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let hash = capability_constraint_request_descriptor_hash(&test_constraint_descriptor())?;
+        let build_entry = || -> Result<AuditEntry, AuditError> {
+            AuditEntryBuilder::new()
+                .id("constraint-cbor")
+                .actor("agent:auditor")
+                .zone_id("z:work")
+                .seq(7)
+                .occurred_at(1_700_000_420)
+                .capability_constraint_denied(CapabilityConstraintDenied::new(
+                    "resource_uri_not_in_allowlist",
+                    "/admin/keys",
+                    hash.clone(),
+                    "node:fcp-host-1",
+                    1_700_000_420,
+                ))
+                .build()
+        };
+
+        let first = fcp_cbor::to_canonical_cbor(&build_entry()?)?;
+        let second = fcp_cbor::to_canonical_cbor(&build_entry()?)?;
+        assert_eq!(first, second);
+        Ok(())
     }
 
     #[test]

@@ -4,12 +4,33 @@
 //! scenarios, individual steps with assertions, and evidence bundles for
 //! archival and replay.
 
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    fmt::Write as _,
+    fs,
+    path::{Component, Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 /// Shared verification bundle schema version used across replayable evidence.
 pub const VERIFICATION_BUNDLE_SCHEMA_VERSION: &str = "fcp-verification-bundle/v1";
+
+/// Shared Lean witness schema version for formal proof gates.
+pub const FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION: &str = "fcp-lean-witness/v1";
+
+/// Canonical replay-bundle path for formal invariant witnesses.
+pub const FORMAL_INVARIANTS_WITNESS_PATH: &str = "lean/witnesses/formal_invariants.v1.json";
+
+/// Theorems required before formal-invariant-gated E2E scenarios may run.
+pub const FORMAL_INVARIANT_THEOREMS: &[&str] = &[
+    "Fcp.Invariants.Capability.capability_token_ladder_composes_only_through_bound",
+    "Fcp.Invariants.Revocation.revocation_seal_check_use_atomicity",
+    "Fcp.Invariants.Audit.audit_chain_hash_link_fork_resistance",
+    "Fcp.Invariants.Zone.merge_preserves_integrity_and_confidentiality",
+    "Fcp.Invariants.Symbol.symbol_fungibility_reconstruction_guarantee",
+];
 
 // ── Scenario metadata ───────────────────────────────────────────────────
 
@@ -83,6 +104,97 @@ pub struct VerificationCommands {
     /// Bundle validation command.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub validate: String,
+}
+
+/// Lean proof witness consumed by E2E gates before scenario execution.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeanWitness {
+    /// Fully-qualified theorem name.
+    pub theorem: String,
+    /// Repository-relative Lean source path containing the theorem.
+    pub source_path: String,
+    /// Hash of the source file at the time `lake build` passed.
+    pub source_hash: String,
+    /// Lake target that checked the theorem.
+    pub lake_target: String,
+    /// Date the witness was last verified, as `YYYY-MM-DD`.
+    pub verified_at: String,
+}
+
+/// Materialized witness file generated after a successful `lake build`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeanWitnessFile {
+    /// Witness schema version.
+    pub schema_version: String,
+    /// Command used to verify the proofs.
+    pub generated_by: String,
+    /// Theorem witnesses in deterministic order.
+    pub witnesses: Vec<LeanWitness>,
+}
+
+/// Errors returned when validating Lean proof witnesses.
+#[derive(Debug, thiserror::Error)]
+pub enum LeanWitnessError {
+    /// Witness file could not be read.
+    #[error("failed to read Lean witness input {path}: {source}")]
+    Io {
+        /// Path being read.
+        path: PathBuf,
+        /// Underlying IO error.
+        #[source]
+        source: std::io::Error,
+    },
+    /// Witness file JSON was malformed.
+    #[error("failed to parse Lean witness JSON {path}: {source}")]
+    Json {
+        /// Path being parsed.
+        path: PathBuf,
+        /// Underlying JSON error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Witness schema is not the current E2E gate schema.
+    #[error("unsupported Lean witness schema {actual:?}, expected {expected:?}")]
+    UnsupportedSchema {
+        /// Expected schema version.
+        expected: String,
+        /// Actual schema version from the file.
+        actual: String,
+    },
+    /// Required theorem was not present in the witness file.
+    #[error("missing Lean witness for required theorem {theorem}")]
+    MissingTheorem {
+        /// Fully-qualified theorem name.
+        theorem: String,
+    },
+    /// Witness source path escaped the repository root or used an absolute path.
+    #[error("unsafe Lean witness source path {path}")]
+    UnsafeSourcePath {
+        /// Source path from the witness.
+        path: String,
+    },
+    /// Witness did not record a verification date.
+    #[error("Lean witness {theorem} has an empty verified_at field")]
+    EmptyVerifiedAt {
+        /// Fully-qualified theorem name.
+        theorem: String,
+    },
+    /// Witness did not record the Lake target that checked the theorem.
+    #[error("Lean witness {theorem} has an empty lake_target field")]
+    EmptyLakeTarget {
+        /// Fully-qualified theorem name.
+        theorem: String,
+    },
+    /// Source file hash no longer matches the witness.
+    #[error("stale Lean witness for {theorem}: expected source hash {expected}, found {actual}")]
+    SourceHashMismatch {
+        /// Fully-qualified theorem name.
+        theorem: String,
+        /// Hash from the witness file.
+        expected: String,
+        /// Hash computed from the current source file.
+        actual: String,
+    },
 }
 
 // ── Step taxonomy ───────────────────────────────────────────────────────
@@ -255,6 +367,9 @@ pub struct EvidenceBundle {
     /// Structured rerun and validation commands.
     #[serde(default)]
     pub commands: VerificationCommands,
+    /// Formal Lean witnesses consumed before gated E2E execution.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lean_witnesses: Vec<LeanWitness>,
     /// Number of days to retain this bundle.
     pub retention_days: u32,
 }
@@ -288,6 +403,10 @@ pub fn canonical_e2e_artifact_paths() -> BTreeMap<String, String> {
             "session_transcript.json".to_string(),
         ),
         ("replay_sh".to_string(), "replay.sh".to_string()),
+        (
+            "lean_witness".to_string(),
+            FORMAL_INVARIANTS_WITNESS_PATH.to_string(),
+        ),
     ])
 }
 
@@ -405,8 +524,155 @@ pub fn bundle_evidence(script: ScenarioScript, redact: &[&str]) -> EvidenceBundl
             validate: default_e2e_validation_command(),
             ..VerificationCommands::default()
         },
+        lean_witnesses: Vec::new(),
         retention_days: DEFAULT_RETENTION_DAYS,
     }
+}
+
+/// Load a Lean witness file from disk.
+///
+/// # Errors
+///
+/// Returns [`LeanWitnessError`] if the witness file cannot be read or parsed.
+pub fn load_lean_witness_file<P>(path: P) -> Result<LeanWitnessFile, LeanWitnessError>
+where
+    P: AsRef<Path>,
+{
+    let path = path.as_ref();
+    let body = fs::read_to_string(path).map_err(|source| LeanWitnessError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    serde_json::from_str(&body).map_err(|source| LeanWitnessError::Json {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+/// Verify the canonical formal-invariant Lean witness file.
+///
+/// # Errors
+///
+/// Returns [`LeanWitnessError`] if any required theorem witness is missing,
+/// malformed, or stale relative to the current Lean source files.
+pub fn verify_formal_invariant_witnesses<P>(
+    repo_root: P,
+) -> Result<Vec<LeanWitness>, LeanWitnessError>
+where
+    P: AsRef<Path>,
+{
+    verify_lean_witness_file(
+        repo_root,
+        FORMAL_INVARIANTS_WITNESS_PATH,
+        FORMAL_INVARIANT_THEOREMS,
+    )
+}
+
+/// Verify a Lean witness file against required theorem names and source hashes.
+///
+/// # Errors
+///
+/// Returns [`LeanWitnessError`] if the witness schema is unsupported, a required
+/// theorem is missing, a source path is unsafe, or a current source hash differs
+/// from the recorded witness hash.
+pub fn verify_lean_witness_file<P, Q>(
+    repo_root: P,
+    witness_path: Q,
+    required_theorems: &[&str],
+) -> Result<Vec<LeanWitness>, LeanWitnessError>
+where
+    P: AsRef<Path>,
+    Q: AsRef<Path>,
+{
+    let repo_root = repo_root.as_ref();
+    let witness = load_lean_witness_file(repo_root.join(witness_path.as_ref()))?;
+    if witness.schema_version != FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION {
+        return Err(LeanWitnessError::UnsupportedSchema {
+            expected: FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION.to_string(),
+            actual: witness.schema_version,
+        });
+    }
+
+    required_theorems
+        .iter()
+        .map(|theorem| verify_required_lean_witness(repo_root, &witness, theorem))
+        .collect()
+}
+
+/// Attach verified Lean witnesses to an evidence bundle.
+pub fn attach_lean_witnesses(bundle: &mut EvidenceBundle, witnesses: Vec<LeanWitness>) {
+    bundle.lean_witnesses = witnesses;
+    bundle.artifact_paths.insert(
+        "lean_witness".to_string(),
+        FORMAL_INVARIANTS_WITNESS_PATH.to_string(),
+    );
+}
+
+fn verify_required_lean_witness(
+    repo_root: &Path,
+    witness_file: &LeanWitnessFile,
+    theorem: &str,
+) -> Result<LeanWitness, LeanWitnessError> {
+    let witness = witness_file
+        .witnesses
+        .iter()
+        .find(|entry| entry.theorem == theorem)
+        .ok_or_else(|| LeanWitnessError::MissingTheorem {
+            theorem: theorem.to_string(),
+        })?;
+
+    if witness.verified_at.trim().is_empty() {
+        return Err(LeanWitnessError::EmptyVerifiedAt {
+            theorem: theorem.to_string(),
+        });
+    }
+    if witness.lake_target.trim().is_empty() {
+        return Err(LeanWitnessError::EmptyLakeTarget {
+            theorem: theorem.to_string(),
+        });
+    }
+
+    let source_path = Path::new(&witness.source_path);
+    if !is_safe_repo_relative_path(source_path) {
+        return Err(LeanWitnessError::UnsafeSourcePath {
+            path: witness.source_path.clone(),
+        });
+    }
+
+    let actual = sha256_file_hash(&repo_root.join(source_path))?;
+    if witness.source_hash != actual {
+        return Err(LeanWitnessError::SourceHashMismatch {
+            theorem: theorem.to_string(),
+            expected: witness.source_hash.clone(),
+            actual,
+        });
+    }
+
+    Ok(witness.clone())
+}
+
+fn sha256_file_hash(path: &Path) -> Result<String, LeanWitnessError> {
+    let bytes = fs::read(path).map_err(|source| LeanWitnessError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let digest = Sha256::digest(&bytes);
+    Ok(format!("sha256:{}", lower_hex(&digest)))
+}
+
+fn lower_hex(bytes: &[u8]) -> String {
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
+fn is_safe_repo_relative_path(path: &Path) -> bool {
+    !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
 }
 
 /// Validate a scenario script and return a list of problems.
@@ -714,6 +980,50 @@ mod tests {
         );
         assert_eq!(back.redacted_fields, vec!["token"]);
         assert_eq!(back.retention_days, 90);
+    }
+
+    #[test]
+    fn canonical_lean_witness_file_is_current() {
+        let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root");
+        let witnesses = verify_formal_invariant_witnesses(repo_root)
+            .expect("formal invariant witnesses must be current");
+        assert_eq!(witnesses.len(), FORMAL_INVARIANT_THEOREMS.len());
+        assert!(witnesses.iter().any(|witness| {
+            witness
+                .theorem
+                .ends_with("symbol_fungibility_reconstruction_guarantee")
+        }));
+    }
+
+    #[test]
+    fn evidence_bundle_serializes_lean_witness_section() {
+        let script = new_scenario("lean_gate", ScenarioEnvironment::Local);
+        let mut bundle = bundle_evidence(script, &[]);
+        attach_lean_witnesses(
+            &mut bundle,
+            vec![LeanWitness {
+                theorem: FORMAL_INVARIANT_THEOREMS[0].to_string(),
+                source_path: "lean/Fcp/Invariants/Capability.lean".to_string(),
+                source_hash: "sha256:test".to_string(),
+                lake_target: "Fcp".to_string(),
+                verified_at: "2026-05-02".to_string(),
+            }],
+        );
+
+        let json = serde_json::to_value(&bundle).expect("serialize bundle");
+        assert_eq!(
+            json.pointer("/lean_witnesses/0/theorem")
+                .and_then(serde_json::Value::as_str),
+            Some(FORMAL_INVARIANT_THEOREMS[0])
+        );
+        assert_eq!(
+            json.pointer("/artifact_paths/lean_witness")
+                .and_then(serde_json::Value::as_str),
+            Some(FORMAL_INVARIANTS_WITNESS_PATH)
+        );
     }
 
     #[test]

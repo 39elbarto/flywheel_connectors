@@ -1,0 +1,41 @@
+{
+  "schema_version": "fcp-lean-witness/v1",
+  "generated_by": "lake build",
+  "witnesses": [
+    {
+      "theorem": "Fcp.Invariants.Capability.capability_token_ladder_composes_only_through_bound",
+      "source_path": "lean/Fcp/Invariants/Capability.lean",
+      "source_hash": "sha256:643154a8afe7b2c0cafd9d4ea495a1be09b055b580b5b8e04da8ae72319e4599",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
+    },
+    {
+      "theorem": "Fcp.Invariants.Revocation.revocation_seal_check_use_atomicity",
+      "source_path": "lean/Fcp/Invariants/Revocation.lean",
+      "source_hash": "sha256:b86c7876e951cc40808e8ae13224e88fe363090223ad402880f888ef70386878",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
+    },
+    {
+      "theorem": "Fcp.Invariants.Audit.audit_chain_hash_link_fork_resistance",
+      "source_path": "lean/Fcp/Invariants/Audit.lean",
+      "source_hash": "sha256:43ad1c3882f96fec067a27d73df2979318888b77371e619497a1495de5a7c7dc",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
+    },
+    {
+      "theorem": "Fcp.Invariants.Zone.merge_preserves_integrity_and_confidentiality",
+      "source_path": "lean/Fcp/Invariants/Zone.lean",
+      "source_hash": "sha256:bb6f68f680c27cd44ada62e505b3bcce8a25a1a8c0a7fc6273d382056b849b57",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
+    },
+    {
+      "theorem": "Fcp.Invariants.Symbol.symbol_fungibility_reconstruction_guarantee",
+      "source_path": "lean/Fcp/Invariants/Symbol.lean",
+      "source_hash": "sha256:9551740e6ea5170b256ca7a08f84f71a8d61f53cf01519feab73d3944f0df72d",
+      "lake_target": "Fcp",
+      "verified_at": "2026-05-02"
+    }
+  ]
+}

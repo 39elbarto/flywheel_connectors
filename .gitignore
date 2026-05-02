@@ -37,6 +37,9 @@ coverage/
 # Documentation builds
 /doc/
 
+# Lean / Lake build artifacts
+.lake/
+
 # Temporary files
 *.tmp
 *.temp

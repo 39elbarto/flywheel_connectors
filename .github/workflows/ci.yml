@@ -89,6 +89,22 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
+  # Formal verification: Lean proof gate for E2E-linked invariants
+  # ─────────────────────────────────────────────────────────────────────────────
+  formal-verification:
+    name: Lean Formal Verification
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: leanprover/lean-action@v1
+        with:
+          build: true
+          test: false
+          lint: false
+          use-mathlib-cache: false
+
+  # ─────────────────────────────────────────────────────────────────────────────
   # ASUPERSYNC lane: smoke (fast signal for migration churn)
   # ─────────────────────────────────────────────────────────────────────────────
   migration-smoke:

@@ -840,6 +840,7 @@ impl SessionE2eRunner {
                 ci: self.cargo_replay_command().unwrap_or_default(),
                 validate: default_e2e_validation_command(),
             },
+            lean_witnesses: Vec::new(),
             retention_days: 90,
         }
     }

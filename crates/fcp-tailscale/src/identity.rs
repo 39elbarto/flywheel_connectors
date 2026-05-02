@@ -7,12 +7,12 @@
 //! - [`NodeKeyAttestation`] - Owner-signed binding of `node_id` ↔ keys ↔ tags
 
 use chrono::{DateTime, Utc};
-use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::canonicalize::to_deterministic_cbor;
 use fcp_crypto::{
     Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, KeyId, X25519PublicKey,
     canonical_signing_bytes,
 };
+use fcp_prelude::{TailscaleNodeId, validate_canonical_id};
 use serde::{Deserialize, Serialize};
 use std::net::IpAddr;
 use std::str::FromStr;
@@ -32,15 +32,27 @@ impl NodeId {
         Self(TailscaleNodeId::new(id))
     }
 
+    /// Validate a borrowed node ID without allocating a [`NodeId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the borrowed string is not a canonical
+    /// `TailscaleNodeId`.
+    pub fn validate_str(id: &str) -> TailscaleResult<&str> {
+        validate_canonical_id(id)
+            .map(|()| id)
+            .map_err(|err| TailscaleError::InvalidNodeId(err.to_string()))
+    }
+
     /// Create a validated `NodeId` from untrusted input.
     ///
     /// # Errors
     ///
     /// Returns an error if the node ID is not a canonical `TailscaleNodeId`.
     pub fn try_new(id: impl Into<String>) -> TailscaleResult<Self> {
-        TailscaleNodeId::try_new(id)
-            .map(Self)
-            .map_err(|err| TailscaleError::InvalidNodeId(err.to_string()))
+        let id = id.into();
+        Self::validate_str(&id)?;
+        Ok(Self(TailscaleNodeId::new(id)))
     }
 
     /// Get the node ID as a string slice.

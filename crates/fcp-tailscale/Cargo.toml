@@ -29,9 +29,14 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 semver = "1.0"
 fcp-cbor = { path = "../fcp-cbor" }
 insta.workspace = true
+
+[[bench]]
+name = "peer_scans"
+harness = false
 
 [[test]]
 name = "no_mock_integration"

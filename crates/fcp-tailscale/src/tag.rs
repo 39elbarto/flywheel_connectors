@@ -38,12 +38,18 @@ impl TailscaleTag {
     /// Returns an error if the tag doesn't start with `tag:`.
     pub fn new(tag: impl Into<String>) -> TailscaleResult<Self> {
         let tag = tag.into();
-        if !tag.starts_with("tag:") {
+        if !Self::is_valid_str(&tag) {
             return Err(TailscaleError::InvalidTag(format!(
                 "tag must start with 'tag:': {tag}"
             )));
         }
         Ok(Self(tag))
+    }
+
+    /// Check whether a borrowed string is syntactically a Tailscale ACL tag.
+    #[must_use]
+    pub fn is_valid_str(tag: &str) -> bool {
+        tag.starts_with("tag:")
     }
 
     /// Create a new FCP tag for a zone suffix.
@@ -70,7 +76,13 @@ impl TailscaleTag {
     /// Check if this is an FCP tag (has `tag:fcp-` prefix).
     #[must_use]
     pub fn is_fcp_tag(&self) -> bool {
-        self.0.starts_with(FCP_TAG_PREFIX)
+        Self::is_fcp_tag_str(&self.0)
+    }
+
+    /// Check whether a borrowed tag string has the FCP zone prefix.
+    #[must_use]
+    pub fn is_fcp_tag_str(tag: &str) -> bool {
+        tag.starts_with(FCP_TAG_PREFIX)
     }
 
     /// Get the FCP zone suffix if this is an FCP tag.
@@ -357,9 +369,15 @@ mod tests {
     fn test_tailscale_tag_is_fcp_tag() {
         let fcp_tag = TailscaleTag::new("tag:fcp-work").unwrap();
         assert!(fcp_tag.is_fcp_tag());
+        assert!(TailscaleTag::is_valid_str("tag:fcp-work"));
+        assert!(TailscaleTag::is_fcp_tag_str("tag:fcp-work"));
 
         let other_tag = TailscaleTag::new("tag:server").unwrap();
         assert!(!other_tag.is_fcp_tag());
+        assert!(TailscaleTag::is_valid_str("tag:server"));
+        assert!(!TailscaleTag::is_fcp_tag_str("tag:server"));
+        assert!(!TailscaleTag::is_valid_str("server"));
+        assert!(!TailscaleTag::is_fcp_tag_str("server"));
     }
 
     #[test]
@@ -933,14 +951,20 @@ mod tests {
         // INV3: every declared standard zone must survive the
         // zone_to_tag → tag_to_zone cycle with no drift.
         for &zone in ZoneTagMapping::standard_zones() {
-            let tag = ZoneTagMapping::zone_to_tag(zone)
-                .unwrap_or_else(|e| panic!("zone_to_tag({zone}) failed: {e:?}"));
-            let recovered = ZoneTagMapping::tag_to_zone(&tag).unwrap_or_else(|| {
-                panic!(
-                    "tag_to_zone({}) returned None for standard zone {zone}",
-                    tag.as_str()
-                )
-            });
+            let tag = ZoneTagMapping::zone_to_tag(zone);
+            assert!(
+                tag.is_ok(),
+                "zone_to_tag({zone}) failed: {:?}",
+                tag.as_ref().err()
+            );
+            let tag = tag.unwrap_or_else(|_| TailscaleTag::fcp_tag("unreachable"));
+            let recovered = ZoneTagMapping::tag_to_zone(&tag);
+            assert!(
+                recovered.is_some(),
+                "tag_to_zone({}) returned None for standard zone {zone}",
+                tag.as_str()
+            );
+            let recovered = recovered.unwrap_or_else(|| "z:unreachable".to_string());
             assert_eq!(
                 recovered,
                 zone,

@@ -6047,6 +6047,7 @@ dependencies = [
  "asupersync",
  "base64 0.22.1",
  "chrono",
+ "criterion",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-core",

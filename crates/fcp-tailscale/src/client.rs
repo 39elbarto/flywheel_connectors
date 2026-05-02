@@ -77,6 +77,33 @@ pub struct TailscaleStatus {
 }
 
 impl TailscaleStatus {
+    /// Iterate over raw peer map entries without cloning peer records.
+    pub fn iter_peers(&self) -> impl Iterator<Item = (&str, &PeerInfo)> {
+        self.peer
+            .iter()
+            .map(|(raw_key, peer)| (raw_key.as_str(), peer))
+    }
+
+    /// Validate peer map keys and embedded peer IDs without allocating peer maps.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a peer-map key or embedded peer ID is not a valid
+    /// `NodeId`, or if the outer map key does not match the embedded `ID`.
+    pub fn validate_peer_ids(&self) -> TailscaleResult<()> {
+        for (raw_key, peer) in self.iter_peers() {
+            NodeId::validate_str(raw_key)?;
+            peer.validate_node_id()?;
+            if raw_key != peer.node_id_str() {
+                return Err(TailscaleError::ParseError(format!(
+                    "peer map key '{raw_key}' does not match embedded ID '{}'",
+                    peer.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
     /// Get peers as a more convenient map.
     ///
     /// # Errors
@@ -84,16 +111,11 @@ impl TailscaleStatus {
     /// Returns an error if a peer-map key or embedded peer ID is not a valid
     /// `NodeId`, or if the outer map key does not match the embedded `ID`.
     pub fn peers(&self) -> TailscaleResult<HashMap<NodeId, PeerInfo>> {
+        self.validate_peer_ids()?;
+
         let mut peers = HashMap::with_capacity(self.peer.len());
-        for (raw_key, peer) in &self.peer {
-            let key_id = NodeId::try_new(raw_key.clone())?;
-            let peer_id = peer.node_id()?;
-            if key_id != peer_id {
-                return Err(TailscaleError::ParseError(format!(
-                    "peer map key '{raw_key}' does not match embedded ID '{}'",
-                    peer.id
-                )));
-            }
+        for (raw_key, peer) in self.iter_peers() {
+            let key_id = NodeId::try_new(raw_key.to_owned())?;
             if peers.insert(key_id, peer.clone()).is_some() {
                 return Err(TailscaleError::ParseError(format!(
                     "duplicate peer entry for '{}'",
@@ -173,6 +195,21 @@ pub struct PeerInfo {
 }
 
 impl PeerInfo {
+    /// Borrow this peer's raw node ID.
+    #[must_use]
+    pub fn node_id_str(&self) -> &str {
+        &self.id
+    }
+
+    /// Validate this peer's node ID without constructing an owned [`NodeId`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the peer ID is not canonical.
+    pub fn validate_node_id(&self) -> TailscaleResult<&str> {
+        NodeId::validate_str(&self.id)
+    }
+
     /// Get this peer's node ID.
     ///
     /// # Errors
@@ -182,22 +219,41 @@ impl PeerInfo {
         NodeId::try_new(self.id.clone())
     }
 
+    /// Iterate over valid raw Tailscale tag strings without allocation.
+    pub fn iter_tailscale_tag_strs(&self) -> impl Iterator<Item = &str> {
+        self.tags
+            .iter()
+            .map(String::as_str)
+            .filter(|tag| TailscaleTag::is_valid_str(tag))
+    }
+
+    /// Iterate over raw FCP tag strings without allocation.
+    pub fn iter_fcp_tag_strs(&self) -> impl Iterator<Item = &str> {
+        self.iter_tailscale_tag_strs()
+            .filter(|tag| TailscaleTag::is_fcp_tag_str(tag))
+    }
+
+    /// Lazily parse this peer's valid Tailscale tags.
+    pub fn iter_tailscale_tags(&self) -> impl Iterator<Item = TailscaleTag> + '_ {
+        self.iter_tailscale_tag_strs()
+            .filter_map(|tag| TailscaleTag::new(tag).ok())
+    }
+
+    /// Lazily parse this peer's FCP tags.
+    pub fn iter_fcp_tags(&self) -> impl Iterator<Item = TailscaleTag> + '_ {
+        self.iter_tailscale_tags().filter(TailscaleTag::is_fcp_tag)
+    }
+
     /// Get this peer's tags as `TailscaleTag` objects.
     #[must_use]
     pub fn tailscale_tags(&self) -> Vec<TailscaleTag> {
-        self.tags
-            .iter()
-            .filter_map(|t| TailscaleTag::new(t).ok())
-            .collect()
+        self.iter_tailscale_tags().collect()
     }
 
     /// Get this peer's FCP tags (zone memberships).
     #[must_use]
     pub fn fcp_tags(&self) -> Vec<TailscaleTag> {
-        self.tailscale_tags()
-            .into_iter()
-            .filter(TailscaleTag::is_fcp_tag)
-            .collect()
+        self.iter_fcp_tags().collect()
     }
 }
 
@@ -902,6 +958,43 @@ mod tests {
     }
 
     #[test]
+    fn peer_info_borrowed_tag_iterators_filter_without_vec_helpers() {
+        let peer = MockTailscaleClient::mock_peer(
+            "n1",
+            "h",
+            "100.64.0.1".parse().unwrap(),
+            &["tag:server", "not-a-tag", "tag:fcp-work", "tag:fcp-owner"],
+        );
+
+        let tailscale_tags: Vec<_> = peer.iter_tailscale_tag_strs().collect();
+        assert_eq!(
+            tailscale_tags,
+            vec!["tag:server", "tag:fcp-work", "tag:fcp-owner"]
+        );
+
+        let fcp_tags: Vec<_> = peer.iter_fcp_tag_strs().collect();
+        assert_eq!(fcp_tags, vec!["tag:fcp-work", "tag:fcp-owner"]);
+
+        let parsed: Vec<_> = peer.iter_fcp_tags().map(|tag| tag.to_string()).collect();
+        assert_eq!(parsed, vec!["tag:fcp-work", "tag:fcp-owner"]);
+    }
+
+    #[test]
+    fn peer_info_validate_node_id_uses_borrowed_id() {
+        let peer =
+            MockTailscaleClient::mock_peer("node-42", "host", "100.64.0.1".parse().unwrap(), &[]);
+        assert_eq!(peer.node_id_str(), "node-42");
+        assert_eq!(peer.validate_node_id().unwrap(), "node-42");
+
+        let invalid =
+            MockTailscaleClient::mock_peer("Node 42", "host", "100.64.0.2".parse().unwrap(), &[]);
+        assert!(matches!(
+            invalid.validate_node_id(),
+            Err(TailscaleError::InvalidNodeId(_))
+        ));
+    }
+
+    #[test]
     fn peer_info_tailscale_tags_invalid_filtered() {
         let peer = PeerInfo {
             id: "n1".into(),
@@ -936,6 +1029,37 @@ mod tests {
         assert_eq!(peers.len(), 2);
         assert!(peers.contains_key(&NodeId::new("node-aaa")));
         assert!(peers.contains_key(&NodeId::new("node-bbb")));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn status_iter_peers_and_validate_peer_ids_avoid_peer_map_clone() {
+        let client = MockTailscaleClient::new();
+        client
+            .add_peer(MockTailscaleClient::mock_peer(
+                "node-aaa",
+                "h1",
+                "100.64.0.2".parse().unwrap(),
+                &[],
+            ))
+            .await;
+        client
+            .add_peer(MockTailscaleClient::mock_peer(
+                "node-bbb",
+                "h2",
+                "100.64.0.3".parse().unwrap(),
+                &[],
+            ))
+            .await;
+
+        let status = client.status().await.unwrap();
+        let peer_ids: Vec<_> = status
+            .iter_peers()
+            .map(|(node_id, peer)| (node_id, peer.node_id_str()))
+            .collect();
+        assert_eq!(peer_ids.len(), 2);
+        assert!(peer_ids.contains(&("node-aaa", "node-aaa")));
+        assert!(peer_ids.contains(&("node-bbb", "node-bbb")));
+        status.validate_peer_ids().unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -1044,11 +1168,10 @@ mod tests {
     #[test]
     fn local_api_client_custom_socket_returns_error() {
         let result = LocalApiClient::with_socket("/tmp/test.sock");
-        assert!(result.is_err());
-        match result {
-            Err(e) => assert!(e.to_string().contains("Unix socket")),
-            Ok(_) => panic!("expected error"),
-        }
+        assert!(
+            matches!(result, Err(ref e) if e.to_string().contains("Unix socket")),
+            "custom socket should be rejected with a Unix socket error",
+        );
     }
 
     // ── TailscaleStatus from JSON ────────────────────────────────────

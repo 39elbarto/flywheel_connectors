@@ -1,11 +1,11 @@
 use chrono::Utc;
 use fcp_cbor::SchemaId;
+use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use fcp_prelude::{
     DeviceEnrollmentApproval, DeviceEnrollmentRequest, DeviceMetadata, NodeSignature, ObjectHeader,
     ObjectIdKey, ObjectIdKeyId, Provenance, RevocationObject, RevocationRegistry, RevocationScope,
-    StoredObject, ZoneId, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
+    StoredObject, ZoneId, ZoneKemAlgorithm, ZoneKeyAlgorithm, ZoneKeyId, ZoneKeyManifest,
 };
-use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
 use fcp_tailscale::{MeshIdentity, NodeId, NodeKeyAttestation, NodeKeys};
 use semver::Version;
 
@@ -79,6 +79,8 @@ fn create_empty_manifest(
         wrapped_object_id_keys: vec![],
         rekey_policy: None,
         signature,
+        kem: ZoneKemAlgorithm::HpkeX25519,
+        wrapped_keys_v4: vec![],
     }
 }
 

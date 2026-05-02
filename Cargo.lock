@@ -3136,6 +3136,7 @@ name = "fcp-e2e"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "blake3",
  "chrono",
  "ciborium",
  "fcp-airtable",
@@ -3207,6 +3208,7 @@ dependencies = [
  "fcp-posthog",
  "fcp-pulumi",
  "fcp-qdrant",
+ "fcp-raptorq",
  "fcp-reddit",
  "fcp-redis",
  "fcp-retool",

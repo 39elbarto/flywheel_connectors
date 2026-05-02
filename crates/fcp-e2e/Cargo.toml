@@ -302,8 +302,10 @@ ciborium = { workspace = true }
 base64 = { workspace = true }
 fcp-host = { workspace = true }
 fcp-store = { workspace = true }
+fcp-raptorq = { workspace = true }
 fcp-audit = { workspace = true }
 fcp-mesh = { workspace = true }
+blake3 = { workspace = true }
 # br-ab8sb: llm_router_compliance_e2e.rs references
 # `fcp_sandbox::host_matches_allow_list` at test body scope; without this
 # dev-dep the test binary does not compile (pre-existing baseline error,

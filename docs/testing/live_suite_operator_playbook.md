@@ -240,11 +240,23 @@ export FCP_LIVE_SANDBOX=1 FCP_LIVE_READ=1
 bash scripts/e2e/live_connector_smoke_suite.sh
 ```
 
-### Rerun with increased budget
+### Rerun with a higher per-connector budget
+
+There is no global "multiplier" environment variable today (br-hby86
+audit, 2026-05-02). Per-connector budgets are configured at the
+construction site via `fcp_testkit::live_suite::CostBudget::new(usd)`;
+the nightly default is $1.00 per connector
+(`CostBudget::nightly_default()` in
+`crates/fcp-testkit/src/live_suite.rs:454`).
+
+To rerun with a higher budget for a SPECIFIC connector, pass a
+larger value at the construction site (typically in the connector's
+`live_acceptance` test setup). A workspace-wide multiplier knob is a
+reasonable enhancement but is NOT wired today — track in br-hby86 if
+you need it.
 
 ```bash
 export FCP_LIVE_SANDBOX=1
-export FCP_LIVE_BUDGET_MULTIPLIER=2  # Double all budgets
 bash scripts/e2e/live_connector_smoke_suite.sh
 ```
 

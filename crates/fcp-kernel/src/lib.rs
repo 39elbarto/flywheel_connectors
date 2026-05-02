@@ -30,6 +30,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod computation_migration;
 mod execution_control;
 
 // ── Invocation Protocol ──────────────────────────────────────────
@@ -121,6 +122,11 @@ pub use execution_control::{
     PartialResult, PhaseTransition, ProgressNotification, ProgressOptions, ProgressPayload,
     ProgressUnit, ProgressUpdate, RolloutAuditEvent, RolloutDecision, RolloutEvidence,
     RolloutObservation, RolloutOutcome,
+};
+
+pub use computation_migration::{
+    CheckpointEntry, ComputationPhase, ComputationState, LeaseTransfer, MigrationPlan,
+    MigrationResult, ResumeRequest, TransferReason,
 };
 
 // ── Supply-chain Evidence ────────────────────────────────────────

@@ -55,6 +55,7 @@ sha2.workspace = true
 axum = { version = "0.8", features = ["json"] }
 tower = { version = "0.5.3", features = ["util"] }
 fcp-manifest = { path = "../fcp-manifest" }
+fcp-evidence = { path = "../fcp-evidence" }
 fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-registry = { path = "../fcp-registry" }
 fcp-raptorq = { path = "../fcp-raptorq" }

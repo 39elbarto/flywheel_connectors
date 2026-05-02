@@ -162,6 +162,12 @@ struct LatestLedgerPointer {
     published_at_ms: u64,
 }
 
+#[derive(Debug, Serialize)]
+struct LegacyLatestLedgerPointer<'a> {
+    mesh_id: &'a str,
+    root: CompatibilityLedgerRoot,
+}
+
 impl DurableCompatibilityLedgerStore {
     /// Open or create a filesystem-backed compatibility-ledger store.
     ///
@@ -492,10 +498,22 @@ fn load_latest_pointers(
             CompatibilityLedgerStoreError::Ledger(CompatibilityLedgerError::from(err))
         })?;
         if recoded != bytes {
-            return Err(CompatibilityLedgerStoreError::CorruptLatestPointer {
-                path,
-                message: "latest pointer CBOR is not canonical".to_owned(),
-            });
+            let is_canonical_legacy_v1 = pointer.sequence == 0 && pointer.published_at_ms == 0 && {
+                let legacy = LegacyLatestLedgerPointer {
+                    mesh_id: &pointer.mesh_id,
+                    root: pointer.root,
+                };
+                let legacy_recoded = to_canonical_cbor(&legacy).map_err(|err| {
+                    CompatibilityLedgerStoreError::Ledger(CompatibilityLedgerError::from(err))
+                })?;
+                legacy_recoded == bytes
+            };
+            if !is_canonical_legacy_v1 {
+                return Err(CompatibilityLedgerStoreError::CorruptLatestPointer {
+                    path,
+                    message: "latest pointer CBOR is not canonical".to_owned(),
+                });
+            }
         }
         let target_ledger = state.ledgers.get(&pointer.root).ok_or(
             CompatibilityLedgerStoreError::MissingLatestLedger {

@@ -25,19 +25,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
-use fcp_prelude::{
-    CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
-    PrincipalId, RevocationRegistry, SafetyTier, ZoneIdError,
-};
 use fcp_kernel::{ConnectorId, OperationId};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintDenialKind, DefaultConstraintEnforcer,
     RequestDescriptor, ZoneId,
 };
-
-use crate::deployment_mode::{
-    DeploymentClassification, DeploymentTierRefusal, admit_safety_tier,
+use fcp_prelude::{
+    CapabilityConstraints, EnforcementCheckId, EnforcementCheckOrder, IdValidationError, ObjectId,
+    PrincipalId, RevocationRegistry, SafetyTier, ZoneIdError,
 };
+
+use crate::deployment_mode::{DeploymentClassification, DeploymentTierRefusal, admit_safety_tier};
 use serde::Serialize;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1013,22 +1011,108 @@ impl EnforcementCheck for CapabilityVerifyCheck {
     }
 }
 
+/// Behavior when [`DeploymentTierCheck`] encounters an
+/// [`EnforcementContext`] that is missing required fields
+/// (`safety_tier` or `deployment_classification`).
+///
+/// Production default is [`MissingFieldPolicy::Deny`] (fail-closed)
+/// per the br-298px review finding: a security gate that silently
+/// skips when its inputs aren't populated is a fail-OPEN landmine
+/// that gets hit the moment a future caller forgets the
+/// `.safety_tier(t).deployment_classification(c)` builder calls.
+/// The legacy back-compat behavior is preserved as
+/// [`MissingFieldPolicy::Skip`] for callers that explicitly opt in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MissingFieldPolicy {
+    /// Missing `safety_tier` OR `deployment_classification` →
+    /// `CheckOutcome::Deny` with reason_code
+    /// `"TIER_ADMISSION_NOT_CONFIGURED"`. This is the fail-CLOSED
+    /// default: a request whose tier admission cannot be evaluated
+    /// MUST NOT proceed.
+    Deny,
+    /// Missing fields → `CheckOutcome::Skip` with explanatory
+    /// reason. Use only for explicit back-compat with pre-nsrx3
+    /// callers that haven't wired the new context fields. NOT
+    /// recommended for production hosts that target hr0rr.1's
+    /// security guarantees.
+    Skip,
+}
+
+impl Default for MissingFieldPolicy {
+    fn default() -> Self {
+        Self::Deny
+    }
+}
+
 /// Validates the request's [`SafetyTier`] is admissible under the
-/// host's current [`DeploymentClassification`] (br-nsrx3 / hr0rr.A).
+/// host's current [`DeploymentClassification`] (br-nsrx3 / hr0rr.A,
+/// hardened by br-298px).
 ///
 /// Composes the [`admit_safety_tier`] predicate hr0rr.1 (CrimsonWolf,
-/// commit 26d7919dd) shipped but never wired. Refuses `Risky` and
-/// `Dangerous` tiers when the host is in `DeploymentMode::Evaluation`
-/// (insufficient mesh quorum). Always refuses `Forbidden`. Always
-/// allows `Safe` and `Critical` (Critical's own quorum/elevation
-/// gating handles it).
+/// commit 26d7919dd). Refuses `Risky` and `Dangerous` tiers when
+/// the host is in `DeploymentMode::Evaluation` (insufficient mesh
+/// quorum). Always refuses `Forbidden`. Always allows `Safe` and
+/// `Critical` (Critical's own quorum/elevation gating handles it).
 ///
-/// Skips with `Skip` when either the request's `safety_tier` or the
-/// host's `deployment_classification` is missing on the context — this
-/// preserves back-compat for pre-nsrx3 callers that don't yet wire
-/// the new fields. Hosts that want strict enforcement MUST populate
-/// both fields on every `EnforcementContextBuilder`.
-pub struct DeploymentTierCheck;
+/// ## Missing-field policy
+///
+/// When `ctx.safety_tier` OR `ctx.deployment_classification` is
+/// missing, the check honors [`Self::on_missing`]:
+///
+/// * [`MissingFieldPolicy::Deny`] (production default) — returns
+///   `CheckOutcome::Deny` with reason_code
+///   `"TIER_ADMISSION_NOT_CONFIGURED"`. A security gate whose
+///   inputs aren't populated MUST NOT silently skip — that is the
+///   br-298px review finding's argument.
+/// * [`MissingFieldPolicy::Skip`] — returns `CheckOutcome::Skip`
+///   with an explanatory reason. Construct via
+///   [`Self::back_compat`] for callers that explicitly need the
+///   legacy fail-OPEN behavior.
+pub struct DeploymentTierCheck {
+    on_missing: MissingFieldPolicy,
+}
+
+impl DeploymentTierCheck {
+    /// Strict (fail-CLOSED) constructor — missing context fields
+    /// produce [`CheckOutcome::Deny`] with reason_code
+    /// `"TIER_ADMISSION_NOT_CONFIGURED"`. This is the production
+    /// default per br-298px.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            on_missing: MissingFieldPolicy::Deny,
+        }
+    }
+
+    /// Back-compat (fail-OPEN) constructor — missing context fields
+    /// produce [`CheckOutcome::Skip`] with an explanatory reason.
+    /// Use only for explicit back-compat with pre-nsrx3 callers
+    /// that haven't yet wired `safety_tier` +
+    /// `deployment_classification` on every
+    /// `EnforcementContextBuilder`. NOT recommended for production.
+    #[must_use]
+    pub const fn back_compat() -> Self {
+        Self {
+            on_missing: MissingFieldPolicy::Skip,
+        }
+    }
+
+    /// Whether this check fails closed (Deny) on missing fields.
+    #[must_use]
+    pub const fn fails_closed(&self) -> bool {
+        matches!(self.on_missing, MissingFieldPolicy::Deny)
+    }
+}
+
+impl Default for DeploymentTierCheck {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Stable reason code for missing-field denials. Operator dashboards
+/// and alerting may key off this string.
+pub const TIER_ADMISSION_NOT_CONFIGURED: &str = "TIER_ADMISSION_NOT_CONFIGURED";
 
 impl EnforcementCheck for DeploymentTierCheck {
     fn name(&self) -> &'static str {
@@ -1037,16 +1121,16 @@ impl EnforcementCheck for DeploymentTierCheck {
 
     fn check(&self, ctx: &EnforcementContext, _config: &EnforcementConfig) -> CheckOutcome {
         let Some(tier) = ctx.safety_tier else {
-            return CheckOutcome::Skip {
-                reason: "request has no safety_tier — pre-nsrx3 caller; tier admission deferred"
-                    .into(),
-            };
+            return self.handle_missing(
+                "safety_tier",
+                "request has no safety_tier — pre-nsrx3 caller; tier admission deferred",
+            );
         };
         let Some(classification) = ctx.deployment_classification.as_deref() else {
-            return CheckOutcome::Skip {
-                reason:
-                    "host has no deployment_classification on context — admission deferred".into(),
-            };
+            return self.handle_missing(
+                "deployment_classification",
+                "host has no deployment_classification on context — admission deferred",
+            );
         };
 
         match admit_safety_tier(classification, tier) {
@@ -1066,6 +1150,26 @@ impl EnforcementCheck for DeploymentTierCheck {
                         "safety tier {tier:?} is never admissible in any deployment mode"
                     ),
                 },
+            },
+        }
+    }
+}
+
+impl DeploymentTierCheck {
+    /// Translate a missing-field condition into the configured
+    /// outcome. Centralizes the policy so the two missing-field
+    /// branches in `check()` share identical message structure.
+    fn handle_missing(&self, field: &str, skip_reason: &'static str) -> CheckOutcome {
+        match self.on_missing {
+            MissingFieldPolicy::Deny => CheckOutcome::Deny {
+                reason_code: TIER_ADMISSION_NOT_CONFIGURED.into(),
+                explanation: format!(
+                    "deployment-tier admission cannot be evaluated: required EnforcementContext field `{field}` is missing. \
+                    Populate via EnforcementContextBuilder.{field}(...) or use DeploymentTierCheck::back_compat() to opt into legacy fail-OPEN behavior."
+                ),
+            },
+            MissingFieldPolicy::Skip => CheckOutcome::Skip {
+                reason: skip_reason.into(),
             },
         }
     }
@@ -1588,7 +1692,7 @@ impl EnforcementPipeline {
             EnforcementCheckId::CanonicalDecode => Box::new(CanonicalDecodeCheck),
             EnforcementCheckId::ZoneMembership => Box::new(ZoneMembershipCheck),
             EnforcementCheckId::CapabilityVerify => Box::new(CapabilityVerifyCheck),
-            EnforcementCheckId::DeploymentTier => Box::new(DeploymentTierCheck),
+            EnforcementCheckId::DeploymentTier => Box::new(DeploymentTierCheck::new()),
             EnforcementCheckId::HolderProof => Box::new(HolderProofCheck),
             EnforcementCheckId::CheckpointFreshness => Box::new(CheckpointFreshnessCheck),
             EnforcementCheckId::RevocationFreshness => Box::new(RevocationCheck),
@@ -1655,13 +1759,29 @@ fn test_context() -> EnforcementContext {
         rate_count: Some(5),
         rate_limit: Some(100),
         manifest_allowed_operations: vec!["send_message".into(), "list_channels".into()],
-        // br-nsrx3: pre-existing test fixture left as Skip (None) so
-        // the new DeploymentTier check is non-disruptive to the legacy
-        // test suite. nsrx3-specific tests below construct contexts
-        // with these fields populated to exercise the gate.
-        safety_tier: None,
-        deployment_classification: None,
+        // br-298px: the test_context fixture populates both
+        // DeploymentTier inputs with admissible defaults (Safe +
+        // MeshActive) so the strict fail-CLOSED DeploymentTierCheck
+        // (which now Denies on missing fields) does not short-circuit
+        // every legacy pipeline test before the test's intended
+        // assertion runs. Tests that exercise the missing-field
+        // behavior override these to None explicitly (see
+        // deployment_tier_check_default_denies_when_*_missing).
+        safety_tier: Some(SafetyTier::Safe),
+        deployment_classification: Some(test_mesh_active_classification()),
     }
+}
+
+/// Test fixture: a `DeploymentClassification` for a fully-active
+/// mesh deployment. Used by [`test_context`] so the strict
+/// DeploymentTierCheck admits the request and downstream pipeline
+/// checks run (br-298px).
+#[cfg(test)]
+fn test_mesh_active_classification() -> std::sync::Arc<DeploymentClassification> {
+    use crate::deployment_mode::{MeshQuorumSignals, classify_deployment_mode};
+    std::sync::Arc::new(classify_deployment_mode(
+        MeshQuorumSignals::fully_active(3),
+    ))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4934,8 +5054,7 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     use crate::deployment_mode::{
-        DeploymentClassification, DeploymentClassificationReason, DeploymentMode,
-        MeshQuorumSignals,
+        DeploymentClassification, DeploymentClassificationReason, DeploymentMode, MeshQuorumSignals,
     };
 
     fn evaluation_classification() -> Arc<DeploymentClassification> {
@@ -4971,7 +5090,7 @@ mod tests {
 
     #[test]
     fn deployment_tier_check_allows_safe_in_evaluation() {
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         let ctx = ctx_with_tier_and_mode(SafetyTier::Safe, evaluation_classification());
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         assert!(matches!(outcome, CheckOutcome::Allow));
@@ -4979,7 +5098,7 @@ mod tests {
 
     #[test]
     fn deployment_tier_check_refuses_risky_in_evaluation() {
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         let ctx = ctx_with_tier_and_mode(SafetyTier::Risky, evaluation_classification());
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         match outcome {
@@ -4992,7 +5111,7 @@ mod tests {
 
     #[test]
     fn deployment_tier_check_refuses_dangerous_in_evaluation() {
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         let ctx = ctx_with_tier_and_mode(SafetyTier::Dangerous, evaluation_classification());
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         match outcome {
@@ -5007,7 +5126,7 @@ mod tests {
     fn deployment_tier_check_allows_critical_in_evaluation() {
         // Critical carries its own quorum/elevation gating downstream;
         // DeploymentTier MUST NOT block it.
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         let ctx = ctx_with_tier_and_mode(SafetyTier::Critical, evaluation_classification());
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         assert!(matches!(outcome, CheckOutcome::Allow));
@@ -5015,7 +5134,7 @@ mod tests {
 
     #[test]
     fn deployment_tier_check_refuses_forbidden_in_any_mode() {
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         for classification in [evaluation_classification(), mesh_active_classification()] {
             let ctx = ctx_with_tier_and_mode(SafetyTier::Forbidden, classification);
             let outcome = check.check(&ctx, &EnforcementConfig::default());
@@ -5032,7 +5151,7 @@ mod tests {
 
     #[test]
     fn deployment_tier_check_allows_all_non_forbidden_tiers_in_mesh_active() {
-        let check = DeploymentTierCheck;
+        let check = DeploymentTierCheck::new();
         for tier in [
             SafetyTier::Safe,
             SafetyTier::Risky,
@@ -5048,32 +5167,152 @@ mod tests {
         }
     }
 
-    // ── Back-compat: missing fields skip the check ──
+    // ── br-298px: production default fails CLOSED on missing fields ──
 
     #[test]
-    fn deployment_tier_check_skips_when_safety_tier_missing() {
-        let check = DeploymentTierCheck;
+    fn deployment_tier_check_default_denies_when_safety_tier_missing() {
+        // The production constructor (DeploymentTierCheck::new() /
+        // ::default()) MUST refuse a request that lacks safety_tier
+        // — silently skipping is fail-OPEN on a security gate.
+        let check = DeploymentTierCheck::new();
+        assert!(check.fails_closed(), "default constructor must fail closed");
         let mut ctx = test_context();
         ctx.deployment_classification = Some(evaluation_classification());
-        // safety_tier left as None — pre-nsrx3 caller.
+        ctx.safety_tier = None;
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        match outcome {
+            CheckOutcome::Deny {
+                reason_code,
+                explanation,
+            } => {
+                assert_eq!(reason_code, TIER_ADMISSION_NOT_CONFIGURED);
+                assert!(
+                    explanation.contains("safety_tier"),
+                    "explanation must name the missing field: {explanation}"
+                );
+                assert!(
+                    explanation.contains("EnforcementContextBuilder"),
+                    "explanation must point operators at the fix: {explanation}"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deployment_tier_check_default_denies_when_classification_missing() {
+        let check = DeploymentTierCheck::default();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Risky);
+        ctx.deployment_classification = None;
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        match outcome {
+            CheckOutcome::Deny {
+                reason_code,
+                explanation,
+            } => {
+                assert_eq!(reason_code, TIER_ADMISSION_NOT_CONFIGURED);
+                assert!(
+                    explanation.contains("deployment_classification"),
+                    "explanation must name the missing field: {explanation}"
+                );
+            }
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deployment_tier_check_default_denies_when_both_fields_missing() {
+        // Both fields missing — Deny on the first one checked
+        // (safety_tier per current impl ordering). The exact field
+        // named in the explanation is fine as long as ONE is named.
+        let check = DeploymentTierCheck::default();
+        let mut ctx = test_context();
+        ctx.safety_tier = None;
+        ctx.deployment_classification = None;
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         assert!(
-            matches!(outcome, CheckOutcome::Skip { .. }),
-            "missing safety_tier MUST skip (back-compat for pre-nsrx3 callers)"
+            matches!(
+                &outcome,
+                CheckOutcome::Deny { reason_code, .. } if reason_code == TIER_ADMISSION_NOT_CONFIGURED
+            ),
+            "both-missing must Deny with TIER_ADMISSION_NOT_CONFIGURED; got {outcome:?}"
         );
     }
 
     #[test]
-    fn deployment_tier_check_skips_when_classification_missing() {
-        let check = DeploymentTierCheck;
+    fn deployment_tier_check_default_constructor_returns_strict_mode() {
+        // Invariant: DeploymentTierCheck::new() and
+        // DeploymentTierCheck::default() are equivalent (both
+        // return MissingFieldPolicy::Deny).
+        let new_check = DeploymentTierCheck::new();
+        let default_check = DeploymentTierCheck::default();
+        assert!(new_check.fails_closed());
+        assert!(default_check.fails_closed());
+    }
+
+    // ── Back-compat opt-in: explicit ::back_compat() preserves Skip ──
+
+    #[test]
+    fn deployment_tier_check_back_compat_skips_when_safety_tier_missing() {
+        // The back_compat constructor preserves the legacy
+        // fail-OPEN behavior for callers that explicitly opt in.
+        let check = DeploymentTierCheck::back_compat();
+        assert!(
+            !check.fails_closed(),
+            "back_compat constructor must NOT fail closed"
+        );
         let mut ctx = test_context();
-        ctx.safety_tier = Some(SafetyTier::Risky);
-        // deployment_classification left as None — host hasn't wired it.
+        ctx.deployment_classification = Some(evaluation_classification());
+        ctx.safety_tier = None;
         let outcome = check.check(&ctx, &EnforcementConfig::default());
         assert!(
             matches!(outcome, CheckOutcome::Skip { .. }),
-            "missing deployment_classification MUST skip (back-compat)"
+            "back_compat with missing safety_tier must Skip; got {outcome:?}"
         );
+    }
+
+    #[test]
+    fn deployment_tier_check_back_compat_skips_when_classification_missing() {
+        let check = DeploymentTierCheck::back_compat();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Risky);
+        ctx.deployment_classification = None;
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(
+            matches!(outcome, CheckOutcome::Skip { .. }),
+            "back_compat with missing classification must Skip; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn deployment_tier_check_back_compat_still_admits_when_fields_present() {
+        // back_compat affects ONLY the missing-field path. When both
+        // fields are present, behavior must be identical to the
+        // strict default — a real Risky-in-Evaluation request must
+        // still Deny.
+        let check = DeploymentTierCheck::back_compat();
+        let mut ctx = test_context();
+        ctx.safety_tier = Some(SafetyTier::Risky);
+        ctx.deployment_classification = Some(evaluation_classification());
+        let outcome = check.check(&ctx, &EnforcementConfig::default());
+        assert!(
+            matches!(
+                &outcome,
+                CheckOutcome::Deny { reason_code, .. } if reason_code == "TIER_REQUIRES_MESH_ACTIVE"
+            ),
+            "back_compat must NOT weaken the present-fields admission path; got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn missing_field_policy_default_is_deny_per_br_298px() {
+        // Explicit invariant: the default MissingFieldPolicy is
+        // Deny (fail-CLOSED). Any future change that flips this
+        // default flips the security gate to fail-OPEN — that
+        // change MUST be deliberate, not accidental.
+        let policy = MissingFieldPolicy::default();
+        assert_eq!(policy, MissingFieldPolicy::Deny);
     }
 
     // ── Wired into the canonical EnforcementPipeline ──
@@ -5116,9 +5355,9 @@ mod tests {
                 assert_eq!(check_name, "deployment_tier");
                 assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
             }
-            other => panic!(
-                "expected Deny at deployment_tier for Risky-in-Evaluation, got {other:?}"
-            ),
+            other => {
+                panic!("expected Deny at deployment_tier for Risky-in-Evaluation, got {other:?}")
+            }
         }
     }
 

@@ -117,11 +117,22 @@ pub struct MasterPublicKey {
 /// **Stub:** the bytes here are placeholder; the real type will be the
 /// Micciancio-Peikert gadget trapdoor. Wrapped in its own type so future
 /// callers don't accidentally serialize it (and `Drop` can zeroize).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **Constant-time equality** (br-1zlht): the trapdoor IS the
+/// load-bearing secret of the lattice-trapdoor scheme. Equality via
+/// [`subtle::ConstantTimeEq`] not the derived `[u8; N]::eq`.
+#[derive(Debug, Clone, Eq)]
 pub struct MasterTrapdoor {
     /// Opaque trapdoor bytes. Length will be `O(n × log q × n)` in the
     /// real impl; here it's a fixed 32-byte placeholder.
     pub(crate) bytes: [u8; 32],
+}
+
+impl PartialEq for MasterTrapdoor {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.bytes.ct_eq(&other.bytes).into()
+    }
 }
 
 /// Per-`(zone, period)` public matrix `A_zp` returned by [`delegate`].
@@ -143,9 +154,18 @@ pub struct ZonePeriodPublicKey {
 /// Per-`(zone, period)` trapdoor `T_zp` returned by [`delegate`].
 ///
 /// Held by the issuance node; used to derive sub-tokens via [`sample_pre`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// **Constant-time equality** (br-1zlht): see [`MasterTrapdoor`].
+#[derive(Debug, Clone, Eq)]
 pub struct ZonePeriodTrapdoor {
     pub(crate) bytes: [u8; 32],
+}
+
+impl PartialEq for ZonePeriodTrapdoor {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.bytes.ct_eq(&other.bytes).into()
+    }
 }
 
 /// Hash of an operation context `H(zone | period | op | principal)`,
@@ -157,11 +177,22 @@ pub struct OperationHash(pub [u8; 32]);
 ///
 /// Real impl: a vector in `Z_q^m` with `‖e‖₂ ≤ B`. Here a fixed-size
 /// 64-byte placeholder so the API surface is concrete.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// **Constant-time equality** (br-1zlht): the preimage is the
+/// signature material of the lattice-trapdoor scheme; equality via
+/// [`subtle::ConstantTimeEq`].
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 pub struct LatticePreimage {
     /// Opaque preimage bytes.
     #[serde(with = "hex_array_64")]
     pub bytes: [u8; 64],
+}
+
+impl PartialEq for LatticePreimage {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.bytes.ct_eq(&other.bytes).into()
+    }
 }
 
 mod hex_array_64 {

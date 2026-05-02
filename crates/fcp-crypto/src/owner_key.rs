@@ -46,9 +46,20 @@ pub enum OwnerKeyAlgorithm {
 /// at decode time so an attacker-supplied CBOR/JSON envelope with a
 /// mis-sized payload fails fast (before any verifier code can hit a
 /// downstream `<[u8; N]>::try_from` panic vector).
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MlDsa65VerifyingKeyBytes(#[serde(with = "serde_bytes")] Vec<u8>);
+
+impl PartialEq for MlDsa65VerifyingKeyBytes {
+    /// Constant-time byte comparison (br-1zlht). Verifying keys are
+    /// public, but defensive practice avoids any future caller
+    /// accidentally introducing a timing oracle by comparing them on a
+    /// hot dispatch path.
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
 
 impl<'de> Deserialize<'de> for MlDsa65VerifyingKeyBytes {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -116,9 +127,22 @@ impl std::fmt::Debug for MlDsa65VerifyingKeyBytes {
 /// **Length is invariant-enforced on BOTH construction and
 /// deserialisation** (br-kfr9j). See [`MlDsa65VerifyingKeyBytes`] for
 /// the full rationale.
-#[derive(Clone, PartialEq, Eq, Serialize)]
+#[derive(Clone, Eq, Serialize)]
 #[serde(transparent)]
 pub struct MlDsa65SignatureBytes(#[serde(with = "serde_bytes")] Vec<u8>);
+
+impl PartialEq for MlDsa65SignatureBytes {
+    /// Constant-time byte comparison (br-1zlht). Signature bytes are
+    /// not strictly secret material, but constant-time comparison is
+    /// defensive practice — a future caller comparing a candidate
+    /// signature against a stored reference under any branch-on-bytes
+    /// pattern would otherwise leak prefix-match information via
+    /// wall-clock timing.
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
 
 impl<'de> Deserialize<'de> for MlDsa65SignatureBytes {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>

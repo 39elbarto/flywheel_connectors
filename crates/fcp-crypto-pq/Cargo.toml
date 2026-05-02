@@ -17,6 +17,9 @@ workspace = true
 # uses BLAKE3 as a placeholder for the API surface.
 blake3 = { workspace = true }
 
+# Constant-time byte comparison for trapdoor / preimage types (br-1zlht).
+subtle = { workspace = true }
+
 # Wire-format support — DelegationCertificate / LatticeSubToken serialize via
 # CBOR for cross-version dispatch (matches the rest of FCP3).
 serde = { workspace = true }

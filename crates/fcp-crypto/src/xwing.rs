@@ -93,6 +93,9 @@ pub const XWING_ENCAPSULATION_RANDOMNESS_SIZE: usize = 64;
 /// [`crate::hpke_seal::HPKE_MAX_CIPHERTEXT`] for consistency.
 pub const XWING_MAX_CIPHERTEXT: usize = 64 * 1024;
 
+/// Maximum accepted V4 canonical CBOR payload length before deserialization.
+pub const MAX_V4_PAYLOAD_BYTES: usize = 64 * 1024;
+
 /// HKDF info string used by the FCP V4 X-Wing AEAD layer.
 pub const XWING_AEAD_INFO: &[u8] = b"FCP4-XWING-AEAD";
 
@@ -179,8 +182,20 @@ impl XWingPublicKey {
 ///
 /// Wrapped in a dedicated newtype so a redacting `Debug` impl can avoid
 /// leaking secret material into logs.
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+///
+/// **Constant-time equality** (br-1zlht): `PartialEq` is implemented
+/// via [`subtle::ConstantTimeEq`] rather than the derived
+/// `[u8; N]::eq` (which short-circuits on first mismatch and would
+/// give a recovery oracle for the 32-byte seed).
+#[derive(Clone, Eq, Zeroize, ZeroizeOnDrop)]
 pub struct XWingSecretKey([u8; XWING_SECRET_KEY_SIZE]);
+
+impl PartialEq for XWingSecretKey {
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
 
 impl core::fmt::Debug for XWingSecretKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -333,19 +348,28 @@ impl XWingSealedBox {
     ///
     /// - [`CryptoError::SerializationError`] if the input is not valid
     ///   CBOR or does not match the [`XWingSealedBox`] schema.
+    /// - [`CryptoError::PayloadTooLarge`] if the encoded payload exceeds
+    ///   [`MAX_V4_PAYLOAD_BYTES`].
     /// - [`CryptoError::HpkeFailed`] if either field's length is out of
     ///   bounds.
     pub fn from_canonical_cbor(bytes: &[u8]) -> CryptoResult<Self> {
-        if bytes.len() > XWING_MAX_CIPHERTEXT + 256 {
-            // 256-byte slack covers CBOR map + key overhead.
-            return Err(CryptoError::HpkeFailed(format!(
-                "xwing CBOR sealed box too large: {} bytes exceeds {} byte limit",
-                bytes.len(),
-                XWING_MAX_CIPHERTEXT + 256
-            )));
+        if bytes.len() > MAX_V4_PAYLOAD_BYTES {
+            return Err(CryptoError::PayloadTooLarge {
+                observed: bytes.len(),
+                max: MAX_V4_PAYLOAD_BYTES,
+            });
         }
-        let decoded: Self = ciborium::from_reader(bytes)
-            .map_err(|e| CryptoError::SerializationError(format!("xwing sealed box CBOR: {e}")))?;
+        let mut reader = bytes;
+        let decoded: Self = ciborium::de::from_reader_with_recursion_limit(
+            &mut reader,
+            fcp_cbor::MAX_DESERIALIZATION_RECURSION_LIMIT,
+        )
+        .map_err(|e| CryptoError::SerializationError(format!("xwing sealed box CBOR: {e}")))?;
+        if !reader.is_empty() {
+            return Err(CryptoError::SerializationError(
+                "xwing sealed box CBOR: trailing bytes after sealed box".to_owned(),
+            ));
+        }
         const AEAD_TAG: usize = 16;
         if decoded.enc.len() != XWING_ENC_SIZE {
             return Err(CryptoError::HpkeFailed(format!(

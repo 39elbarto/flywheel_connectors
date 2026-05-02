@@ -43,6 +43,7 @@ const CONTENT_TYPE_HEADER: &str = "Content-Type";
 const JSON_CONTENT_TYPE: &str = "application/json";
 const RETRY_AFTER_HEADER: &str = "Retry-After";
 const BATCH_CORRELATION_EXTENSION: &str = "fcpBatchIndex";
+const EMPTY_BEARER_TOKEN_MESSAGE: &str = "GraphQL bearer token must not be empty or whitespace";
 
 /// GraphQL client metrics.
 #[derive(Debug, Default)]
@@ -167,6 +168,10 @@ fn upsert_header(headers: &mut HeaderList, name: impl Into<String>, value: impl 
     } else {
         headers.push((name, value));
     }
+}
+
+fn remove_header(headers: &mut HeaderList, name: &str) {
+    headers.retain(|(header_name, _)| !header_name.eq_ignore_ascii_case(name));
 }
 
 fn header_value<'a>(headers: &'a HeaderList, name: &str) -> Option<&'a str> {
@@ -382,6 +387,7 @@ pub struct GraphqlClientBuilder {
     /// pool — the right choice when an application creates many
     /// `GraphqlClient`s pointing at the same service.
     http: Option<Arc<HttpClient>>,
+    bearer_token_error: Option<String>,
 }
 
 impl fmt::Debug for GraphqlClientBuilder {
@@ -390,6 +396,7 @@ impl fmt::Debug for GraphqlClientBuilder {
             .field("endpoint", &self.endpoint)
             .field("config", &self.config)
             .field("shared_http_client", &self.http.is_some())
+            .field("bearer_token_valid", &self.bearer_token_error.is_none())
             .finish()
     }
 }
@@ -402,6 +409,7 @@ impl GraphqlClientBuilder {
             endpoint: endpoint.into(),
             config: GraphqlClientConfig::default(),
             http: None,
+            bearer_token_error: None,
         }
     }
 
@@ -438,11 +446,18 @@ impl GraphqlClientBuilder {
     /// Add a bearer token header.
     #[must_use]
     pub fn with_bearer_token(mut self, token: impl AsRef<str>) -> Self {
+        let token = token.as_ref();
+        if token.trim().is_empty() {
+            remove_header(&mut self.config.headers, AUTHORIZATION_HEADER);
+            self.bearer_token_error = Some(EMPTY_BEARER_TOKEN_MESSAGE.to_string());
+            return self;
+        }
         upsert_header(
             &mut self.config.headers,
             AUTHORIZATION_HEADER,
-            format!("Bearer {}", token.as_ref()),
+            format!("Bearer {token}"),
         );
+        self.bearer_token_error = None;
         self
     }
 
@@ -483,6 +498,10 @@ impl GraphqlClientBuilder {
 
     /// Build the client.
     pub fn build(self) -> Result<GraphqlClient, GraphqlClientError> {
+        if let Some(message) = self.bearer_token_error {
+            return Err(GraphqlClientError::Protocol { message });
+        }
+
         let http = self
             .http
             .unwrap_or_else(|| Arc::new(HttpClientBuilder::new().build()));
@@ -1521,12 +1540,42 @@ mod tests {
 
     #[test]
     fn builder_with_empty_bearer_token() {
-        let builder =
-            GraphqlClientBuilder::new("https://api.test.com/graphql").with_bearer_token("");
+        let err = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_bearer_token("")
+            .build()
+            .unwrap_err();
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert_eq!(message, EMPTY_BEARER_TOKEN_MESSAGE);
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_with_whitespace_bearer_token() {
+        let err = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_bearer_token(" \t\n ")
+            .build()
+            .unwrap_err();
+        match err {
+            GraphqlClientError::Protocol { message } => {
+                assert_eq!(message, EMPTY_BEARER_TOKEN_MESSAGE);
+            }
+            other => panic!("expected Protocol error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn builder_valid_bearer_token_clears_previous_empty_token_error() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_bearer_token("")
+            .with_bearer_token("tok_abc123");
         assert_eq!(
             header_value(&builder.config.headers, AUTHORIZATION_HEADER),
-            Some("Bearer ")
+            Some("Bearer tok_abc123")
         );
+        assert!(builder.build().is_ok());
     }
 
     #[test]

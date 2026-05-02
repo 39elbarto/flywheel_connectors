@@ -69,11 +69,6 @@ const LEGACY_VERIFY_MARKER: &str = "verifier.verify(";
 /// `grep -lE "verifier\\.verify\\(" connectors/*/src/connector.rs`
 /// at the time the dja9u commit landed.
 const LEGACY_VERIFY_ALLOWLIST: &[&str] = &[
-    "google-calendar",
-    "hackernews",
-    "line",
-    "linear",
-    "mastodon",
     "matrix",
     "mattermost",
     "netlify",
@@ -131,16 +126,21 @@ const TYPESTATE_ENFORCED_ALLOWLIST: &[&str] = &[
     "gmail",
     "google-admin-reports",
     "google-ai",
+    "google-calendar",
     "google-docs",
     "google-drive",
     "google-people",
     "google-places",
     "google-sheets",
+    "hackernews",
     "hue",
     "imessage",
     "irc",
     "jira",
+    "line",
+    "linear",
     "llm-router",
+    "mastodon",
     "microsoft365",
     "nextcloud-talk",
     "nostr",
@@ -290,13 +290,13 @@ fn dja9u_allowlists_match_pinned_baseline_counts() {
     // typestate size in this assertion.
     assert_eq!(
         LEGACY_VERIFY_ALLOWLIST.len(),
-        24,
+        19,
         "LEGACY_VERIFY_ALLOWLIST size drifted; update this assertion to \
          match"
     );
     assert_eq!(
         TYPESTATE_ENFORCED_ALLOWLIST.len(),
-        54,
+        59,
         "TYPESTATE_ENFORCED_ALLOWLIST size drifted; update this assertion \
          to match"
     );

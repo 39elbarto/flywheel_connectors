@@ -1076,7 +1076,9 @@ impl LineConnector {
                 });
             }
         };
-        verifier.verify(req.capability_token, &required_cap, &req.operation, &[])?;
+        // dja9u.1.b: typestate handoff via verify_bound.
+        let _bound =
+            verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
 
         let runtime = self.runtime.as_ref().ok_or(FcpError::Internal {
             message: "Connector runtime missing after configure".into(),

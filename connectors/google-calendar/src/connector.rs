@@ -3,16 +3,16 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use fcp_google_discovery::{
+    ServiceAliasRegistry,
+    auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
+    provisioning::load_default_google_provisioning_bundle,
+};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
-};
-use fcp_google_discovery::{
-    ServiceAliasRegistry,
-    auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
-    provisioning::load_default_google_provisioning_bundle,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -1060,7 +1060,8 @@ impl GoogleCalendarConnector {
         })?;
 
         if let Some(verifier) = &self.verifier {
-            verifier.verify(token, &cap_id, &op_id, &[])?;
+            // dja9u.1.b: typestate handoff via verify_bound.
+            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &[])?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1437,9 +1438,9 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
 
     #[test]
     fn validate_calendar_base_url_accepts_googleapis_hosts() {

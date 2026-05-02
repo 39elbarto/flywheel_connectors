@@ -212,12 +212,7 @@ mod tests {
         let err =
             run_with_timeout(sleep_command(30), Duration::from_secs(1)).expect_err("must time out");
         let elapsed = started.elapsed();
-        match err {
-            SubprocessError::Timeout { timeout_secs } => {
-                assert_eq!(timeout_secs, 1);
-            }
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+        assert!(matches!(err, SubprocessError::Timeout { timeout_secs: 1 }));
         // Elapsed must be close to the timeout (within 2s slop for
         // poll cadence + kill overhead) — the SIGKILL path must NOT
         // wait the full 30s.
@@ -298,11 +293,12 @@ mod tests {
         // finished depending on race. We accept either Timeout OR
         // success for trivially-fast commands.
         let result = run_with_timeout(echo_command("x"), Duration::from_secs(0));
-        match result {
-            Ok(out) => assert!(out.status.success()),
-            Err(SubprocessError::Timeout { timeout_secs }) => assert_eq!(timeout_secs, 0),
-            Err(other) => panic!("unexpected error: {other:?}"),
-        }
+        let accepted_zero_timeout_outcome = match result {
+            Ok(out) => out.status.success(),
+            Err(SubprocessError::Timeout { timeout_secs }) => timeout_secs == 0,
+            Err(_) => false,
+        };
+        assert!(accepted_zero_timeout_outcome);
     }
 
     #[test]

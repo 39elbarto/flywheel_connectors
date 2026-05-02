@@ -362,12 +362,11 @@ mod tests {
             "try_wait failed after child exit".into(),
         ));
 
-        match err {
-            AppleNotesError::Process(message) => {
-                assert!(message.contains("try_wait failed after child exit"));
-            }
-            other => panic!("expected process error, got {other:?}"),
-        }
+        assert!(matches!(
+            &err,
+            AppleNotesError::Process(message)
+                if message.contains("try_wait failed after child exit")
+        ));
     }
 
     #[test]

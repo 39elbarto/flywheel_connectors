@@ -763,9 +763,10 @@ impl EgressGuard {
                     }
                 }
                 Err(e) => {
-                    // Invalid CIDR strings are silently skipped to prevent a
-                    // typo in the deny list from blocking all traffic.
-                    warn!(cidr = %cidr_str, error = %e, "skipping unparseable CIDR deny rule");
+                    warn!(cidr = %cidr_str, error = %e, "rejecting unparseable CIDR deny rule");
+                    return Err(EgressError::InvalidRequest(format!(
+                        "invalid cidr_deny rule `{cidr_str}`: {e}"
+                    )));
                 }
             }
         }
@@ -3447,24 +3448,18 @@ mod tests {
     }
 
     #[test]
-    fn test_cidr_deny_invalid_cidr_string_ignored() {
+    fn test_cidr_deny_invalid_cidr_string_rejected() {
         let guard = EgressGuard::new();
         let mut constraints = test_constraints();
         constraints.deny_localhost = false;
         constraints.deny_private_ranges = false;
         constraints.cidr_deny = vec!["not-a-cidr".into(), "203.0.113.0/24".into()];
 
-        // Invalid CIDR is silently ignored, valid one still works
-        assert!(
-            guard
-                .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
-                .is_err()
-        );
-        assert!(
-            guard
-                .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
-                .is_ok()
-        );
+        let err = guard
+            .check_ip_constraints("8.8.8.8".parse().unwrap(), &constraints)
+            .unwrap_err();
+        assert!(matches!(err, EgressError::InvalidRequest(_)));
+        assert!(err.to_string().contains("invalid cidr_deny rule"));
     }
 
     // ── Hostname canonicalization edge cases ──────────────────────────
@@ -4507,19 +4502,18 @@ mod tests {
     }
 
     #[test]
-    fn test_cidr_deny_invalid_cidr_skipped() {
+    fn test_cidr_deny_invalid_cidr_rejected_before_valid_rules() {
         let guard = EgressGuard::new();
         let mut constraints = test_constraints();
         constraints.deny_localhost = false;
         constraints.deny_private_ranges = false;
         constraints.cidr_deny = vec!["not-a-cidr".into(), "203.0.113.0/24".into()];
 
-        // Invalid CIDR is skipped, valid one still applies
-        assert!(
-            guard
-                .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
-                .is_err()
-        );
+        let err = guard
+            .check_ip_constraints("203.0.113.1".parse().unwrap(), &constraints)
+            .unwrap_err();
+        assert!(matches!(err, EgressError::InvalidRequest(_)));
+        assert!(err.to_string().contains("not-a-cidr"));
     }
 
     // ── New tests: Egress request serde edge cases ──

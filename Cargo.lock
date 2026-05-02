@@ -3941,6 +3941,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-evidence",
  "fcp-kernel",
+ "fcp-mesh",
  "fcp-policy",
  "fcp-raptorq",
  "fcp-sandbox",

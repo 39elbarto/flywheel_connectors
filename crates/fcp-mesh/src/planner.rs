@@ -32,7 +32,10 @@
 use std::cmp::Ordering;
 use std::collections::HashSet;
 
-use fcp_prelude::{ConnectorId, ObjectId, ZoneId};
+use fcp_prelude::{
+    ConnectorId, LeasePurpose as CoreLeasePurpose, ObjectId, TailscaleNodeId, ZoneId,
+    rank_nodes_by_hrw, select_coordinator,
+};
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
 
@@ -405,6 +408,108 @@ impl std::fmt::Display for LeasePurpose {
             Self::Other => write!(f, "other"),
         }
     }
+}
+
+/// Result of rendezvous-hashed lease-holder selection for a subject.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HrwLeaseSelection {
+    /// Zone in which the lease authority applies.
+    pub zone_id: ZoneId,
+    /// Subject covered by the singleton lease.
+    pub subject_id: ObjectId,
+    /// Normative lease purpose being routed.
+    pub purpose: CoreLeasePurpose,
+    /// Elected lease holder for this `(zone, subject)`.
+    pub holder: TailscaleNodeId,
+    /// Deterministic failover order for audit and transfer receipts.
+    pub ranked_holders: Vec<TailscaleNodeId>,
+}
+
+/// Structured reason a node must transfer or refuse lease authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "reason", rename_all = "snake_case")]
+pub enum LeaseTransferReason {
+    /// The local node is not the rendezvous-hashed holder for this subject.
+    WrongHolder {
+        /// Zone in which the lease authority applies.
+        zone_id: ZoneId,
+        /// Subject covered by the singleton lease.
+        subject_id: ObjectId,
+        /// Normative lease purpose being routed.
+        purpose: CoreLeasePurpose,
+        /// Holder elected by rendezvous hashing.
+        expected_holder: TailscaleNodeId,
+        /// Local holder attempting to execute.
+        actual_holder: TailscaleNodeId,
+    },
+    /// No eligible holder set was available for this subject.
+    NoEligibleHolder {
+        /// Zone in which the lease authority applies.
+        zone_id: ZoneId,
+        /// Subject covered by the singleton lease.
+        subject_id: ObjectId,
+        /// Normative lease purpose being routed.
+        purpose: CoreLeasePurpose,
+    },
+}
+
+/// Rank eligible lease holders by the normative HRW/Rendezvous algorithm.
+#[must_use]
+pub fn rank_lease_holders_by_hrw(
+    zone_id: &ZoneId,
+    subject_id: &ObjectId,
+    eligible_nodes: &[TailscaleNodeId],
+) -> Vec<TailscaleNodeId> {
+    rank_nodes_by_hrw(zone_id, subject_id, eligible_nodes)
+}
+
+/// Select the rendezvous-hashed lease holder for a subject.
+#[must_use]
+pub fn select_lease_holder(
+    zone_id: &ZoneId,
+    subject_id: &ObjectId,
+    eligible_nodes: &[TailscaleNodeId],
+) -> Option<TailscaleNodeId> {
+    select_coordinator(zone_id, subject_id, eligible_nodes)
+}
+
+/// Admit local execution only when `local_node` is the HRW-selected holder.
+///
+/// # Errors
+///
+/// Returns [`LeaseTransferReason::WrongHolder`] when another node is the
+/// selected holder, or [`LeaseTransferReason::NoEligibleHolder`] when the
+/// supplied candidate set is empty.
+pub fn admit_lease_holder(
+    zone_id: &ZoneId,
+    subject_id: &ObjectId,
+    purpose: CoreLeasePurpose,
+    eligible_nodes: &[TailscaleNodeId],
+    local_node: &TailscaleNodeId,
+) -> Result<HrwLeaseSelection, LeaseTransferReason> {
+    let Some(holder) = select_lease_holder(zone_id, subject_id, eligible_nodes) else {
+        return Err(LeaseTransferReason::NoEligibleHolder {
+            zone_id: zone_id.clone(),
+            subject_id: *subject_id,
+            purpose,
+        });
+    };
+    if holder != *local_node {
+        return Err(LeaseTransferReason::WrongHolder {
+            zone_id: zone_id.clone(),
+            subject_id: *subject_id,
+            purpose,
+            expected_holder: holder,
+            actual_holder: local_node.clone(),
+        });
+    }
+    Ok(HrwLeaseSelection {
+        zone_id: zone_id.clone(),
+        subject_id: *subject_id,
+        purpose,
+        holder,
+        ranked_holders: rank_lease_holders_by_hrw(zone_id, subject_id, eligible_nodes),
+    })
 }
 
 impl HeldLease {
@@ -1707,6 +1812,67 @@ mod tests {
         // Only the lease holder should be eligible
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].node_id.as_str(), "node-holder");
+    }
+
+    #[test]
+    fn hrw_lease_selects_deterministic_holder_and_failover_order() {
+        let zone = ZoneId::work();
+        let subject = test_object_id(42);
+        let nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+
+        let holder = select_lease_holder(&zone, &subject, &nodes).expect("holder selected");
+        let second_holder =
+            select_lease_holder(&zone, &subject, &nodes).expect("holder selected twice");
+        let ranked = rank_lease_holders_by_hrw(&zone, &subject, &nodes);
+
+        assert_eq!(holder, second_holder);
+        assert_eq!(ranked.first(), Some(&holder));
+        assert_eq!(ranked.len(), nodes.len());
+        for node in &nodes {
+            assert!(ranked.contains(node));
+        }
+    }
+
+    #[test]
+    fn hrw_lease_admission_rejects_wrong_holder() {
+        let zone = ZoneId::work();
+        let subject = test_object_id(43);
+        let nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            select_lease_holder(&zone, &subject, &nodes).expect("holder selected for test");
+        let actual = nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("at least one non-holder")
+            .clone();
+
+        let error = admit_lease_holder(
+            &zone,
+            &subject,
+            CoreLeasePurpose::ConnectorStateWrite,
+            &nodes,
+            &actual,
+        )
+        .expect_err("non-holder must be rejected");
+
+        assert_eq!(
+            error,
+            LeaseTransferReason::WrongHolder {
+                zone_id: zone,
+                subject_id: subject,
+                purpose: CoreLeasePurpose::ConnectorStateWrite,
+                expected_holder: expected,
+                actual_holder: actual,
+            }
+        );
     }
 
     #[test]

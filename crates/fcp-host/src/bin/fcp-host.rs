@@ -1,6 +1,6 @@
 //! Minimal fcp-host HTTP server with discovery and doctor endpoints.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -69,7 +69,7 @@ use fcp_host::{
     RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
     SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
     SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
-    SupplyChainGate, SupplyChainGateConfig, admit_safety_tier,
+    SupplyChainGate, SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
 };
@@ -88,9 +88,9 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
-    ObjectId, PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier,
-    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
-    simulate_policy_decision,
+    LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
+    RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
+    ZoneId, ZonePolicyObject, simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
@@ -639,6 +639,14 @@ impl SubprocessRegistry {
             .map(|entry| entry.config.allowed_operations.clone())
     }
 
+    async fn connector_requires_singleton_writer(&self, connector_id: &ConnectorId) -> bool {
+        let state = self.state.read().await;
+        state
+            .connectors
+            .get(connector_id)
+            .is_some_and(|entry| connector_config_declares_singleton_writer(&entry.config))
+    }
+
     async fn simulate(&self, request: SimulateRequest) -> HostResult<SimulateResponse> {
         let connector_id = request.connector_id.clone();
         let connector = {
@@ -750,6 +758,27 @@ fn configured_subprocess_archetype(config: &ConnectorConfig) -> ConnectorArchety
 
 fn configured_subprocess_rate_limits(_config: &ConnectorConfig) -> Option<RateLimitDeclarations> {
     None
+}
+
+fn connector_config_declares_singleton_writer(config: &ConnectorConfig) -> bool {
+    let env_declares = config
+        .env
+        .get("FCP_CONNECTOR_STATE_MODEL")
+        .or_else(|| config.env.get("FCP_HOST_CONNECTOR_STATE_MODEL"))
+        .is_some_and(|value| value.trim() == "singleton_writer");
+    if env_declares {
+        return true;
+    }
+
+    let Some(payload) = config.config.as_ref() else {
+        return false;
+    };
+    let model = payload
+        .pointer("/state/model")
+        .or_else(|| payload.pointer("/state_model"))
+        .or_else(|| payload.pointer("/stateModel"))
+        .and_then(Value::as_str);
+    model == Some("singleton_writer")
 }
 
 struct ConnectorProcessRunner {
@@ -1251,6 +1280,8 @@ Startup configuration is supplied via environment variables:
   FCP_HOST_APPROVAL_PUBLIC_KEY or FCP_HOST_APPROVAL_PUBLIC_KEY_FILE
   FCP_HOST_SELF_CHECK_TIMEOUT_MS
   FCP_HOST_SUPPLY_CHAIN_*
+  FCP_HOST_HRW_LEASE_LOCAL_NODE
+  FCP_HOST_HRW_LEASE_NODES
 ",
         env!("CARGO_PKG_VERSION")
     );
@@ -2015,6 +2046,227 @@ fn emit_deployment_tier_denial_audit_event(
     );
 }
 
+const HRW_LEASE_LOCAL_NODE_ENV: &str = "FCP_HOST_HRW_LEASE_LOCAL_NODE";
+const HRW_LEASE_NODES_ENV: &str = "FCP_HOST_HRW_LEASE_NODES";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct HrwLeaseRoutingConfig {
+    local_node: TailscaleNodeId,
+    eligible_nodes: Vec<TailscaleNodeId>,
+}
+
+#[cfg(test)]
+static TEST_HRW_LEASE_ROUTING_OVERRIDE: std::sync::Mutex<Option<Option<HrwLeaseRoutingConfig>>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+struct TestHrwLeaseRoutingOverrideGuard;
+
+#[cfg(test)]
+impl Drop for TestHrwLeaseRoutingOverrideGuard {
+    fn drop(&mut self) {
+        *TEST_HRW_LEASE_ROUTING_OVERRIDE
+            .lock()
+            .expect("HRW lease routing override lock poisoned") = None;
+    }
+}
+
+#[cfg(test)]
+fn set_test_hrw_lease_routing_override(
+    config: Option<HrwLeaseRoutingConfig>,
+) -> TestHrwLeaseRoutingOverrideGuard {
+    let mut guard = TEST_HRW_LEASE_ROUTING_OVERRIDE
+        .lock()
+        .expect("HRW lease routing override lock poisoned");
+    assert!(guard.is_none(), "HRW lease routing override already set");
+    *guard = Some(config);
+    TestHrwLeaseRoutingOverrideGuard
+}
+
+fn parse_hrw_lease_node_id(raw: &str, env_name: &str) -> HostResult<TailscaleNodeId> {
+    TailscaleNodeId::try_new(raw.to_owned()).map_err(|error| {
+        HostError::InvalidFilter(format!("invalid {env_name} node id `{raw}`: {error}"))
+    })
+}
+
+fn parse_hrw_lease_node_set(raw: &str, env_name: &str) -> HostResult<Vec<TailscaleNodeId>> {
+    let mut seen = HashSet::new();
+    let mut nodes = Vec::new();
+    for raw_node in raw.split(',') {
+        let trimmed = raw_node.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let node = parse_hrw_lease_node_id(trimmed, env_name)?;
+        if seen.insert(node.as_str().to_owned()) {
+            nodes.push(node);
+        }
+    }
+    if nodes.is_empty() {
+        return Err(HostError::InvalidFilter(format!(
+            "{env_name} must list at least one node id"
+        )));
+    }
+    Ok(nodes)
+}
+
+fn parse_hrw_lease_routing_config_from_env_values(
+    local_node: Option<&str>,
+    eligible_nodes: Option<&str>,
+) -> HostResult<Option<HrwLeaseRoutingConfig>> {
+    match (local_node, eligible_nodes) {
+        (None, None) => Ok(None),
+        (Some(local_node), Some(eligible_nodes)) => {
+            let local_node = parse_hrw_lease_node_id(local_node, HRW_LEASE_LOCAL_NODE_ENV)?;
+            let eligible_nodes = parse_hrw_lease_node_set(eligible_nodes, HRW_LEASE_NODES_ENV)?;
+            if !eligible_nodes.iter().any(|node| node == &local_node) {
+                return Err(HostError::InvalidFilter(format!(
+                    "{HRW_LEASE_NODES_ENV} must include local node `{}`",
+                    local_node.as_str()
+                )));
+            }
+            Ok(Some(HrwLeaseRoutingConfig {
+                local_node,
+                eligible_nodes,
+            }))
+        }
+        (Some(_), None) | (None, Some(_)) => Err(HostError::InvalidFilter(format!(
+            "set both {HRW_LEASE_LOCAL_NODE_ENV} and {HRW_LEASE_NODES_ENV} to enable singleton_writer HRW lease routing"
+        ))),
+    }
+}
+
+fn current_hrw_lease_routing_config() -> HostResult<Option<HrwLeaseRoutingConfig>> {
+    #[cfg(test)]
+    {
+        if let Some(config) = TEST_HRW_LEASE_ROUTING_OVERRIDE
+            .lock()
+            .expect("HRW lease routing override lock poisoned")
+            .clone()
+        {
+            return Ok(config);
+        }
+    }
+
+    let local_node = read_optional_trimmed_env_string(HRW_LEASE_LOCAL_NODE_ENV)?;
+    let eligible_nodes = read_optional_trimmed_env_string(HRW_LEASE_NODES_ENV)?;
+    parse_hrw_lease_routing_config_from_env_values(local_node.as_deref(), eligible_nodes.as_deref())
+}
+
+fn json_schema_declares_singleton_writer(value: &Value) -> bool {
+    match value {
+        Value::Object(map) => {
+            let state_model = map
+                .get("x-fcp-state-model")
+                .or_else(|| map.get("x-fcp-state_model"))
+                .or_else(|| map.get("state_model"))
+                .and_then(Value::as_str);
+            if state_model == Some("singleton_writer") {
+                return true;
+            }
+            if map
+                .get("properties")
+                .and_then(Value::as_object)
+                .is_some_and(|properties| properties.contains_key("lease_seq"))
+            {
+                return true;
+            }
+            if map
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|field| field.as_str() == Some("lease_seq"))
+                })
+            {
+                return true;
+            }
+            map.values().any(json_schema_declares_singleton_writer)
+        }
+        Value::Array(values) => values.iter().any(json_schema_declares_singleton_writer),
+        _ => false,
+    }
+}
+
+fn operation_requires_hrw_lease(
+    tool: &ToolDescriptor,
+    request: &InvokeRequest,
+    connector_declares_singleton_writer: bool,
+) -> bool {
+    connector_declares_singleton_writer
+        || request.lease_seq.is_some()
+        || json_schema_declares_singleton_writer(&tool.input_schema)
+}
+
+fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
+    hasher.update(&u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
+    hasher.update(bytes);
+}
+
+fn singleton_writer_lease_subject_id(request: &InvokeRequest) -> ObjectId {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"FCP-HOST-SINGLETON-WRITER-HRW-LEASE-V1");
+    update_len_prefixed(&mut hasher, request.connector_id.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, request.operation.as_str().as_bytes());
+    update_len_prefixed(&mut hasher, request.zone_id.as_str().as_bytes());
+    ObjectId::from_bytes(*hasher.finalize().as_bytes())
+}
+
+fn hrw_lease_refusal_message(reason: &fcp_mesh::planner::LeaseTransferReason) -> String {
+    let payload = serde_json::to_string(reason).unwrap_or_else(|error| {
+        format!("{{\"reason\":\"serialization_error\",\"message\":\"{error}\"}}")
+    });
+    format!("HRW lease routing refused singleton_writer invoke: {payload}")
+}
+
+fn enforce_hrw_lease_route(
+    request: &InvokeRequest,
+    routing: Option<&HrwLeaseRoutingConfig>,
+) -> HostResult<()> {
+    let subject_id = singleton_writer_lease_subject_id(request);
+    let Some(routing) = routing else {
+        let reason = fcp_mesh::planner::LeaseTransferReason::NoEligibleHolder {
+            zone_id: request.zone_id.clone(),
+            subject_id,
+            purpose: CoreLeasePurpose::ConnectorStateWrite,
+        };
+        return Err(HostError::PreflightFailed(hrw_lease_refusal_message(
+            &reason,
+        )));
+    };
+
+    fcp_mesh::planner::admit_lease_holder(
+        &request.zone_id,
+        &subject_id,
+        CoreLeasePurpose::ConnectorStateWrite,
+        &routing.eligible_nodes,
+        &routing.local_node,
+    )
+    .map(|selection| {
+        tracing::debug!(
+            event = "hrw_lease_route_admitted",
+            connector_id = %request.connector_id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            subject_id = %selection.subject_id,
+            holder = %selection.holder.as_str(),
+            "singleton_writer invoke admitted by HRW lease routing"
+        );
+    })
+    .map_err(|reason| {
+        tracing::warn!(
+            event = "hrw_lease_route_refused",
+            connector_id = %request.connector_id,
+            operation = %request.operation,
+            zone_id = %request.zone_id,
+            reason = ?reason,
+            "singleton_writer invoke refused by HRW lease routing"
+        );
+        HostError::PreflightFailed(hrw_lease_refusal_message(&reason))
+    })
+}
+
 fn enforce_live_deployment_tier(request: &InvokeRequest, tier: SafetyTier) -> HostResult<()> {
     let classification = current_deployment_classification();
     match admit_safety_tier(&classification, tier) {
@@ -2171,6 +2423,15 @@ async fn verify_live_request(
     verify_live_revocation_cascade(state, &request.capability_token, verified_claims)?;
 
     enforce_live_deployment_tier(request, tool.safety_tier)?;
+
+    let connector_declares_singleton_writer = state
+        .registry
+        .connector_requires_singleton_writer(&request.connector_id)
+        .await;
+    if operation_requires_hrw_lease(tool, request, connector_declares_singleton_writer) {
+        let routing = current_hrw_lease_routing_config()?;
+        enforce_hrw_lease_route(request, routing.as_ref())?;
+    }
 
     // SECURITY: holder-bound tokens (`holder_node` claim present) must never
     // silently degrade to bearer tokens. Until fcp-host wires live holder-proof
@@ -6216,17 +6477,80 @@ mod tests {
         })
     }
 
+    fn dispatcher_registry_with_connector(
+        connector_id: &'static str,
+        connector: Arc<SubprocessConnector>,
+        config: ConnectorConfig,
+    ) -> Arc<SubprocessRegistry> {
+        let connector_key = ConnectorId::from_static(connector_id);
+        let mut connectors = HashMap::new();
+        connectors.insert(connector_key, RegistryEntry { config, connector });
+        Arc::new(SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+        })
+    }
+
+    fn dispatcher_app_state(
+        registry: Arc<SubprocessRegistry>,
+        lifecycle: Arc<HostAdminStateStore>,
+        capability_verifying_key: Option<Ed25519VerifyingKey>,
+        zone_policies: HashMap<ZoneId, ZonePolicyObject>,
+    ) -> Arc<AppState> {
+        let budget = Arc::new(BudgetPolicyEngine::new());
+        let discovery = Arc::new(DiscoveryEndpoint::new(
+            Arc::clone(&registry),
+            Arc::clone(&budget),
+        ));
+        Arc::new(AppState {
+            registry: Arc::clone(&registry),
+            doctor: DoctorService::new(Arc::clone(&registry)),
+            budget,
+            discovery,
+            cancellation: Arc::new(CancellationController::new()),
+            lifecycle: Arc::clone(&lifecycle),
+            rollout: Arc::new(RolloutController::new(
+                Arc::clone(&registry),
+                Arc::clone(&lifecycle),
+            )),
+            supply_chain: Arc::new(SupplyChainGate::default()),
+            capability_verifying_key,
+            revocation_cascade: Arc::new(RevocationCascadeVerifier::default()),
+            approval_verifying_key: None,
+            admin_bearer_token: None,
+            connectors_file: None,
+            zone_policies: Arc::new(RwLock::new(zone_policies)),
+            started_at: Instant::now(),
+        })
+    }
+
     fn dispatcher_introspection(
         operation_id: &'static str,
         capability_id: &str,
         safety_tier: SafetyTier,
+    ) -> Introspection {
+        dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            safety_tier,
+            json!({ "type": "object" }),
+        )
+    }
+
+    fn dispatcher_introspection_with_input_schema(
+        operation_id: &'static str,
+        capability_id: &str,
+        safety_tier: SafetyTier,
+        input_schema: Value,
     ) -> Introspection {
         Introspection {
             operations: vec![OperationInfo {
                 id: OperationId::from_static(operation_id),
                 summary: format!("{operation_id} summary"),
                 description: Some(format!("{operation_id} description")),
-                input_schema: json!({ "type": "object" }),
+                input_schema,
                 output_schema: json!({ "type": "object" }),
                 capability: CapabilityId::new(capability_id).expect("valid capability id"),
                 risk_level: RiskLevel::High,
@@ -6779,6 +7103,173 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_hrw_lease_refuses_non_holder_and_admits_elected_holder() {
+        let connector_id = "fcp.test.hrw-lease-refuse:utility:1.0.0";
+        let operation_id = "test.singleton";
+        let capability_id = "cap.test.singleton";
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let invoke_count = Arc::new(AtomicU64::new(0));
+        let input_schema = json!({
+            "type": "object",
+            "required": ["lease_seq"],
+            "properties": {
+                "lease_seq": { "type": "integer" },
+                "message": { "type": "string" }
+            }
+        });
+
+        let introspection = serde_json::to_value(dispatcher_introspection_with_input_schema(
+            operation_id,
+            capability_id,
+            SafetyTier::Safe,
+            input_schema,
+        ))
+        .expect("test introspection should serialize");
+        let (runner_tx, mut runner_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let runner_invoke_count = Arc::clone(&invoke_count);
+        let runner_task = task::spawn(async move {
+            while let Some(request) = runner_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        runner_invoke_count.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params.clone())
+                                .expect("invoke params decode");
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({ "accepted_by_elected_holder": true }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+        let connector = dispatcher_test_connector(connector_id, runner_tx, runner_task);
+        let registry = dispatcher_registry_with_connector(
+            connector_id,
+            connector,
+            ConnectorConfig {
+                id: connector_id.to_string(),
+                binary: "dispatcher-test".to_string(),
+                name: Some("HRW Lease Refuse Test Connector".to_string()),
+                description: None,
+                args: Vec::new(),
+                env: BTreeMap::new(),
+                config: None,
+                categories: vec!["test".to_string()],
+                version: None,
+                allowed_zones: Vec::new(),
+                allowed_operations: Vec::new(),
+            },
+        );
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::new()),
+            Some(signing_key.verifying_key()),
+            HashMap::new(),
+        );
+
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static(connector_id),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({ "message": "non-holder must refuse", "lease_seq": 7 }),
+            capability_token: test_capability_token(
+                &signing_key,
+                capability_id,
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: Some(7),
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let subject_id = singleton_writer_lease_subject_id(&request);
+        let eligible_nodes = vec![
+            TailscaleNodeId::new("node-a"),
+            TailscaleNodeId::new("node-b"),
+            TailscaleNodeId::new("node-c"),
+        ];
+        let expected =
+            fcp_mesh::planner::select_lease_holder(&request.zone_id, &subject_id, &eligible_nodes)
+                .expect("HRW holder selected");
+        let local_node = eligible_nodes
+            .iter()
+            .find(|node| *node != &expected)
+            .expect("test set includes non-holder")
+            .clone();
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: local_node.clone(),
+            eligible_nodes: eligible_nodes.clone(),
+        }));
+
+        let (status, message) = invoke_handler(
+            State(Arc::clone(&state)),
+            HeaderMap::new(),
+            Json(request.clone()),
+        )
+        .await
+        .expect_err("non-holder singleton_writer invoke must be refused");
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert!(message.contains("HRW lease routing refused singleton_writer invoke"));
+        assert!(message.contains(r#""reason":"wrong_holder""#));
+        assert!(message.contains(expected.as_str()));
+        assert!(message.contains(local_node.as_str()));
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            0,
+            "WrongHolder refusal must happen before connector dispatch"
+        );
+        drop(_guard);
+        let mut policies: HashMap<ZoneId, ZonePolicyObject> = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        *state.zone_policies.write().await = policies;
+        let _guard = set_test_hrw_lease_routing_override(Some(HrwLeaseRoutingConfig {
+            local_node: expected,
+            eligible_nodes,
+        }));
+
+        let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect("elected holder should dispatch singleton_writer invoke");
+
+        assert_eq!(response.status, InvokeStatus::Ok);
+        assert_eq!(
+            response.result,
+            Some(json!({ "accepted_by_elected_holder": true }))
+        );
+        assert_eq!(
+            invoke_count.load(Ordering::SeqCst),
+            1,
+            "Elected holder should reach connector dispatch"
+        );
     }
 
     #[fcp_async_core::runtime::test(flavor = "multi_thread")]

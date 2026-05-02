@@ -1594,6 +1594,101 @@ async fn subscription_receives_next_message() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn subscription_full_result_buffer_handles_ping_then_closes_on_overflow() {
+    let ctx =
+        TestContext::new("subscription_full_result_buffer_handles_ping_then_closes_on_overflow");
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("addr");
+
+    let server_task = task::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let mut ws = accept_test_websocket(stream).await;
+
+        let _init = recv_text(&mut ws, "init message").await;
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "connection_ack" }),
+            "ack send",
+        )
+        .await;
+
+        let _subscribe = recv_text(&mut ws, "subscribe message").await;
+
+        for index in 0..16 {
+            send_json(
+                &mut ws,
+                serde_json::json!({
+                    "type": "next",
+                    "id": "1",
+                    "payload": {
+                        "data": { "viewer": { "id": format!("queued-{index}") } }
+                    }
+                }),
+                "queued next send",
+            )
+            .await;
+        }
+
+        send_json(
+            &mut ws,
+            serde_json::json!({ "type": "ping", "payload": { "full": true } }),
+            "ping send",
+        )
+        .await;
+        let pong_text =
+            fcp_async_core::time::timeout(Duration::from_secs(2), recv_text(&mut ws, "pong"))
+                .await
+                .expect("pong timeout");
+        let pong_value: serde_json::Value = serde_json::from_str(&pong_text).expect("pong json");
+        assert_eq!(
+            pong_value.get("type").and_then(serde_json::Value::as_str),
+            Some("pong")
+        );
+
+        send_json(
+            &mut ws,
+            serde_json::json!({
+                "type": "next",
+                "id": "1",
+                "payload": {
+                    "data": { "viewer": { "id": "overflow" } }
+                }
+            }),
+            "overflow next send",
+        )
+        .await;
+
+        let complete_text = fcp_async_core::time::timeout(
+            Duration::from_secs(2),
+            recv_text(&mut ws, "complete after overflow"),
+        )
+        .await
+        .expect("overflow complete timeout");
+        let complete_value: serde_json::Value =
+            serde_json::from_str(&complete_text).expect("complete json");
+        assert_eq!(
+            complete_value
+                .get("type")
+                .and_then(serde_json::Value::as_str),
+            Some("complete")
+        );
+    });
+
+    let url = format!("ws://{}", addr);
+    let client = GraphqlSubscriptionClient::new(url, "test");
+    let _stream = client
+        .subscribe::<ViewerQuery>(EmptyVars {})
+        .await
+        .expect("subscribe");
+
+    server_task.await.expect("server task");
+    ctx.finalize(
+        "pass",
+        Some(serde_json::json!({"overflow_policy": "close"})),
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn subscription_reconnects_after_disconnect() {
     let mut ctx = TestContext::new("subscription_reconnects_after_disconnect");
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

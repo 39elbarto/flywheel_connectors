@@ -3,7 +3,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use fcp_async_core::{channel::mpsc, task, time};
+use fcp_async_core::{
+    channel::mpsc::{self, error::TrySendError},
+    task, time,
+};
 use futures_util::stream::BoxStream;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
@@ -27,6 +30,7 @@ struct GraphqlWsMessage {
 }
 
 const SUBSCRIPTION_ID: &str = "1";
+const SUBSCRIPTION_RESULT_BUFFER_CAPACITY: usize = 16;
 
 /// Subscription configuration.
 #[derive(Debug, Clone)]
@@ -120,7 +124,7 @@ impl GraphqlSubscriptionClient {
         ))
         .await?;
 
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(SUBSCRIPTION_RESULT_BUFFER_CAPACITY);
         let service_name = self.service_name.clone();
         let init_payload = self.config.init_payload.clone();
         let ack_timeout = self.config.ack_timeout;
@@ -155,7 +159,9 @@ impl GraphqlSubscriptionClient {
                                         continue;
                                     }
                                     Err(err) => {
-                                        let _ = tx.send(Err(err)).await;
+                                        let _ =
+                                            deliver_subscription_item(&tx, &mut conn, Err(err))
+                                                .await;
                                         break;
                                     }
                                 }
@@ -177,7 +183,12 @@ impl GraphqlSubscriptionClient {
                                         continue;
                                     }
                                     Err(reconnect_err) => {
-                                        let _ = tx.send(Err(reconnect_err)).await;
+                                        let _ = deliver_subscription_item(
+                                            &tx,
+                                            &mut conn,
+                                            Err(reconnect_err),
+                                        )
+                                        .await;
                                         break;
                                     }
                                 }
@@ -211,7 +222,7 @@ impl GraphqlSubscriptionClient {
                                 continue;
                             }
                             Err(err) => {
-                                let _ = tx.send(Err(err)).await;
+                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
                                 break;
                             }
                         }
@@ -223,7 +234,7 @@ impl GraphqlSubscriptionClient {
                     Ok(ws_msg) => match ws_msg.message_type.as_str() {
                         "next" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = tx.send(Err(err)).await;
+                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
                                 break;
                             }
                             if let Some(payload) = ws_msg.payload {
@@ -231,18 +242,21 @@ impl GraphqlSubscriptionClient {
                                     serde_json::from_value(payload);
                                 match parsed {
                                     Ok(response) => {
-                                        if tx.send(Ok(response)).await.is_err() {
-                                            send_complete_and_close(&mut conn).await;
+                                        if !deliver_subscription_item(&tx, &mut conn, Ok(response))
+                                            .await
+                                        {
                                             break;
                                         }
                                     }
                                     Err(err) => {
-                                        if tx
-                                            .send(Err(GraphqlClientError::Json(err.to_string())))
+                                        if !deliver_subscription_item(
+                                            &tx,
+                                            &mut conn,
+                                            Err(GraphqlClientError::Json(err.to_string())),
+                                        )
                                             .await
-                                            .is_err()
                                         {
-                                            send_complete_and_close(&mut conn).await;
+                                            break;
                                         }
                                         break;
                                     }
@@ -251,7 +265,7 @@ impl GraphqlSubscriptionClient {
                         }
                         "error" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = tx.send(Err(err)).await;
+                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
                                 break;
                             }
                             let errors = ws_msg
@@ -266,14 +280,17 @@ impl GraphqlSubscriptionClient {
                                     }
                                 })
                                 .unwrap_or_default();
-                            let _ = tx
-                                .send(Err(GraphqlClientError::GraphqlErrors { errors }))
-                                .await;
+                            let _ = deliver_subscription_item(
+                                &tx,
+                                &mut conn,
+                                Err(GraphqlClientError::GraphqlErrors { errors }),
+                            )
+                            .await;
                             break;
                         }
                         "complete" => {
                             if let Err(err) = validate_subscription_message_id(&ws_msg) {
-                                let _ = tx.send(Err(err)).await;
+                                let _ = deliver_subscription_item(&tx, &mut conn, Err(err)).await;
                             }
                             break;
                         }
@@ -286,23 +303,29 @@ impl GraphqlSubscriptionClient {
                             let _ = conn.send_json(&pong).await;
                         }
                         _ => {
-                            let _ = tx
-                                .send(Err(GraphqlClientError::Protocol {
+                            let _ = deliver_subscription_item(
+                                &tx,
+                                &mut conn,
+                                Err(GraphqlClientError::Protocol {
                                     message: format!(
                                         "unexpected websocket message: {}",
                                         ws_msg.message_type
                                     ),
-                                }))
-                                .await;
+                                }),
+                            )
+                            .await;
                             break;
                         }
                     },
                     Err(err) => {
-                        let _ = tx
-                            .send(Err(GraphqlClientError::Protocol {
+                        let _ = deliver_subscription_item(
+                            &tx,
+                            &mut conn,
+                            Err(GraphqlClientError::Protocol {
                                 message: format!("decode failed: {err}"),
-                            }))
-                            .await;
+                            }),
+                        )
+                        .await;
                         break;
                     }
                 }
@@ -315,6 +338,28 @@ impl GraphqlSubscriptionClient {
             rx,
             |mut receiver| async move { receiver.recv().await.map(|item| (item, receiver)) },
         )))
+    }
+}
+
+async fn deliver_subscription_item<T>(
+    tx: &mpsc::Sender<Result<GraphqlResponse<T>, GraphqlClientError>>,
+    connection: &mut WsConnection,
+    item: Result<GraphqlResponse<T>, GraphqlClientError>,
+) -> bool {
+    match tx.try_send(item) {
+        Ok(()) => true,
+        Err(TrySendError::Closed(_)) => {
+            send_complete_and_close(connection).await;
+            false
+        }
+        Err(TrySendError::Full(_)) => {
+            debug!(
+                capacity = SUBSCRIPTION_RESULT_BUFFER_CAPACITY,
+                "graphql subscription result buffer full; closing subscription"
+            );
+            send_complete_and_close(connection).await;
+            false
+        }
     }
 }
 

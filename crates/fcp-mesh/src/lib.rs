@@ -31,6 +31,7 @@ pub mod coordinator;
 pub mod degraded;
 
 pub mod device;
+pub mod emergency_revocation;
 pub mod gossip;
 pub mod iblt;
 pub mod node;
@@ -46,6 +47,7 @@ pub use coordinator::*;
 pub use degraded::*;
 
 pub use device::*;
+pub use emergency_revocation::*;
 pub use gossip::*;
 pub use iblt::*;
 pub use node::*;

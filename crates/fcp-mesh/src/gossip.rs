@@ -1249,28 +1249,84 @@ impl RevocationPushMessage {
 /// instead of waiting for the next gossip round.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PriorityGossipPolicy {
-    /// Push revocations to all known online peers immediately.
+    /// Push revocations to all known online peers immediately, bounded by
+    /// [`GossipConfig::max_revocation_push_peers`].
     #[default]
     DirectPush,
     /// Use the priority gossip interval (faster than standard) but no direct push.
     PriorityInterval,
     /// Use standard gossip cadence (no priority treatment).
     Standard,
+    /// Operator-invoked emergency revocation. Pushes to **all** known peers
+    /// without the normal `max_revocation_push_peers` bound, with up to
+    /// [`Self::EMERGENCY_BURST_FANOUT`] parallel send paths and
+    /// retry/quorum-witness collection bounded by
+    /// [`Self::EMERGENCY_PROPAGATION_DEADLINE_MS`]. Used only by the
+    /// `fwc emergency revoke` admin path (m8j0q.8).
+    ///
+    /// Per ADR `m8j0q-emergency-revocation-protocol`: the Emergency variant
+    /// is intentionally separate from `DirectPush` so call-site discipline
+    /// is visible (an `if policy.is_emergency()` branch in every site
+    /// would be more error-prone than an enum variant).
+    Emergency,
 }
 
 impl PriorityGossipPolicy {
+    /// Maximum parallel send paths used by the emergency burst push.
+    pub const EMERGENCY_BURST_FANOUT: usize = 64;
+
+    /// Hard upper bound on emergency-revoke propagation latency, in ms.
+    /// Witness collection MUST complete (or be abandoned with
+    /// `QuorumNotReached`) before this deadline elapses.
+    pub const EMERGENCY_PROPAGATION_DEADLINE_MS: u64 = 5_000;
+
+    /// Number of [`super::emergency_revocation::RevocationWitness`]
+    /// signatures the originator collects before declaring quorum reached.
+    /// In small-mesh deployments where this exceeds peer count the
+    /// originator falls back to majority-of-online (see ADR §"Open
+    /// questions resolved" #2).
+    pub const EMERGENCY_QUORUM_WITNESSES: usize = 3;
+
+    /// Per-zone rate limit on emergency-revoke originations, in seconds.
+    /// Enforced by the host's admin RPC layer to prevent revocation-as-DoS
+    /// even with a compromised owner key.
+    pub const EMERGENCY_RATE_LIMIT_PER_ZONE_SECS: u64 = 60;
+
     /// Whether this policy uses direct peer push.
     #[must_use]
     pub const fn uses_direct_push(&self) -> bool {
-        matches!(self, Self::DirectPush)
+        matches!(self, Self::DirectPush | Self::Emergency)
+    }
+
+    /// Whether this policy is the operator-invoked emergency variant.
+    #[must_use]
+    pub const fn is_emergency(&self) -> bool {
+        matches!(self, Self::Emergency)
     }
 
     /// The gossip interval in milliseconds for this policy.
     #[must_use]
     pub const fn interval_ms(&self, config: &GossipConfig) -> u64 {
         match self {
-            Self::DirectPush | Self::PriorityInterval => config.priority_gossip_interval_ms,
+            Self::DirectPush | Self::PriorityInterval | Self::Emergency => {
+                config.priority_gossip_interval_ms
+            }
             Self::Standard => 300, // Standard gossip cadence
+        }
+    }
+
+    /// The fanout cap for this policy when planning a direct-push burst.
+    ///
+    /// `DirectPush` honors `GossipConfig::max_revocation_push_peers`.
+    /// `Emergency` overrides it with [`Self::EMERGENCY_BURST_FANOUT`] so
+    /// operator-driven incident response is not capped by ordinary
+    /// amplification limits.
+    #[must_use]
+    pub const fn fanout_cap(&self, config: &GossipConfig) -> usize {
+        match self {
+            Self::DirectPush => config.max_revocation_push_peers,
+            Self::Emergency => Self::EMERGENCY_BURST_FANOUT,
+            Self::PriorityInterval | Self::Standard => 0,
         }
     }
 }
@@ -4805,6 +4861,101 @@ mod tests {
         let config = GossipConfig::default();
         assert_eq!(config.priority_gossip_interval_ms, 100);
         assert_eq!(config.max_revocation_push_peers, 32);
+    }
+
+    // ── m8j0q.8.b: PriorityGossipPolicy::Emergency variant tests ─────
+
+    #[test]
+    fn emergency_policy_constants_match_adr_contract() {
+        // ADR `m8j0q-emergency-revocation-protocol` §"Required API
+        // shape" #1 fixes these constants. Drifting them silently
+        // would change the operator contract; this test pins them.
+        assert_eq!(PriorityGossipPolicy::EMERGENCY_BURST_FANOUT, 64);
+        assert_eq!(
+            PriorityGossipPolicy::EMERGENCY_PROPAGATION_DEADLINE_MS,
+            5_000
+        );
+        assert_eq!(PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES, 3);
+        assert_eq!(
+            PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS,
+            60
+        );
+    }
+
+    #[test]
+    fn emergency_policy_is_emergency_predicate() {
+        assert!(PriorityGossipPolicy::Emergency.is_emergency());
+        assert!(!PriorityGossipPolicy::DirectPush.is_emergency());
+        assert!(!PriorityGossipPolicy::PriorityInterval.is_emergency());
+        assert!(!PriorityGossipPolicy::Standard.is_emergency());
+    }
+
+    #[test]
+    fn emergency_policy_uses_direct_push() {
+        // Emergency MUST use direct push (it's a burst-push) — code
+        // sites that branch on uses_direct_push() must include
+        // Emergency in the direct-push path.
+        assert!(PriorityGossipPolicy::Emergency.uses_direct_push());
+        assert!(PriorityGossipPolicy::DirectPush.uses_direct_push());
+        assert!(!PriorityGossipPolicy::PriorityInterval.uses_direct_push());
+        assert!(!PriorityGossipPolicy::Standard.uses_direct_push());
+    }
+
+    #[test]
+    fn emergency_policy_uses_priority_interval() {
+        // ADR "Tests expected to follow" m8j0q.8.b: emergency interval
+        // falls back to priority_gossip_interval_ms (no separate
+        // emergency interval — the Emergency variant is about *fanout*
+        // and *retry*, not cadence).
+        let config = GossipConfig::default();
+        assert_eq!(
+            PriorityGossipPolicy::Emergency.interval_ms(&config),
+            config.priority_gossip_interval_ms
+        );
+    }
+
+    #[test]
+    fn emergency_policy_uses_full_fanout() {
+        // ADR "Tests expected to follow" m8j0q.8.b: burst-push selects
+        // up to EMERGENCY_BURST_FANOUT, NOT max_revocation_push_peers.
+        let config = GossipConfig {
+            max_revocation_push_peers: 5,
+            ..GossipConfig::default()
+        };
+        assert_eq!(
+            PriorityGossipPolicy::Emergency.fanout_cap(&config),
+            PriorityGossipPolicy::EMERGENCY_BURST_FANOUT,
+            "Emergency must override max_revocation_push_peers"
+        );
+        // Verify DirectPush still honors the configured cap.
+        assert_eq!(
+            PriorityGossipPolicy::DirectPush.fanout_cap(&config),
+            5
+        );
+        // Non-direct-push policies have no fanout (they wait for the
+        // next gossip round instead of bursting).
+        assert_eq!(
+            PriorityGossipPolicy::PriorityInterval.fanout_cap(&config),
+            0
+        );
+        assert_eq!(PriorityGossipPolicy::Standard.fanout_cap(&config), 0);
+    }
+
+    #[test]
+    fn priority_gossip_policy_serde_round_trip_includes_emergency_variant() {
+        // Adding Emergency must not perturb the wire form of the
+        // existing variants, AND Emergency itself must round-trip.
+        for variant in [
+            PriorityGossipPolicy::DirectPush,
+            PriorityGossipPolicy::PriorityInterval,
+            PriorityGossipPolicy::Standard,
+            PriorityGossipPolicy::Emergency,
+        ] {
+            let json = serde_json::to_string(&variant).expect("encode");
+            let back: PriorityGossipPolicy =
+                serde_json::from_str(&json).expect("decode");
+            assert_eq!(back, variant, "round-trip drift for {variant:?}");
+        }
     }
 
     #[test]

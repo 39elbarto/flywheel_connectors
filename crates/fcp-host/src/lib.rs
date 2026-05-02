@@ -20,6 +20,7 @@ mod budget;
 mod cancellation;
 mod discovery;
 mod doctor;
+mod emergency_revocation;
 mod enforcement;
 mod error;
 // Retained-but-unwired: composite host-health framework
@@ -55,6 +56,7 @@ pub use budget::*;
 pub use cancellation::*;
 pub use discovery::*;
 pub use doctor::*;
+pub use emergency_revocation::*;
 pub use enforcement::*;
 pub use error::*;
 pub use migration_linux::*;

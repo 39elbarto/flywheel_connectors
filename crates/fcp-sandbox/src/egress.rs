@@ -752,22 +752,29 @@ impl EgressGuard {
             IpAddr::V6(v6) => v6.to_ipv4_mapped().map_or(ip, IpAddr::V4),
             IpAddr::V4(_) => ip,
         };
-        for cidr_str in &constraints.cidr_deny {
-            match cidr_str.parse::<IpNet>() {
-                Ok(cidr) => {
-                    if cidr.contains(&check_ip) {
-                        return Err(EgressError::Denied {
-                            reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
-                            code: DenyReason::CidrDenyMatched,
-                        });
-                    }
-                }
-                Err(e) => {
+        // Validate ALL cidr_deny rules upfront so a malformed rule that sits after
+        // a matching valid rule still fails-closed regardless of iteration order.
+        // Without this pre-pass, an IP that matches an early valid CIDR would
+        // short-circuit before reaching a malformed entry, letting operator
+        // misconfigurations lurk silently until a non-matching IP arrives.
+        let parsed_deny: Vec<IpNet> = constraints
+            .cidr_deny
+            .iter()
+            .map(|cidr_str| {
+                cidr_str.parse::<IpNet>().map_err(|e| {
                     warn!(cidr = %cidr_str, error = %e, "rejecting unparseable CIDR deny rule");
-                    return Err(EgressError::InvalidRequest(format!(
+                    EgressError::InvalidRequest(format!(
                         "invalid cidr_deny rule `{cidr_str}`: {e}"
-                    )));
-                }
+                    ))
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        for (cidr, cidr_str) in parsed_deny.iter().zip(constraints.cidr_deny.iter()) {
+            if cidr.contains(&check_ip) {
+                return Err(EgressError::Denied {
+                    reason: format!("CIDR deny rule matched: {ip} in {cidr_str}"),
+                    code: DenyReason::CidrDenyMatched,
+                });
             }
         }
 

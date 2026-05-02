@@ -541,11 +541,20 @@ fn load_latest_pointers(
         // A stale pointer (e.g. restored from backup) below the HWM
         // gets silently upgraded.
         //
-        // br-28nms: emit a structured WARN at the detection site so
-        // operators can distinguish (a) legitimate first-reopen-after-
-        // iqy2b V1 upgrades from (b) tampered pointer files. The two
-        // events carry distinct `reason` fields so log-aggregation can
-        // alert on the attack signal without flooding on normal upgrades.
+        // br-28nms: emit a structured `tracing::warn!` at the detection
+        // site so operators can distinguish (a) legitimate first-reopen-
+        // after-iqy2b V1 upgrades from (b) tampered pointer files. The
+        // two events carry distinct `reason` fields so log-aggregation
+        // can alert on the attack signal without flooding on normal
+        // upgrades.
+        //
+        // NOTE: this is observability via the tracing subscriber — it is
+        // NOT an entry on `InvokeAuditChain` or the typed `fcp_audit`
+        // chain. Operators monitoring audit-chain events alone will not
+        // see this; they must also tail tracing logs filtered on
+        // `bead = "28nms"`. A future change can promote this to a typed
+        // audit entry once the audit chain is plumbed into the durable
+        // store reopen path. (br-03o2m noted the gap.)
         let (effective_root, effective_sequence) = match hwm_by_mesh.get(&pointer.mesh_id) {
             Some(&(hwm_epoch, hwm_root)) if is_legacy_v1 || pointer.sequence < hwm_epoch => {
                 let reason = if is_legacy_v1 {
@@ -1372,10 +1381,7 @@ mod tests {
     /// change.
     #[test]
     fn br_28nms_pointer_repair_reason_strings_are_stable() {
-        assert_eq!(
-            PointerRepairReason::LegacyV1Form.as_str(),
-            "legacy_v1_form"
-        );
+        assert_eq!(PointerRepairReason::LegacyV1Form.as_str(), "legacy_v1_form");
         assert_eq!(
             PointerRepairReason::SequenceBelowHwm.as_str(),
             "sequence_below_hwm"

@@ -629,12 +629,16 @@ impl ZoneKeyManifest {
             };
             let safe = match &v4_entry.sealed {
                 WrappedKey::HpkeX25519 { sealed: v4_sealed } => {
-                    // Promoted V3: bytes must match the V3 entry's
-                    // sealed bytes exactly. Ed25519/X25519 byte
-                    // equality is a public-data comparison so a plain
-                    // `==` is fine here.
+                    // Promoted V3: bytes AND issued_at must match the
+                    // V3 entry exactly. issued_at is part of the AAD
+                    // for the unwrap, so a mismatch would let two
+                    // lookup paths derive different AAD for the same
+                    // sealed bytes. Ed25519/X25519 byte equality and
+                    // u64 equality are public-data comparisons so a
+                    // plain `==` is fine here.
                     v4_sealed.enc == v3_entry.sealed.enc
                         && v4_sealed.ciphertext == v3_entry.sealed.ciphertext
+                        && v4_entry.issued_at == v3_entry.issued_at
                 }
                 WrappedKey::XWing { .. } => false,
             };
@@ -748,9 +752,12 @@ impl UnsignedV4Manifest {
     /// ([`ZoneKeyManifest::validate_no_recipient_split_view`],
     /// [`ZoneKeyManifest::wrapped_key_v4_for`]) before signing.
     ///
-    /// The returned reference's `signature` field is the all-zero
-    /// placeholder installed by [`ZoneKeyManifest::migrated_to_v4`]
-    /// — it cannot verify. Callers that bypass the type system by
+    /// The returned reference's `signature` field is the inherited
+    /// V3 signature, intentionally left in place by
+    /// [`ZoneKeyManifest::migrated_to_v4`] as defence in depth: it
+    /// commits to the V3-shaped payload, so any V4 verifier that
+    /// re-derives canonical signing bytes from the migrated form
+    /// will reject it. Callers that bypass the type system by
     /// cloning the inner value still ship a manifest that fails
     /// every owner-signature check, so the safety property holds
     /// even under defeated typestate.
@@ -1255,11 +1262,17 @@ fn resolve_wrap_or_error(
 /// for `node_id`, so at least one of the two lists carries this
 /// recipient.
 fn wrapped_issued_at(manifest: &ZoneKeyManifest, node_id: &TailscaleNodeId) -> u64 {
-    manifest
+    let result = manifest
         .wrapped_key_v4_for(node_id)
         .map(|w| w.issued_at)
-        .or_else(|| manifest.wrapped_key_for(node_id).map(|w| w.issued_at))
-        .unwrap_or_default()
+        .or_else(|| manifest.wrapped_key_for(node_id).map(|w| w.issued_at));
+    debug_assert!(
+        result.is_some(),
+        "wrapped_issued_at called for recipient {} not present in V4 or V3 wraps; \
+         caller must verify resolved_wrapped_key_for(node_id).is_some() first",
+        node_id.as_str()
+    );
+    result.unwrap_or_default()
 }
 
 /// Open a V4 X-Wing-sealed zone-key wrap into a [`ZoneKey`].

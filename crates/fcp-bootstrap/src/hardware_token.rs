@@ -1397,7 +1397,9 @@ impl<'a> CertificateSelectionIndex<'a> {
 
         let result = self.verify_chain_for_cert_index(cert_index, visited);
         visited.remove(&cert_index);
-        self.verified_chain_cache[cert_index] = Some(result);
+        if result {
+            self.verified_chain_cache[cert_index] = Some(true);
+        }
         result
     }
 

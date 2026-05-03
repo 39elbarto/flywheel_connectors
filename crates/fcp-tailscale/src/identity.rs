@@ -18,7 +18,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 use crate::error::{TailscaleError, TailscaleResult};
-use crate::tag::TailscaleTag;
+use crate::tag::{TailscaleTag, ZoneTagMapping};
 
 /// Tailscale node ID (opaque string identifier).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -245,7 +245,10 @@ impl MeshIdentity {
         if self.verify_attestation().is_err() {
             return Vec::new();
         }
-        self.tags.iter().filter(|t| t.is_fcp_tag()).collect()
+        self.tags
+            .iter()
+            .filter(|tag| ZoneTagMapping::is_zone_tag(tag))
+            .collect()
     }
 
     /// Get verified FCP tags, returning an error if verification fails.
@@ -254,7 +257,11 @@ impl MeshIdentity {
     /// Returns `TailscaleError` if the attestation is missing, invalid, or expired.
     pub fn verified_fcp_tags(&self) -> TailscaleResult<Vec<&TailscaleTag>> {
         self.verify_attestation()?;
-        Ok(self.tags.iter().filter(|t| t.is_fcp_tag()).collect())
+        Ok(self
+            .tags
+            .iter()
+            .filter(|tag| ZoneTagMapping::is_zone_tag(tag))
+            .collect())
     }
 }
 
@@ -2151,10 +2158,10 @@ mod tests {
         assert!(!keys.issuance_kid().to_hex().is_empty());
     }
 
-    // --- MeshIdentity: fcp_tags with only fcp- prefix tag ---
+    // --- MeshIdentity: fcp_tags rejects unmapped fcp- prefix tag ---
 
     #[test]
-    fn test_mesh_identity_fcp_tags_with_bare_fcp_prefix() {
+    fn test_mesh_identity_fcp_tags_rejects_bare_fcp_prefix() {
         // `fcp_tags()` requires a valid attestation post-8a0d49596.
         let (owner_key, node_keys) = create_test_keys();
         let node_id = NodeId::new("bare-fcp");
@@ -2170,8 +2177,11 @@ mod tests {
             node_keys,
         )
         .with_attestation(attestation);
-        // "tag:fcp-" is technically an FCP tag (starts with tag:fcp-)
-        assert_eq!(identity.fcp_tags().len(), 1);
+        // `tag:fcp-` is a prefix match, but it is not a valid FCP zone.
+        assert!(identity.tags[0].is_fcp_tag());
+        assert_eq!(ZoneTagMapping::tag_to_zone(&identity.tags[0]), None);
+        assert!(identity.fcp_tags().is_empty());
+        assert!(identity.verified_fcp_tags().unwrap().is_empty());
     }
 
     // --- Attestation: sign with unicode node_id ---

@@ -204,7 +204,38 @@ impl ZoneTagMapping {
     /// ```
     #[must_use]
     pub fn tag_to_zone(tag: &TailscaleTag) -> Option<String> {
-        let suffix = tag.fcp_suffix()?;
+        Self::tag_str_to_zone(tag.as_str())
+    }
+
+    /// Check whether a Tailscale tag maps to a valid FCP zone ID.
+    #[must_use]
+    pub fn is_zone_tag(tag: &TailscaleTag) -> bool {
+        Self::is_zone_tag_str(tag.as_str())
+    }
+
+    /// Check whether a raw Tailscale tag string maps to a valid FCP zone ID.
+    #[must_use]
+    pub fn is_zone_tag_str(tag: &str) -> bool {
+        let Some(suffix) = tag.strip_prefix(FCP_TAG_PREFIX) else {
+            return false;
+        };
+
+        if let Some(project) = suffix.strip_prefix("proj-") {
+            return Self::is_valid_tag_suffix(project);
+        }
+
+        !suffix.contains(':') && !suffix.starts_with("proj-") && Self::is_valid_tag_suffix(suffix)
+    }
+
+    /// Convert a raw Tailscale FCP tag string to its zone ID.
+    ///
+    /// Returns `None` if the tag is not an FCP tag or does not encode a valid zone ID.
+    #[must_use]
+    pub fn tag_str_to_zone(tag: &str) -> Option<String> {
+        if !Self::is_zone_tag_str(tag) {
+            return None;
+        }
+        let suffix = tag.strip_prefix(FCP_TAG_PREFIX)?;
         let zone = suffix.strip_prefix("proj-").map_or_else(
             || format!("{}{suffix}", Self::ZONE_PREFIX),
             |project| format!("z:project:{project}"),
@@ -1040,6 +1071,9 @@ mod tests {
         let tag = TailscaleTag::new("tag:fcp-").unwrap();
         let zone = ZoneTagMapping::tag_to_zone(&tag);
         assert!(zone.is_none());
+        assert!(!ZoneTagMapping::is_zone_tag(&tag));
+        assert!(!ZoneTagMapping::is_zone_tag_str(tag.as_str()));
+        assert!(ZoneTagMapping::tag_str_to_zone(tag.as_str()).is_none());
     }
 
     #[test]

@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use crate::error::{TailscaleError, TailscaleResult};
 use crate::identity::NodeId;
-use crate::tag::TailscaleTag;
+use crate::tag::{TailscaleTag, ZoneTagMapping};
 use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
 #[cfg(any(test, feature = "test-mocks"))]
 use fcp_async_core::sync::RwLock;
@@ -227,10 +227,10 @@ impl PeerInfo {
             .filter(|tag| TailscaleTag::is_valid_str(tag))
     }
 
-    /// Iterate over raw FCP tag strings without allocation.
+    /// Iterate over raw FCP zone tag strings without allocation.
     pub fn iter_fcp_tag_strs(&self) -> impl Iterator<Item = &str> {
         self.iter_tailscale_tag_strs()
-            .filter(|tag| TailscaleTag::is_fcp_tag_str(tag))
+            .filter(|tag| ZoneTagMapping::is_zone_tag_str(tag))
     }
 
     /// Lazily parse this peer's valid Tailscale tags.
@@ -239,9 +239,10 @@ impl PeerInfo {
             .filter_map(|tag| TailscaleTag::new(tag).ok())
     }
 
-    /// Lazily parse this peer's FCP tags.
+    /// Lazily parse this peer's FCP zone tags.
     pub fn iter_fcp_tags(&self) -> impl Iterator<Item = TailscaleTag> + '_ {
-        self.iter_tailscale_tags().filter(TailscaleTag::is_fcp_tag)
+        self.iter_tailscale_tags()
+            .filter(ZoneTagMapping::is_zone_tag)
     }
 
     /// Get this peer's tags as `TailscaleTag` objects.
@@ -963,13 +964,26 @@ mod tests {
             "n1",
             "h",
             "100.64.0.1".parse().unwrap(),
-            &["tag:server", "not-a-tag", "tag:fcp-work", "tag:fcp-owner"],
+            &[
+                "tag:server",
+                "not-a-tag",
+                "tag:fcp-work",
+                "tag:fcp-",
+                "tag:fcp-owner",
+                "tag:fcp-proj-",
+            ],
         );
 
         let tailscale_tags: Vec<_> = peer.iter_tailscale_tag_strs().collect();
         assert_eq!(
             tailscale_tags,
-            vec!["tag:server", "tag:fcp-work", "tag:fcp-owner"]
+            vec![
+                "tag:server",
+                "tag:fcp-work",
+                "tag:fcp-",
+                "tag:fcp-owner",
+                "tag:fcp-proj-"
+            ]
         );
 
         let fcp_tags: Vec<_> = peer.iter_fcp_tag_strs().collect();
@@ -2189,7 +2203,14 @@ mod tests {
             "n1",
             "h",
             "100.64.0.1".parse().unwrap(),
-            &["tag:fcp", "tag:fcpwork", "tag:fcp-real"],
+            &[
+                "tag:fcp",
+                "tag:fcpwork",
+                "tag:fcp-",
+                "tag:fcp-Invalid",
+                "tag:fcp-proj-",
+                "tag:fcp-real",
+            ],
         );
         let fcp = peer.fcp_tags();
         assert_eq!(fcp.len(), 1);

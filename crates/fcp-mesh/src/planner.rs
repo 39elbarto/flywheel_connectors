@@ -30,11 +30,11 @@
 //! ```
 
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use fcp_prelude::{
-    ConnectorId, LeasePurpose as CoreLeasePurpose, ObjectId, TailscaleNodeId, ZoneId,
-    rank_nodes_by_hrw, select_coordinator,
+    rank_nodes_by_hrw, select_coordinator, ConnectorId, LeasePurpose as CoreLeasePurpose, ObjectId,
+    TailscaleNodeId, ZoneId,
 };
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
@@ -812,6 +812,43 @@ impl ResourcePoolDecisionSummary {
     }
 }
 
+struct ResourcePoolLookup<'a> {
+    by_node_class: HashMap<(NodeId, ResourcePoolClass), Vec<&'a ResourcePoolStatus>>,
+}
+
+impl<'a> ResourcePoolLookup<'a> {
+    fn new(pools: &'a [ResourcePoolStatus]) -> Self {
+        let mut by_node_class: HashMap<(NodeId, ResourcePoolClass), Vec<&'a ResourcePoolStatus>> =
+            HashMap::with_capacity(pools.len());
+        for pool in pools {
+            by_node_class
+                .entry((pool.node_id.clone(), pool.class))
+                .or_default()
+                .push(pool);
+        }
+        Self { by_node_class }
+    }
+
+    fn for_context(input: &'a PlannerInput, context: &PlannerContext) -> Option<Self> {
+        if context.resource_pool_class.is_none() || input.resource_pools.is_empty() {
+            None
+        } else {
+            Some(Self::new(&input.resource_pools))
+        }
+    }
+
+    fn pools_for(
+        &self,
+        node_id: &NodeId,
+        class: ResourcePoolClass,
+    ) -> impl Iterator<Item = &'a ResourcePoolStatus> + '_ {
+        self.by_node_class
+            .get(&(node_id.clone(), class))
+            .into_iter()
+            .flat_map(|pools| pools.iter().copied())
+    }
+}
+
 // ============================================================================
 // Per-Zone SLO Telemetry
 // ============================================================================
@@ -1000,11 +1037,12 @@ impl ExecutionPlanner {
     /// Only eligible candidates are included.
     #[must_use]
     pub fn plan(&self, input: &PlannerInput, context: &PlannerContext) -> Vec<CandidateNode> {
+        let resource_pool_lookup = ResourcePoolLookup::for_context(input, context);
         let mut candidates: Vec<CandidateNode> = input
             .nodes
             .iter()
             .filter(|n| !context.excluded_nodes.contains(n.profile.node_id.as_str()))
-            .map(|node| self.score_node(node, input, context))
+            .map(|node| self.score_node(node, input, context, resource_pool_lookup.as_ref()))
             .collect();
 
         // Sort by score descending, then by node_id for determinism
@@ -1038,6 +1076,7 @@ impl ExecutionPlanner {
         node: &NodeInfo,
         input: &PlannerInput,
         context: &PlannerContext,
+        resource_pool_lookup: Option<&ResourcePoolLookup<'_>>,
     ) -> CandidateNode {
         // Check data locality for fitness context
         let has_preferred_symbols = !context.preferred_symbols.is_empty()
@@ -1080,7 +1119,7 @@ impl ExecutionPlanner {
             return candidate;
         }
 
-        self.check_resource_pool_constraints(&mut candidate, node, input, context);
+        self.check_resource_pool_constraints(&mut candidate, node, context, resource_pool_lookup);
         if !candidate.eligible {
             return candidate;
         }
@@ -1153,14 +1192,16 @@ impl ExecutionPlanner {
         let Some(class) = context.resource_pool_class else {
             return Vec::new();
         };
-        if input.resource_pools.is_empty() {
+        let Some(resource_pool_lookup) = ResourcePoolLookup::for_context(input, context) else {
             return Vec::new();
-        }
+        };
 
         input
             .nodes
             .iter()
-            .map(|node| Self::resource_pool_decision_for_node(node, input, context, class))
+            .map(|node| {
+                Self::resource_pool_decision_for_node(node, &resource_pool_lookup, context, class)
+            })
             .collect()
     }
 
@@ -1168,17 +1209,18 @@ impl ExecutionPlanner {
         &self,
         candidate: &mut CandidateNode,
         node: &NodeInfo,
-        input: &PlannerInput,
         context: &PlannerContext,
+        resource_pool_lookup: Option<&ResourcePoolLookup<'_>>,
     ) {
+        let Some(resource_pool_lookup) = resource_pool_lookup else {
+            return;
+        };
         let Some(class) = context.resource_pool_class else {
             return;
         };
-        if input.resource_pools.is_empty() {
-            return;
-        }
 
-        let decision = Self::resource_pool_decision_for_node(node, input, context, class);
+        let decision =
+            Self::resource_pool_decision_for_node(node, resource_pool_lookup, context, class);
         if decision.admitted {
             candidate.add_reason(DecisionReason::ResourcePoolAccepted {
                 pool_id: decision.pool_id.unwrap_or_default(),
@@ -1202,7 +1244,7 @@ impl ExecutionPlanner {
 
     fn resource_pool_decision_for_node(
         node: &NodeInfo,
-        input: &PlannerInput,
+        resource_pool_lookup: &ResourcePoolLookup<'_>,
         context: &PlannerContext,
         class: ResourcePoolClass,
     ) -> ResourcePoolDecision {
@@ -1211,7 +1253,7 @@ impl ExecutionPlanner {
         let target_zone = context.target_zone.as_ref();
         let mut best_rejection: Option<&ResourcePoolStatus> = None;
 
-        for pool in &input.resource_pools {
+        for pool in resource_pool_lookup.pools_for(node.node_id(), class) {
             if !resource_pool_matches(pool, node.node_id(), class, target_zone) {
                 continue;
             }
@@ -3176,12 +3218,10 @@ mod tests {
         let candidates = planner.plan(&input, &context);
         assert_eq!(candidates.len(), 2);
         // First candidate has SelectedAsBest
-        assert!(
-            candidates[0]
-                .decision_reasons
-                .iter()
-                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
-        );
+        assert!(candidates[0]
+            .decision_reasons
+            .iter()
+            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
         // Second has EligibleNotSelected
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(
             r,
@@ -4027,12 +4067,10 @@ mod tests {
         assert_eq!(candidates.len(), 3);
 
         // First should have SelectedAsBest { rank: 1 }
-        assert!(
-            candidates[0]
-                .decision_reasons
-                .iter()
-                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
-        );
+        assert!(candidates[0]
+            .decision_reasons
+            .iter()
+            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
 
         // Second should have rank 2
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(

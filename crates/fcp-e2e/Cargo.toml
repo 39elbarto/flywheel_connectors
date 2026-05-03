@@ -325,3 +325,4 @@ zeroize = { workspace = true }
 # fault-injection scratch dirs.
 tokio = { workspace = true }
 tempfile = "3"
+bytes = { workspace = true }

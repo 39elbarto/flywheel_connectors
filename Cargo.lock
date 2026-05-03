@@ -2614,6 +2614,7 @@ dependencies = [
  "bytes",
  "chrono",
  "ciborium",
+ "criterion",
  "cryptoki",
  "ed25519-dalek",
  "fcp-async-core",
@@ -2886,6 +2887,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-evidence",
  "fcp-host",
  "fcp-manifest",
  "fcp-mesh",
@@ -2937,6 +2939,7 @@ dependencies = [
  "futures-util",
  "hex",
  "jsonschema",
+ "proptest",
  "rand 0.9.4",
  "semver",
  "serde",
@@ -3021,6 +3024,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "subtle",
  "thiserror 2.0.18",
 ]
 
@@ -3984,6 +3988,7 @@ version = "0.1.0"
 dependencies = [
  "asupersync",
  "chrono",
+ "criterion",
  "fcp-async-core",
  "fcp-core",
  "fcp-prelude",
@@ -4058,6 +4063,7 @@ dependencies = [
  "ciborium",
  "criterion",
  "fcp-async-core",
+ "fcp-audit",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
@@ -4067,6 +4073,7 @@ dependencies = [
  "fcp-policy",
  "fcp-prelude",
  "fcp-raptorq",
+ "fcp-ratelimit",
  "fcp-sandbox",
  "fcp-store",
  "fcp-testkit",
@@ -4076,6 +4083,7 @@ dependencies = [
  "hyper-util",
  "insta",
  "mach2",
+ "proptest",
  "reqwest 0.13.2",
  "semver",
  "serde",
@@ -4086,6 +4094,7 @@ dependencies = [
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -4452,6 +4461,7 @@ dependencies = [
  "chrono",
  "fcp-cbor",
  "fcp-core",
+ "fcp-crypto",
  "fcp-prelude",
  "hex",
  "insta",
@@ -4461,6 +4471,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
  "uuid",
 ]
 
@@ -5180,14 +5191,20 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "fcp-async-core",
+ "fcp-cbor",
  "fcp-core",
  "fcp-crypto-pq",
  "fcp-evidence",
  "hex",
+ "insta",
+ "proptest",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tracing",
+ "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -5356,6 +5373,7 @@ dependencies = [
  "blake3",
  "bytes",
  "chrono",
+ "criterion",
  "fcp-async-core",
  "fcp-cbor",
  "fcp-core",
@@ -5466,6 +5484,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tough",
  "tower",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -5942,6 +5961,7 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "chrono",
+ "criterion",
  "fcp-async-core",
  "fcp-core",
  "futures-util",
@@ -6410,6 +6430,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "chrono",
+ "criterion",
  "ed25519-dalek",
  "fcp-async-core",
  "fcp-core",
@@ -7042,6 +7063,7 @@ dependencies = [
  "criterion",
  "fcp-async-core",
  "fcp-audit",
+ "fcp-bootstrap",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",

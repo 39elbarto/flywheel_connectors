@@ -685,13 +685,17 @@ impl SwarmEvidenceArtifactManifest {
         if self.rch_worker_id.trim().is_empty() {
             return Err(SwarmEvidenceBundleError::MissingRchWorkerInfo);
         }
-        if environment
+        if self.source_revision.trim().is_empty() {
+            return Err(SwarmEvidenceBundleError::MissingSourceRevision);
+        }
+        let environment_revision = environment
             .source_revision
             .as_deref()
-            .is_some_and(|revision| revision != self.source_revision)
-        {
+            .filter(|revision| !revision.trim().is_empty())
+            .ok_or(SwarmEvidenceBundleError::MissingSourceRevision)?;
+        if environment_revision != self.source_revision {
             return Err(SwarmEvidenceBundleError::StaleSourceRevision {
-                expected: environment.source_revision.clone().unwrap_or_default(),
+                expected: environment_revision.to_string(),
                 actual: self.source_revision.clone(),
             });
         }
@@ -2706,6 +2710,30 @@ mod tests {
                 expected: "abc123".to_string(),
                 actual: "def456".to_string()
             }
+        );
+
+        let mut missing_environment_revision = environment.clone();
+        missing_environment_revision.source_revision = None;
+        let missing_environment_err =
+            match stale_manifest.validate_against_environment(&missing_environment_revision) {
+                Ok(()) => return Err("missing environment source revision must fail"),
+                Err(err) => err,
+            };
+        assert_eq!(
+            missing_environment_err,
+            SwarmEvidenceBundleError::MissingSourceRevision
+        );
+
+        let mut missing_manifest_revision = stale_manifest.clone();
+        missing_manifest_revision.source_revision = " ".to_string();
+        let missing_manifest_err =
+            match missing_manifest_revision.validate_against_environment(&environment) {
+                Ok(()) => return Err("missing manifest source revision must fail"),
+                Err(err) => err,
+            };
+        assert_eq!(
+            missing_manifest_err,
+            SwarmEvidenceBundleError::MissingSourceRevision
         );
         Ok(())
     }

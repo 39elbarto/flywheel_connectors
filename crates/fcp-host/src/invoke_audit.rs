@@ -172,7 +172,10 @@ pub struct InvokeAuditContext {
     pub operation_id: String,
     /// Optional client-supplied correlation id for tracing.
     pub correlation_id: Option<String>,
-    /// Wall-clock when the request entered the host (Unix seconds).
+    /// Wall-clock lower bound for when the request entered the host
+    /// (Unix seconds). Same-zone commits clamp this to the previous
+    /// committed audit timestamp so chain order remains verifiable
+    /// when concurrent requests finish out of request-start order.
     pub occurred_at: u64,
 }
 
@@ -180,6 +183,7 @@ pub struct InvokeAuditContext {
 struct ZoneChain {
     last_seq: Option<u64>,
     last_id: Option<String>,
+    last_occurred_at: Option<u64>,
     entries: Vec<AuditEntry>,
 }
 
@@ -318,7 +322,6 @@ impl InvokeAuditChain {
             .severity(severity)
             .actor(&ctx.actor)
             .zone_id(&ctx.zone_id)
-            .occurred_at(ctx.occurred_at)
             .connector_id(&ctx.connector_id)
             .operation_id(&ctx.operation_id)
             .meta("operation", json!(ctx.operation));
@@ -342,18 +345,20 @@ impl InvokeAuditChain {
             // 1. Snapshot (last_seq, last_id) under the per-zone
             //    Mutex — short critical section, no allocation
             //    beyond the optional String clone of last_id.
-            let (next_seq, prev_snapshot) = {
+            let (next_seq, prev_snapshot, last_occurred_at) = {
                 let z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
                 (
                     z.last_seq.map_or(0u64, |s| s.saturating_add(1)),
                     z.last_id.clone(),
+                    z.last_occurred_at,
                 )
             };
+            let occurred_at = monotonic_occurred_at(ctx.occurred_at, last_occurred_at);
 
             // 2. Build entry + encode canonical + hash OUTSIDE
             //    any lock. This is the dominant cost; running it
             //    lock-free is the load-bearing perf win.
-            let mut builder = base_builder.clone().seq(next_seq);
+            let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
             if let Some(p) = prev_snapshot {
                 builder = builder.prev(p);
             }
@@ -372,6 +377,7 @@ impl InvokeAuditChain {
                 if z.last_id.as_deref() == entry.prev.as_deref() {
                     z.last_seq = Some(next_seq);
                     z.last_id = Some(real_id);
+                    z.last_occurred_at = Some(occurred_at);
                     z.entries.push(entry.clone());
                     drop(z);
                     return Ok(entry);
@@ -388,7 +394,7 @@ impl InvokeAuditChain {
             // whose snapshot cannot go stale because the snapshot and
             // commit happen in the same critical section.
             if serialized_fallback_after.is_some_and(|fallback_after| attempts >= fallback_after) {
-                return Self::append_serialized(&zone, &base_builder);
+                return Self::append_serialized(&zone, &base_builder, ctx.occurred_at);
             }
 
             // Defence in depth against pathological retry storms
@@ -414,10 +420,12 @@ impl InvokeAuditChain {
     fn append_serialized(
         zone: &Arc<Mutex<ZoneChain>>,
         base_builder: &AuditEntryBuilder,
+        requested_occurred_at: u64,
     ) -> Result<AuditEntry, AuditError> {
         let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
         let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
-        let mut builder = base_builder.clone().seq(next_seq);
+        let occurred_at = monotonic_occurred_at(requested_occurred_at, z.last_occurred_at);
+        let mut builder = base_builder.clone().seq(next_seq).occurred_at(occurred_at);
         if let Some(prev) = z.last_id.clone() {
             builder = builder.prev(prev);
         }
@@ -426,6 +434,7 @@ impl InvokeAuditChain {
             .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
         z.last_seq = Some(next_seq);
         z.last_id = Some(entry.id.clone());
+        z.last_occurred_at = Some(occurred_at);
         z.entries.push(entry.clone());
         drop(z);
         Ok(entry)
@@ -477,6 +486,10 @@ impl InvokeAuditChain {
             .entries
             .len()
     }
+}
+
+fn monotonic_occurred_at(requested: u64, previous: Option<u64>) -> u64 {
+    previous.map_or(requested, |last| requested.max(last))
 }
 
 #[cfg(test)]
@@ -869,6 +882,41 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn invoke_audit_chain_clamps_out_of_order_same_zone_timestamps() {
+        // evxvv.8 cross-crate seam: fcp-host commits same-zone audit
+        // entries in completion order, while fcp-audit verifies
+        // timestamps in chain order. If request A starts before
+        // request B but commits after B, using the request-entry
+        // timestamp verbatim creates a timestamp regression even
+        // though the hash link and sequence are valid.
+        let chain = InvokeAuditChain::new();
+        let mut later_start = ctx("z:work", "op-later-start");
+        later_start.occurred_at = 1_700_000_200;
+        let mut earlier_start = ctx("z:work", "op-earlier-start");
+        earlier_start.occurred_at = 1_700_000_100;
+
+        chain
+            .append(&later_start, InvokePhase::PreflightAllow)
+            .unwrap();
+        chain
+            .append(&earlier_start, InvokePhase::PreflightAllow)
+            .unwrap();
+
+        let entries = chain.entries_for_zone("z:work");
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].follows(&entries[0]));
+        assert_eq!(
+            entries[1].occurred_at, entries[0].occurred_at,
+            "same-zone commit order must remain non-decreasing for fcp-audit verification"
+        );
+        let report = fcp_audit::verify_chain(&entries, None, Some("z:work"));
+        assert!(
+            report.is_clean() && report.status.is_ok(),
+            "timestamp-clamped invoke chain must verify cleanly: {report:?}"
+        );
     }
 
     /// br-1a73y: when the optimistic-CAS retry budget is exhausted

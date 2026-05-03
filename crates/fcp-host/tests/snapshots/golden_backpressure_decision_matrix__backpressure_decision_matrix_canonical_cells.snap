@@ -1,0 +1,59 @@
+---
+source: crates/fcp-host/tests/golden_backpressure_decision_matrix.rs
+expression: actual
+---
+# Backpressure decision card canonical matrix golden
+# br-uwih7 + br-6bgp1 + br-817cba87c
+# Format:
+#   <priority>:<shape>  | state=<S> action=<A> score=<I> fallback=<F>
+# - state: classified backpressure_state from telemetry
+# - action: selected action (admit/admit_with_warning/delay/shed/cancel_low_priority/fallback_static_policy)
+# - score: selected_loss_score (deterministic; weight refactor → per-row number diff)
+# - fallback: trigger when fallback path fires; 'none' otherwise
+#
+# Cells:
+#   4 priorities × 6 telemetry shapes = 24 admission rows
+#   3 fallback rows (missing telemetry, coverage drift, replay mismatch)
+#
+# Findings observable in this matrix (use as operator dashboard guide):
+#   - admit_with_warning IS load-bearing in production: it fires for
+#     Critical/High/Normal at cpu_saturated. Operators MUST surface
+#     the tracing::warn! the host integration emits (br-uwih7 fix).
+#   - Low priority falls into cancel_low_priority three of six shapes
+#     (queue_congested, memory_pressure, warning_band) — the loss
+#     matrix's priority_factor (Low=1) makes this the lowest-loss
+#     action when shedding is needed.
+#   - Critical never picks shed under any non-fallback shape except
+#     memory_pressure, where shed scores 2.07e9 — verifying the
+#     priority-shed-monotonicity property (Critical is most-protected).
+
+## Admission grid (priority × telemetry shape)
+critical:normal_low_pressure                     | state=normal                 action=admit                    score=      +12000000 fallback=none
+critical:queue_congested_moderate_cpu            | state=queue_congested        action=delay                    score=     +594000000 fallback=none
+critical:cpu_saturated                           | state=cpu_saturated          action=admit_with_warning       score=    +1990000000 fallback=none
+critical:memory_pressure                         | state=memory_pressure        action=shed                     score=    +2070000000 fallback=none
+critical:downstream_throttled                    | state=downstream_throttled   action=delay                    score=    +1044000000 fallback=none
+critical:warning_band_pressure                   | state=queue_congested        action=delay                    score=     +469000000 fallback=none
+high:normal_low_pressure                         | state=normal                 action=admit                    score=      +12000000 fallback=none
+high:queue_congested_moderate_cpu                | state=queue_congested        action=delay                    score=     +594000000 fallback=none
+high:cpu_saturated                               | state=cpu_saturated          action=admit_with_warning       score=    +1990000000 fallback=none
+high:memory_pressure                             | state=memory_pressure        action=shed                     score=    +1710000000 fallback=none
+high:downstream_throttled                        | state=downstream_throttled   action=delay                    score=    +1044000000 fallback=none
+high:warning_band_pressure                       | state=queue_congested        action=delay                    score=     +469000000 fallback=none
+normal:normal_low_pressure                       | state=normal                 action=admit                    score=      +12000000 fallback=none
+normal:queue_congested_moderate_cpu              | state=queue_congested        action=delay                    score=     +594000000 fallback=none
+normal:cpu_saturated                             | state=cpu_saturated          action=admit_with_warning       score=    +1990000000 fallback=none
+normal:memory_pressure                           | state=memory_pressure        action=shed                     score=    +1350000000 fallback=none
+normal:downstream_throttled                      | state=downstream_throttled   action=delay                    score=    +1044000000 fallback=none
+normal:warning_band_pressure                     | state=queue_congested        action=delay                    score=     +469000000 fallback=none
+low:normal_low_pressure                          | state=normal                 action=admit                    score=      +12000000 fallback=none
+low:queue_congested_moderate_cpu                 | state=queue_congested        action=cancel_low_priority      score=     +531000000 fallback=none
+low:cpu_saturated                                | state=cpu_saturated          action=shed                     score=     +522000000 fallback=none
+low:memory_pressure                              | state=memory_pressure        action=cancel_low_priority      score=     +337000000 fallback=none
+low:downstream_throttled                         | state=downstream_throttled   action=delay                    score=    +1044000000 fallback=none
+low:warning_band_pressure                        | state=queue_congested        action=cancel_low_priority      score=     +408000000 fallback=none
+
+## Fallback paths
+missing_telemetry_fallback                       | state=normal                 action=fallback_static_policy   score=     +276000000 fallback=missingtelemetry
+calibration_coverage_drift                       | state=calibration_drift      action=fallback_static_policy   score=     +666000000 fallback=coveragedrift
+calibration_replay_mismatch                      | state=calibration_drift      action=fallback_static_policy   score=     +666000000 fallback=replaymismatch

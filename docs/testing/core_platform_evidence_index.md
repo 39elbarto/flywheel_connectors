@@ -302,7 +302,10 @@ high-core workers. When a `PlannerInput` supplies explicit pool state and the
 `PlannerContext` asks for a pool class, the planner admits or rejects candidates
 against per-node, per-zone CPU/memory budgets. Placement evidence can include
 the selected pool, CPU and memory headroom, and machine-readable refusal reasons
-for exhausted or missing pools.
+for exhausted or missing pools. Evidence also carries a compact
+`resource_pool_summary` with admitted/rejected totals and refusal-reason counts
+so operators can see pool-state failure modes without scanning every node
+decision.
 
 Swarm latency evidence fingerprints also carry runner-supplied physical core
 count and NUMA node count (`FCP_SWARM_PHYSICAL_CPU_COUNT` and

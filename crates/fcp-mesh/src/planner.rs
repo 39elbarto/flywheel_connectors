@@ -761,6 +761,57 @@ pub struct ResourcePoolDecision {
     pub refusal: Option<ResourcePoolRefusalReason>,
 }
 
+/// Aggregated resource-pool admission diagnostics for operator summaries.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ResourcePoolDecisionSummary {
+    /// Number of nodes evaluated against explicit resource-pool state.
+    pub evaluated: u32,
+    /// Number of nodes admitted by their matching resource pool.
+    pub admitted: u32,
+    /// Number of nodes rejected by resource-pool admission.
+    pub rejected: u32,
+    /// Rejections where no pool matched node, class, and zone.
+    pub no_matching_pool: u32,
+    /// Rejections caused by insufficient CPU headroom.
+    pub cpu_exhausted: u32,
+    /// Rejections caused by insufficient memory headroom.
+    pub memory_exhausted: u32,
+}
+
+impl ResourcePoolDecisionSummary {
+    /// Summarize detailed resource-pool decisions into stable counters.
+    #[must_use]
+    pub fn from_decisions(decisions: &[ResourcePoolDecision]) -> Self {
+        let mut summary = Self {
+            evaluated: u32::try_from(decisions.len()).unwrap_or(u32::MAX),
+            ..Self::default()
+        };
+
+        for decision in decisions {
+            if decision.admitted {
+                summary.admitted = summary.admitted.saturating_add(1);
+                continue;
+            }
+
+            summary.rejected = summary.rejected.saturating_add(1);
+            match decision.refusal.as_ref() {
+                Some(ResourcePoolRefusalReason::NoMatchingPool { .. }) => {
+                    summary.no_matching_pool = summary.no_matching_pool.saturating_add(1);
+                }
+                Some(ResourcePoolRefusalReason::CpuExhausted { .. }) => {
+                    summary.cpu_exhausted = summary.cpu_exhausted.saturating_add(1);
+                }
+                Some(ResourcePoolRefusalReason::MemoryExhausted { .. }) => {
+                    summary.memory_exhausted = summary.memory_exhausted.saturating_add(1);
+                }
+                None => {}
+            }
+        }
+
+        summary
+    }
+}
+
 // ============================================================================
 // Per-Zone SLO Telemetry
 // ============================================================================
@@ -1872,6 +1923,9 @@ pub struct PlacementDecisionEvidence {
     /// Resource-pool admissions/refusals that shaped placement.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub resource_pool_decisions: Vec<ResourcePoolDecision>,
+    /// Aggregated resource-pool admission diagnostics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_pool_summary: Option<ResourcePoolDecisionSummary>,
 }
 
 /// A node's score in a placement decision (for evidence).
@@ -1985,6 +2039,7 @@ impl ExecutionPlanner {
             nodes_considered: u32::try_from(plan.nodes_considered).unwrap_or(u32::MAX),
             nodes_excluded: u32::try_from(plan.nodes_excluded).unwrap_or(u32::MAX),
             resource_pool_decisions: Vec::new(),
+            resource_pool_summary: None,
         }
     }
 
@@ -1999,7 +2054,12 @@ impl ExecutionPlanner {
         request_object_id: Option<&ObjectId>,
     ) -> PlacementDecisionEvidence {
         let mut evidence = self.evidence_from_plan(plan, connector_id, request_object_id);
-        evidence.resource_pool_decisions = self.resource_pool_decisions(input, context);
+        let decisions = self.resource_pool_decisions(input, context);
+        if !decisions.is_empty() {
+            evidence.resource_pool_summary =
+                Some(ResourcePoolDecisionSummary::from_decisions(&decisions));
+        }
+        evidence.resource_pool_decisions = decisions;
         evidence
     }
 }
@@ -2207,6 +2267,17 @@ mod tests {
             Some("node-idle")
         );
         assert_eq!(evidence.resource_pool_decisions.len(), 2);
+        assert_eq!(
+            evidence.resource_pool_summary,
+            Some(ResourcePoolDecisionSummary {
+                evaluated: 2,
+                admitted: 1,
+                rejected: 1,
+                no_matching_pool: 0,
+                cpu_exhausted: 1,
+                memory_exhausted: 0,
+            })
+        );
     }
 
     #[test]
@@ -2225,6 +2296,89 @@ mod tests {
 
         assert_eq!(candidates.len(), 2);
         assert!(planner.resource_pool_decisions(&input, &context).is_empty());
+    }
+
+    #[test]
+    fn resource_pool_decision_summary_counts_refusal_reasons() {
+        let planner = ExecutionPlanner::new();
+        let work_zone = ZoneId::work();
+        let nodes = vec![
+            with_zones(
+                make_node_info("no-pool", 4096, true, "1.0.0", vec![]),
+                vec![work_zone.clone()],
+            ),
+            with_zones(
+                make_node_info("cpu-hot", 4096, true, "1.0.0", vec![]),
+                vec![work_zone.clone()],
+            ),
+            with_zones(
+                make_node_info("mem-hot", 4096, true, "1.0.0", vec![]),
+                vec![work_zone.clone()],
+            ),
+            with_zones(
+                make_node_info("admitted", 4096, true, "1.0.0", vec![]),
+                vec![work_zone.clone()],
+            ),
+        ];
+        let input = PlannerInput::new(nodes, 1000).with_resource_pools(vec![
+            ResourcePoolStatus::new(
+                "rr-work-cpu-hot",
+                test_node_id("cpu-hot"),
+                Some(work_zone.clone()),
+                ResourcePoolClass::RequestResponse,
+                8,
+                4096,
+            )
+            .with_usage(7, 0),
+            ResourcePoolStatus::new(
+                "rr-work-mem-hot",
+                test_node_id("mem-hot"),
+                Some(work_zone.clone()),
+                ResourcePoolClass::RequestResponse,
+                8,
+                1024,
+            )
+            .with_usage(0, 768),
+            ResourcePoolStatus::new(
+                "rr-work-admitted",
+                test_node_id("admitted"),
+                Some(work_zone.clone()),
+                ResourcePoolClass::RequestResponse,
+                8,
+                4096,
+            )
+            .with_usage(1, 512),
+        ]);
+        let context = PlannerContext::new(test_connector_id())
+            .with_target_zone(work_zone)
+            .with_resource_pool_class(ResourcePoolClass::RequestResponse)
+            .with_requested_cpu_cores(4)
+            .with_min_memory_mb(1024);
+
+        let decisions = planner.resource_pool_decisions(&input, &context);
+        let summary = ResourcePoolDecisionSummary::from_decisions(&decisions);
+
+        assert_eq!(
+            summary,
+            ResourcePoolDecisionSummary {
+                evaluated: 4,
+                admitted: 1,
+                rejected: 3,
+                no_matching_pool: 1,
+                cpu_exhausted: 1,
+                memory_exhausted: 1,
+            }
+        );
+
+        let plan = planner.plan_with_policy(&input, &context, &PlacementPolicy::default());
+        let evidence = planner.evidence_from_plan_with_resource_pools(
+            &plan,
+            &input,
+            &context,
+            &test_connector_id(),
+            None,
+        );
+        assert_eq!(evidence.resource_pool_summary, Some(summary));
     }
 
     #[test]

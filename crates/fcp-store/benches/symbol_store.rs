@@ -4,7 +4,7 @@
 //! as required by the FCP2 store acceptance criteria.
 
 use bytes::Bytes;
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fcp_async_core::runtime::Runtime;
 use fcp_prelude::{ObjectId, ZoneId};
 use fcp_store::{
@@ -90,6 +90,42 @@ fn bench_put_symbol(c: &mut Criterion) {
                         black_box(store.symbol_count(&obj_id).await)
                     });
                 });
+            },
+        );
+    }
+
+    group.finish();
+}
+
+fn bench_put_object_meta_sparse(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+
+    let mut group = c.benchmark_group("put_object_meta_sparse");
+    group.sample_size(10);
+    group.warm_up_time(std::time::Duration::from_secs(1));
+    group.measurement_time(std::time::Duration::from_secs(2));
+
+    for source_symbols in [100_u32, 1_000, 10_000, 56_403] {
+        group.throughput(Throughput::Elements(1));
+        group.bench_with_input(
+            BenchmarkId::from_parameter(source_symbols),
+            &source_symbols,
+            |b, &source_symbols| {
+                b.iter_batched(
+                    || {
+                        (
+                            MemorySymbolStore::new(MemorySymbolStoreConfig::default()),
+                            test_object_meta(test_object_id(1), source_symbols),
+                        )
+                    },
+                    |(store, meta)| {
+                        rt.block_on(async move {
+                            store.put_object_meta(meta).await.unwrap();
+                            black_box(store.storage_used().await)
+                        });
+                    },
+                    BatchSize::SmallInput,
+                );
             },
         );
     }
@@ -284,6 +320,7 @@ fn bench_list_zone(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_put_symbol,
+    bench_put_object_meta_sparse,
     bench_get_symbol,
     bench_get_all_symbols,
     bench_can_reconstruct,

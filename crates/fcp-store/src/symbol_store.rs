@@ -29,6 +29,14 @@ use crate::error::SymbolStoreError;
 /// lock before any symbols arrive. See br-ywpup.
 const MAX_SOURCE_SYMBOLS: u32 = 56_403;
 
+/// Maximum bucket request used when an object advertises many source symbols
+/// but has not received any symbols yet.
+///
+/// The symbol map still grows normally as symbols arrive; this only bounds
+/// eager allocation while `put_object_meta` holds the global `objects.write()`
+/// lock.
+const MAX_EAGER_SYMBOL_MAP_CAPACITY: usize = 1_024;
+
 pub fn validate_source_symbols(meta: &ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
     if meta.source_symbols == 0 || meta.source_symbols > MAX_SOURCE_SYMBOLS {
         return Err(SymbolStoreError::InvalidSymbol {
@@ -282,6 +290,14 @@ impl MemorySymbolStore {
         u32::try_from(symbol_count).map_or(true, |count| count >= source_symbols)
     }
 
+    fn initial_symbol_map_capacity(source_symbols: u32) -> usize {
+        let bounded_source_symbols = source_symbols.min(MAX_SOURCE_SYMBOLS);
+        let bounded_source_symbols =
+            usize::try_from(bounded_source_symbols).expect("MAX_SOURCE_SYMBOLS fits in usize");
+
+        bounded_source_symbols.min(MAX_EAGER_SYMBOL_MAP_CAPACITY)
+    }
+
     fn symbol_matches_meta(meta: &ObjectSymbolMeta, symbol: &StoredSymbol) -> bool {
         symbol.meta.object_id == meta.object_id
             && symbol.meta.zone_id == meta.zone_id
@@ -447,11 +463,11 @@ impl SymbolStore for MemorySymbolStore {
             return Ok(());
         }
 
-        // Pre-allocate the symbols HashMap to the expected source symbol
-        // count. `source_symbols` has already been bounded to
-        // `MAX_SOURCE_SYMBOLS` above; the `min` here is belt-and-braces so
-        // future changes to the check can't regress the allocation budget.
-        let capacity = (meta.source_symbols as usize).min(MAX_SOURCE_SYMBOLS as usize);
+        // Reserve enough buckets for common small objects, but do not let a
+        // valid sparse high-K object burn a large allocation while the global
+        // object map is write-locked. HashMap growth preserves overwrite,
+        // duplicate, and reconstruction semantics once symbols arrive.
+        let capacity = Self::initial_symbol_map_capacity(meta.source_symbols);
         objects.insert(
             meta.object_id,
             RwLock::new(ObjectSymbols {
@@ -2246,6 +2262,64 @@ mod tests {
                 ..StoreLogData::default()
             }
         });
+    }
+
+    #[test]
+    fn initial_symbol_map_capacity_caps_sparse_metadata() {
+        assert_eq!(MemorySymbolStore::initial_symbol_map_capacity(100), 100);
+        assert_eq!(MemorySymbolStore::initial_symbol_map_capacity(1_000), 1_000);
+        assert_eq!(
+            MemorySymbolStore::initial_symbol_map_capacity(10_000),
+            MAX_EAGER_SYMBOL_MAP_CAPACITY
+        );
+        assert_eq!(
+            MemorySymbolStore::initial_symbol_map_capacity(MAX_SOURCE_SYMBOLS),
+            MAX_EAGER_SYMBOL_MAP_CAPACITY
+        );
+    }
+
+    #[test]
+    fn put_object_meta_caps_sparse_capacity_without_changing_growth() {
+        run_store_test(
+            "put_meta_caps_sparse_capacity",
+            "verify",
+            "write",
+            5,
+            || async {
+                let store = MemorySymbolStore::new(MemorySymbolStoreConfig::default());
+                let mut meta = test_object_meta();
+                meta.source_symbols = MAX_SOURCE_SYMBOLS;
+
+                store.put_object_meta(meta.clone()).await.unwrap();
+
+                let expected_capacity =
+                    HashMap::<u32, StoredSymbol>::with_capacity(MAX_EAGER_SYMBOL_MAP_CAPACITY)
+                        .capacity();
+                {
+                    let objects = store.objects.read();
+                    let obj = objects.get(&meta.object_id).unwrap().read();
+                    assert_eq!(obj.meta.source_symbols, MAX_SOURCE_SYMBOLS);
+                    assert_eq!(obj.symbols.capacity(), expected_capacity);
+                    assert!(obj.symbols.is_empty());
+                }
+
+                store.put_symbol(test_symbol(0)).await.unwrap();
+
+                assert!(store.get_symbol(&meta.object_id, 0).await.is_ok());
+                assert_eq!(store.symbol_count(&meta.object_id).await, 1);
+
+                StoreLogData {
+                    object_id: Some(meta.object_id),
+                    symbol_count: Some(1),
+                    details: Some(json!({
+                        "source_symbols": MAX_SOURCE_SYMBOLS,
+                        "initial_capacity": expected_capacity,
+                        "cap": MAX_EAGER_SYMBOL_MAP_CAPACITY
+                    })),
+                    ..StoreLogData::default()
+                }
+            },
+        );
     }
 
     /// Regression for br-ywpup: a forged `source_symbols` above RFC 6330

@@ -963,8 +963,11 @@ impl DurableSymbolStore {
     fn record_mutation(&self, op: SymbolWalOp) -> Result<(), SymbolStoreError> {
         let _guard = self.write_guard.lock();
         {
-            let mut state = self.state.write();
+            let state = self.state.read();
             state.validate_mutation(&op, self.config.max_bytes)?;
+        }
+
+        {
             // Reserve the seq but do not publish until the WAL append succeeds.
             // Advancing next_seq on a failed append leaves an irrecoverable gap
             // in the WAL sequence (load_wal_records rejects the gap at startup).
@@ -972,12 +975,14 @@ impl DurableSymbolStore {
             append_wal_record(&self.wal_path, seq, &op, self.config.mac_key.as_ref())
                 .map_err(symbol_io_durable)?;
             self.next_seq.store(seq.saturating_add(1), Ordering::SeqCst);
+
+            let mut state = self.state.write();
             state.apply_loaded_mutation(op)?;
+            drop(state);
 
             if self.config.checkpoint_after_ops > 0 {
                 let ops = self.ops_since_checkpoint.fetch_add(1, Ordering::SeqCst) + 1;
                 if ops >= self.config.checkpoint_after_ops {
-                    drop(state);
                     if let Err(error) = self.checkpoint_locked(seq) {
                         tracing::warn!(error = %error, "durable symbol checkpoint failed after WAL sync");
                     } else {

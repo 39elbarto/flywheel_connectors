@@ -258,6 +258,32 @@ Reports serialize as JSONL with explicit failed metric records so CI can
 distinguish true responsiveness regressions from insufficient evidence or worker
 environment drift.
 
+### Statistical Baseline Promotion Gates
+
+`swarm-statistical-gate/v1` wraps the deterministic regression gate with the
+retained-baseline contract required for optimization work. A promoted baseline
+must include a `swarm-baseline-promotion/v1` manifest with smoke, soak,
+direct-LAN, DERP/fallback, scheduler, placement, backpressure, audit, and
+store-allocation coverage. The manifest carries raw-sample, summary, gate-report,
+proof-note, and artifact-manifest digests plus the redaction policy that was
+applied before the artifacts were retained.
+
+The statistical report emits one of `pass`, `fail`, or `indeterminate`. It
+accounts for sample count, bootstrap p99/p999 confidence-band width, worker
+drift, warmup discard share, outlier share, and minimum effect size before
+turning a deterministic threshold breach into a meaningful regression. Compatible
+evidence fails on material p99, p999, throughput, CPU, RSS, queue-depth,
+retry-amplification, audit-loss, or decision-card replay mismatches. Stale
+baselines, incompatible scenarios, low samples, noisy workers, wide confidence
+bands, excessive warmup, excessive outliers, and below-minimum-effect breaches
+are indeterminate so CI does not pass or fail code on weak evidence.
+
+Offline smoke coverage for the gate lives in:
+
+```bash
+cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_statistical -- --nocapture
+```
+
 ### Integrated Swarm Gauntlet
 
 `swarm-gauntlet/v1` ties the first-generation swarm evidence surfaces together

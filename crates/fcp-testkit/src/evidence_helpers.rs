@@ -262,6 +262,12 @@ pub const SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION: &str = "swarm-evidence-bundle/v1
 /// Schema tag for CI/nightly swarm performance regression gates.
 pub const SWARM_REGRESSION_GATE_SCHEMA_VERSION: &str = "swarm-regression-gate/v1";
 
+/// Schema tag for statistically-qualified swarm performance gate reports.
+pub const SWARM_STATISTICAL_GATE_SCHEMA_VERSION: &str = "swarm-statistical-gate/v1";
+
+/// Schema tag for retained swarm baseline promotion manifests.
+pub const SWARM_BASELINE_PROMOTION_SCHEMA_VERSION: &str = "swarm-baseline-promotion/v1";
+
 /// Schema tag for the integrated massive-swarm proof gauntlet.
 pub const SWARM_GAUNTLET_SCHEMA_VERSION: &str = "swarm-gauntlet/v1";
 
@@ -2771,6 +2777,925 @@ fn retention_floor(baseline_value: u64, min_retention_percent: u32) -> u64 {
     u64::try_from(scaled.saturating_add(99) / 100).unwrap_or(u64::MAX)
 }
 
+/// Retained baseline path that must be represented before promoting a swarm baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmBaselinePathKind {
+    /// PR-friendly offline or host-backed smoke path.
+    Smoke,
+    /// Long-running soak path.
+    Soak,
+    /// Direct LAN mesh invocation path.
+    DirectLan,
+    /// DERP or fallback mesh invocation path.
+    DerpFallback,
+    /// Scheduler decision-card replay path.
+    Scheduler,
+    /// Placement decision-card replay path.
+    Placement,
+    /// Backpressure and retry-amplification path.
+    Backpressure,
+    /// Audit append and loss-detection path.
+    Audit,
+    /// Sparse/high-K store allocation path.
+    StoreAllocation,
+}
+
+impl SwarmBaselinePathKind {
+    /// Required retained baseline coverage in stable manifest order.
+    pub const REQUIRED: [Self; 9] = [
+        Self::Smoke,
+        Self::Soak,
+        Self::DirectLan,
+        Self::DerpFallback,
+        Self::Scheduler,
+        Self::Placement,
+        Self::Backpressure,
+        Self::Audit,
+        Self::StoreAllocation,
+    ];
+
+    /// Stable machine label for this baseline path.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Soak => "soak",
+            Self::DirectLan => "direct_lan",
+            Self::DerpFallback => "derp_fallback",
+            Self::Scheduler => "scheduler",
+            Self::Placement => "placement",
+            Self::Backpressure => "backpressure",
+            Self::Audit => "audit",
+            Self::StoreAllocation => "store_allocation",
+        }
+    }
+}
+
+/// Content digests required to promote and later replay a swarm baseline.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmBaselineArtifactDigests {
+    /// Digest of retained raw per-operation samples.
+    pub raw_sample_digest: String,
+    /// Digest of scenario summary JSON.
+    pub summary_digest: String,
+    /// Digest of the gate report that promoted this baseline.
+    pub gate_report_digest: String,
+    /// Digest of operator proof notes.
+    pub proof_notes_digest: String,
+    /// Digest of the artifact manifest.
+    pub artifact_manifest_digest: String,
+}
+
+impl SwarmBaselineArtifactDigests {
+    /// Construct baseline artifact digests.
+    #[must_use]
+    pub fn new(
+        raw_sample_digest: impl Into<String>,
+        summary_digest: impl Into<String>,
+        gate_report_digest: impl Into<String>,
+        proof_notes_digest: impl Into<String>,
+        artifact_manifest_digest: impl Into<String>,
+    ) -> Self {
+        Self {
+            raw_sample_digest: raw_sample_digest.into(),
+            summary_digest: summary_digest.into(),
+            gate_report_digest: gate_report_digest.into(),
+            proof_notes_digest: proof_notes_digest.into(),
+            artifact_manifest_digest: artifact_manifest_digest.into(),
+        }
+    }
+
+    fn validate(&self) -> Result<(), SwarmBaselinePromotionError> {
+        for (field, value) in [
+            ("raw_sample_digest", self.raw_sample_digest.as_str()),
+            ("summary_digest", self.summary_digest.as_str()),
+            ("gate_report_digest", self.gate_report_digest.as_str()),
+            ("proof_notes_digest", self.proof_notes_digest.as_str()),
+            (
+                "artifact_manifest_digest",
+                self.artifact_manifest_digest.as_str(),
+            ),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SwarmBaselinePromotionError::EmptyField { field });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Manifest for a retained swarm baseline that is safe to compare against.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmBaselinePromotionManifest {
+    /// Manifest schema version.
+    pub schema_version: String,
+    /// Stable baseline identifier.
+    pub baseline_id: String,
+    /// Scenario this baseline represents.
+    pub scenario_id: String,
+    /// Smoke or soak baseline class.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Source revision that produced the promoted baseline.
+    pub source_revision: String,
+    /// Worker that produced the promoted baseline.
+    pub rch_worker_id: String,
+    /// Required retained baseline paths covered by the promotion bundle.
+    pub required_paths: Vec<SwarmBaselinePathKind>,
+    /// Content digests required for replay and audit.
+    pub artifact_digests: SwarmBaselineArtifactDigests,
+    /// Redaction policy applied to retained artifacts.
+    pub redaction_policy: SwarmEvidenceRedactionPolicy,
+    /// Operator-readable proof notes summary.
+    pub operator_notes: String,
+    /// Promotion timestamp.
+    pub promoted_at: DateTime<Utc>,
+    /// Expiration timestamp after which the baseline must be regenerated.
+    pub expires_at: DateTime<Utc>,
+}
+
+impl SwarmBaselinePromotionManifest {
+    /// Validate the baseline promotion manifest in isolation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the manifest is incomplete, stale, or
+    /// missing mandatory replay artifacts.
+    pub fn validate(&self, now: DateTime<Utc>) -> Result<(), SwarmBaselinePromotionError> {
+        if self.schema_version != SWARM_BASELINE_PROMOTION_SCHEMA_VERSION {
+            return Err(SwarmBaselinePromotionError::SchemaMismatch {
+                expected: SWARM_BASELINE_PROMOTION_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        for (field, value) in [
+            ("baseline_id", self.baseline_id.as_str()),
+            ("scenario_id", self.scenario_id.as_str()),
+            ("source_revision", self.source_revision.as_str()),
+            ("rch_worker_id", self.rch_worker_id.as_str()),
+            ("operator_notes", self.operator_notes.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SwarmBaselinePromotionError::EmptyField { field });
+            }
+        }
+        self.artifact_digests.validate()?;
+        let observed_paths: BTreeSet<_> = self.required_paths.iter().copied().collect();
+        for path in SwarmBaselinePathKind::REQUIRED {
+            if !observed_paths.contains(&path) {
+                return Err(SwarmBaselinePromotionError::MissingRequiredPath { path });
+            }
+        }
+        if !self.redaction_policy.protects_exported_artifacts() {
+            return Err(SwarmBaselinePromotionError::RedactionPolicyIncomplete);
+        }
+        if now >= self.expires_at {
+            return Err(SwarmBaselinePromotionError::StaleBaseline {
+                expires_at: self.expires_at,
+                now,
+            });
+        }
+        Ok(())
+    }
+
+    /// Validate compatibility with the candidate scenario and execution mode.
+    ///
+    /// # Errors
+    ///
+    /// Returns a structured error when the candidate cannot be compared against
+    /// this baseline.
+    pub fn validate_compatibility(
+        &self,
+        scenario_id: &str,
+        execution_mode: SwarmEvidenceExecutionMode,
+    ) -> Result<(), SwarmBaselinePromotionError> {
+        if self.scenario_id != scenario_id {
+            return Err(SwarmBaselinePromotionError::ScenarioMismatch {
+                expected: self.scenario_id.clone(),
+                actual: scenario_id.to_string(),
+            });
+        }
+        if self.execution_mode != execution_mode {
+            return Err(SwarmBaselinePromotionError::ExecutionModeMismatch {
+                expected: self.execution_mode,
+                actual: execution_mode,
+            });
+        }
+        Ok(())
+    }
+
+    /// Render the baseline manifest as a typed JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the manifest cannot be converted to JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, serde_json::Error> {
+        Ok(json!({
+            "record_type": "swarm_baseline_promotion_manifest",
+            "schema_version": self.schema_version,
+            "baseline_id": self.baseline_id,
+            "scenario_id": self.scenario_id,
+            "raw_sample_digest": self.artifact_digests.raw_sample_digest,
+            "summary_digest": self.artifact_digests.summary_digest,
+            "gate_report_digest": self.artifact_digests.gate_report_digest,
+            "proof_notes_digest": self.artifact_digests.proof_notes_digest,
+            "artifact_manifest_digest": self.artifact_digests.artifact_manifest_digest,
+            "redaction_policy": serde_json::to_value(&self.redaction_policy)?,
+            "manifest": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+/// Validation error for retained swarm baseline promotion manifests.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmBaselinePromotionError {
+    /// Schema tag was unsupported.
+    SchemaMismatch {
+        /// Expected schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// Required text field was empty.
+    EmptyField {
+        /// Field name.
+        field: &'static str,
+    },
+    /// Required retained path was absent.
+    MissingRequiredPath {
+        /// Missing path kind.
+        path: SwarmBaselinePathKind,
+    },
+    /// Redaction policy is not sufficient for retained artifacts.
+    RedactionPolicyIncomplete,
+    /// Baseline has expired and must be regenerated.
+    StaleBaseline {
+        /// Expiration timestamp.
+        expires_at: DateTime<Utc>,
+        /// Evaluation timestamp.
+        now: DateTime<Utc>,
+    },
+    /// Candidate scenario does not match the baseline.
+    ScenarioMismatch {
+        /// Baseline scenario.
+        expected: String,
+        /// Candidate scenario.
+        actual: String,
+    },
+    /// Candidate execution mode does not match the baseline.
+    ExecutionModeMismatch {
+        /// Baseline mode.
+        expected: SwarmEvidenceExecutionMode,
+        /// Candidate mode.
+        actual: SwarmEvidenceExecutionMode,
+    },
+}
+
+impl fmt::Display for SwarmBaselinePromotionError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => write!(
+                f,
+                "swarm baseline schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::EmptyField { field } => write!(f, "swarm baseline field '{field}' is empty"),
+            Self::MissingRequiredPath { path } => {
+                write!(
+                    f,
+                    "swarm baseline missing required path '{}'",
+                    path.as_str()
+                )
+            }
+            Self::RedactionPolicyIncomplete => {
+                write!(f, "swarm baseline redaction policy is incomplete")
+            }
+            Self::StaleBaseline { expires_at, now } => {
+                write!(
+                    f,
+                    "swarm baseline expired at {expires_at}, evaluated at {now}"
+                )
+            }
+            Self::ScenarioMismatch { expected, actual } => write!(
+                f,
+                "swarm baseline scenario mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::ExecutionModeMismatch { expected, actual } => write!(
+                f,
+                "swarm baseline execution mode mismatch: expected '{}', got '{}'",
+                expected.as_str(),
+                actual.as_str()
+            ),
+        }
+    }
+}
+
+impl Error for SwarmBaselinePromotionError {}
+
+/// Trace-quality limits for statistical swarm gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmStatisticalGateTuning {
+    /// Minimum samples required in both baseline and candidate traces.
+    pub min_sample_count: usize,
+    /// Minimum percent effect required before a deterministic breach becomes a regression.
+    pub min_effect_percent: u32,
+    /// Maximum tolerated worker drift before quarantining the run.
+    pub max_worker_drift_percent: u32,
+    /// Maximum tolerated bootstrap confidence band width.
+    pub max_bootstrap_band_percent: u32,
+    /// Maximum tolerated warmup sample share.
+    pub max_warmup_sample_percent: u32,
+    /// Maximum tolerated outlier sample share.
+    pub max_outlier_sample_percent: u32,
+}
+
+impl SwarmStatisticalGateTuning {
+    /// PR-friendly statistical gate tuning.
+    #[must_use]
+    pub const fn smoke() -> Self {
+        Self {
+            min_sample_count: 30,
+            min_effect_percent: 2,
+            max_worker_drift_percent: 10,
+            max_bootstrap_band_percent: 8,
+            max_warmup_sample_percent: 10,
+            max_outlier_sample_percent: 5,
+        }
+    }
+
+    /// Promotion tuning for retained soak baselines.
+    #[must_use]
+    pub const fn soak() -> Self {
+        Self {
+            min_sample_count: 100,
+            min_effect_percent: 1,
+            max_worker_drift_percent: 5,
+            max_bootstrap_band_percent: 4,
+            max_warmup_sample_percent: 5,
+            max_outlier_sample_percent: 2,
+        }
+    }
+}
+
+/// Quality summary for one baseline or candidate trace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmStatisticalTraceQuality {
+    /// Total retained samples.
+    pub sample_count: usize,
+    /// Samples discarded as warmup.
+    pub warmup_sample_count: usize,
+    /// Samples classified as outliers.
+    pub outlier_sample_count: usize,
+    /// Bootstrap confidence band width around p99, as percent of p99.
+    pub bootstrap_p99_band_percent: u32,
+    /// Bootstrap confidence band width around p999, as percent of p999.
+    pub bootstrap_p999_band_percent: u32,
+    /// Worker/topology drift against the promoted baseline.
+    pub worker_drift_percent: u32,
+}
+
+impl SwarmStatisticalTraceQuality {
+    /// Controlled deterministic trace with narrow confidence bands and no discarded samples.
+    #[must_use]
+    pub const fn controlled(sample_count: usize) -> Self {
+        Self {
+            sample_count,
+            warmup_sample_count: 0,
+            outlier_sample_count: 0,
+            bootstrap_p99_band_percent: 1,
+            bootstrap_p999_band_percent: 1,
+            worker_drift_percent: 0,
+        }
+    }
+}
+
+/// Statistical gate outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmStatisticalGateOutcome {
+    /// Evidence is compatible and no meaningful regression was detected.
+    Pass,
+    /// Evidence is compatible and a meaningful regression was detected.
+    Fail,
+    /// Evidence is insufficient or noisy, so the run must not promote or fail code.
+    Indeterminate,
+}
+
+impl SwarmStatisticalGateOutcome {
+    /// Stable machine label for this outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Indeterminate => "indeterminate",
+        }
+    }
+}
+
+/// Machine-readable reason attached to a statistical gate outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmStatisticalGateReasonKind {
+    /// Baseline cannot be compared with this candidate.
+    BaselineIncompatible,
+    /// Baseline has expired.
+    StaleBaseline,
+    /// Baseline or candidate has too few samples.
+    LowSampleCount,
+    /// Worker drift is high enough to quarantine the run.
+    NoisyWorker,
+    /// Bootstrap confidence band is too wide.
+    WideBootstrapBand,
+    /// Warmup discard share is too high.
+    WarmupBudgetExceeded,
+    /// Outlier share is too high.
+    OutlierBudgetExceeded,
+    /// A deterministic breach was below the configured minimum effect size.
+    BelowMinimumEffectSize,
+    /// p99 latency regressed materially.
+    P99Regression,
+    /// p99.9 latency regressed materially.
+    P999Regression,
+    /// Throughput regressed materially.
+    ThroughputRegression,
+    /// CPU use regressed materially.
+    CpuRegression,
+    /// RSS regressed materially.
+    RssRegression,
+    /// Queue depth regressed materially.
+    QueueDepthRegression,
+    /// Retry amplification regressed materially.
+    RetryAmplificationRegression,
+    /// Audit evidence was absent or lost.
+    AuditLoss,
+    /// Decision-card replay disagreed with the candidate run.
+    DecisionCardReplayMismatch,
+}
+
+impl SwarmStatisticalGateReasonKind {
+    /// Stable machine reason code.
+    #[must_use]
+    pub const fn code(self) -> &'static str {
+        match self {
+            Self::BaselineIncompatible => "baseline_incompatible",
+            Self::StaleBaseline => "stale_baseline",
+            Self::LowSampleCount => "low_sample_count",
+            Self::NoisyWorker => "noisy_worker",
+            Self::WideBootstrapBand => "wide_bootstrap_band",
+            Self::WarmupBudgetExceeded => "warmup_budget_exceeded",
+            Self::OutlierBudgetExceeded => "outlier_budget_exceeded",
+            Self::BelowMinimumEffectSize => "below_minimum_effect_size",
+            Self::P99Regression => "p99_regression",
+            Self::P999Regression => "p999_regression",
+            Self::ThroughputRegression => "throughput_regression",
+            Self::CpuRegression => "cpu_regression",
+            Self::RssRegression => "rss_regression",
+            Self::QueueDepthRegression => "queue_depth_regression",
+            Self::RetryAmplificationRegression => "retry_amplification_regression",
+            Self::AuditLoss => "audit_loss",
+            Self::DecisionCardReplayMismatch => "decision_card_replay_mismatch",
+        }
+    }
+
+    const fn is_indeterminate(self) -> bool {
+        matches!(
+            self,
+            Self::BaselineIncompatible
+                | Self::StaleBaseline
+                | Self::LowSampleCount
+                | Self::NoisyWorker
+                | Self::WideBootstrapBand
+                | Self::WarmupBudgetExceeded
+                | Self::OutlierBudgetExceeded
+                | Self::BelowMinimumEffectSize
+        )
+    }
+}
+
+/// One reason emitted by a statistical swarm gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmStatisticalGateReason {
+    /// Machine-readable reason kind.
+    pub kind: SwarmStatisticalGateReasonKind,
+    /// Metric involved, when applicable.
+    pub metric: Option<SwarmRegressionMetricKind>,
+    /// Human-readable operator note.
+    pub message: String,
+    /// Baseline value for metric reasons.
+    pub baseline_value: Option<u64>,
+    /// Candidate value for metric reasons.
+    pub candidate_value: Option<u64>,
+    /// Allowed value for metric reasons.
+    pub allowed_value: Option<u64>,
+    /// Observed effect size as an integer percent.
+    pub effect_percent: Option<u32>,
+}
+
+impl SwarmStatisticalGateReason {
+    fn indeterminate(kind: SwarmStatisticalGateReasonKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            metric: None,
+            message: message.into(),
+            baseline_value: None,
+            candidate_value: None,
+            allowed_value: None,
+            effect_percent: None,
+        }
+    }
+
+    fn metric_reason(
+        kind: SwarmStatisticalGateReasonKind,
+        metric: SwarmRegressionMetricKind,
+        failure: &SwarmRegressionGateFailure,
+        effect_percent: Option<u32>,
+    ) -> Self {
+        Self {
+            kind,
+            metric: Some(metric),
+            message: failure.reason.clone(),
+            baseline_value: Some(failure.baseline_value),
+            candidate_value: Some(failure.candidate_value),
+            allowed_value: Some(failure.allowed_value),
+            effect_percent,
+        }
+    }
+}
+
+/// Input bundle for evaluating a statistical swarm gate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmStatisticalGateInput {
+    /// Promoted baseline manifest.
+    pub baseline_manifest: SwarmBaselinePromotionManifest,
+    /// Baseline metric snapshot.
+    pub baseline: SwarmRegressionMetricSnapshot,
+    /// Candidate metric snapshot.
+    pub candidate: SwarmRegressionMetricSnapshot,
+    /// Deterministic metric thresholds.
+    pub thresholds: SwarmRegressionGateThresholds,
+    /// Smoke or soak gate mode.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Statistical and noise limits.
+    pub tuning: SwarmStatisticalGateTuning,
+    /// Baseline trace quality summary.
+    pub baseline_quality: SwarmStatisticalTraceQuality,
+    /// Candidate trace quality summary.
+    pub candidate_quality: SwarmStatisticalTraceQuality,
+    /// Candidate audit events retained in the evidence log.
+    pub audit_event_count: u64,
+    /// Whether decision-card replay matched the candidate run.
+    pub decision_card_replay_matches: bool,
+    /// Operator-readable proof summary.
+    pub operator_notes: String,
+    /// Evaluation timestamp.
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Statistical wrapper around deterministic swarm regression gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmStatisticalGateReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario under evaluation.
+    pub scenario_id: String,
+    /// Smoke or soak gate.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Promoted baseline manifest.
+    pub baseline_manifest: SwarmBaselinePromotionManifest,
+    /// Baseline metrics.
+    pub baseline: SwarmRegressionMetricSnapshot,
+    /// Candidate metrics.
+    pub candidate: SwarmRegressionMetricSnapshot,
+    /// Deterministic thresholds.
+    pub thresholds: SwarmRegressionGateThresholds,
+    /// Statistical tuning.
+    pub tuning: SwarmStatisticalGateTuning,
+    /// Baseline trace quality.
+    pub baseline_quality: SwarmStatisticalTraceQuality,
+    /// Candidate trace quality.
+    pub candidate_quality: SwarmStatisticalTraceQuality,
+    /// Underlying deterministic regression report.
+    pub deterministic_report: SwarmRegressionGateReport,
+    /// Final statistical outcome.
+    pub outcome: SwarmStatisticalGateOutcome,
+    /// Machine-readable reasons for fail or indeterminate outcomes.
+    pub reasons: Vec<SwarmStatisticalGateReason>,
+    /// Candidate audit events retained in the evidence log.
+    pub audit_event_count: u64,
+    /// Whether decision-card replay matched the candidate run.
+    pub decision_card_replay_matches: bool,
+    /// Operator-readable proof summary.
+    pub operator_notes: String,
+    /// Evaluation timestamp.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmStatisticalGateReport {
+    /// Evaluate a statistical swarm gate from a promoted baseline and candidate trace.
+    #[must_use]
+    pub fn evaluate(input: SwarmStatisticalGateInput) -> Self {
+        let deterministic_report = SwarmRegressionGateReport::evaluate(
+            input.baseline.clone(),
+            input.candidate.clone(),
+            input.thresholds,
+            input.execution_mode,
+        );
+        let mut reasons = Vec::new();
+        if let Err(err) = input.baseline_manifest.validate(input.generated_at) {
+            reasons.push(baseline_error_reason(&err));
+        }
+        if let Err(err) = input
+            .baseline_manifest
+            .validate_compatibility(&input.candidate.scenario_id, input.execution_mode)
+        {
+            reasons.push(baseline_error_reason(&err));
+        }
+        push_quality_reasons(
+            &mut reasons,
+            "baseline",
+            input.baseline_quality,
+            input.tuning,
+        );
+        push_quality_reasons(
+            &mut reasons,
+            "candidate",
+            input.candidate_quality,
+            input.tuning,
+        );
+        if input.audit_event_count == 0 {
+            reasons.push(SwarmStatisticalGateReason::indeterminate(
+                SwarmStatisticalGateReasonKind::AuditLoss,
+                "candidate evidence did not retain audit events",
+            ));
+        }
+        if !input.decision_card_replay_matches {
+            reasons.push(SwarmStatisticalGateReason::indeterminate(
+                SwarmStatisticalGateReasonKind::DecisionCardReplayMismatch,
+                "candidate decision-card replay did not match retained decisions",
+            ));
+        }
+        for failure in &deterministic_report.failures {
+            reasons.push(statistical_reason_for_failure(
+                failure,
+                input.tuning.min_effect_percent,
+            ));
+        }
+        let outcome = statistical_outcome(&reasons);
+
+        Self {
+            schema_version: SWARM_STATISTICAL_GATE_SCHEMA_VERSION.to_string(),
+            scenario_id: input.candidate.scenario_id.clone(),
+            execution_mode: input.execution_mode,
+            baseline_manifest: input.baseline_manifest,
+            baseline: input.baseline,
+            candidate: input.candidate,
+            thresholds: input.thresholds,
+            tuning: input.tuning,
+            baseline_quality: input.baseline_quality,
+            candidate_quality: input.candidate_quality,
+            deterministic_report,
+            outcome,
+            reasons,
+            audit_event_count: input.audit_event_count,
+            decision_card_replay_matches: input.decision_card_replay_matches,
+            operator_notes: input.operator_notes,
+            generated_at: input.generated_at,
+        }
+    }
+
+    /// Render the baseline manifest and gate report as typed JSONL records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the records cannot be converted to JSON.
+    pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
+        Ok(vec![
+            self.baseline_manifest.to_jsonl_value()?,
+            json!({
+                "record_type": "swarm_statistical_gate_report",
+                "schema_version": self.schema_version,
+                "scenario_id": self.scenario_id,
+                "outcome": self.outcome.as_str(),
+                "reason_codes": self.reasons.iter().map(|reason| reason.kind.code()).collect::<Vec<_>>(),
+                "baseline_id": self.baseline_manifest.baseline_id,
+                "raw_sample_digest": self.baseline_manifest.artifact_digests.raw_sample_digest,
+                "summary_digest": self.baseline_manifest.artifact_digests.summary_digest,
+                "gate_report_digest": self.baseline_manifest.artifact_digests.gate_report_digest,
+                "proof_notes_digest": self.baseline_manifest.artifact_digests.proof_notes_digest,
+                "redaction_policy": serde_json::to_value(&self.baseline_manifest.redaction_policy)?,
+                "report": serde_json::to_value(self)?,
+            }),
+        ])
+    }
+}
+
+fn baseline_error_reason(err: &SwarmBaselinePromotionError) -> SwarmStatisticalGateReason {
+    let kind = match err {
+        SwarmBaselinePromotionError::StaleBaseline { .. } => {
+            SwarmStatisticalGateReasonKind::StaleBaseline
+        }
+        SwarmBaselinePromotionError::SchemaMismatch { .. }
+        | SwarmBaselinePromotionError::EmptyField { .. }
+        | SwarmBaselinePromotionError::MissingRequiredPath { .. }
+        | SwarmBaselinePromotionError::RedactionPolicyIncomplete
+        | SwarmBaselinePromotionError::ScenarioMismatch { .. }
+        | SwarmBaselinePromotionError::ExecutionModeMismatch { .. } => {
+            SwarmStatisticalGateReasonKind::BaselineIncompatible
+        }
+    };
+    SwarmStatisticalGateReason::indeterminate(kind, err.to_string())
+}
+
+fn push_quality_reasons(
+    reasons: &mut Vec<SwarmStatisticalGateReason>,
+    scope: &str,
+    quality: SwarmStatisticalTraceQuality,
+    tuning: SwarmStatisticalGateTuning,
+) {
+    let min_sample_count = u64::try_from(tuning.min_sample_count).unwrap_or(u64::MAX);
+    if quality.sample_count < tuning.min_sample_count {
+        reasons.push(SwarmStatisticalGateReason {
+            kind: SwarmStatisticalGateReasonKind::LowSampleCount,
+            metric: Some(SwarmRegressionMetricKind::SampleCount),
+            message: format!("{scope} trace sample count is below statistical minimum"),
+            baseline_value: None,
+            candidate_value: Some(u64::try_from(quality.sample_count).unwrap_or(u64::MAX)),
+            allowed_value: Some(min_sample_count),
+            effect_percent: None,
+        });
+    }
+    if quality.worker_drift_percent > tuning.max_worker_drift_percent {
+        reasons.push(SwarmStatisticalGateReason {
+            kind: SwarmStatisticalGateReasonKind::NoisyWorker,
+            metric: None,
+            message: format!("{scope} worker drift exceeds quarantine budget"),
+            baseline_value: None,
+            candidate_value: Some(u64::from(quality.worker_drift_percent)),
+            allowed_value: Some(u64::from(tuning.max_worker_drift_percent)),
+            effect_percent: Some(quality.worker_drift_percent),
+        });
+    }
+    push_bootstrap_band_reason(
+        reasons,
+        scope,
+        SwarmRegressionMetricKind::P99Latency,
+        quality.bootstrap_p99_band_percent,
+        tuning.max_bootstrap_band_percent,
+    );
+    push_bootstrap_band_reason(
+        reasons,
+        scope,
+        SwarmRegressionMetricKind::P999Latency,
+        quality.bootstrap_p999_band_percent,
+        tuning.max_bootstrap_band_percent,
+    );
+    let warmup_percent = percentage_ceil(quality.warmup_sample_count, quality.sample_count);
+    if warmup_percent > tuning.max_warmup_sample_percent {
+        reasons.push(SwarmStatisticalGateReason {
+            kind: SwarmStatisticalGateReasonKind::WarmupBudgetExceeded,
+            metric: None,
+            message: format!("{scope} warmup discard share exceeds budget"),
+            baseline_value: None,
+            candidate_value: Some(u64::from(warmup_percent)),
+            allowed_value: Some(u64::from(tuning.max_warmup_sample_percent)),
+            effect_percent: Some(warmup_percent),
+        });
+    }
+    let outlier_percent = percentage_ceil(quality.outlier_sample_count, quality.sample_count);
+    if outlier_percent > tuning.max_outlier_sample_percent {
+        reasons.push(SwarmStatisticalGateReason {
+            kind: SwarmStatisticalGateReasonKind::OutlierBudgetExceeded,
+            metric: None,
+            message: format!("{scope} outlier share exceeds budget"),
+            baseline_value: None,
+            candidate_value: Some(u64::from(outlier_percent)),
+            allowed_value: Some(u64::from(tuning.max_outlier_sample_percent)),
+            effect_percent: Some(outlier_percent),
+        });
+    }
+}
+
+fn push_bootstrap_band_reason(
+    reasons: &mut Vec<SwarmStatisticalGateReason>,
+    scope: &str,
+    metric: SwarmRegressionMetricKind,
+    band_percent: u32,
+    max_band_percent: u32,
+) {
+    if band_percent > max_band_percent {
+        reasons.push(SwarmStatisticalGateReason {
+            kind: SwarmStatisticalGateReasonKind::WideBootstrapBand,
+            metric: Some(metric),
+            message: format!("{scope} bootstrap confidence band is too wide"),
+            baseline_value: None,
+            candidate_value: Some(u64::from(band_percent)),
+            allowed_value: Some(u64::from(max_band_percent)),
+            effect_percent: Some(band_percent),
+        });
+    }
+}
+
+fn statistical_reason_for_failure(
+    failure: &SwarmRegressionGateFailure,
+    min_effect_percent: u32,
+) -> SwarmStatisticalGateReason {
+    let effect_percent = regression_effect_percent(failure);
+    let fail_kind = match failure.metric {
+        SwarmRegressionMetricKind::ScenarioId => {
+            return SwarmStatisticalGateReason::metric_reason(
+                SwarmStatisticalGateReasonKind::BaselineIncompatible,
+                failure.metric,
+                failure,
+                None,
+            );
+        }
+        SwarmRegressionMetricKind::SampleCount => {
+            return SwarmStatisticalGateReason::metric_reason(
+                SwarmStatisticalGateReasonKind::LowSampleCount,
+                failure.metric,
+                failure,
+                None,
+            );
+        }
+        SwarmRegressionMetricKind::P99Latency => SwarmStatisticalGateReasonKind::P99Regression,
+        SwarmRegressionMetricKind::P999Latency => SwarmStatisticalGateReasonKind::P999Regression,
+        SwarmRegressionMetricKind::Throughput => {
+            SwarmStatisticalGateReasonKind::ThroughputRegression
+        }
+        SwarmRegressionMetricKind::Cpu => SwarmStatisticalGateReasonKind::CpuRegression,
+        SwarmRegressionMetricKind::Rss => SwarmStatisticalGateReasonKind::RssRegression,
+        SwarmRegressionMetricKind::QueueDepth => {
+            SwarmStatisticalGateReasonKind::QueueDepthRegression
+        }
+        SwarmRegressionMetricKind::RetryAmplification => {
+            SwarmStatisticalGateReasonKind::RetryAmplificationRegression
+        }
+    };
+    let kind = if effect_percent.unwrap_or_default() < min_effect_percent {
+        SwarmStatisticalGateReasonKind::BelowMinimumEffectSize
+    } else {
+        fail_kind
+    };
+    SwarmStatisticalGateReason::metric_reason(kind, failure.metric, failure, effect_percent)
+}
+
+fn regression_effect_percent(failure: &SwarmRegressionGateFailure) -> Option<u32> {
+    match failure.metric {
+        SwarmRegressionMetricKind::Throughput => {
+            if failure.baseline_value == 0 || failure.candidate_value >= failure.baseline_value {
+                Some(0)
+            } else {
+                Some(percent_delta(
+                    failure.baseline_value - failure.candidate_value,
+                    failure.baseline_value,
+                ))
+            }
+        }
+        SwarmRegressionMetricKind::ScenarioId | SwarmRegressionMetricKind::SampleCount => None,
+        SwarmRegressionMetricKind::P99Latency
+        | SwarmRegressionMetricKind::P999Latency
+        | SwarmRegressionMetricKind::Cpu
+        | SwarmRegressionMetricKind::Rss
+        | SwarmRegressionMetricKind::QueueDepth
+        | SwarmRegressionMetricKind::RetryAmplification => {
+            if failure.baseline_value == 0 || failure.candidate_value <= failure.baseline_value {
+                Some(0)
+            } else {
+                Some(percent_delta(
+                    failure.candidate_value - failure.baseline_value,
+                    failure.baseline_value,
+                ))
+            }
+        }
+    }
+}
+
+fn statistical_outcome(reasons: &[SwarmStatisticalGateReason]) -> SwarmStatisticalGateOutcome {
+    if reasons.iter().any(|reason| reason.kind.is_indeterminate()) {
+        SwarmStatisticalGateOutcome::Indeterminate
+    } else if reasons.is_empty() {
+        SwarmStatisticalGateOutcome::Pass
+    } else {
+        SwarmStatisticalGateOutcome::Fail
+    }
+}
+
+fn percentage_ceil(part: usize, total: usize) -> u32 {
+    if total == 0 {
+        return 0;
+    }
+    let scaled = (part as u128).saturating_mul(100);
+    u32::try_from(scaled.saturating_add(total as u128 - 1) / total as u128).unwrap_or(u32::MAX)
+}
+
+fn percent_delta(delta: u64, baseline: u64) -> u32 {
+    if baseline == 0 {
+        return u32::MAX;
+    }
+    let scaled = u128::from(delta).saturating_mul(100);
+    u32::try_from(scaled / u128::from(baseline)).unwrap_or(u32::MAX)
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Swarm decision cards
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3516,6 +4441,57 @@ mod tests {
         }
     }
 
+    fn baseline_promotion_manifest(
+        scenario_id: &str,
+        execution_mode: SwarmEvidenceExecutionMode,
+    ) -> SwarmBaselinePromotionManifest {
+        let now = Utc::now();
+        SwarmBaselinePromotionManifest {
+            schema_version: SWARM_BASELINE_PROMOTION_SCHEMA_VERSION.to_string(),
+            baseline_id: format!("baseline:{scenario_id}:soak"),
+            scenario_id: scenario_id.to_string(),
+            execution_mode,
+            source_revision: "baseline-revision".to_string(),
+            rch_worker_id: "rch-worker-64c".to_string(),
+            required_paths: SwarmBaselinePathKind::REQUIRED.to_vec(),
+            artifact_digests: SwarmBaselineArtifactDigests::new(
+                "blake3:raw-samples",
+                "blake3:summary",
+                "blake3:gate-report",
+                "blake3:proof-notes",
+                "blake3:manifest",
+            ),
+            redaction_policy: SwarmEvidenceRedactionPolicy::conservative(),
+            operator_notes: "baseline promoted from retained raw samples and proof notes"
+                .to_string(),
+            promoted_at: now,
+            expires_at: now + chrono::Duration::days(30),
+        }
+    }
+
+    fn statistical_gate_input(
+        candidate: SwarmRegressionMetricSnapshot,
+    ) -> SwarmStatisticalGateInput {
+        let baseline = baseline_regression_snapshot();
+        SwarmStatisticalGateInput {
+            baseline_manifest: baseline_promotion_manifest(
+                &baseline.scenario_id,
+                SwarmEvidenceExecutionMode::Smoke,
+            ),
+            baseline: baseline.clone(),
+            candidate,
+            thresholds: SwarmRegressionGateThresholds::smoke(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            tuning: SwarmStatisticalGateTuning::smoke(),
+            baseline_quality: SwarmStatisticalTraceQuality::controlled(baseline.sample_count),
+            candidate_quality: SwarmStatisticalTraceQuality::controlled(100),
+            audit_event_count: 4,
+            decision_card_replay_matches: true,
+            operator_notes: "controlled statistical gate fixture".to_string(),
+            generated_at: Utc::now(),
+        }
+    }
+
     fn gauntlet_phase_evidence() -> Vec<SwarmGauntletPhaseEvidence> {
         vec![
             SwarmGauntletPhaseEvidence::new(
@@ -4133,6 +5109,148 @@ mod tests {
         assert!(failed_metrics.contains(&SwarmRegressionMetricKind::Rss));
         assert!(failed_metrics.contains(&SwarmRegressionMetricKind::QueueDepth));
         assert!(failed_metrics.contains(&SwarmRegressionMetricKind::RetryAmplification));
+    }
+
+    #[test]
+    fn swarm_statistical_gate_passes_controlled_trace_with_retained_baseline()
+    -> Result<(), Box<dyn Error>> {
+        let baseline = baseline_regression_snapshot();
+        let candidate = SwarmRegressionMetricSnapshot {
+            p99_ns: 104_000,
+            p999_ns: 131_000,
+            throughput_ops_per_second: 970_000,
+            cpu_microunits: 66_000_000,
+            max_queue_depth: 1_050,
+            retry_amplification_microunits: 105_000,
+            ..baseline
+        };
+        let report = SwarmStatisticalGateReport::evaluate(statistical_gate_input(candidate));
+        let records = report.to_jsonl_values()?;
+
+        assert_eq!(report.outcome, SwarmStatisticalGateOutcome::Pass);
+        assert!(report.reasons.is_empty());
+        assert_eq!(records.len(), 2);
+        assert_eq!(
+            records[0]["record_type"],
+            "swarm_baseline_promotion_manifest"
+        );
+        assert_eq!(records[1]["record_type"], "swarm_statistical_gate_report");
+        assert_eq!(
+            records[1]["schema_version"],
+            SWARM_STATISTICAL_GATE_SCHEMA_VERSION
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_statistical_gate_fails_meaningful_tail_resource_audit_and_replay_regressions() {
+        let baseline = baseline_regression_snapshot();
+        let candidate = SwarmRegressionMetricSnapshot {
+            p99_ns: 112_000,
+            p999_ns: 141_000,
+            throughput_ops_per_second: 900_000,
+            cpu_microunits: 72_000_000,
+            max_queue_depth: 1_250,
+            retry_amplification_microunits: 125_000,
+            ..baseline
+        };
+        let mut input = statistical_gate_input(candidate);
+        input.audit_event_count = 0;
+        input.decision_card_replay_matches = false;
+        let report = SwarmStatisticalGateReport::evaluate(input);
+        let reason_kinds: BTreeSet<_> = report.reasons.iter().map(|reason| reason.kind).collect();
+
+        assert_eq!(report.outcome, SwarmStatisticalGateOutcome::Fail);
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::P99Regression));
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::P999Regression));
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::ThroughputRegression));
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::AuditLoss));
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::DecisionCardReplayMismatch));
+    }
+
+    #[test]
+    fn swarm_statistical_gate_rejects_stale_baseline_as_indeterminate() {
+        let baseline = baseline_regression_snapshot();
+        let candidate = baseline.clone();
+        let mut input = statistical_gate_input(candidate);
+        input.baseline_manifest.expires_at = input.generated_at - chrono::Duration::seconds(1);
+        let report = SwarmStatisticalGateReport::evaluate(input);
+
+        assert_eq!(report.outcome, SwarmStatisticalGateOutcome::Indeterminate);
+        assert!(
+            report
+                .reasons
+                .iter()
+                .any(|reason| reason.kind == SwarmStatisticalGateReasonKind::StaleBaseline)
+        );
+    }
+
+    #[test]
+    fn swarm_statistical_gate_rejects_incompatible_baseline_as_indeterminate() {
+        let baseline = baseline_regression_snapshot();
+        let candidate = baseline.clone();
+        let mut input = statistical_gate_input(candidate);
+        input.baseline_manifest.scenario_id = "mesh_gossip_update_10000".to_string();
+        let report = SwarmStatisticalGateReport::evaluate(input);
+
+        assert_eq!(report.outcome, SwarmStatisticalGateOutcome::Indeterminate);
+        assert!(report.reasons.iter().any(|reason| {
+            reason.kind == SwarmStatisticalGateReasonKind::BaselineIncompatible
+                && reason.message.contains("scenario mismatch")
+        }));
+    }
+
+    #[test]
+    fn swarm_statistical_gate_quarantines_noisy_worker_before_failing_candidate() {
+        let baseline = baseline_regression_snapshot();
+        let candidate = SwarmRegressionMetricSnapshot {
+            p99_ns: 125_000,
+            p999_ns: 160_000,
+            ..baseline
+        };
+        let mut input = statistical_gate_input(candidate);
+        input.candidate_quality.worker_drift_percent = 25;
+        let report = SwarmStatisticalGateReport::evaluate(input);
+        let reason_kinds: BTreeSet<_> = report.reasons.iter().map(|reason| reason.kind).collect();
+
+        assert_eq!(report.outcome, SwarmStatisticalGateOutcome::Indeterminate);
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::NoisyWorker));
+        assert!(reason_kinds.contains(&SwarmStatisticalGateReasonKind::P99Regression));
+    }
+
+    #[test]
+    fn swarm_statistical_gate_emits_golden_baseline_and_report_artifacts()
+    -> Result<(), Box<dyn Error>> {
+        let baseline = baseline_regression_snapshot();
+        let report = SwarmStatisticalGateReport::evaluate(statistical_gate_input(baseline));
+        let records = report.to_jsonl_values()?;
+        let manifest_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_baseline_promotion_manifest")
+            .ok_or("baseline manifest record should be present")?;
+        let gate_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_statistical_gate_report")
+            .ok_or("statistical gate report should be present")?;
+        let jsonl = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        assert_eq!(manifest_record["raw_sample_digest"], "blake3:raw-samples");
+        assert_eq!(manifest_record["summary_digest"], "blake3:summary");
+        assert_eq!(manifest_record["gate_report_digest"], "blake3:gate-report");
+        assert_eq!(manifest_record["proof_notes_digest"], "blake3:proof-notes");
+        assert_eq!(gate_record["redaction_policy"]["proof_notes_checked"], true);
+        assert_eq!(gate_record["outcome"], "pass");
+        assert_eq!(
+            gate_record["reason_codes"].as_array().map(Vec::len),
+            Some(0)
+        );
+        assert!(!jsonl.contains("Bearer test-token"));
+        assert!(!jsonl.contains("super-secret-value"));
+        Ok(())
     }
 
     #[test]

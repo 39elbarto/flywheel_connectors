@@ -9,16 +9,19 @@ use std::error::Error;
 
 use chrono::Utc;
 use fcp_testkit::evidence_helpers::{
-    LatencyBreakdown, SwarmDecisionAction, SwarmDecisionCard, SwarmDecisionCounterfactual,
-    SwarmDecisionDomain, SwarmDecisionEvidencePointer, SwarmDecisionFallback,
-    SwarmDecisionLossTerm, SwarmEvidenceArtifact, SwarmEvidenceArtifactKind,
+    LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION, SwarmBaselineArtifactDigests,
+    SwarmBaselinePathKind, SwarmBaselinePromotionManifest, SwarmDecisionAction, SwarmDecisionCard,
+    SwarmDecisionCounterfactual, SwarmDecisionDomain, SwarmDecisionEvidencePointer,
+    SwarmDecisionFallback, SwarmDecisionLossTerm, SwarmEvidenceArtifact, SwarmEvidenceArtifactKind,
     SwarmEvidenceArtifactManifest, SwarmEvidenceExecutionMode, SwarmEvidenceRedactionPolicy,
     SwarmEvidenceSourceKind, SwarmGauntletCounters, SwarmGauntletEvidenceBundle,
     SwarmGauntletManifest, SwarmGauntletPhase, SwarmGauntletPhaseEvidence,
     SwarmLatencyEvidenceBundle, SwarmLatencySample, SwarmLatencyScenario, SwarmPromotionEnvelope,
     SwarmPromotionQualification, SwarmPromotionSkipArtifact, SwarmPromotionTopology,
-    SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics, SwarmRunEnvironment,
-    SwarmWorkloadKind,
+    SwarmRegressionGateThresholds, SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics,
+    SwarmRunEnvironment, SwarmStatisticalGateInput, SwarmStatisticalGateOutcome,
+    SwarmStatisticalGateReasonKind, SwarmStatisticalGateReport, SwarmStatisticalGateTuning,
+    SwarmStatisticalTraceQuality, SwarmWorkloadKind,
 };
 use serde_json::{Value, json};
 
@@ -240,6 +243,70 @@ fn resource_snapshots(bundle: &SwarmLatencyEvidenceBundle) -> Vec<SwarmRegressio
         .collect()
 }
 
+fn statistical_baseline_snapshot() -> SwarmRegressionMetricSnapshot {
+    SwarmRegressionMetricSnapshot {
+        scenario_id: "host_batch_invoke_10000".to_string(),
+        sample_count: 120,
+        p99_ns: 100_000,
+        p999_ns: 125_000,
+        throughput_ops_per_second: 1_000_000,
+        cpu_microunits: 64_000_000,
+        rss_bytes: 8 * 1024 * 1024 * 1024,
+        max_queue_depth: 1_000,
+        retry_amplification_microunits: 100_000,
+    }
+}
+
+fn statistical_baseline_manifest(
+    scenario_id: &str,
+    expires_at: chrono::DateTime<Utc>,
+) -> SwarmBaselinePromotionManifest {
+    SwarmBaselinePromotionManifest {
+        schema_version: SWARM_BASELINE_PROMOTION_SCHEMA_VERSION.to_string(),
+        baseline_id: format!("baseline:{scenario_id}:e2e"),
+        scenario_id: scenario_id.to_string(),
+        execution_mode: SwarmEvidenceExecutionMode::Smoke,
+        source_revision: "e2e-baseline-revision".to_string(),
+        rch_worker_id: "offline-e2e-runner".to_string(),
+        required_paths: SwarmBaselinePathKind::REQUIRED.to_vec(),
+        artifact_digests: SwarmBaselineArtifactDigests::new(
+            "blake3:e2e-raw-samples",
+            "blake3:e2e-summary",
+            "blake3:e2e-gate-report",
+            "blake3:e2e-proof-notes",
+            "blake3:e2e-manifest",
+        ),
+        redaction_policy: SwarmEvidenceRedactionPolicy::conservative(),
+        operator_notes: "offline e2e baseline promoted from controlled traces".to_string(),
+        promoted_at: Utc::now(),
+        expires_at,
+    }
+}
+
+fn statistical_report(
+    candidate: SwarmRegressionMetricSnapshot,
+    candidate_quality: SwarmStatisticalTraceQuality,
+    audit_event_count: u64,
+    decision_card_replay_matches: bool,
+    expires_at: chrono::DateTime<Utc>,
+) -> SwarmStatisticalGateReport {
+    let baseline = statistical_baseline_snapshot();
+    SwarmStatisticalGateReport::evaluate(SwarmStatisticalGateInput {
+        baseline_manifest: statistical_baseline_manifest(&baseline.scenario_id, expires_at),
+        baseline: baseline.clone(),
+        candidate,
+        thresholds: SwarmRegressionGateThresholds::smoke(),
+        execution_mode: SwarmEvidenceExecutionMode::Smoke,
+        tuning: SwarmStatisticalGateTuning::smoke(),
+        baseline_quality: SwarmStatisticalTraceQuality::controlled(baseline.sample_count),
+        candidate_quality,
+        audit_event_count,
+        decision_card_replay_matches,
+        operator_notes: "offline e2e statistical gate proof".to_string(),
+        generated_at: Utc::now(),
+    })
+}
+
 fn record_types(records: &[Value]) -> BTreeSet<&str> {
     records
         .iter()
@@ -299,6 +366,126 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
     assert!(log_record["decision_card_ids"].is_array());
     assert!(log_record["p99_ns"].is_u64());
     assert!(log_record["throughput_ops_per_second"].is_u64());
+    for line in jsonl.lines() {
+        serde_json::from_str::<Value>(line)?;
+    }
+    assert!(!jsonl.contains("sk-live-"));
+    assert!(!jsonl.contains("Bearer test-token"));
+    assert!(!jsonl.contains("super-secret-value"));
+    Ok(())
+}
+
+#[test]
+fn swarm_statistical_gate_e2e_emits_pass_fail_and_indeterminate_logs() -> Result<(), Box<dyn Error>>
+{
+    let baseline = statistical_baseline_snapshot();
+    let future_expiry = Utc::now() + chrono::Duration::days(30);
+    let pass_report = statistical_report(
+        SwarmRegressionMetricSnapshot {
+            p99_ns: 104_000,
+            p999_ns: 131_000,
+            throughput_ops_per_second: 970_000,
+            cpu_microunits: 66_000_000,
+            max_queue_depth: 1_050,
+            retry_amplification_microunits: 105_000,
+            ..baseline.clone()
+        },
+        SwarmStatisticalTraceQuality::controlled(120),
+        4,
+        true,
+        future_expiry,
+    );
+    let fail_report = statistical_report(
+        SwarmRegressionMetricSnapshot {
+            p99_ns: 115_000,
+            p999_ns: 145_000,
+            throughput_ops_per_second: 900_000,
+            cpu_microunits: 72_000_000,
+            max_queue_depth: 1_250,
+            retry_amplification_microunits: 125_000,
+            ..baseline.clone()
+        },
+        SwarmStatisticalTraceQuality::controlled(120),
+        0,
+        false,
+        future_expiry,
+    );
+    let mut noisy_quality = SwarmStatisticalTraceQuality::controlled(120);
+    noisy_quality.worker_drift_percent = 25;
+    let indeterminate_report = statistical_report(
+        baseline,
+        noisy_quality,
+        4,
+        true,
+        Utc::now() + chrono::Duration::days(30),
+    );
+    let reports = [
+        ("pass", pass_report),
+        ("fail", fail_report),
+        ("indeterminate", indeterminate_report),
+    ];
+    let outcomes: BTreeMap<_, _> = reports
+        .iter()
+        .map(|(name, report)| (*name, report.outcome))
+        .collect();
+    let mut records = Vec::new();
+    for (_, report) in &reports {
+        records.extend(report.to_jsonl_values()?);
+    }
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    let gate_records = records
+        .iter()
+        .filter(|record| record["record_type"] == "swarm_statistical_gate_report")
+        .collect::<Vec<_>>();
+    let fail_record = gate_records
+        .iter()
+        .find(|record| record["outcome"] == "fail")
+        .ok_or("fail record should be present")?;
+    let indeterminate_record = gate_records
+        .iter()
+        .find(|record| record["outcome"] == "indeterminate")
+        .ok_or("indeterminate record should be present")?;
+
+    assert_eq!(
+        outcomes.get("pass"),
+        Some(&SwarmStatisticalGateOutcome::Pass)
+    );
+    assert_eq!(
+        outcomes.get("fail"),
+        Some(&SwarmStatisticalGateOutcome::Fail)
+    );
+    assert_eq!(
+        outcomes.get("indeterminate"),
+        Some(&SwarmStatisticalGateOutcome::Indeterminate)
+    );
+    assert_eq!(gate_records.len(), 3);
+    assert!(
+        fail_record["reason_codes"]
+            .as_array()
+            .ok_or("fail reason codes should be an array")?
+            .iter()
+            .any(|code| code == SwarmStatisticalGateReasonKind::P99Regression.code())
+    );
+    assert!(
+        fail_record["reason_codes"]
+            .as_array()
+            .ok_or("fail reason codes should be an array")?
+            .iter()
+            .any(|code| code == SwarmStatisticalGateReasonKind::AuditLoss.code())
+    );
+    assert!(
+        indeterminate_record["reason_codes"]
+            .as_array()
+            .ok_or("indeterminate reason codes should be an array")?
+            .iter()
+            .any(|code| code == SwarmStatisticalGateReasonKind::NoisyWorker.code())
+    );
+    assert!(jsonl.contains("swarm_baseline_promotion_manifest"));
+    assert!(jsonl.contains("blake3:e2e-raw-samples"));
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

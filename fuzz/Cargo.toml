@@ -513,6 +513,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "fuzz_store_wal_write_faults"
+path = "fuzz_targets/store_wal_write_faults.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "fuzz_provenance_decode"
 path = "fuzz_targets/provenance_decode.rs"
 test = false
@@ -606,6 +613,13 @@ bench = false
 [[bin]]
 name = "fuzz_host_invoke_dispatch"
 path = "fuzz_targets/host_invoke_dispatch.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_host_conformal_backpressure_replay"
+path = "fuzz_targets/host_conformal_backpressure_replay.rs"
 test = false
 doc = false
 bench = false

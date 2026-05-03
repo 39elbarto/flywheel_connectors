@@ -1126,10 +1126,7 @@ const fn schedule_action(
 fn wait_delta_ms(scheduled_wait: u64, fifo_wait: u64) -> i64 {
     let delta = i128::from(scheduled_wait) - i128::from(fifo_wait);
     let clamped = delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
-    match i64::try_from(clamped) {
-        Ok(value) => value,
-        Err(_) => unreachable!("clamped wait delta must fit in i64"),
-    }
+    i64::try_from(clamped).unwrap_or_else(|_| unreachable!("clamped wait delta must fit in i64"))
 }
 
 fn batch_timeout_error() -> BatchOperationError {

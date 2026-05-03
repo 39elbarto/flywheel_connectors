@@ -362,7 +362,6 @@ fn select_capability_token<'a>(
         .capability_tokens
         .iter()
         .find(|token| token_matches_invocation(token, invocation))
-        .or_else(|| bundle.capability_tokens.first())
 }
 
 fn select_admission_entry<'a>(
@@ -385,12 +384,9 @@ fn select_receipt<'a>(
     receipts: &'a [DecisionReceipt],
     invocation: &AuditEntry,
 ) -> Option<&'a DecisionReceipt> {
-    receipts
-        .iter()
-        .find(|receipt| {
-            receipt_matches_invocation(receipt, invocation) && receipt.decision.is_allow()
-        })
-        .or_else(|| receipts.iter().find(|receipt| receipt.decision.is_allow()))
+    receipts.iter().find(|receipt| {
+        receipt_matches_invocation(receipt, invocation) && receipt.decision.is_allow()
+    })
 }
 
 fn token_matches_invocation(token: &Value, invocation: &AuditEntry) -> bool {
@@ -714,6 +710,53 @@ mod tests {
         assert!(human.contains("confirmed admission"));
         assert!(human.contains("decision receipt receipt-allow-1 returned allow"));
         assert!(human.contains("revocation cascade did not trigger"));
+    }
+
+    #[test]
+    fn explain_bundle_does_not_borrow_unmatched_positive_evidence() {
+        let invocation = audit_entry(
+            0,
+            event_types::CAPABILITY_INVOKE,
+            Some("fcp.github"),
+            Some("issues.create"),
+            "corr-github",
+            BTreeMap::new(),
+        );
+        let slack_invocation = audit_entry(
+            1,
+            event_types::CAPABILITY_INVOKE,
+            Some("fcp.slack"),
+            Some("chat.postMessage"),
+            "corr-slack",
+            BTreeMap::new(),
+        );
+        let slack_token = serde_json::json!({
+            "id": "tok-slack",
+            "capability_id": "slack.messages.write",
+            "connector_id": "fcp.slack",
+            "operation_id": "chat.postMessage",
+            "issuer_kid": "kid-owner"
+        });
+        let mut slack_receipt = allow_receipt(&slack_invocation);
+        slack_receipt.id = "receipt-slack-allow".to_string();
+        let bundle = ReplayBundle {
+            audit_entries: vec![invocation.clone()],
+            capability_tokens: vec![slack_token],
+            receipts: vec![slack_receipt],
+        };
+
+        let explanation = explain_bundle(&bundle).expect("bundle explains");
+        let human = explanation.render_human();
+
+        assert!(
+            human.contains(
+                "no capability token matched connector fcp.github operation issues.create"
+            )
+        );
+        assert!(!human.contains("tok-slack"));
+        assert!(!human.contains("slack.messages.write"));
+        assert!(!human.contains("receipt-slack-allow"));
+        assert!(!human.contains("returned allow"));
     }
 
     #[test]

@@ -1,0 +1,36 @@
+---
+source: crates/fcp-mesh/tests/golden_resource_pool_decisions.rs
+expression: actual
+---
+# Resource-pool decisions canonical golden (br-evxvv.3)
+# Format: per-scenario list of (node, ADMIT | REJECT class=<refusal>) 
+#         + aggregated summary line.
+# Conservation invariants asserted in the summary line:
+#   conservation OK     => admitted + rejected == evaluated
+#   bucket-vs-rejected  => no_matching_pool + cpu_exhausted +
+#                          memory_exhausted == rejected
+# Any 'MISMATCH' marker means the summary aggregation drifted from
+# the per-node verdicts — that's the most concerning regression class
+# this golden catches.
+
+scenario: single_node_admitted
+    node-alpha                       | ADMIT
+  summary: evaluated=1 admitted=1 rejected=0 no_matching_pool=0 cpu_exhausted=0 memory_exhausted=0 conservation=OK bucket-vs-rejected=OK
+
+scenario: single_node_no_matching_pool
+  summary: evaluated=0 admitted=0 rejected=0 no_matching_pool=0 cpu_exhausted=0 memory_exhausted=0 conservation=OK bucket-vs-rejected=OK
+
+scenario: single_node_cpu_exhausted
+    node-gamma                       | REJECT class=cpu_exhausted
+  summary: evaluated=1 admitted=0 rejected=1 no_matching_pool=0 cpu_exhausted=1 memory_exhausted=0 conservation=OK bucket-vs-rejected=OK
+
+scenario: single_node_memory_exhausted
+    node-delta                       | REJECT class=memory_exhausted
+  summary: evaluated=1 admitted=0 rejected=1 no_matching_pool=0 cpu_exhausted=0 memory_exhausted=1 conservation=OK bucket-vs-rejected=OK
+
+scenario: mixed_4_nodes_one_per_outcome
+    node-admit                       | ADMIT
+    node-cpu-hot                     | REJECT class=cpu_exhausted
+    node-mem-hot                     | REJECT class=memory_exhausted
+    node-no-pool                     | REJECT class=no_matching_pool
+  summary: evaluated=4 admitted=1 rejected=3 no_matching_pool=1 cpu_exhausted=1 memory_exhausted=1 conservation=OK bucket-vs-rejected=OK

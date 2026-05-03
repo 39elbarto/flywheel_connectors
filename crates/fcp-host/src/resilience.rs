@@ -16,8 +16,8 @@ use std::time::{Duration, Instant};
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{OwnedSemaphorePermit, Semaphore};
 use fcp_async_core::time;
-use fcp_prelude::ZoneId;
 use fcp_kernel::{ConnectorHealth, ConnectorId};
+use fcp_prelude::ZoneId;
 use serde::{Deserialize, Serialize};
 
 const MAX_PER_MILLE: u32 = 1_000;
@@ -25,7 +25,8 @@ const DEFAULT_CONFORMAL_COVERAGE_PER_MILLE: u16 = 990;
 const DEFAULT_MIN_CONFORMAL_CALIBRATION_SAMPLES: usize = 3;
 
 /// Request priority used by load shedding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RequestPriority {
     /// Essential traffic that should never be shed.
     Critical,
@@ -257,6 +258,645 @@ impl Default for LoadShedConfig {
     }
 }
 
+/// Runtime state evaluated by the host backpressure controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackpressureState {
+    /// Host signals are comfortably below warning thresholds.
+    Normal,
+    /// Bulkhead queues are consuming meaningful request budget.
+    QueueCongested,
+    /// Host CPU or equivalent load pressure is saturated.
+    CpuSaturated,
+    /// Host memory pressure threatens connector stability.
+    MemoryPressure,
+    /// Downstream service limits or retry feedback dominate the decision.
+    DownstreamThrottled,
+    /// Calibration or replay verification says adaptive decisions are unsafe.
+    CalibrationDrift,
+}
+
+impl BackpressureState {
+    /// Stable machine label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::QueueCongested => "queue_congested",
+            Self::CpuSaturated => "cpu_saturated",
+            Self::MemoryPressure => "memory_pressure",
+            Self::DownstreamThrottled => "downstream_throttled",
+            Self::CalibrationDrift => "calibration_drift",
+        }
+    }
+}
+
+/// Action selected by the host backpressure controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackpressureAction {
+    /// Admit work immediately.
+    Admit,
+    /// Admit work while exposing warning evidence to operators.
+    AdmitWithWarning,
+    /// Delay work through existing queueing/backoff paths.
+    Delay,
+    /// Shed work intentionally.
+    Shed,
+    /// Cancel low-priority work to preserve higher-value traffic.
+    CancelLowPriority,
+    /// Defer to the static conservative policy.
+    FallbackStaticPolicy,
+}
+
+impl BackpressureAction {
+    /// Stable machine label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::AdmitWithWarning => "admit_with_warning",
+            Self::Delay => "delay",
+            Self::Shed => "shed",
+            Self::CancelLowPriority => "cancel_low_priority",
+            Self::FallbackStaticPolicy => "fallback_static_policy",
+        }
+    }
+}
+
+/// Calibration state supplied to the backpressure controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackpressureCalibrationStatus {
+    /// Calibration is present and inside the accepted envelope.
+    Valid,
+    /// Observed coverage has drifted below the configured floor.
+    CoverageDrift,
+    /// Required telemetry was unavailable.
+    MissingTelemetry,
+    /// Offline replay could not reproduce the decision.
+    ReplayMismatch,
+    /// Controller artifact integrity verification failed.
+    ArtifactVerificationFailed,
+}
+
+/// Conservative fallback trigger retained in the decision evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackpressureFallbackTrigger {
+    /// Observed coverage is below the accepted envelope.
+    CoverageDrift,
+    /// Required telemetry is absent.
+    MissingTelemetry,
+    /// Replay did not reproduce the selected action.
+    ReplayMismatch,
+    /// Controller artifact verification failed.
+    ArtifactVerificationFailed,
+}
+
+/// Calibration envelope for adaptive backpressure decisions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureCalibration {
+    /// Current calibration status.
+    pub status: BackpressureCalibrationStatus,
+    /// Observed coverage in per-mille units, when known.
+    pub coverage_per_mille: Option<u16>,
+    /// Minimum accepted coverage in per-mille units.
+    pub min_coverage_per_mille: u16,
+}
+
+impl BackpressureCalibration {
+    /// Build a valid calibration envelope at the default coverage floor.
+    #[must_use]
+    pub const fn valid() -> Self {
+        Self {
+            status: BackpressureCalibrationStatus::Valid,
+            coverage_per_mille: Some(DEFAULT_CONFORMAL_COVERAGE_PER_MILLE),
+            min_coverage_per_mille: DEFAULT_CONFORMAL_COVERAGE_PER_MILLE,
+        }
+    }
+
+    /// Build a calibration envelope that has drifted below its floor.
+    #[must_use]
+    pub const fn coverage_drift(coverage_per_mille: u16, min_coverage_per_mille: u16) -> Self {
+        Self {
+            status: BackpressureCalibrationStatus::CoverageDrift,
+            coverage_per_mille: Some(coverage_per_mille),
+            min_coverage_per_mille,
+        }
+    }
+
+    /// Build a calibration envelope with a non-coverage fallback status.
+    #[must_use]
+    pub const fn fallback(status: BackpressureCalibrationStatus) -> Self {
+        Self {
+            status,
+            coverage_per_mille: None,
+            min_coverage_per_mille: DEFAULT_CONFORMAL_COVERAGE_PER_MILLE,
+        }
+    }
+
+    fn fallback_trigger(self) -> Option<BackpressureFallbackTrigger> {
+        match self.status {
+            BackpressureCalibrationStatus::Valid => {
+                let coverage = self.coverage_per_mille?;
+                (coverage < self.min_coverage_per_mille)
+                    .then_some(BackpressureFallbackTrigger::CoverageDrift)
+            }
+            BackpressureCalibrationStatus::CoverageDrift => {
+                Some(BackpressureFallbackTrigger::CoverageDrift)
+            }
+            BackpressureCalibrationStatus::MissingTelemetry => {
+                Some(BackpressureFallbackTrigger::MissingTelemetry)
+            }
+            BackpressureCalibrationStatus::ReplayMismatch => {
+                Some(BackpressureFallbackTrigger::ReplayMismatch)
+            }
+            BackpressureCalibrationStatus::ArtifactVerificationFailed => {
+                Some(BackpressureFallbackTrigger::ArtifactVerificationFailed)
+            }
+        }
+    }
+}
+
+/// Telemetry snapshot consumed by the host backpressure controller.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureTelemetry {
+    /// Bulkhead queue or active-permit pressure in per-mille units.
+    pub queue_pressure_per_mille: Option<u16>,
+    /// Host CPU or equivalent executor pressure in per-mille units.
+    pub cpu_pressure_per_mille: Option<u16>,
+    /// Memory pressure in per-mille units.
+    pub memory_pressure_per_mille: Option<u16>,
+    /// Downstream retry-after hint in milliseconds.
+    pub downstream_retry_after_ms: Option<u64>,
+    /// Retry amplification estimate in per-mille units.
+    pub retry_amplification_per_mille: Option<u16>,
+    /// Useful-work value estimate in per-mille units.
+    pub useful_work_per_mille: Option<u16>,
+}
+
+impl BackpressureTelemetry {
+    /// Build telemetry from the existing host resilience load signals.
+    #[must_use]
+    pub fn from_resilience_pressure(
+        effective_load_per_mille: u32,
+        queue_pressure_per_mille: u32,
+    ) -> Self {
+        Self {
+            queue_pressure_per_mille: Some(to_u16(queue_pressure_per_mille)),
+            cpu_pressure_per_mille: Some(to_u16(effective_load_per_mille)),
+            memory_pressure_per_mille: None,
+            downstream_retry_after_ms: None,
+            retry_amplification_per_mille: None,
+            useful_work_per_mille: None,
+        }
+    }
+
+    const fn missing_required_signal(self) -> bool {
+        self.queue_pressure_per_mille.is_none()
+            && self.cpu_pressure_per_mille.is_none()
+            && self.memory_pressure_per_mille.is_none()
+            && self.downstream_retry_after_ms.is_none()
+            && self.retry_amplification_per_mille.is_none()
+    }
+
+    fn max_pressure_per_mille(self) -> u16 {
+        [
+            self.queue_pressure_per_mille,
+            self.cpu_pressure_per_mille,
+            self.memory_pressure_per_mille,
+            self.retry_amplification_per_mille,
+        ]
+        .into_iter()
+        .flatten()
+        .max()
+        .unwrap_or(0)
+    }
+}
+
+/// Expected-loss term names used by the backpressure controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackpressureLossTermKind {
+    /// Tail-latency cost.
+    TailLatency,
+    /// Useful work dropped by rejection or cancellation.
+    DroppedUsefulWork,
+    /// Retry amplification induced by the action.
+    RetryAmplification,
+    /// Memory exhaustion risk.
+    MemoryExhaustion,
+    /// Fairness violation risk.
+    FairnessViolation,
+    /// Operator surprise or auditability risk.
+    OperatorSurprise,
+}
+
+impl BackpressureLossTermKind {
+    /// Stable machine label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::TailLatency => "tail_latency",
+            Self::DroppedUsefulWork => "dropped_useful_work",
+            Self::RetryAmplification => "retry_amplification",
+            Self::MemoryExhaustion => "memory_exhaustion",
+            Self::FairnessViolation => "fairness_violation",
+            Self::OperatorSurprise => "operator_surprise",
+        }
+    }
+}
+
+/// One deterministic expected-loss term.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureLossTerm {
+    /// Stable loss term name.
+    pub kind: BackpressureLossTermKind,
+    /// Modeled value in per-mille style integer units.
+    pub value: u32,
+    /// Term weight in millionths.
+    pub weight_microunits: i64,
+}
+
+impl BackpressureLossTerm {
+    /// Build a weighted loss term.
+    #[must_use]
+    pub const fn new(kind: BackpressureLossTermKind, value: u32, weight_microunits: i64) -> Self {
+        Self {
+            kind,
+            value,
+            weight_microunits,
+        }
+    }
+
+    /// Weighted score for deterministic action comparison.
+    #[must_use]
+    pub fn weighted_score(&self) -> i128 {
+        i128::from(self.value).saturating_mul(i128::from(self.weight_microunits))
+    }
+}
+
+/// Weights for the controller loss matrix.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureLossWeights {
+    /// Weight for tail-latency loss.
+    pub tail_latency: i64,
+    /// Weight for useful-work loss.
+    pub dropped_useful_work: i64,
+    /// Weight for retry-amplification loss.
+    pub retry_amplification: i64,
+    /// Weight for memory-exhaustion loss.
+    pub memory_exhaustion: i64,
+    /// Weight for fairness loss.
+    pub fairness_violation: i64,
+    /// Weight for operator-surprise loss.
+    pub operator_surprise: i64,
+}
+
+impl Default for BackpressureLossWeights {
+    fn default() -> Self {
+        Self {
+            tail_latency: 1_000_000,
+            dropped_useful_work: 1_200_000,
+            retry_amplification: 900_000,
+            memory_exhaustion: 1_500_000,
+            fairness_violation: 1_300_000,
+            operator_surprise: 500_000,
+        }
+    }
+}
+
+/// Thresholds used to classify host backpressure state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureControllerThresholds {
+    /// Pressure at which warning admission starts.
+    pub warning_per_mille: u16,
+    /// Pressure at which queueing/backoff should dominate.
+    pub soft_limit_per_mille: u16,
+    /// Pressure at which hard shedding or cancellation may dominate.
+    pub hard_limit_per_mille: u16,
+}
+
+impl Default for BackpressureControllerThresholds {
+    fn default() -> Self {
+        Self {
+            warning_per_mille: 600,
+            soft_limit_per_mille: 850,
+            hard_limit_per_mille: 950,
+        }
+    }
+}
+
+/// Configuration for the host backpressure controller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BackpressureControllerConfig {
+    /// State classification thresholds.
+    pub thresholds: BackpressureControllerThresholds,
+    /// Expected-loss weights.
+    pub weights: BackpressureLossWeights,
+}
+
+/// Inputs needed to replay one backpressure decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureControllerInput {
+    /// Subject being admitted, delayed, shed, or cancelled.
+    pub subject: String,
+    /// Request priority.
+    pub priority: RequestPriority,
+    /// Telemetry snapshot.
+    pub telemetry: BackpressureTelemetry,
+    /// Calibration envelope.
+    pub calibration: BackpressureCalibration,
+}
+
+impl BackpressureControllerInput {
+    /// Build controller input.
+    #[must_use]
+    pub fn new(
+        subject: impl Into<String>,
+        priority: RequestPriority,
+        telemetry: BackpressureTelemetry,
+        calibration: BackpressureCalibration,
+    ) -> Self {
+        Self {
+            subject: subject.into(),
+            priority,
+            telemetry,
+            calibration,
+        }
+    }
+}
+
+/// Evaluation for one candidate action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureActionEvaluation {
+    /// Candidate action.
+    pub action: BackpressureAction,
+    /// Deterministic expected-loss score.
+    pub expected_loss_score: i64,
+    /// Terms that produced the score.
+    pub loss_terms: Vec<BackpressureLossTerm>,
+}
+
+/// Next-best action retained for audit and replay.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureCounterfactual {
+    /// Action that was not selected.
+    pub action: BackpressureAction,
+    /// Deterministic expected-loss score for the action.
+    pub expected_loss_score: i64,
+    /// Why the counterfactual lost.
+    pub reason: String,
+}
+
+/// Replay record embedded in every backpressure decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureReplayRecord {
+    /// Controller configuration used for the decision.
+    pub controller: BackpressureController,
+    /// Input snapshot used for the decision.
+    pub input: BackpressureControllerInput,
+}
+
+/// Replayable host backpressure decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BackpressureDecision {
+    /// Classified backpressure state.
+    pub state: BackpressureState,
+    /// Selected action.
+    pub action: BackpressureAction,
+    /// Deterministic score for the selected action.
+    pub selected_loss_score: i64,
+    /// Selected action loss terms.
+    pub loss_terms: Vec<BackpressureLossTerm>,
+    /// Next-best action, when present.
+    pub counterfactual: Option<BackpressureCounterfactual>,
+    /// Conservative fallback trigger, when fallback is active.
+    pub fallback_trigger: Option<BackpressureFallbackTrigger>,
+    /// Human-readable fallback reason.
+    pub fallback_reason: Option<String>,
+    /// All candidate action evaluations.
+    pub evaluations: Vec<BackpressureActionEvaluation>,
+    /// Replay material sufficient to reproduce the decision offline.
+    pub replay: BackpressureReplayRecord,
+}
+
+impl BackpressureDecision {
+    /// Whether this decision rejects work immediately.
+    #[must_use]
+    pub const fn rejects_work(&self) -> bool {
+        matches!(
+            self.action,
+            BackpressureAction::Shed | BackpressureAction::CancelLowPriority
+        )
+    }
+
+    /// Replay this decision from its embedded record.
+    #[must_use]
+    pub fn replay(&self) -> Self {
+        self.replay.controller.decide(self.replay.input.clone())
+    }
+
+    /// Whether offline replay reproduces the selected action and score.
+    #[must_use]
+    pub fn replay_matches(&self) -> bool {
+        let replayed = self.replay();
+        replayed.state == self.state
+            && replayed.action == self.action
+            && replayed.selected_loss_score == self.selected_loss_score
+            && replayed.fallback_trigger == self.fallback_trigger
+    }
+}
+
+/// Deterministic expected-loss controller for host resource/backpressure choices.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BackpressureController {
+    config: BackpressureControllerConfig,
+}
+
+impl BackpressureController {
+    /// Build a controller with explicit configuration.
+    #[must_use]
+    pub const fn new(config: BackpressureControllerConfig) -> Self {
+        Self { config }
+    }
+
+    /// Choose an action and retain enough evidence for deterministic replay.
+    #[must_use]
+    pub fn decide(&self, input: BackpressureControllerInput) -> BackpressureDecision {
+        let fallback_trigger = Self::fallback_trigger(&input);
+        let state = self.classify_state(&input, fallback_trigger);
+        let mut evaluations = self.evaluate_actions(state, &input);
+        evaluations.sort_by(|left, right| {
+            left.expected_loss_score
+                .cmp(&right.expected_loss_score)
+                .then_with(|| left.action.cmp(&right.action))
+        });
+
+        let selected_action = if fallback_trigger.is_some() {
+            BackpressureAction::FallbackStaticPolicy
+        } else {
+            evaluations
+                .first()
+                .map_or(BackpressureAction::FallbackStaticPolicy, |evaluation| {
+                    evaluation.action
+                })
+        };
+        let selected = evaluations
+            .iter()
+            .find(|evaluation| evaluation.action == selected_action)
+            .cloned()
+            .unwrap_or_else(|| fallback_evaluation(&self.config.weights));
+        let counterfactual = evaluations
+            .iter()
+            .find(|evaluation| evaluation.action != selected_action)
+            .map(|evaluation| BackpressureCounterfactual {
+                action: evaluation.action,
+                expected_loss_score: evaluation.expected_loss_score,
+                reason: counterfactual_reason(selected_action, evaluation.action),
+            });
+        let fallback_reason = fallback_trigger.map(fallback_reason);
+
+        BackpressureDecision {
+            state,
+            action: selected.action,
+            selected_loss_score: selected.expected_loss_score,
+            loss_terms: selected.loss_terms,
+            counterfactual,
+            fallback_trigger,
+            fallback_reason,
+            evaluations,
+            replay: BackpressureReplayRecord {
+                controller: *self,
+                input,
+            },
+        }
+    }
+
+    fn fallback_trigger(
+        input: &BackpressureControllerInput,
+    ) -> Option<BackpressureFallbackTrigger> {
+        input.calibration.fallback_trigger().or_else(|| {
+            input
+                .telemetry
+                .missing_required_signal()
+                .then_some(BackpressureFallbackTrigger::MissingTelemetry)
+        })
+    }
+
+    fn classify_state(
+        &self,
+        input: &BackpressureControllerInput,
+        fallback_trigger: Option<BackpressureFallbackTrigger>,
+    ) -> BackpressureState {
+        if matches!(
+            fallback_trigger,
+            Some(
+                BackpressureFallbackTrigger::CoverageDrift
+                    | BackpressureFallbackTrigger::ReplayMismatch
+                    | BackpressureFallbackTrigger::ArtifactVerificationFailed
+            )
+        ) {
+            return BackpressureState::CalibrationDrift;
+        }
+
+        if input.telemetry.downstream_retry_after_ms.unwrap_or(0) > 0
+            || input.telemetry.retry_amplification_per_mille.unwrap_or(0)
+                >= self.config.thresholds.soft_limit_per_mille
+        {
+            return BackpressureState::DownstreamThrottled;
+        }
+
+        if input.telemetry.memory_pressure_per_mille.unwrap_or(0)
+            >= self.config.thresholds.soft_limit_per_mille
+        {
+            return BackpressureState::MemoryPressure;
+        }
+
+        if input.telemetry.cpu_pressure_per_mille.unwrap_or(0)
+            >= self.config.thresholds.hard_limit_per_mille
+        {
+            return BackpressureState::CpuSaturated;
+        }
+
+        if input.telemetry.queue_pressure_per_mille.unwrap_or(0)
+            >= self.config.thresholds.soft_limit_per_mille
+        {
+            return BackpressureState::QueueCongested;
+        }
+
+        if input.telemetry.max_pressure_per_mille() >= self.config.thresholds.warning_per_mille {
+            return BackpressureState::QueueCongested;
+        }
+
+        BackpressureState::Normal
+    }
+
+    fn evaluate_actions(
+        &self,
+        state: BackpressureState,
+        input: &BackpressureControllerInput,
+    ) -> Vec<BackpressureActionEvaluation> {
+        [
+            BackpressureAction::Admit,
+            BackpressureAction::AdmitWithWarning,
+            BackpressureAction::Delay,
+            BackpressureAction::Shed,
+            BackpressureAction::CancelLowPriority,
+            BackpressureAction::FallbackStaticPolicy,
+        ]
+        .into_iter()
+        .map(|action| self.evaluate_action(state, input, action))
+        .collect()
+    }
+
+    fn evaluate_action(
+        &self,
+        state: BackpressureState,
+        input: &BackpressureControllerInput,
+        action: BackpressureAction,
+    ) -> BackpressureActionEvaluation {
+        let terms = vec![
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::TailLatency,
+                tail_latency_loss(state, input.telemetry, action),
+                self.config.weights.tail_latency,
+            ),
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::DroppedUsefulWork,
+                dropped_useful_work_loss(input.priority, input.telemetry, action),
+                self.config.weights.dropped_useful_work,
+            ),
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::RetryAmplification,
+                retry_amplification_loss(state, input.telemetry, action),
+                self.config.weights.retry_amplification,
+            ),
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::MemoryExhaustion,
+                memory_exhaustion_loss(state, input.telemetry, action),
+                self.config.weights.memory_exhaustion,
+            ),
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::FairnessViolation,
+                fairness_violation_loss(input.priority, action),
+                self.config.weights.fairness_violation,
+            ),
+            BackpressureLossTerm::new(
+                BackpressureLossTermKind::OperatorSurprise,
+                operator_surprise_loss(state, action),
+                self.config.weights.operator_surprise,
+            ),
+        ];
+        BackpressureActionEvaluation {
+            action,
+            expected_loss_score: score_loss_terms(&terms),
+            loss_terms: terms,
+        }
+    }
+}
+
 /// Routing decision derived from connector health.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RoutingDecision {
@@ -311,7 +951,7 @@ impl ConformalSloConfig {
             .div_ceil(u64::from(MAX_PER_MILLE))
             .max(1);
         usize::try_from(rank_one_based.saturating_sub(1))
-            .unwrap_or(sample_count.saturating_sub(1))
+            .unwrap_or_else(|_| sample_count.saturating_sub(1))
             .min(sample_count.saturating_sub(1))
     }
 }
@@ -365,7 +1005,7 @@ impl ConformalSloCalibrationSample {
             && self.budget_remaining != Some(0)
     }
 
-    fn latency_for_bound(&self) -> u64 {
+    const fn latency_for_bound(&self) -> u64 {
         if self.success {
             self.observed_latency_ms
         } else {
@@ -598,6 +1238,7 @@ pub struct ResilienceLayer {
     connectors: RwLock<HashMap<ConnectorId, Arc<ConnectorState>>>,
     health_router: HealthRouter,
     load_shedder: LoadShedder,
+    backpressure_controller: BackpressureController,
 }
 
 impl Default for ResilienceLayer {
@@ -612,6 +1253,7 @@ impl ResilienceLayer {
     pub fn new(config: ResilienceConfig) -> Self {
         Self {
             load_shedder: LoadShedder::new(config.load_shed.clone()),
+            backpressure_controller: BackpressureController::default(),
             health_router: HealthRouter::new(config.health.clone()),
             config,
             connectors: RwLock::new(HashMap::new()),
@@ -647,6 +1289,26 @@ impl ResilienceLayer {
     #[must_use]
     pub fn metrics(&self, connector_id: &ConnectorId) -> ResilienceMetricsSnapshot {
         self.connector_state(connector_id).metrics.snapshot()
+    }
+
+    /// Evaluate current host backpressure for a connector without executing work.
+    #[must_use]
+    pub fn backpressure_decision(
+        &self,
+        connector_id: &ConnectorId,
+        priority: RequestPriority,
+        operation: &str,
+    ) -> BackpressureDecision {
+        let state = self.connector_state(connector_id);
+        let queue_pressure = state.bulkhead.pressure_per_mille();
+        let effective_load = self.load_shedder.effective_load_per_mille(queue_pressure);
+        self.backpressure_controller
+            .decide(BackpressureControllerInput::new(
+                format!("{connector_id}:{operation}"),
+                priority,
+                BackpressureTelemetry::from_resilience_pressure(effective_load, queue_pressure),
+                BackpressureCalibration::valid(),
+            ))
     }
 
     /// Execute a connector operation with all resilience protections applied.
@@ -709,13 +1371,33 @@ impl ResilienceLayer {
         operation: &str,
         effective_load: u32,
     ) -> Result<(), ResilienceError<E>> {
-        if self.load_shedder.should_shed(priority, effective_load) {
+        let decision = self
+            .backpressure_controller
+            .decide(BackpressureControllerInput::new(
+                format!("{connector_id}:{operation}"),
+                priority,
+                BackpressureTelemetry::from_resilience_pressure(
+                    effective_load,
+                    state.bulkhead.pressure_per_mille(),
+                ),
+                BackpressureCalibration::valid(),
+            ));
+        let should_shed = if decision.action == BackpressureAction::FallbackStaticPolicy {
+            self.load_shedder.should_shed(priority, effective_load)
+        } else {
+            decision.rejects_work()
+        };
+
+        if should_shed {
             state.metrics.load_shed.fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 connector_id = %connector_id,
                 operation,
                 load_per_mille = effective_load,
                 priority = ?priority,
+                backpressure_state = decision.state.as_str(),
+                backpressure_action = decision.action.as_str(),
+                fallback_trigger = ?decision.fallback_trigger,
                 "request shed due to load"
             );
             return Err(ResilienceError::LoadShed {
@@ -1776,6 +2458,263 @@ fn preferred_prediction_order(
         .then_with(|| left.path_id.cmp(&right.path_id))
 }
 
+fn fallback_evaluation(weights: &BackpressureLossWeights) -> BackpressureActionEvaluation {
+    let terms = vec![
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::TailLatency,
+            0,
+            weights.tail_latency,
+        ),
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::DroppedUsefulWork,
+            0,
+            weights.dropped_useful_work,
+        ),
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::RetryAmplification,
+            0,
+            weights.retry_amplification,
+        ),
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::MemoryExhaustion,
+            0,
+            weights.memory_exhaustion,
+        ),
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::FairnessViolation,
+            0,
+            weights.fairness_violation,
+        ),
+        BackpressureLossTerm::new(
+            BackpressureLossTermKind::OperatorSurprise,
+            0,
+            weights.operator_surprise,
+        ),
+    ];
+    BackpressureActionEvaluation {
+        action: BackpressureAction::FallbackStaticPolicy,
+        expected_loss_score: score_loss_terms(&terms),
+        loss_terms: terms,
+    }
+}
+
+fn fallback_reason(trigger: BackpressureFallbackTrigger) -> String {
+    match trigger {
+        BackpressureFallbackTrigger::CoverageDrift => {
+            "coverage drift requires conservative static policy".to_string()
+        }
+        BackpressureFallbackTrigger::MissingTelemetry => {
+            "missing telemetry requires conservative static policy".to_string()
+        }
+        BackpressureFallbackTrigger::ReplayMismatch => {
+            "replay mismatch requires conservative static policy".to_string()
+        }
+        BackpressureFallbackTrigger::ArtifactVerificationFailed => {
+            "controller artifact verification failed".to_string()
+        }
+    }
+}
+
+fn counterfactual_reason(
+    selected_action: BackpressureAction,
+    counterfactual_action: BackpressureAction,
+) -> String {
+    if selected_action == BackpressureAction::FallbackStaticPolicy {
+        return format!(
+            "{} suppressed because fallback is active",
+            counterfactual_action.as_str()
+        );
+    }
+
+    format!(
+        "{} had higher expected loss than {}",
+        counterfactual_action.as_str(),
+        selected_action.as_str()
+    )
+}
+
+fn tail_latency_loss(
+    state: BackpressureState,
+    telemetry: BackpressureTelemetry,
+    action: BackpressureAction,
+) -> u32 {
+    let pressure = u32::from(telemetry.max_pressure_per_mille());
+    let base = match state {
+        BackpressureState::Normal => pressure / 4,
+        BackpressureState::QueueCongested
+        | BackpressureState::DownstreamThrottled
+        | BackpressureState::CalibrationDrift => pressure,
+        BackpressureState::CpuSaturated => pressure.saturating_mul(2),
+        BackpressureState::MemoryPressure => pressure.saturating_mul(3) / 2,
+    };
+
+    match action {
+        BackpressureAction::Admit | BackpressureAction::FallbackStaticPolicy => base,
+        BackpressureAction::AdmitWithWarning => base.saturating_add(50),
+        BackpressureAction::Delay => match state {
+            BackpressureState::QueueCongested | BackpressureState::DownstreamThrottled => base / 2,
+            BackpressureState::Normal => base.saturating_add(100),
+            BackpressureState::CpuSaturated
+            | BackpressureState::MemoryPressure
+            | BackpressureState::CalibrationDrift => base,
+        },
+        BackpressureAction::Shed => 0,
+        BackpressureAction::CancelLowPriority => {
+            if state == BackpressureState::MemoryPressure {
+                base / 8
+            } else {
+                base / 4
+            }
+        }
+    }
+}
+
+fn dropped_useful_work_loss(
+    priority: RequestPriority,
+    telemetry: BackpressureTelemetry,
+    action: BackpressureAction,
+) -> u32 {
+    let useful_work = u32::from(
+        telemetry
+            .useful_work_per_mille
+            .unwrap_or_else(|| default_useful_work_per_mille(priority)),
+    );
+    let priority_factor = match priority {
+        RequestPriority::Critical => 4,
+        RequestPriority::High => 3,
+        RequestPriority::Normal => 2,
+        RequestPriority::Low => 1,
+    };
+    let priority_weighted_work = useful_work.saturating_mul(priority_factor);
+
+    match action {
+        BackpressureAction::Admit
+        | BackpressureAction::AdmitWithWarning
+        | BackpressureAction::Delay
+        | BackpressureAction::FallbackStaticPolicy => 0,
+        BackpressureAction::Shed => priority_weighted_work,
+        BackpressureAction::CancelLowPriority => {
+            if priority == RequestPriority::Low {
+                priority_weighted_work / 4
+            } else {
+                priority_weighted_work.saturating_mul(2)
+            }
+        }
+    }
+}
+
+fn retry_amplification_loss(
+    state: BackpressureState,
+    telemetry: BackpressureTelemetry,
+    action: BackpressureAction,
+) -> u32 {
+    let retry_pressure = u32::from(telemetry.retry_amplification_per_mille.unwrap_or(0)).max(
+        if telemetry.downstream_retry_after_ms.unwrap_or(0) > 0 {
+            MAX_PER_MILLE
+        } else {
+            0
+        },
+    );
+    let base = if state == BackpressureState::DownstreamThrottled {
+        retry_pressure.saturating_mul(2)
+    } else {
+        retry_pressure
+    };
+
+    match action {
+        BackpressureAction::Admit | BackpressureAction::FallbackStaticPolicy => base,
+        BackpressureAction::AdmitWithWarning | BackpressureAction::CancelLowPriority => base / 2,
+        BackpressureAction::Delay => base / 4,
+        BackpressureAction::Shed => base / 3,
+    }
+}
+
+fn memory_exhaustion_loss(
+    state: BackpressureState,
+    telemetry: BackpressureTelemetry,
+    action: BackpressureAction,
+) -> u32 {
+    let memory_pressure = u32::from(telemetry.memory_pressure_per_mille.unwrap_or(0));
+    let base = if state == BackpressureState::MemoryPressure {
+        memory_pressure.saturating_mul(2)
+    } else {
+        memory_pressure
+    };
+
+    match action {
+        BackpressureAction::Admit | BackpressureAction::AdmitWithWarning => base,
+        BackpressureAction::Delay | BackpressureAction::FallbackStaticPolicy => base / 2,
+        BackpressureAction::Shed => 0,
+        BackpressureAction::CancelLowPriority => {
+            if state == BackpressureState::MemoryPressure {
+                0
+            } else {
+                base / 4
+            }
+        }
+    }
+}
+
+fn fairness_violation_loss(priority: RequestPriority, action: BackpressureAction) -> u32 {
+    match action {
+        BackpressureAction::Admit | BackpressureAction::AdmitWithWarning => 0,
+        BackpressureAction::Delay => 80,
+        BackpressureAction::Shed => {
+            if priority == RequestPriority::Low {
+                40
+            } else {
+                400
+            }
+        }
+        BackpressureAction::CancelLowPriority => {
+            if priority == RequestPriority::Low {
+                20
+            } else {
+                800
+            }
+        }
+        BackpressureAction::FallbackStaticPolicy => 120,
+    }
+}
+
+fn operator_surprise_loss(state: BackpressureState, action: BackpressureAction) -> u32 {
+    match action {
+        BackpressureAction::Admit => {
+            if state == BackpressureState::Normal {
+                0
+            } else {
+                300
+            }
+        }
+        BackpressureAction::AdmitWithWarning => 40,
+        BackpressureAction::Delay | BackpressureAction::CancelLowPriority => 80,
+        BackpressureAction::Shed => 220,
+        BackpressureAction::FallbackStaticPolicy => {
+            if state == BackpressureState::CalibrationDrift {
+                20
+            } else {
+                240
+            }
+        }
+    }
+}
+
+const fn default_useful_work_per_mille(priority: RequestPriority) -> u16 {
+    match priority {
+        RequestPriority::Critical => 1_000,
+        RequestPriority::High => 900,
+        RequestPriority::Normal => 700,
+        RequestPriority::Low => 300,
+    }
+}
+
+fn score_loss_terms(terms: &[BackpressureLossTerm]) -> i64 {
+    let score = terms.iter().fold(0_i128, |acc, term| {
+        acc.saturating_add(term.weighted_score())
+    });
+    i64::try_from(score).unwrap_or(i64::MAX)
+}
+
 fn to_u16(value: u32) -> u16 {
     u16::try_from(value.min(u32::from(u16::MAX))).unwrap_or(u16::MAX)
 }
@@ -1794,6 +2733,23 @@ mod tests {
 
     fn test_connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.host:test:v1")
+    }
+
+    fn swarm_decision_action(
+        action: BackpressureAction,
+    ) -> fcp_testkit::evidence_helpers::SwarmDecisionAction {
+        match action {
+            BackpressureAction::Admit | BackpressureAction::AdmitWithWarning => {
+                fcp_testkit::evidence_helpers::SwarmDecisionAction::Admit
+            }
+            BackpressureAction::Delay => fcp_testkit::evidence_helpers::SwarmDecisionAction::Delay,
+            BackpressureAction::Shed | BackpressureAction::CancelLowPriority => {
+                fcp_testkit::evidence_helpers::SwarmDecisionAction::Shed
+            }
+            BackpressureAction::FallbackStaticPolicy => {
+                fcp_testkit::evidence_helpers::SwarmDecisionAction::Fallback
+            }
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1999,6 +2955,290 @@ mod tests {
 
         assert!(low_shed >= 80);
         assert_eq!(critical_shed, 0);
+    }
+
+    #[test]
+    fn backpressure_controller_admits_normal_load() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(25),
+                cpu_pressure_per_mille: Some(50),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+
+        assert_eq!(decision.state, BackpressureState::Normal);
+        assert_eq!(decision.action, BackpressureAction::Admit);
+        assert!(decision.replay_matches());
+    }
+
+    #[test]
+    fn backpressure_controller_delays_queue_congestion_with_counterfactual() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(900),
+                cpu_pressure_per_mille: Some(250),
+                useful_work_per_mille: Some(800),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+
+        assert_eq!(decision.state, BackpressureState::QueueCongested);
+        assert_eq!(decision.action, BackpressureAction::Delay);
+        let counterfactual = decision
+            .counterfactual
+            .as_ref()
+            .expect("decision should retain next-best action");
+        assert!(counterfactual.expected_loss_score >= decision.selected_loss_score);
+        assert!(decision.replay_matches());
+    }
+
+    #[test]
+    fn backpressure_controller_cancels_low_priority_memory_pressure() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/export",
+            RequestPriority::Low,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(200),
+                cpu_pressure_per_mille: Some(300),
+                memory_pressure_per_mille: Some(970),
+                useful_work_per_mille: Some(300),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+
+        assert_eq!(decision.state, BackpressureState::MemoryPressure);
+        assert_eq!(decision.action, BackpressureAction::CancelLowPriority);
+        assert!(decision.rejects_work());
+        assert!(decision.replay_matches());
+    }
+
+    #[test]
+    fn backpressure_controller_falls_back_on_missing_telemetry() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry::default(),
+            BackpressureCalibration::valid(),
+        ));
+
+        assert_eq!(decision.action, BackpressureAction::FallbackStaticPolicy);
+        assert_eq!(
+            decision.fallback_trigger,
+            Some(BackpressureFallbackTrigger::MissingTelemetry)
+        );
+        assert!(decision.fallback_reason.is_some());
+        assert!(decision.replay_matches());
+    }
+
+    #[test]
+    fn backpressure_controller_falls_back_on_calibration_drift() {
+        let controller = BackpressureController::default();
+        let decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(500),
+                cpu_pressure_per_mille: Some(500),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::coverage_drift(900, 990),
+        ));
+
+        assert_eq!(decision.state, BackpressureState::CalibrationDrift);
+        assert_eq!(decision.action, BackpressureAction::FallbackStaticPolicy);
+        assert_eq!(
+            decision.fallback_trigger,
+            Some(BackpressureFallbackTrigger::CoverageDrift)
+        );
+        assert!(decision.replay_matches());
+    }
+
+    #[test]
+    fn backpressure_decision_card_is_offline_replayable() {
+        use fcp_testkit::evidence_helpers::{
+            SwarmCalibrationStatus, SwarmDecisionAction, SwarmDecisionCard,
+            SwarmDecisionCounterfactual, SwarmDecisionDomain, SwarmDecisionEvidencePointer,
+            SwarmDecisionFallback, SwarmDecisionLossTerm,
+        };
+        use std::collections::BTreeMap;
+
+        let decision = BackpressureController::default().decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(900),
+                cpu_pressure_per_mille: Some(250),
+                useful_work_per_mille: Some(800),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+        let counterfactual = decision
+            .counterfactual
+            .as_ref()
+            .expect("decision should have a counterfactual");
+        let mut replay_inputs = BTreeMap::new();
+        replay_inputs.insert(
+            "backpressure_decision".to_string(),
+            serde_json::to_value(&decision).expect("decision should serialize"),
+        );
+
+        let card = SwarmDecisionCard::new(
+            "backpressure-controller-card",
+            SwarmDecisionDomain::Backpressure,
+            decision.replay.input.subject.clone(),
+            decision.state.as_str(),
+            swarm_decision_action(decision.action),
+            decision.selected_loss_score,
+            SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+        )
+        .with_loss_terms(
+            decision
+                .loss_terms
+                .iter()
+                .map(|term| {
+                    SwarmDecisionLossTerm::new(
+                        term.kind.as_str(),
+                        i64::from(term.value),
+                        term.weight_microunits,
+                        "per_mille",
+                    )
+                })
+                .collect(),
+        )
+        .with_calibration(SwarmCalibrationStatus::Valid)
+        .with_counterfactual(SwarmDecisionCounterfactual::new(
+            swarm_decision_action(counterfactual.action),
+            counterfactual.expected_loss_score,
+            counterfactual.reason.clone(),
+        ))
+        .with_evidence_pointers(vec![SwarmDecisionEvidencePointer::inline_summary(
+            "host.backpressure.loss_matrix",
+        )])
+        .with_replay_inputs(replay_inputs);
+
+        assert!(card.is_replayable_offline());
+        assert!(card.safe_to_disable());
+    }
+
+    #[test]
+    fn resilience_layer_exposes_current_backpressure_decision() {
+        let layer = ResilienceLayer::default();
+        let connector_id = test_connector_id();
+        layer.set_base_load_per_mille(950);
+
+        let decision = layer.backpressure_decision(&connector_id, RequestPriority::Low, "invoke");
+
+        assert_eq!(decision.state, BackpressureState::CpuSaturated);
+        assert_eq!(decision.action, BackpressureAction::Shed);
+        assert!(decision.rejects_work());
+        assert!(decision.replay_matches());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn backpressure_sheds_burst_low_priority_then_recovers() {
+        let layer = ResilienceLayer::default();
+        let connector_id = test_connector_id();
+        layer.set_base_load_per_mille(980);
+
+        let shed = layer
+            .execute(&connector_id, RequestPriority::Low, "invoke", async {
+                Ok::<_, &str>("should not run")
+            })
+            .await;
+        assert!(matches!(shed, Err(ResilienceError::LoadShed { .. })));
+        assert_eq!(layer.metrics(&connector_id).load_shed, 1);
+
+        layer.set_base_load_per_mille(0);
+        let recovered = layer
+            .execute(&connector_id, RequestPriority::Low, "invoke", async {
+                Ok::<_, &str>("recovered")
+            })
+            .await;
+
+        assert_eq!(recovered.unwrap(), "recovered");
+        let metrics = layer.metrics(&connector_id);
+        assert_eq!(metrics.requests, 2);
+        assert_eq!(metrics.successes, 1);
+        assert_eq!(metrics.load_shed, 1);
+    }
+
+    #[test]
+    fn backpressure_controller_reduces_loss_vs_static_policy_in_swarm_mix() {
+        let controller = BackpressureController::default();
+        let scenarios = [
+            (
+                RequestPriority::Normal,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(920),
+                    cpu_pressure_per_mille: Some(220),
+                    useful_work_per_mille: Some(800),
+                    ..BackpressureTelemetry::default()
+                },
+                500_i64,
+            ),
+            (
+                RequestPriority::Low,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(250),
+                    cpu_pressure_per_mille: Some(350),
+                    memory_pressure_per_mille: Some(970),
+                    useful_work_per_mille: Some(300),
+                    ..BackpressureTelemetry::default()
+                },
+                350_i64,
+            ),
+            (
+                RequestPriority::Normal,
+                BackpressureTelemetry {
+                    queue_pressure_per_mille: Some(400),
+                    cpu_pressure_per_mille: Some(300),
+                    downstream_retry_after_ms: Some(2_000),
+                    retry_amplification_per_mille: Some(900),
+                    useful_work_per_mille: Some(700),
+                    ..BackpressureTelemetry::default()
+                },
+                150_i64,
+            ),
+        ];
+
+        let mut controller_loss = 0_i64;
+        let mut static_policy_loss = 0_i64;
+        for (index, (priority, telemetry, count)) in scenarios.into_iter().enumerate() {
+            let decision = controller.decide(BackpressureControllerInput::new(
+                format!("fcp.host:swarm:v1/invoke:{index}"),
+                priority,
+                telemetry,
+                BackpressureCalibration::valid(),
+            ));
+            let static_loss = decision
+                .evaluations
+                .iter()
+                .find(|evaluation| evaluation.action == BackpressureAction::FallbackStaticPolicy)
+                .expect("static fallback evaluation should be retained")
+                .expected_loss_score;
+
+            assert!(decision.replay_matches());
+            assert!(decision.selected_loss_score <= static_loss);
+            controller_loss =
+                controller_loss.saturating_add(decision.selected_loss_score.saturating_mul(count));
+            static_policy_loss =
+                static_policy_loss.saturating_add(static_loss.saturating_mul(count));
+        }
+
+        assert!(controller_loss < static_policy_loss);
     }
 
     #[fcp_async_core::runtime::test]

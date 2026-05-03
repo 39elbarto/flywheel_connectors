@@ -233,6 +233,28 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler cargo test -p fc
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler-bench cargo bench -p fcp-host --bench batch_scheduler -- --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
 
+### Backpressure Controller Evidence
+
+Host resilience now includes an expected-loss backpressure controller for
+massive swarm overload. It classifies queue, CPU, memory, downstream retry, and
+calibration-drift states; chooses admit, warn, delay, shed, cancel-low-priority,
+or static-fallback actions; and emits replayable decision evidence with loss
+terms, fallback triggers, and counterfactuals.
+
+Targeted verification:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-backpressure-controller cargo test -p fcp-host backpressure --lib
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-backpressure-controller cargo clippy -p fcp-host --lib --no-deps -- -D warnings
+```
+
+The controller test slice covers normal admission, queue delay, memory-pressure
+low-priority cancellation, missing-telemetry and calibration-drift fallback,
+offline decision-card replay, burst shedding, recovery, and a synthetic
+1k-request swarm mix proving selected expected loss is lower than static
+fallback loss.
+
 ### Resource-Pool Placement Evidence
 
 Mesh placement now has a default-off resource-pool admission surface for

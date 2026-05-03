@@ -49,6 +49,7 @@ reqwest = { workspace = true, features = ["json"] }
 wiremock.workspace = true
 insta.workspace = true
 criterion.workspace = true
+proptest.workspace = true
 
 [[bench]]
 name = "routing_index"

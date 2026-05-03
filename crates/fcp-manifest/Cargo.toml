@@ -27,7 +27,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 chrono.workspace = true
+ciborium.workspace = true
 fcp-crypto = { path = "../fcp-crypto" }
 insta = { workspace = true, features = ["json"] }
+proptest.workspace = true
 tracing.workspace = true
 uuid.workspace = true

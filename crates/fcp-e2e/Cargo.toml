@@ -320,3 +320,8 @@ fcp-sandbox = { workspace = true }
 # events; zeroize for the wipe-on-drop secret wrapper.
 tracing-subscriber = { workspace = true }
 zeroize = { workspace = true }
+# Real-service e2e harnesses (no mocks): tokio for in-process HTTP
+# server + concurrent task spawning; tempfile for filesystem
+# fault-injection scratch dirs.
+tokio = { workspace = true }
+tempfile = "3"

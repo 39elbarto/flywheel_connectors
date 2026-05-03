@@ -1,7 +1,7 @@
 //! Live `/rpc/invoke` hash-linked audit chain (br-mvax3).
 //!
-//! VioletPine's reality-check audit (br-mvax3) found that the README
-//! advertises a "hash-linked audit event on every invoke" but the
+//! A reality-check audit (br-mvax3) found that the README advertises
+//! a "hash-linked audit event on every invoke" but the
 //! production `/rpc/invoke` path only ever recorded a flat
 //! `ReceiptSummary` (and only when the connector chose to return a
 //! `receipt_id`). When the connector failed, denied preflight, or
@@ -39,13 +39,27 @@ use std::sync::{Arc, Mutex, RwLock};
 use fcp_audit::{AuditEntry, AuditEntryBuilder, AuditError, Severity};
 use serde_json::json;
 
-/// br-uwlj5 / br-1a73y: defence-in-depth bound on the optimistic-CAS
-/// retry loop in [`InvokeAuditChain::append`]. Sized so that even
-/// with thousands of concurrent same-zone appenders the natural
-/// happy path completes well under the bound; hitting it indicates
-/// pathological per-zone writer overload (operator response: scale
-/// the writer fan-in or shard the per-zone Mutex).
+/// Defence-in-depth bound on the optimistic-CAS retry loop.
+///
+/// Sized so that even with thousands of concurrent same-zone appenders
+/// the natural happy path completes well under the bound; hitting it
+/// indicates pathological per-zone writer overload (operator response:
+/// scale the writer fan-in or shard the per-zone Mutex).
 pub const CAS_RETRY_BUDGET: usize = 64;
+
+/// Number of stale-head CAS attempts after which production append
+/// switches to a deterministic serialized commit for the current
+/// event.
+///
+/// The optimistic path remains the hot path for uncontended and
+/// lightly-contended zones. Under a same-zone storm, repeatedly
+/// rebuilding canonical CBOR against stale heads burns CPU and can
+/// exhaust [`CAS_RETRY_BUDGET`]. The serialized fallback pays one
+/// short critical section for one event, using the fresh chain head
+/// already protected by the zone mutex. That preserves chain
+/// semantics while guaranteeing progress before the defensive retry
+/// budget trips.
+pub const SERIALIZED_COMMIT_FALLBACK_ATTEMPTS: usize = 8;
 
 /// Event type strings for invoke-chain audit entries.
 pub mod event_types {
@@ -91,7 +105,7 @@ pub enum InvokePhase {
 }
 
 impl InvokePhase {
-    fn event_type(&self) -> &'static str {
+    const fn event_type(&self) -> &'static str {
         match self {
             Self::PreflightAllow => event_types::INVOKE_ALLOW,
             Self::PreflightDeny { .. } => event_types::INVOKE_DENY,
@@ -100,7 +114,7 @@ impl InvokePhase {
         }
     }
 
-    fn severity(&self) -> Severity {
+    const fn severity(&self) -> Severity {
         match self {
             Self::PreflightAllow => Severity::Info,
             Self::PreflightDeny { .. } => Severity::Warning,
@@ -255,20 +269,43 @@ impl InvokeAuditChain {
         ctx: &InvokeAuditContext,
         phase: InvokePhase,
     ) -> Result<AuditEntry, AuditError> {
-        self.append_with_retry_budget(ctx, phase, CAS_RETRY_BUDGET)
+        self.append_with_contention_policy(
+            ctx,
+            phase,
+            CAS_RETRY_BUDGET,
+            Some(SERIALIZED_COMMIT_FALLBACK_ATTEMPTS),
+        )
     }
 
     /// Same as [`Self::append`] but with a caller-supplied CAS retry
-    /// budget. Production callers should always use [`Self::append`]
-    /// (which passes [`CAS_RETRY_BUDGET`]). This entry point exists so
-    /// regression tests for the contention-exhausted bail can drive
-    /// the bound deterministically with a tiny budget instead of
-    /// trying to construct a real pathological storm.
+    /// budget and no serialized fallback. Production callers should
+    /// always use [`Self::append`] (which passes
+    /// [`CAS_RETRY_BUDGET`] and enables
+    /// [`SERIALIZED_COMMIT_FALLBACK_ATTEMPTS`]). This entry point
+    /// exists so regression tests and benchmarks can drive the
+    /// retry-only bound deterministically instead of trying to
+    /// construct a real pathological storm.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuditError`] if canonical-CBOR encoding of the entry
+    /// payload fails, or [`AuditError::ContentionExhausted`] if the
+    /// supplied retry budget is exceeded under same-zone contention.
     pub fn append_with_retry_budget(
         &self,
         ctx: &InvokeAuditContext,
         phase: InvokePhase,
         retry_budget: usize,
+    ) -> Result<AuditEntry, AuditError> {
+        self.append_with_contention_policy(ctx, phase, retry_budget, None)
+    }
+
+    fn append_with_contention_policy(
+        &self,
+        ctx: &InvokeAuditContext,
+        phase: InvokePhase,
+        retry_budget: usize,
+        serialized_fallback_after: Option<usize>,
     ) -> Result<AuditEntry, AuditError> {
         let event_type = phase.event_type();
         let severity = phase.severity();
@@ -336,11 +373,24 @@ impl InvokeAuditChain {
                     z.last_seq = Some(next_seq);
                     z.last_id = Some(real_id);
                     z.entries.push(entry.clone());
+                    drop(z);
                     return Ok(entry);
                 }
                 // Else: another writer raced us; retry with the
                 // fresh head. Drop the lock and loop.
             }
+
+            // Same-zone storms can make every lock-free build race a
+            // fresher head. Once that pattern is visible, switch this
+            // one event to a serialized commit: take the fresh head
+            // under the zone mutex, build the entry once, and append
+            // immediately. This is equivalent to a successful retry
+            // whose snapshot cannot go stale because the snapshot and
+            // commit happen in the same critical section.
+            if serialized_fallback_after.is_some_and(|fallback_after| attempts >= fallback_after) {
+                return Self::append_serialized(&zone, &base_builder);
+            }
+
             // Defence in depth against pathological retry storms
             // (should be impossible without thousands of concurrent
             // same-zone appenders): bail with an error after a
@@ -361,8 +411,32 @@ impl InvokeAuditChain {
         }
     }
 
+    fn append_serialized(
+        zone: &Arc<Mutex<ZoneChain>>,
+        base_builder: &AuditEntryBuilder,
+    ) -> Result<AuditEntry, AuditError> {
+        let mut z = zone.lock().expect("InvokeAuditChain zone mutex poisoned");
+        let next_seq = z.last_seq.map_or(0u64, |s| s.saturating_add(1));
+        let mut builder = base_builder.clone().seq(next_seq);
+        if let Some(prev) = z.last_id.clone() {
+            builder = builder.prev(prev);
+        }
+        let entry = builder
+            .build_with_computed_id()
+            .map_err(|e| AuditError::SerializationError(format!("invoke audit build: {e}")))?;
+        z.last_seq = Some(next_seq);
+        z.last_id = Some(entry.id.clone());
+        z.entries.push(entry.clone());
+        drop(z);
+        Ok(entry)
+    }
+
     /// Snapshot of the entries appended for `zone_id`. Empty if the
     /// zone has had no invokes yet.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain map or per-zone chain mutex has been poisoned.
     #[must_use]
     pub fn entries_for_zone(&self, zone_id: &str) -> Vec<AuditEntry> {
         let Some(handle) = self
@@ -382,6 +456,10 @@ impl InvokeAuditChain {
     }
 
     /// Number of entries appended for `zone_id`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the chain map or per-zone chain mutex has been poisoned.
     #[must_use]
     pub fn len_for_zone(&self, zone_id: &str) -> usize {
         let Some(handle) = self
@@ -740,6 +818,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn invoke_audit_chain_same_zone_storm_uses_serialized_fallback_without_dropping_events() {
+        // evxvv.8: the retry-only CAS path can exhaust its defensive
+        // retry budget under modest same-zone storms. Production
+        // append keeps the optimistic path for ordinary traffic but
+        // falls back to one serialized commit once stale-head retries
+        // show that this event is racing a hot zone. The observable
+        // contract is unchanged: every append lands exactly once, seq
+        // is monotonic, and prev hash-links to the prior entry.
+        use std::thread;
+
+        const THREADS: usize = 64;
+        const APPENDS_PER: usize = 16;
+
+        let chain = std::sync::Arc::new(InvokeAuditChain::new());
+        let mut handles = Vec::with_capacity(THREADS);
+        for t in 0..THREADS {
+            let chain_arc = std::sync::Arc::clone(&chain);
+            handles.push(thread::spawn(move || {
+                for i in 0..APPENDS_PER {
+                    let c = InvokeAuditContext {
+                        zone_id: "z:storm".into(),
+                        actor: format!("agent:t-{t}"),
+                        connector_id: "github".into(),
+                        operation: "list_repos".into(),
+                        operation_id: format!("op-{t}-{i}"),
+                        correlation_id: None,
+                        occurred_at: 1_700_000_000,
+                    };
+                    chain_arc
+                        .append(&c, InvokePhase::PreflightAllow)
+                        .expect("serialized fallback must prevent same-zone audit loss");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        let entries = chain.entries_for_zone("z:storm");
+        assert_eq!(entries.len(), THREADS * APPENDS_PER);
+        assert!(entries[0].is_genesis());
+        for (i, entry) in entries.iter().enumerate() {
+            assert_eq!(entry.seq, i as u64, "monotonic seq broken at index {i}");
+            if i > 0 {
+                assert!(
+                    entry.follows(&entries[i - 1]),
+                    "entry {i} must hash-link after serialized fallback"
+                );
+            }
+        }
+    }
+
     /// br-1a73y: when the optimistic-CAS retry budget is exhausted
     /// the bail MUST surface as `AuditError::ContentionExhausted`
     /// (not the misleading `SerializationError` the prior taxonomy
@@ -760,10 +891,12 @@ mod tests {
 
         let chain = StdArc::new(InvokeAuditChain::new());
         let contention_failures = StdArc::new(AtomicUsize::new(0));
+        let unexpected_errors = StdArc::new(AtomicUsize::new(0));
         let mut handles = Vec::with_capacity(THREADS);
         for t in 0..THREADS {
             let chain_arc = StdArc::clone(&chain);
             let failures = StdArc::clone(&contention_failures);
+            let unexpected = StdArc::clone(&unexpected_errors);
             handles.push(thread::spawn(move || {
                 for i in 0..APPENDS_PER {
                     let c = InvokeAuditContext {
@@ -790,11 +923,9 @@ mod tests {
                                 "ContentionExhausted must report attempts > budget"
                             );
                         }
-                        Err(other) => panic!(
-                            "expected Ok or ContentionExhausted, got {other:?} \
-                             (br-1a73y: any other variant means the bail returned the \
-                             wrong taxonomy and operator telemetry will mis-route)"
-                        ),
+                        Err(_) => {
+                            unexpected.fetch_add(1, Ordering::SeqCst);
+                        }
                     }
                 }
             }));
@@ -804,6 +935,12 @@ mod tests {
         }
 
         let total = contention_failures.load(Ordering::SeqCst);
+        assert_eq!(
+            unexpected_errors.load(Ordering::SeqCst),
+            0,
+            "br-1a73y: expected only Ok or ContentionExhausted; any other variant means the bail \
+             returned the wrong taxonomy and operator telemetry will mis-route"
+        );
         assert!(
             total > 0,
             "br-1a73y: with RETRY_BUDGET={RETRY_BUDGET} and {THREADS} threads racing on one \

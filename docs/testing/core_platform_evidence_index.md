@@ -328,6 +328,28 @@ remaining promotion gate is to rerun this benchmark and the swarm latency bundle
 on a real 64+ CPU / 256+ GiB worker with physical core and NUMA environment
 fields populated.
 
+### Same-Zone Invoke Audit Contention
+
+The live invoke audit chain keeps per-zone hash linkage and sequence ordering
+while avoiding retry-budget exhaustion under hot same-zone writer pressure. The
+ordinary path still uses optimistic CAS so canonical CBOR encoding and BLAKE3
+hashing run outside the per-zone lock. If an event repeatedly races a stale
+zone head, production append falls back to a single serialized commit for that
+event before the defensive CAS retry budget can become an audit-loss error.
+
+This is the flat-combining-style fallback for the pathological case surfaced by
+the `invoke_audit_same_zone` benchmark: retry-only append can exhaust
+`CAS_RETRY_BUDGET` at modest concurrency, while the production path must keep
+every audit event, preserve monotonic `seq`, and maintain `prev` hash linkage.
+
+Targeted verification:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit cargo test -p fcp-host invoke_audit_chain --lib
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-invoke-audit-bench cargo bench -p fcp-host --bench invoke_audit_throughput -- invoke_audit_same_zone --sample-size 10 --warm-up-time 1 --measurement-time 2
+```
+
 ## Known Flakes and Workarounds
 
 ### fcp-streaming health.rs timing tests

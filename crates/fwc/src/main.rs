@@ -14759,6 +14759,30 @@ fn sanitize_cache_component(value: &str) -> String {
         .collect()
 }
 
+fn validate_registry_binary_name(binary_name: &str) -> Result<()> {
+    if binary_name.trim().is_empty() {
+        bail!("registry signature artifact binary_name must not be empty");
+    }
+
+    let path = Path::new(binary_name);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::ParentDir
+                    | std::path::Component::RootDir
+                    | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        bail!(
+            "registry signature artifact binary_name `{binary_name}` must be a relative path inside the registry cache"
+        );
+    }
+
+    Ok(())
+}
+
 fn registry_target_triple(target: &ConnectorTarget) -> String {
     match (target.os.as_str(), target.arch.as_str()) {
         ("linux", "amd64") => "x86_64-unknown-linux-gnu".to_owned(),
@@ -15015,6 +15039,7 @@ fn materialize_registry_package_output(
     attestation_json: Option<&str>,
     build_metadata: &PackageBuildMetadata,
 ) -> Result<PackageOutput> {
+    validate_registry_binary_name(binary_name)?;
     let output_dir = registry_cached_package_dir(endpoint, connector_id, version, target)?;
     std::fs::create_dir_all(&output_dir).with_context(|| {
         format!(
@@ -15761,6 +15786,7 @@ fn managed_connector_from_artifact(
         allowed_zones: existing.map_or_else(Vec::new, |entry| entry.allowed_zones.clone()),
         allowed_operations: existing
             .map_or_else(Vec::new, |entry| entry.allowed_operations.clone()),
+        enforce_empty_allow_lists: existing.is_some_and(|entry| entry.enforce_empty_allow_lists),
     }
 }
 
@@ -29928,6 +29954,7 @@ deny_ptrace = true
                             version: Some("1.2.4".to_string()),
                             allowed_zones: Vec::new(),
                             allowed_operations: Vec::new(),
+                            enforce_empty_allow_lists: false,
                         },
                         None,
                     ),
@@ -30032,6 +30059,7 @@ deny_ptrace = true
                             version: Some("1.2.4".to_string()),
                             allowed_zones: Vec::new(),
                             allowed_operations: Vec::new(),
+                            enforce_empty_allow_lists: false,
                         },
                         None,
                     ),
@@ -30118,6 +30146,7 @@ deny_ptrace = true
                         version: Some("1.2.4".to_string()),
                         allowed_zones: Vec::new(),
                         allowed_operations: Vec::new(),
+                        enforce_empty_allow_lists: false,
                     },
                     None,
                 ),
@@ -30209,6 +30238,7 @@ deny_ptrace = true
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let planned = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -30222,6 +30252,7 @@ deny_ptrace = true
             version: Some("1.2.4".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
             allowed_operations: previous.allowed_operations.clone(),
+            enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -30292,6 +30323,7 @@ deny_ptrace = true
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -30305,6 +30337,7 @@ deny_ptrace = true
             version: Some("1.2.4".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
             allowed_operations: previous.allowed_operations.clone(),
+            enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
         };
         let (host, server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -36910,6 +36943,7 @@ depends_on = ["missing"]
                 },
             ],
             total_duration_ms: 8,
+            schedule_report: None,
         })
         .expect("batch response should serialize");
 
@@ -36968,6 +37002,7 @@ depends_on = ["missing"]
                 },
             ],
             total_duration_ms: 10,
+            schedule_report: None,
         })
         .expect("batch response should serialize");
 
@@ -37832,6 +37867,7 @@ require_attestation_types = ["in-toto"]"#,
                             version: Some("1.2.5".to_string()),
                             allowed_zones: Vec::new(),
                             allowed_operations: Vec::new(),
+                            enforce_empty_allow_lists: false,
                         },
                         None,
                     ),
@@ -37932,6 +37968,7 @@ require_attestation_types = ["in-toto"]"#,
             version: Some("1.2.3".to_string()),
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
         };
         let updated = ManagedConnectorConfig {
             id: "fcp.github:enterprise:v1".to_string(),
@@ -37945,6 +37982,7 @@ require_attestation_types = ["in-toto"]"#,
             version: Some("1.2.5".to_string()),
             allowed_zones: previous.allowed_zones.clone(),
             allowed_operations: previous.allowed_operations.clone(),
+            enforce_empty_allow_lists: previous.enforce_empty_allow_lists,
         };
         let (host, host_server) = spawn_mock_host(
             StdBTreeMap::from([
@@ -38153,6 +38191,41 @@ require_attestation_types = ["in-toto"]"#,
                 .as_str()
                 .is_some_and(|message| message.contains("signature"))
         );
+    }
+
+    #[test]
+    fn install_registry_verify_only_rejects_binary_name_path_traversal() {
+        let (_context_dir, _context_path, _guard) = temp_context_config();
+        let (_signed_tempdir, signed_dir) =
+            write_test_signed_registry_package("fcp.github:enterprise:v1", "1.2.5", None);
+        let fixture = load_signed_registry_fixture(&signed_dir);
+        let _trust_guard = pin_fixture_trust_root(&fixture);
+        let mut traversal_signature = fixture.signature_artifact.clone();
+        traversal_signature.binary_name = "../escaped-binary".to_owned();
+        let (registry, registry_server) = spawn_mock_http_server(
+            registry_routes_for_fixture(&fixture, None, Some(traversal_signature), None, false),
+            4,
+        );
+
+        let (exit_code, payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "install",
+            "fcp.github:enterprise:v1",
+            "--registry",
+            &registry,
+            "--verify-only",
+        ]);
+
+        registry_server
+            .join()
+            .expect("registry mock thread should complete");
+        assert_eq!(exit_code, CliExitCode::Validation.into());
+        assert_eq!(payload["command"], "install");
+        assert_eq!(payload["error"]["type"], "invalid-install-source");
+        assert!(payload["error"]["message"].as_str().is_some_and(|message| {
+            message.contains("binary_name") && message.contains("registry cache")
+        }));
     }
 
     #[test]

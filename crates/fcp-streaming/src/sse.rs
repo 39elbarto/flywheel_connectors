@@ -81,7 +81,13 @@ fn http_error_from_head(status: u16, reason: String, headers: &[(String, String)
         }
     }
 
-    let retry_after = if status == 429 {
+    // RFC 7231 §7.1.3 defines Retry-After for 429 and 503 (and other
+    // statuses, but these are the practical reconnect-budget cases for an
+    // SSE consumer). The FCP backpressure 503 path above already extracted
+    // retry_after via HostBackpressureSignal; this branch handles generic
+    // upstream 429/503 where the connector got an HTTP retry hint without
+    // the FCP-specific reason header.
+    let retry_after = if status == 429 || status == HOST_BACKPRESSURE_STATUS {
         header_value(headers, "retry-after").and_then(parse_retry_after)
     } else {
         None
@@ -795,6 +801,30 @@ mod tests {
         let err = http_error_from_head(429, "Too Many Requests".to_string(), &headers);
 
         assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
+    }
+
+    #[test]
+    fn sse_generic_503_preserves_retry_after_when_no_fcp_backpressure_header() {
+        // A generic upstream returning 503 with Retry-After must not lose
+        // the hint just because the FCP backpressure reason header is
+        // absent — that fall-through previously discarded the value.
+        let headers = vec![("Retry-After".to_string(), "13".to_string())];
+
+        let err = http_error_from_head(503, "Service Unavailable".to_string(), &headers);
+
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(13)));
+        assert!(!err.is_terminal_backpressure());
+    }
+
+    #[test]
+    fn sse_other_status_does_not_set_retry_after() {
+        let headers = vec![("Retry-After".to_string(), "5".to_string())];
+
+        let err = http_error_from_head(500, "Internal Server Error".to_string(), &headers);
+
+        // Retry-After on a non-rate-limited 5xx isn't part of the SSE
+        // reconnect-budget contract; ignore it.
+        assert_eq!(err.retry_after(), None);
     }
 
     #[test]

@@ -1303,6 +1303,34 @@ impl fmt::Display for ToolCallError {
 
 impl ToolDescriptor {
     #[must_use]
+    fn mcp_description(&self) -> String {
+        let mut parts = vec![self.description.clone()];
+
+        if let Some(ai_hints) = &self.ai_hints {
+            let when_to_use = ai_hints.when_to_use.trim();
+            if !when_to_use.is_empty() {
+                parts.push(format!("When to use: {when_to_use}"));
+            }
+
+            let common_mistakes = ai_hints
+                .common_mistakes
+                .iter()
+                .map(|mistake| mistake.trim())
+                .filter(|mistake| !mistake.is_empty())
+                .collect::<Vec<_>>();
+            if !common_mistakes.is_empty() {
+                parts.push(format!("Common mistakes: {}", common_mistakes.join("; ")));
+            }
+        }
+
+        if self.requires_confirmation {
+            parts.push("Requires confirmation before execution.".to_owned());
+        }
+
+        parts.join("\n\n")
+    }
+
+    #[must_use]
     const fn mcp_read_only_hint(&self) -> bool {
         matches!(
             (self.safety_tier, self.idempotency),
@@ -1335,7 +1363,7 @@ impl ToolDescriptor {
 
         McpToolListEntry {
             name: self.name.clone(),
-            description: Some(self.description.clone()),
+            description: Some(self.mcp_description()),
             input_schema: self.input_schema.clone(),
             annotations: Some(annotations),
         }
@@ -2912,6 +2940,46 @@ mod tests {
         };
         let entry = desc.to_mcp_tool_list_entry();
         assert_eq!(entry.input_schema, schema);
+    }
+
+    #[test]
+    fn tool_descriptor_to_mcp_entry_includes_agent_guidance() {
+        let desc = ToolDescriptor {
+            name: "delete_message".to_owned(),
+            description: "Delete a message".to_owned(),
+            input_schema: serde_json::json!({}),
+            output_schema: serde_json::json!({}),
+            capability: fcp_core::CapabilityId::from_static("messaging.delete"),
+            risk_level: fcp_core::RiskLevel::High,
+            safety_tier: fcp_core::SafetyTier::Dangerous,
+            idempotency: IdempotencyClass::None,
+            approval_mode: Some(fcp_core::ApprovalMode::Interactive),
+            requires_confirmation: true,
+            idempotent: false,
+            supports_simulate: Some(false),
+            latency_hint: None,
+            rate_limits: vec![],
+            examples: vec![],
+            ai_hints: Some(fcp_core::AgentHint {
+                when_to_use: "Only after the caller identifies the exact message".to_owned(),
+                common_mistakes: vec![
+                    "Passing a channel id instead of a message id".to_owned(),
+                    " ".to_owned(),
+                ],
+                examples: vec![],
+                related: vec![],
+            }),
+        };
+
+        let entry = desc.to_mcp_tool_list_entry();
+        let description = entry
+            .description
+            .expect("MCP tool description should be set");
+        assert!(description.contains("Delete a message"));
+        assert!(description.contains("When to use: Only after the caller identifies"));
+        assert!(description.contains("Common mistakes: Passing a channel id"));
+        assert!(description.contains("Requires confirmation before execution."));
+        assert!(!description.contains(";  "));
     }
 
     // ── build_error_response ────────────────────────────────────────────

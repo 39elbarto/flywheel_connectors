@@ -825,10 +825,7 @@ impl SubprocessRegistry {
     /// Production gates in `verify_live_request` MUST use this helper
     /// (one call per request) instead of the per-field accessors.
     /// Returns `None` when the connector is unknown.
-    async fn allow_list_snapshot(
-        &self,
-        connector_id: &ConnectorId,
-    ) -> Option<AllowListSnapshot> {
+    async fn allow_list_snapshot(&self, connector_id: &ConnectorId) -> Option<AllowListSnapshot> {
         let state = self.state.read().await;
         state.connectors.get(connector_id).map(|entry| {
             let cfg = &entry.config;
@@ -4205,6 +4202,7 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
         )
+        .route("/rpc/budget/report", post(budget_report_handler))
         // br-71lku: /rpc/cancel and /rpc/operations/cancel were
         // previously mounted on the public app router below, where
         // cancel_handler trusted only the spoofable X-Principal
@@ -4250,7 +4248,6 @@ async fn async_main() -> HostResult<()> {
         .route("/rpc/batch-invoke", post(batch_invoke_handler))
         .route("/rpc/preflight", post(preflight_handler))
         .route("/rpc/simulate", post(simulate_handler))
-        .route("/rpc/budget/report", post(budget_report_handler))
         .route("/rpc/health", get(health_handler))
         .merge(protected_routes)
         .with_state(Arc::clone(&state));
@@ -8122,7 +8119,10 @@ mod tests {
         let mut config = subprocess_test_connector_config(connector_id);
         // allowed_zones populated so we don't hit the zone gate first.
         config.allowed_zones = vec![ZoneId::work().as_str().to_string()];
-        assert!(config.allowed_operations.is_empty(), "test fixture starts empty");
+        assert!(
+            config.allowed_operations.is_empty(),
+            "test fixture starts empty"
+        );
         config.enforce_empty_allow_lists = true;
 
         let tempdir = tempfile::tempdir().expect("tempdir");
@@ -8295,8 +8295,7 @@ mod tests {
             allowed_operations: vec!["op.a".to_string()],
             enforce_empty_allow_lists: false,
         };
-        let registry =
-            dispatcher_registry_with_connector(connector_id, connector, initial_config);
+        let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
 
         // Writer: strictly alternates the connector entry between
         // State A (['z:work'], ['op.a'], false) and State B ([], [], true).
@@ -9226,13 +9225,8 @@ mod tests {
         let zone_id = ZoneId::work();
         let token =
             test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
-        let request = hybrid_owner_production_request(
-            connector_key,
-            operation_id,
-            zone_id,
-            token,
-            None,
-        );
+        let request =
+            hybrid_owner_production_request(connector_key, operation_id, zone_id, token, None);
 
         let error = verify_live_request(state.as_ref(), &request, None)
             .await
@@ -12767,6 +12761,18 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn budget_report_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route("/rpc/budget/report", post(budget_report_handler))
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     async fn send_cancel_request(
         app: axum::Router,
         path: &str,
@@ -12807,6 +12813,51 @@ done"#;
         )
         .await
         .status()
+    }
+
+    async fn post_budget_report_with_headers(
+        app: axum::Router,
+        extra_headers: &[(&str, &str)],
+    ) -> axum::http::StatusCode {
+        send_cancel_request(
+            app,
+            "/rpc/budget/report",
+            serde_json::json!({}),
+            extra_headers,
+        )
+        .await
+        .status()
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_budget_report_rejects_unauthenticated_request() {
+        let state = cancel_route_test_state();
+        let app = budget_report_test_app(state);
+
+        let status = post_budget_report_with_headers(app, &[]).await;
+
+        assert_eq!(
+            status,
+            axum::http::StatusCode::FORBIDDEN,
+            "budget report must be gated by admin auth"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rpc_budget_report_allows_owner_admin_request() {
+        let state = cancel_route_test_state();
+        let app = budget_report_test_app(state);
+
+        let status = post_budget_report_with_headers(
+            app,
+            &[
+                ("Authorization", "Bearer topsecret"),
+                (ADMIN_ZONE_HEADER, "z:owner"),
+            ],
+        )
+        .await;
+
+        assert_eq!(status, axum::http::StatusCode::OK);
     }
 
     #[fcp_async_core::runtime::test]

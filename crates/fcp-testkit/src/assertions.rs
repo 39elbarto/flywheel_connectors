@@ -235,6 +235,137 @@ pub fn assert_json_string_contains(value: &serde_json::Value, pattern: &str) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Connector Contract Assertions
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Expected operation shape in a connector introspection payload.
+#[derive(Debug, Clone, Copy)]
+pub struct OperationContract<'a> {
+    /// Operation ID that must be advertised.
+    pub id: &'a str,
+
+    /// Capability ID the operation must require.
+    pub capability: &'a str,
+
+    /// Input object fields that must be both declared and required.
+    pub required_input_fields: &'a [&'a str],
+
+    /// Output object fields that must be declared.
+    pub output_fields: &'a [&'a str],
+}
+
+/// Assert that an introspection JSON payload declares the expected operation contracts.
+///
+/// # Panics
+///
+/// Panics if `introspection` does not contain an operations array, if an
+/// expected operation is missing, or if any operation contract field does not
+/// match the advertised schema.
+pub fn assert_operation_contracts(
+    introspection: &serde_json::Value,
+    expected: &[OperationContract<'_>],
+) {
+    let operations = introspection_operations(introspection);
+    assert_unique_operation_ids(operations);
+
+    for contract in expected {
+        let operation = find_operation(operations, contract.id);
+        assert_eq!(
+            json_string_field(operation, "capability"),
+            contract.capability,
+            "{} capability mismatch",
+            contract.id
+        );
+        assert_object_schema(
+            operation
+                .get("input_schema")
+                .unwrap_or_else(|| panic!("{} missing input_schema", contract.id)),
+            contract.required_input_fields,
+            contract.required_input_fields,
+            "input_schema",
+            contract.id,
+        );
+        assert_object_schema(
+            operation
+                .get("output_schema")
+                .unwrap_or_else(|| panic!("{} missing output_schema", contract.id)),
+            &[],
+            contract.output_fields,
+            "output_schema",
+            contract.id,
+        );
+    }
+}
+
+fn introspection_operations(introspection: &serde_json::Value) -> &[serde_json::Value] {
+    introspection
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("introspection missing operations array: {introspection:?}"))
+}
+
+fn assert_unique_operation_ids(operations: &[serde_json::Value]) {
+    let mut ids = std::collections::BTreeSet::new();
+    for operation in operations {
+        let id = json_string_field(operation, "id");
+        assert!(ids.insert(id), "duplicate operation id advertised: {id}");
+    }
+}
+
+fn find_operation<'a>(operations: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+    operations
+        .iter()
+        .find(|operation| operation.get("id").and_then(serde_json::Value::as_str) == Some(id))
+        .unwrap_or_else(|| panic!("missing operation contract for {id}"))
+}
+
+fn assert_object_schema(
+    schema: &serde_json::Value,
+    required_fields: &[&str],
+    declared_fields: &[&str],
+    schema_name: &str,
+    operation_id: &str,
+) {
+    assert_eq!(
+        json_string_field(schema, "type"),
+        "object",
+        "{operation_id} {schema_name} must be an object schema"
+    );
+
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .map_or(&[][..], Vec::as_slice);
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("{operation_id} {schema_name} missing properties object"));
+
+    for field in required_fields {
+        assert!(
+            required
+                .iter()
+                .any(|candidate| candidate.as_str() == Some(*field)),
+            "{operation_id} {schema_name} does not require field {field}"
+        );
+    }
+
+    for field in declared_fields {
+        assert!(
+            properties.contains_key(*field),
+            "{operation_id} {schema_name} does not declare property {field}"
+        );
+    }
+}
+
+fn json_string_field<'a>(value: &'a serde_json::Value, field: &str) -> &'a str {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("missing string field {field}: {value:?}"))
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Timing Assertions
 // ─────────────────────────────────────────────────────────────────────────────
 

@@ -50,11 +50,11 @@ use fcp_evidence::{
 };
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
-    BatchOptions, BatchStatus, BudgetAction, BudgetPolicyEngine, BudgetReportRequest,
-    BudgetReportResponse, CacheMetadata, CacheValidator, CancellationController,
-    CancellationRequest, CancellationResponse, CapabilityTokenVerifyRequest, ConfigRevisionRecord,
-    ConnectorAdminState, ConnectorAdminStatus, ConnectorArchetype,
-    ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
+    BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchSchedulerMode, BatchStatus,
+    BudgetAction, BudgetPolicyEngine, BudgetReportRequest, BudgetReportResponse, CacheMetadata,
+    CacheValidator, CancellationController, CancellationRequest, CancellationResponse,
+    CapabilityTokenVerifyRequest, ConfigRevisionRecord, ConnectorAdminState, ConnectorAdminStatus,
+    ConnectorArchetype, ConnectorArtifactMetadataResponse, ConnectorArtifactRegistrationRequest,
     ConnectorArtifactRegistrationResponse, ConnectorConfigApplyRequest,
     ConnectorConfigApplyResponse, ConnectorConfigDiffRequest, ConnectorConfigDiffResponse,
     ConnectorConfigRevisionsResponse, ConnectorConfigRollbackRequest, ConnectorConfigSnapshot,
@@ -3371,6 +3371,7 @@ impl HttpBatchInvokeRequest {
                     input: serde_json::Value::Null,
                     depends_on: operation.depends_on.clone(),
                     zone: Some(operation.request.zone_id.clone()),
+                    scheduler: operation.scheduler.clone(),
                 })
                 .collect(),
             options: self.options.clone(),
@@ -3385,6 +3386,8 @@ struct HttpBatchOperation {
     request: InvokeRequest,
     #[serde(default)]
     depends_on: Vec<String>,
+    #[serde(default)]
+    scheduler: BatchScheduleHint,
 }
 
 #[derive(Debug, Deserialize)]
@@ -6193,6 +6196,7 @@ fn build_batch_response(
     mut results_map: HashMap<String, OperationResult>,
     aborted: bool,
     started_at: Instant,
+    schedule_report: Option<BatchScheduleReport>,
 ) -> BatchInvokeResponse {
     let results: Vec<OperationResult> = request
         .operations
@@ -6224,6 +6228,7 @@ fn build_batch_response(
         skipped,
         results,
         total_duration_ms: elapsed_millis(started_at),
+        schedule_report,
     }
 }
 
@@ -6338,7 +6343,11 @@ async fn batch_invoke_handler(
 
     let executor = BatchExecutor::new();
     let planning_request = request.planning_request();
-    let plan = executor.plan(&planning_request).map_err(map_host_error)?;
+    let (plan, schedule_report) = executor
+        .plan_with_schedule_report(&planning_request)
+        .map_err(map_host_error)?;
+    let schedule_report = matches!(request.options.scheduler.mode, BatchSchedulerMode::Adaptive)
+        .then_some(schedule_report);
     let timeout = Duration::from_millis(request.options.timeout_ms);
     let max_parallelism = usize::try_from(request.options.max_parallelism)
         .unwrap_or(usize::MAX)
@@ -6414,7 +6423,8 @@ async fn batch_invoke_handler(
         }
     }
 
-    let response = build_batch_response(&request, results_map, aborted, started_at);
+    let response =
+        build_batch_response(&request, results_map, aborted, started_at, schedule_report);
     tracing::info!(
         event = "batch_invoke_response",
         operation_count = request.operations.len(),
@@ -9216,8 +9226,13 @@ mod tests {
         let zone_id = ZoneId::work();
         let token =
             test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
-        let request =
-            hybrid_owner_production_request(connector_key, operation_id, zone_id, token, None);
+        let request = hybrid_owner_production_request(
+            connector_key,
+            operation_id,
+            zone_id,
+            token,
+            None,
+        );
 
         let error = verify_live_request(state.as_ref(), &request, None)
             .await
@@ -9318,13 +9333,8 @@ mod tests {
         let token =
             test_capability_token(&signing_key, capability_id, operation_id, zone_id.as_str());
         // No evidence tag attached → legacy V3-only request shape.
-        let request = hybrid_owner_production_request(
-            connector_key,
-            operation_id,
-            zone_id,
-            token,
-            None,
-        );
+        let request =
+            hybrid_owner_production_request(connector_key, operation_id, zone_id, token, None);
 
         let verified = verify_live_request(unconfigured_state.as_ref(), &request, None)
             .await
@@ -10167,6 +10177,7 @@ mod tests {
                     approval_tokens: Vec::new(),
                 },
                 depends_on: Vec::new(),
+                scheduler: BatchScheduleHint::default(),
             }],
             options: BatchOptions::default(),
         };

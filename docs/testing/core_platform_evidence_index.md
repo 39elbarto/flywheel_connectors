@@ -209,6 +209,22 @@ Runtime health model output:
 }
 ```
 
+### Adaptive Batch Scheduler
+
+Host batch planning now supports an opt-in adaptive scheduler for massive
+agent-swarm fanout. The default remains deterministic FIFO topological order;
+adaptive mode reorders only within already-independent dependency tiers using
+priority, estimated service time, and fairness buckets. Scheduler reports carry
+the original tiers, scheduled tiers, per-operation actions, and FIFO-vs-scheduled
+wait counterfactuals so test harnesses can replay the plan without trusting log
+text.
+
+Targeted verification:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler cargo test -p fcp-host batch_scheduler --lib
+```
+
 ## Known Flakes and Workarounds
 
 ### fcp-streaming health.rs timing tests
@@ -286,6 +302,7 @@ rch exec -- cargo test -p fcp-testkit --test runtime_lifecycle_acceptance
 | `crates/fcp-testkit/tests/runtime_lifecycle_acceptance.rs` | Health tracker, supervisor config, polling cursor, streaming session, session-script DSL, evidence, cleanup, HealthState serialization (30 tests) |
 | `crates/fcp-testkit/src/live_suite.rs` | Live-suite gating, secrets, cost budget, synthetic tenants, cleanup guards, environment manifests, prerequisite reports (88 tests) |
 | `crates/fcp-testkit/src/evidence_helpers.rs` | Evidence collector, audit events, receipts, decisions, secret redaction, swarm-latency scenarios, environment fingerprints, raw samples, p50/p95/p99/p999 summaries, JSONL evidence records, scheduler/placement/backpressure decision cards (34 tests) |
+| `crates/fcp-host/src/batch.rs` | Batch dependency validation, deterministic FIFO planning, opt-in adaptive priority/SRPT/fairness scheduling, FIFO counterfactual reports |
 | `crates/fcp-host/tests/no_mock_integration.rs` | BudgetPolicyEngine, DoctorService, discovery→introspect→preflight pipeline (2,597 lines) |
 | `crates/fcp-host/tests/host_connector_integration.rs` | Real subprocess connector integration (4,207 lines) |
 | `crates/fcp-e2e/tests/host_resilience_e2e.rs` | Circuit breaker, bulkhead, adaptive load shedding (73 tests) |

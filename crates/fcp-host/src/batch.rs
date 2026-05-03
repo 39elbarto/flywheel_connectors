@@ -45,6 +45,9 @@ pub struct BatchOperation {
     /// Optional zone override for this operation.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub zone: Option<ZoneId>,
+    /// Optional scheduler hints used by adaptive batch planning.
+    #[serde(default, skip_serializing_if = "BatchScheduleHint::is_default")]
+    pub scheduler: BatchScheduleHint,
 }
 
 /// Options controlling batch execution behavior.
@@ -59,6 +62,9 @@ pub struct BatchOptions {
     /// Overall timeout for the entire batch.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+    /// Adaptive scheduling options. Defaults to deterministic FIFO tier order.
+    #[serde(default, skip_serializing_if = "BatchSchedulerOptions::is_default")]
+    pub scheduler: BatchSchedulerOptions,
 }
 
 const fn default_max_parallelism() -> u32 {
@@ -75,7 +81,102 @@ impl Default for BatchOptions {
             max_parallelism: default_max_parallelism(),
             stop_on_first_error: false,
             timeout_ms: default_timeout_ms(),
+            scheduler: BatchSchedulerOptions::default(),
         }
+    }
+}
+
+/// Relative urgency hint for a batch operation.
+#[must_use]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchOperationPriority {
+    /// Drop or background work.
+    Low,
+    /// Ordinary user-visible work.
+    #[default]
+    Normal,
+    /// Latency-sensitive work.
+    High,
+    /// Control-plane work that gates the rest of the batch.
+    Critical,
+}
+
+impl BatchOperationPriority {
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Low => 0,
+            Self::Normal => 1,
+            Self::High => 2,
+            Self::Critical => 3,
+        }
+    }
+}
+
+/// Per-operation scheduler hints for adaptive batch planning.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchScheduleHint {
+    /// Relative operation priority. Higher priority runs earlier within a dependency tier.
+    #[serde(default)]
+    pub priority: BatchOperationPriority,
+    /// Estimated service time in milliseconds for SRPT-style ordering.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_duration_ms: Option<u64>,
+    /// Fairness bucket used to prevent one zone/tenant from monopolizing a tier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fairness_key: Option<String>,
+}
+
+impl BatchScheduleHint {
+    const fn is_default(&self) -> bool {
+        self.priority.rank() == BatchOperationPriority::Normal.rank()
+            && self.estimated_duration_ms.is_none()
+            && self.fairness_key.is_none()
+    }
+}
+
+/// Batch scheduling strategy.
+#[must_use]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchSchedulerMode {
+    /// Preserve deterministic topological FIFO ordering.
+    #[default]
+    Fifo,
+    /// Reorder independent operations by priority, estimated duration, and fairness.
+    Adaptive,
+}
+
+/// Scheduler options for dependency-tier batch planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchSchedulerOptions {
+    /// Scheduling mode. Defaults to FIFO for stable existing behavior.
+    #[serde(default)]
+    pub mode: BatchSchedulerMode,
+    /// Maximum consecutive operations from the same fairness bucket in a tier.
+    #[serde(default = "default_max_consecutive_per_fairness_key")]
+    pub max_consecutive_per_fairness_key: usize,
+}
+
+const fn default_max_consecutive_per_fairness_key() -> usize {
+    2
+}
+
+impl Default for BatchSchedulerOptions {
+    fn default() -> Self {
+        Self {
+            mode: BatchSchedulerMode::Fifo,
+            max_consecutive_per_fairness_key: default_max_consecutive_per_fairness_key(),
+        }
+    }
+}
+
+impl BatchSchedulerOptions {
+    const fn is_default(&self) -> bool {
+        matches!(self.mode, BatchSchedulerMode::Fifo)
+            && self.max_consecutive_per_fairness_key == default_max_consecutive_per_fairness_key()
     }
 }
 
@@ -158,6 +259,9 @@ pub struct BatchInvokeResponse {
     pub results: Vec<OperationResult>,
     /// Total batch duration in milliseconds.
     pub total_duration_ms: u64,
+    /// Optional adaptive scheduler replay report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_report: Option<BatchScheduleReport>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -196,6 +300,80 @@ impl ExecutionPlan {
             .max()
             .unwrap_or(0)
     }
+}
+
+/// Reason an operation moved, stayed, or fell back during scheduling.
+#[must_use]
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchScheduleAction {
+    /// FIFO mode was requested, so no adaptive reorder was applied.
+    FifoFallback,
+    /// The operation stayed in the same position after adaptive scheduling.
+    Kept,
+    /// The operation moved earlier because of a higher priority hint.
+    PriorityPromote,
+    /// The operation moved earlier because of a shorter estimated duration.
+    ShortJobPromote,
+    /// The operation moved to satisfy the fairness cap.
+    FairnessInterleave,
+}
+
+/// Replayable counterfactual for one scheduling decision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchScheduleCounterfactual {
+    /// Operation position in deterministic FIFO tier order.
+    pub fifo_position: usize,
+    /// Operation position after scheduler application.
+    pub scheduled_position: usize,
+    /// Estimated wait before this operation under FIFO ordering.
+    pub fifo_wait_before_ms: u64,
+    /// Estimated wait before this operation under scheduled ordering.
+    pub scheduled_wait_before_ms: u64,
+    /// Scheduled wait minus FIFO wait. Negative means the operation moved earlier.
+    pub wait_delta_ms: i64,
+}
+
+/// One scheduler decision emitted for offline replay and audit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchScheduleDecision {
+    /// Dependency tier index.
+    pub tier_index: usize,
+    /// Operation id.
+    pub operation_id: String,
+    /// Scheduler action.
+    pub action: BatchScheduleAction,
+    /// Priority considered by the scheduler.
+    pub priority: BatchOperationPriority,
+    /// Estimated operation duration considered by the scheduler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub estimated_duration_ms: Option<u64>,
+    /// Fairness bucket considered by the scheduler.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fairness_key: Option<String>,
+    /// Counterfactual FIFO-vs-scheduled wait estimate.
+    pub counterfactual: BatchScheduleCounterfactual,
+}
+
+/// Replayable report for adaptive batch scheduler decisions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchScheduleReport {
+    /// Scheduler mode used to build the plan.
+    pub mode: BatchSchedulerMode,
+    /// Total operation count.
+    pub total_operations: usize,
+    /// Original topological tiers before adaptive reordering.
+    pub original_tiers: Vec<Vec<String>>,
+    /// Final tiers after scheduler application.
+    pub scheduled_tiers: Vec<Vec<String>>,
+    /// Whether the scheduler intentionally preserved FIFO order.
+    pub fallback: bool,
+    /// Human-readable fallback reason when `fallback` is true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Per-operation decisions.
+    pub decisions: Vec<BatchScheduleDecision>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -391,6 +569,14 @@ impl BatchExecutor {
             ));
         }
 
+        if matches!(request.options.scheduler.mode, BatchSchedulerMode::Adaptive)
+            && request.options.scheduler.max_consecutive_per_fairness_key == 0
+        {
+            return Err(HostError::InvalidFilter(
+                "adaptive scheduler fairness cap must be > 0".into(),
+            ));
+        }
+
         // Check that all depends_on references exist.
         let all_ids: HashSet<&str> = request.operations.iter().map(|o| o.id.as_str()).collect();
         for op in &request.operations {
@@ -437,10 +623,33 @@ impl BatchExecutor {
     pub fn plan(&self, request: &BatchInvokeRequest) -> HostResult<ExecutionPlan> {
         self.validate(request)?;
         let tiers = topological_tiers(&request.operations)?;
+        let tiers = schedule_tiers(&request.operations, tiers, &request.options.scheduler);
         Ok(ExecutionPlan {
             total_operations: request.operations.len(),
             tiers,
         })
+    }
+
+    /// Build an execution plan and a replayable scheduler decision report.
+    ///
+    /// # Errors
+    /// Returns any validation error produced by [`Self::validate`] or a cycle
+    /// detection error if the dependency graph cannot be tiered.
+    pub fn plan_with_schedule_report(
+        &self,
+        request: &BatchInvokeRequest,
+    ) -> HostResult<(ExecutionPlan, BatchScheduleReport)> {
+        self.validate(request)?;
+        let tiers = topological_tiers(&request.operations)?;
+        let (tiers, report) =
+            schedule_tiers_with_report(&request.operations, tiers, &request.options.scheduler);
+        Ok((
+            ExecutionPlan {
+                total_operations: request.operations.len(),
+                tiers,
+            },
+            report,
+        ))
     }
 
     /// Execute a batch synchronously using a provided handler function.
@@ -642,6 +851,287 @@ fn topological_tiers(operations: &[BatchOperation]) -> HostResult<Vec<ExecutionT
     Ok(tiers)
 }
 
+const UNKNOWN_ESTIMATED_DURATION_MS: u64 = 1_000_000;
+
+struct BatchSchedulerMetadata<'a> {
+    operations: HashMap<&'a str, &'a BatchOperation>,
+}
+
+impl<'a> BatchSchedulerMetadata<'a> {
+    fn new(operations: &'a [BatchOperation]) -> Self {
+        Self {
+            operations: operations
+                .iter()
+                .map(|operation| (operation.id.as_str(), operation))
+                .collect(),
+        }
+    }
+
+    fn operation(&self, operation_id: &str) -> &'a BatchOperation {
+        self.operations
+            .get(operation_id)
+            .copied()
+            .expect("planned batch operation must exist")
+    }
+
+    fn hint(&self, operation_id: &str) -> &'a BatchScheduleHint {
+        &self.operation(operation_id).scheduler
+    }
+
+    fn fairness_key(&self, operation_id: &str) -> Option<String> {
+        let operation = self.operation(operation_id);
+        operation
+            .scheduler
+            .fairness_key
+            .clone()
+            .or_else(|| operation.zone.as_ref().map(|zone| zone.as_str().to_owned()))
+    }
+
+    fn estimated_duration_ms(&self, operation_id: &str) -> u64 {
+        self.hint(operation_id)
+            .estimated_duration_ms
+            .unwrap_or(UNKNOWN_ESTIMATED_DURATION_MS)
+    }
+}
+
+fn schedule_tiers(
+    operations: &[BatchOperation],
+    tiers: Vec<ExecutionTier>,
+    options: &BatchSchedulerOptions,
+) -> Vec<ExecutionTier> {
+    if !matches!(options.mode, BatchSchedulerMode::Adaptive) {
+        return tiers;
+    }
+
+    let metadata = BatchSchedulerMetadata::new(operations);
+    tiers
+        .into_iter()
+        .map(|tier| ExecutionTier {
+            operation_ids: adaptive_order_tier(&tier.operation_ids, &metadata, options),
+        })
+        .collect()
+}
+
+fn schedule_tiers_with_report(
+    operations: &[BatchOperation],
+    tiers: Vec<ExecutionTier>,
+    options: &BatchSchedulerOptions,
+) -> (Vec<ExecutionTier>, BatchScheduleReport) {
+    let original_tiers: Vec<Vec<String>> = tiers
+        .iter()
+        .map(|tier| tier.operation_ids.clone())
+        .collect();
+    let scheduled_tiers = schedule_tiers(operations, tiers, options);
+    let scheduled_tier_ids: Vec<Vec<String>> = scheduled_tiers
+        .iter()
+        .map(|tier| tier.operation_ids.clone())
+        .collect();
+    let fallback = matches!(options.mode, BatchSchedulerMode::Fifo);
+    let decisions = schedule_decisions(
+        operations,
+        &original_tiers,
+        &scheduled_tier_ids,
+        options.mode,
+    );
+
+    (
+        scheduled_tiers,
+        BatchScheduleReport {
+            mode: options.mode,
+            total_operations: operations.len(),
+            original_tiers,
+            scheduled_tiers: scheduled_tier_ids,
+            fallback,
+            fallback_reason: fallback.then(|| "scheduler mode is fifo".to_owned()),
+            decisions,
+        },
+    )
+}
+
+fn adaptive_order_tier(
+    operation_ids: &[String],
+    metadata: &BatchSchedulerMetadata<'_>,
+    options: &BatchSchedulerOptions,
+) -> Vec<String> {
+    let mut pending = operation_ids.to_vec();
+    pending.sort_by(|left, right| compare_schedule_key(left, right, metadata));
+    apply_fairness_cap(
+        pending,
+        metadata,
+        options.max_consecutive_per_fairness_key.max(1),
+    )
+}
+
+fn compare_schedule_key(
+    left: &str,
+    right: &str,
+    metadata: &BatchSchedulerMetadata<'_>,
+) -> std::cmp::Ordering {
+    let left_hint = metadata.hint(left);
+    let right_hint = metadata.hint(right);
+    right_hint
+        .priority
+        .rank()
+        .cmp(&left_hint.priority.rank())
+        .then_with(|| {
+            metadata
+                .estimated_duration_ms(left)
+                .cmp(&metadata.estimated_duration_ms(right))
+        })
+        .then_with(|| left.cmp(right))
+}
+
+fn apply_fairness_cap(
+    mut pending: Vec<String>,
+    metadata: &BatchSchedulerMetadata<'_>,
+    fairness_cap: usize,
+) -> Vec<String> {
+    let mut scheduled = Vec::with_capacity(pending.len());
+    let mut last_key: Option<String> = None;
+    let mut streak = 0usize;
+
+    while !pending.is_empty() {
+        let choice = fairness_choice_index(
+            &pending,
+            metadata,
+            last_key.as_deref(),
+            streak,
+            fairness_cap,
+        );
+        let operation_id = pending.remove(choice);
+        let key = metadata.fairness_key(&operation_id);
+        if last_key.as_deref() == key.as_deref() {
+            streak += 1;
+        } else {
+            last_key = key;
+            streak = 1;
+        }
+        scheduled.push(operation_id);
+    }
+
+    scheduled
+}
+
+fn fairness_choice_index(
+    pending: &[String],
+    metadata: &BatchSchedulerMetadata<'_>,
+    last_key: Option<&str>,
+    streak: usize,
+    fairness_cap: usize,
+) -> usize {
+    if streak < fairness_cap {
+        return 0;
+    }
+
+    let Some(last_key) = last_key else {
+        return 0;
+    };
+
+    pending
+        .iter()
+        .position(|operation_id| metadata.fairness_key(operation_id).as_deref() != Some(last_key))
+        .unwrap_or(0)
+}
+
+fn schedule_decisions(
+    operations: &[BatchOperation],
+    original_tiers: &[Vec<String>],
+    scheduled_tiers: &[Vec<String>],
+    mode: BatchSchedulerMode,
+) -> Vec<BatchScheduleDecision> {
+    let metadata = BatchSchedulerMetadata::new(operations);
+    let mut decisions = Vec::with_capacity(operations.len());
+
+    for (tier_index, (original, scheduled)) in
+        original_tiers.iter().zip(scheduled_tiers).enumerate()
+    {
+        let original_positions = positions_by_operation(original);
+        let scheduled_positions = positions_by_operation(scheduled);
+        let fifo_waits = wait_before_by_operation(original, &metadata);
+        let scheduled_waits = wait_before_by_operation(scheduled, &metadata);
+
+        for operation_id in scheduled {
+            let fifo_position = original_positions[operation_id.as_str()];
+            let scheduled_position = scheduled_positions[operation_id.as_str()];
+            let hint = metadata.hint(operation_id);
+            let fifo_wait = fifo_waits[operation_id.as_str()];
+            let scheduled_wait = scheduled_waits[operation_id.as_str()];
+            decisions.push(BatchScheduleDecision {
+                tier_index,
+                operation_id: operation_id.clone(),
+                action: schedule_action(mode, fifo_position, scheduled_position, hint),
+                priority: hint.priority,
+                estimated_duration_ms: hint.estimated_duration_ms,
+                fairness_key: metadata.fairness_key(operation_id),
+                counterfactual: BatchScheduleCounterfactual {
+                    fifo_position,
+                    scheduled_position,
+                    fifo_wait_before_ms: fifo_wait,
+                    scheduled_wait_before_ms: scheduled_wait,
+                    wait_delta_ms: wait_delta_ms(scheduled_wait, fifo_wait),
+                },
+            });
+        }
+    }
+
+    decisions
+}
+
+fn positions_by_operation(operation_ids: &[String]) -> HashMap<&str, usize> {
+    operation_ids
+        .iter()
+        .enumerate()
+        .map(|(index, operation_id)| (operation_id.as_str(), index))
+        .collect()
+}
+
+fn wait_before_by_operation<'a>(
+    operation_ids: &'a [String],
+    metadata: &BatchSchedulerMetadata<'_>,
+) -> HashMap<&'a str, u64> {
+    let mut waits = HashMap::with_capacity(operation_ids.len());
+    let mut elapsed = 0u64;
+    for operation_id in operation_ids {
+        waits.insert(operation_id.as_str(), elapsed);
+        elapsed = elapsed.saturating_add(metadata.estimated_duration_ms(operation_id));
+    }
+    waits
+}
+
+const fn schedule_action(
+    mode: BatchSchedulerMode,
+    fifo_position: usize,
+    scheduled_position: usize,
+    hint: &BatchScheduleHint,
+) -> BatchScheduleAction {
+    if matches!(mode, BatchSchedulerMode::Fifo) {
+        return BatchScheduleAction::FifoFallback;
+    }
+
+    if fifo_position == scheduled_position {
+        return BatchScheduleAction::Kept;
+    }
+
+    if scheduled_position < fifo_position {
+        if hint.priority.rank() > BatchOperationPriority::Normal.rank() {
+            BatchScheduleAction::PriorityPromote
+        } else {
+            BatchScheduleAction::ShortJobPromote
+        }
+    } else {
+        BatchScheduleAction::FairnessInterleave
+    }
+}
+
+fn wait_delta_ms(scheduled_wait: u64, fifo_wait: u64) -> i64 {
+    let delta = i128::from(scheduled_wait) - i128::from(fifo_wait);
+    let clamped = delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
+    match i64::try_from(clamped) {
+        Ok(value) => value,
+        Err(_) => unreachable!("clamped wait delta must fit in i64"),
+    }
+}
+
 fn batch_timeout_error() -> BatchOperationError {
     BatchOperationError {
         code: "BATCH_TIMEOUT".into(),
@@ -792,6 +1282,7 @@ fn build_response(
         skipped,
         results,
         total_duration_ms: elapsed_millis(started_at),
+        schedule_report: None,
     }
 }
 
@@ -829,13 +1320,43 @@ mod tests {
             input: serde_json::json!({}),
             depends_on: deps.iter().map(|&s| s.into()).collect(),
             zone: None,
+            scheduler: BatchScheduleHint::default(),
         }
+    }
+
+    fn scheduled_op(
+        id: &str,
+        priority: BatchOperationPriority,
+        estimated_duration_ms: u64,
+        fairness_key: Option<&str>,
+        deps: &[&str],
+    ) -> BatchOperation {
+        let mut operation = op(id, "tool", deps);
+        operation.scheduler = BatchScheduleHint {
+            priority,
+            estimated_duration_ms: Some(estimated_duration_ms),
+            fairness_key: fairness_key.map(String::from),
+        };
+        operation
     }
 
     fn simple_request(ops: Vec<BatchOperation>) -> BatchInvokeRequest {
         BatchInvokeRequest {
             operations: ops,
             options: BatchOptions::default(),
+        }
+    }
+
+    fn adaptive_request(ops: Vec<BatchOperation>) -> BatchInvokeRequest {
+        BatchInvokeRequest {
+            operations: ops,
+            options: BatchOptions {
+                scheduler: BatchSchedulerOptions {
+                    mode: BatchSchedulerMode::Adaptive,
+                    max_consecutive_per_fairness_key: 2,
+                },
+                ..Default::default()
+            },
         }
     }
 
@@ -929,6 +1450,23 @@ mod tests {
         };
         let err = executor.validate(&req).unwrap_err();
         assert!(err.to_string().contains("max_parallelism"));
+    }
+
+    #[test]
+    fn validate_batch_scheduler_rejects_zero_fairness_cap() {
+        let executor = BatchExecutor::new();
+        let req = BatchInvokeRequest {
+            operations: vec![op("a", "tool1", &[])],
+            options: BatchOptions {
+                scheduler: BatchSchedulerOptions {
+                    mode: BatchSchedulerMode::Adaptive,
+                    max_consecutive_per_fairness_key: 0,
+                },
+                ..Default::default()
+            },
+        };
+        let err = executor.validate(&req).unwrap_err();
+        assert!(err.to_string().contains("fairness cap"));
     }
 
     #[test]
@@ -1053,6 +1591,144 @@ mod tests {
         );
         // Sorted alphabetically.
         assert_eq!(plan1.tiers[0].operation_ids, vec!["a", "m", "z"]);
+    }
+
+    #[test]
+    fn batch_scheduler_fifo_report_preserves_default_order() {
+        let executor = BatchExecutor::new();
+        let req = simple_request(vec![
+            scheduled_op("z", BatchOperationPriority::Critical, 1, None, &[]),
+            scheduled_op("a", BatchOperationPriority::Low, 1, None, &[]),
+            scheduled_op("m", BatchOperationPriority::High, 1, None, &[]),
+        ]);
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+
+        assert_eq!(plan.tiers[0].operation_ids, vec!["a", "m", "z"]);
+        assert!(report.fallback);
+        assert_eq!(
+            report.fallback_reason.as_deref(),
+            Some("scheduler mode is fifo")
+        );
+        assert!(
+            report
+                .decisions
+                .iter()
+                .all(|decision| decision.action == BatchScheduleAction::FifoFallback)
+        );
+    }
+
+    #[test]
+    fn batch_scheduler_adaptive_prioritizes_critical_and_short_jobs() {
+        let executor = BatchExecutor::new();
+        let req = adaptive_request(vec![
+            scheduled_op("a_long", BatchOperationPriority::Normal, 10_000, None, &[]),
+            scheduled_op("z_short", BatchOperationPriority::Normal, 10, None, &[]),
+            scheduled_op(
+                "c_critical",
+                BatchOperationPriority::Critical,
+                25,
+                None,
+                &[],
+            ),
+        ]);
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+
+        assert_eq!(
+            plan.tiers[0].operation_ids,
+            vec!["c_critical", "z_short", "a_long"]
+        );
+        let critical = report
+            .decisions
+            .iter()
+            .find(|decision| decision.operation_id == "c_critical")
+            .unwrap();
+        assert_eq!(critical.action, BatchScheduleAction::PriorityPromote);
+        assert!(critical.counterfactual.wait_delta_ms < 0);
+
+        let short = report
+            .decisions
+            .iter()
+            .find(|decision| decision.operation_id == "z_short")
+            .unwrap();
+        assert_eq!(short.action, BatchScheduleAction::ShortJobPromote);
+        assert_eq!(short.counterfactual.scheduled_wait_before_ms, 25);
+    }
+
+    #[test]
+    fn batch_scheduler_adaptive_interleaves_fairness_buckets() {
+        let executor = BatchExecutor::new();
+        let req = adaptive_request(vec![
+            scheduled_op(
+                "a1",
+                BatchOperationPriority::Normal,
+                10,
+                Some("tenant-a"),
+                &[],
+            ),
+            scheduled_op(
+                "a2",
+                BatchOperationPriority::Normal,
+                10,
+                Some("tenant-a"),
+                &[],
+            ),
+            scheduled_op(
+                "a3",
+                BatchOperationPriority::Normal,
+                10,
+                Some("tenant-a"),
+                &[],
+            ),
+            scheduled_op(
+                "b1",
+                BatchOperationPriority::Normal,
+                10,
+                Some("tenant-b"),
+                &[],
+            ),
+        ]);
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+
+        assert_eq!(plan.tiers[0].operation_ids, vec!["a1", "a2", "b1", "a3"]);
+        let b1 = report
+            .decisions
+            .iter()
+            .find(|decision| decision.operation_id == "b1")
+            .unwrap();
+        assert_eq!(b1.action, BatchScheduleAction::ShortJobPromote);
+        let a3 = report
+            .decisions
+            .iter()
+            .find(|decision| decision.operation_id == "a3")
+            .unwrap();
+        assert_eq!(a3.action, BatchScheduleAction::FairnessInterleave);
+    }
+
+    #[test]
+    fn batch_scheduler_adaptive_respects_dependency_tiers() {
+        let executor = BatchExecutor::new();
+        let req = adaptive_request(vec![
+            scheduled_op("root", BatchOperationPriority::Low, 1000, None, &[]),
+            scheduled_op(
+                "dependent_critical",
+                BatchOperationPriority::Critical,
+                1,
+                None,
+                &["root"],
+            ),
+            scheduled_op("sibling", BatchOperationPriority::High, 1, None, &[]),
+        ]);
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+
+        assert_eq!(plan.tiers[0].operation_ids, vec!["sibling", "root"]);
+        assert_eq!(plan.tiers[1].operation_ids, vec!["dependent_critical"]);
+        assert_eq!(
+            report.scheduled_tiers,
+            vec![
+                vec!["sibling".to_string(), "root".to_string()],
+                vec!["dependent_critical".to_string()]
+            ]
+        );
     }
 
     // ── Execution Tests ──
@@ -1436,6 +2112,7 @@ mod tests {
                 },
             ],
             total_duration_ms: 52,
+            schedule_report: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: BatchInvokeResponse = serde_json::from_str(&json).unwrap();
@@ -1473,6 +2150,7 @@ mod tests {
         assert_eq!(opts.max_parallelism, 8);
         assert!(!opts.stop_on_first_error);
         assert_eq!(opts.timeout_ms, 30_000);
+        assert_eq!(opts.scheduler.mode, BatchSchedulerMode::Fifo);
     }
 
     #[test]
@@ -1482,6 +2160,7 @@ mod tests {
         assert_eq!(opts.max_parallelism, 4);
         assert!(!opts.stop_on_first_error);
         assert_eq!(opts.timeout_ms, 30_000);
+        assert_eq!(opts.scheduler.mode, BatchSchedulerMode::Fifo);
     }
 
     // ── Edge Cases ──
@@ -1705,6 +2384,7 @@ mod tests {
             max_parallelism: 4,
             stop_on_first_error: true,
             timeout_ms: 5000,
+            ..Default::default()
         };
         assert_eq!(opts.max_parallelism, 4);
         assert!(opts.stop_on_first_error);
@@ -1726,6 +2406,7 @@ mod tests {
             max_parallelism: 16,
             stop_on_first_error: true,
             timeout_ms: 120_000,
+            ..Default::default()
         };
         assert_eq!(opts.max_parallelism, 16);
         assert!(opts.stop_on_first_error);
@@ -1738,6 +2419,7 @@ mod tests {
             max_parallelism: 4,
             stop_on_first_error: true,
             timeout_ms: 5000,
+            ..Default::default()
         };
         let json = serde_json::to_string(&opts).unwrap();
         let parsed: BatchOptions = serde_json::from_str(&json).unwrap();
@@ -2441,6 +3123,7 @@ mod tests {
                 duration_ms: 0,
             }],
             total_duration_ms: 30_000,
+            schedule_report: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: BatchInvokeResponse = serde_json::from_str(&json).unwrap();
@@ -2998,6 +3681,7 @@ mod tests {
             skipped: 0,
             results: vec![],
             total_duration_ms: 0,
+            schedule_report: None,
         };
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: BatchInvokeResponse = serde_json::from_str(&json).unwrap();
@@ -3020,6 +3704,7 @@ mod tests {
                 duration_ms: 5,
             }],
             total_duration_ms: 10,
+            schedule_report: None,
         };
         let cloned = resp.clone();
         assert_eq!(resp.status, cloned.status);

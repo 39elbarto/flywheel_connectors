@@ -29,11 +29,12 @@
 //! 7. **`ZoneRegistry`** — register/get_zone round-trip; absent tool
 //!    returns None.
 
-use fcp_prelude::ZoneId;
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOptions,
-    BatchStatus, ExecutionPlan, ExecutionTier, OperationResultStatus, ZoneRegistry,
+    BatchScheduleHint, BatchStatus, ExecutionPlan, ExecutionTier, OperationResultStatus,
+    ZoneRegistry,
 };
+use fcp_prelude::ZoneId;
 
 fn op(id: &str, depends_on: Vec<&str>) -> BatchOperation {
     BatchOperation {
@@ -42,6 +43,7 @@ fn op(id: &str, depends_on: Vec<&str>) -> BatchOperation {
         input: serde_json::json!({}),
         depends_on: depends_on.into_iter().map(String::from).collect(),
         zone: None,
+        scheduler: BatchScheduleHint::default(),
     }
 }
 

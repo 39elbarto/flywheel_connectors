@@ -6,7 +6,7 @@
 
 use fcp_host::{
     BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions,
-    BatchStatus, OperationResult, OperationResultStatus,
+    BatchScheduleHint, BatchSchedulerMode, BatchStatus, OperationResult, OperationResultStatus,
 };
 use serde_json::json;
 
@@ -17,6 +17,7 @@ fn operation(id: &str) -> BatchOperation {
         input: json!({ "message": id }),
         depends_on: Vec::new(),
         zone: None,
+        scheduler: BatchScheduleHint::default(),
     }
 }
 
@@ -27,6 +28,7 @@ fn batch_options_missing_fields_use_documented_defaults() {
     assert_eq!(options.max_parallelism, 8);
     assert!(!options.stop_on_first_error);
     assert_eq!(options.timeout_ms, 30_000);
+    assert_eq!(options.scheduler.mode, BatchSchedulerMode::Fifo);
 }
 
 #[test]
@@ -40,12 +42,17 @@ fn batch_operation_defaults_dependencies_and_omits_absent_zone() {
 
     assert!(op.depends_on.is_empty());
     assert!(op.zone.is_none());
+    assert_eq!(op.scheduler, BatchScheduleHint::default());
 
     let serialized = serde_json::to_value(&op).expect("operation serialize");
     assert_eq!(serialized["depends_on"], json!([]));
     assert!(
         serialized.get("zone").is_none(),
         "zone MUST be omitted when no per-operation zone override is present"
+    );
+    assert!(
+        serialized.get("scheduler").is_none(),
+        "default scheduler hints MUST be omitted from operation JSON"
     );
 }
 
@@ -63,6 +70,7 @@ fn batch_request_round_trips_dependency_edges_and_options() {
             max_parallelism: 2,
             stop_on_first_error: true,
             timeout_ms: 5_000,
+            ..Default::default()
         },
     };
 
@@ -188,6 +196,7 @@ fn batch_response_preserves_submission_order_and_counts() {
             },
         ],
         total_duration_ms: 6,
+        schedule_report: None,
     };
 
     let value = serde_json::to_value(&response).expect("response serialize");

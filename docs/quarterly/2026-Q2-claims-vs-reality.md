@@ -1,121 +1,131 @@
 # Claims vs Reality Quarterly Report — Q2 2026
 
 > Period: Q2 2026 (April–June)
-> Auditor: SunnyMoose (Claude Opus 4.6)
-> Prior report: N/A (first report — baseline from MOR/C2.4 audit)
-> Snapshot date: 2026-04-10 20:17 UTC (commit 70978239)
-> **Post-report corrections:** Three status rows drifted after this
-> snapshot was written. See the post-snapshot-deltas section below
-> before citing numbers from this report.
+> Current auditor: GoldenFinch (Codex)
+> Prior baseline: SunnyMoose MOR/C2.4 audit, 2026-04-10
+> Current snapshot date: 2026-05-03 (pre-docs commit `7f0bd5e7b`)
+> Quarter note: The date is still Q2, so this report was revised in-place
+> rather than split into a Q3 report.
 
 ## Summary
 
-This is the inaugural claims-vs-reality quarterly report, establishing the
-baseline from the MOR/C2.4 audit conducted on 2026-04-10. All 16 feature
-status labels in the README were verified against code evidence **as of
-the snapshot date**.
+GoldenFinch re-ran the README claims-vs-reality pass after the May 2026
+security, E2E, conformance, golden-vector, and fuzz waves. Code remains the
+ground truth: the README's 16-row feature table was compared against live
+source files, crate-local tests, E2E scenarios, conformance harnesses, fuzz
+targets, and open security findings.
 
-**Result at snapshot date:** All 16 labels accurate, no overclaims, no
-underclaims.
+**Result at 2026-05-03:** one status overclaim, eleven status underclaims,
+one connector-inventory underclaim, and one stale evidence path.
 
-**Post-snapshot status:** Three labels were subsequently changed in the
-README and the quarterly table has been re-reconciled in-place to match
-(br-rx347, br-lvz4t). The original "no overclaims, no underclaims" claim
-above is preserved for historical honesty; see the post-snapshot-deltas
-section for the rows that were re-audited.
+- **Overclaim fixed:** `Capability Tokens (CWT/COSE)` is no longer `PROVEN`
+  because open finding `flywheel_connectors-01yaq` shows that
+  `CapabilityToken<BoundVerified>` currently accepts instance-agnostic tokens.
+- **Underclaims fixed:** rows with direct E2E/conformance/golden proof moved
+  from `IMPLEMENTED` to `PROVEN`.
+- **Still intentionally limited:** `Zone Isolation` remains `LIMITED` because
+  `allowed_zones` is opt-in in the host-backed path.
+- **Still not operational:** `Mesh-Native Architecture` remains
+  `STEADY-STATE TARGET (NOT YET OPERATIONAL)` under the br-lvz4t pin.
+
+There is no README status label named "Production"; this report uses the
+README's status vocabulary. `PROVEN` means direct proof in this repository, not
+live multi-node production deployment.
 
 ## Feature Status Delta Table
 
-Current Status reflects the latest README (re-reconciled 2026-05-03).
-Snapshot Status preserves the 2026-04-10 audit answer so the drift is
-visible.
+| Feature | README before 2026-05-03 pass | README after pass | Verdict | Evidence checked | Notes |
+|---------|--------------------------------|-------------------|---------|------------------|-------|
+| Host-First Control Plane | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-host/src/{supervisor,enforcement,health}.rs` | Current operator path has direct conformance and concurrent E2E proof. |
+| Truthful Runtime Resolution | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fwc/src/{truth,catalog}.rs`, `crates/fwc/tests/{cual_integration,readme_status_pinning}.rs` | Truth-source taxonomy and README drift pinning are tested. |
+| Zone Isolation | `LIMITED` | `LIMITED` | Accurate | `crates/fcp-core/src/{zone_keys,pcs,policy}.rs`, `crates/fcp-host/src/bin/fcp-host.rs`, host/e2e capability tests | Remains limited because empty `allowed_zones` is still permissive in the host-backed path. |
+| Capability Tokens (CWT/COSE) | `PROVEN` | `IMPLEMENTED` | Overclaim fixed | `crates/fcp-crypto/src/cose.rs`, `crates/fcp-core/src/capability.rs`, `crates/fcp-conformance/tests/capability_*.rs`, `crates/fcp-host/tests/capability_token_typestate_runtime.rs` | Open `flywheel_connectors-01yaq` means instance-binding proof is not complete. |
+| Tamper-Evident Audit | `PROVEN` | `PROVEN` | Accurate | `crates/fcp-audit/`, `crates/fcp-core/src/audit.rs`, audit golden/vector tests | Hash-linked chain and checkpoints remain directly proven. |
+| Revocation | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/revocation_cascade_e2e.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs` | Revocation freshness and rejection are now in E2E/conformance paths. |
+| Egress Proxy | `IMPLEMENTED` | `PROVEN` | Underclaim + stale path fixed | `crates/fcp-sandbox/src/egress.rs`, `crates/fcp-e2e/tests/egress_proxy_e2e.rs` | README previously pointed at removed `fcp-host/src/egress.rs`. |
+| Secretless Connectors | `IMPLEMENTED` | `IMPLEMENTED` | Accurate | `crates/fcp-sandbox/src/egress.rs`, credential authorization/injection tests | Integrated path exists; broad connector-family proof is still not enough for `PROVEN`. |
+| Threshold Owner Key | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-bootstrap/src/ceremony.rs`, `crates/fcp-e2e/tests/threshold_owner_key_e2e.rs` | FROST DKG/signing/survivor-quorum E2E exists; universal default remains a separate rollout choice. |
+| Threshold Secrets | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-core/src/secret.rs`, `crates/fcp-e2e/tests/threshold_secrets_e2e.rs` | Shamir + HPKE sealing + k-of-n reconstruction and fail-closed cases are directly proven. |
+| Supply Chain Attestations | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-registry/src/lib.rs`, `crates/fcp-e2e/tests/supply_chain_attestation_e2e.rs`, registry tests | Real cosign/TUF E2E and registry hardening exist; external release distribution remains outside repo proof. |
+| Offline Access | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/{offline_access,offline_repair}_e2e.rs`, `crates/fcp-store/src/offline.rs` | Both connector-side offline queue/cache and store repair flows have E2E proof. |
+| Mesh-Stored Policy Objects | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/mesh_policy_object_e2e.rs`, `crates/fcp-core/src/policy.rs` | Owner-signed bundles, gossip, evaluation, audit denial, and revocation are proven. |
+| Symbol-First Protocol | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/symbol_first_protocol_e2e.rs`, `crates/fcp-raptorq/`, golden vectors | Real RaptorQ encode/decode and loss/fungibility scenarios exist. |
+| Mesh-Native Architecture | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | Accurate | `crates/fwc/tests/readme_status_pinning.rs`, `crates/fwc/src/main.rs`, `crates/fwc/src/truth.rs`, `crates/fcp-mesh/src/` | Building blocks are tested; normal operator invoke still routes through host `/rpc/invoke`. |
+| Computation Migration | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/computation_migration_reference.rs`, `crates/fcp-kernel/src/computation_migration.rs`, `crates/fcp-store/src/resume_handshake.rs` | Default E2E feature set includes the reference migrate/resume proof. |
 
-| Feature | Prior Status | Snapshot Status (2026-04-10) | Current Status | Delta | Evidence | Notes |
-|---------|-------------|------------------------------|----------------|-------|----------|-------|
-| Host-First Control Plane | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 240+ tests | Proven operational boundary |
-| Truthful Runtime Resolution | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 980+ tests | KnowledgeState taxonomy, TruthPrecedencePolicy |
-| Zone Isolation | N/A | `PROVEN` | `LIMITED` | ↓ Downgraded 2026-04-22 (br-lse4w) | 420+ tests, E2E | README now qualifies: host-side connector zone binding enforced when `allowed_zones` is configured; empty-set permissive branch remains |
-| Capability Tokens (CWT/COSE) | N/A | `PROVEN` | `PROVEN` | Baseline | 249+ tests, conformance | COSE_Sign1, phantom types, mandatory constraints |
-| Tamper-Evident Audit | N/A | `PROVEN` | `PROVEN` | Baseline | 473+ tests, golden vectors | Hash-linked chain + quorum checkpoints |
-| Revocation | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 104 tests | RevocationObject, 5 scopes; E2E TBD |
-| Egress Proxy | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 270+ tests | CIDR deny defaults; hardening TBD |
-| Secretless Connectors | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | credential_id path | Broader proof TBD |
-| Threshold Owner Key | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 93 tests | FROST ceremony; not universal default |
-| Threshold Secrets | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 123 tests | GF(2^8) Shamir, full reconstruction |
-| Supply Chain Attestations | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 347 tests | Schema + verification; release signing TBD |
-| Offline Access | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 185+ tests (77 E2E) | PlacementPolicy + repair controllers |
-| Mesh-Stored Policy Objects | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 128 tests | Owner-signed; mesh distribution TBD |
-| Symbol-First Protocol | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 96+ tests | RaptorQ, chunking, golden vectors |
-| Mesh-Native Architecture | N/A | `DESIGNED` | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | ↓ Downgraded 2026-05-02 (br-lvz4t) | 259+ tests + `fwc/src/truth.rs` (78 tests) | Gossip/IBLT/XOR/LiveTruthResolver are built and tested, but the production invoke path remains `fwc -> fcp-host -> connector subprocesses`; zero mesh-native production evidence |
-| Computation Migration | N/A | `DESIGNED` | `DESIGNED` | Baseline | 205 tests | State machines only; not operational |
+## Inventory Claims Checked
 
-## Post-snapshot deltas (br-rx347)
+| Claim | README before | Live measurement | Verdict | Command shape |
+|-------|---------------|------------------|---------|---------------|
+| Platform crates under `crates/` | 34 | 34 | Accurate | `rg --files crates \| rg '/Cargo.toml$'` |
+| Connector crates under `connectors/` | 150 | 150 | Accurate | `rg --files connectors \| rg '/Cargo.toml$'` |
+| Connector manifests | 150 | 150 | Accurate | `rg --files connectors \| rg '/manifest\\.toml$'` |
+| Connector tests | 150 | 150 | Accurate | Per-connector scan for `#[cfg(test)]`, `#[test]`, proptest, wiremock, or mock tests |
+| `ConnectorErrorMapping` coverage | 150 | 150 | Accurate | `rg -l 'ConnectorErrorMapping' connectors` grouped by connector |
+| Full `client.rs`/`connector.rs`/`types.rs` layout | 138 | 138 | Accurate | Per-connector file-existence scan |
+| Explicit `OperationInfo` structs | 137 | 147 | Underclaim fixed | `rg -l 'OperationInfo' connectors` grouped by connector |
+| Fuzz targets | not summarized in README feature table | 176 | Evidence surfaced | `rg --files fuzz/fuzz_targets` |
 
-Three rows above diverged from the README between the 2026-04-10
-snapshot and this re-check. The README edits preceded reconciliation;
-the table now records each drift point explicitly.
+## Overclaims Found
 
-1. **Mesh-Native Architecture** `DESIGNED` → `IMPLEMENTED` (2026-04-10
-   21:43, commit cfd9c0f5, z1nkz.1 teaching-surface rewrite). The
-   quarterly was written ~90 minutes earlier the same day; the
-   accompanying note was updated on the README side but not mirrored
-   here until br-rx347.
-2. **Zone Isolation** `PROVEN` → `LIMITED` (2026-04-22, commit a4ad8d5d,
-   br-lse4w). The downgrade reflects that `allowed_zones` is opt-in in
-   the current host-backed path and an empty set preserves a
-   back-compat permissive branch. The quarterly's `PROVEN` cell
-   overclaimed for the 12 days between 04-10 and 04-22.
-3. **Mesh-Native Architecture** `IMPLEMENTED` →
-   `STEADY-STATE TARGET (NOT YET OPERATIONAL)` (2026-05-02, br-lvz4t).
-   The downgrade matches the README's current operational model: mesh
-   building blocks are implemented, but the only production invoke path
-   remains host-first and has zero mesh-native production evidence.
+1. **Capability Tokens (CWT/COSE): `PROVEN` -> `IMPLEMENTED`**
+   - Concrete issue: `flywheel_connectors-01yaq`.
+   - Why it matters: the docs and typestate ADRs describe `BoundVerified` as full instance-binding proof, but live code/tests still allow promotion of instance-agnostic tokens.
+   - README action: downgraded the row and made the caveat explicit while preserving the COSE/CWT evidence.
 
-## Overclaims Found (at re-reconciliation, 2026-04-23)
+## Underclaims Found
 
-- **Zone Isolation** was recorded as `PROVEN` in this quarterly but the
-  README now carries `LIMITED`. Overclaim resolved by updating this
-  report's Current Status column and the README itself (br-lse4w).
-  Underlying policy: when the reconciliation table itself drifts from
-  the audited artifact, the quarterly must be re-run or annotated — a
-  stale quarterly is itself an overclaim.
+1. **Host-First Control Plane:** direct host invoke conformance and concurrent capability E2E justify `PROVEN`.
+2. **Truthful Runtime Resolution:** tested truth-source taxonomy and README drift pinning justify `PROVEN`.
+3. **Revocation:** revocation-cascade and concurrent freshness E2E justify `PROVEN`.
+4. **Egress Proxy:** real `EgressGuard` E2E denial/audit proof justifies `PROVEN`.
+5. **Threshold Owner Key:** FROST owner-key E2E justifies `PROVEN`.
+6. **Threshold Secrets:** Shamir/HPKE threshold-secret E2E justifies `PROVEN`.
+7. **Supply Chain Attestations:** real cosign/TUF E2E justifies `PROVEN` for repo-local verification.
+8. **Offline Access:** offline cache/queue plus store repair E2E justify `PROVEN`.
+9. **Mesh-Stored Policy Objects:** mesh policy object E2E justifies `PROVEN`.
+10. **Symbol-First Protocol:** RaptorQ symbol E2E/golden proof justifies `PROVEN`.
+11. **Computation Migration:** reference connector migrate/resume E2E justifies `PROVEN`.
+12. **Connector inventory:** `OperationInfo` coverage is 147 connectors, not 137.
 
-## Underclaims Found (at re-reconciliation, 2026-04-23)
+## Still-Honest Limits
 
-- **Mesh-Native Architecture** was recorded as `DESIGNED` in this
-  quarterly. The same-day README edit (z1nkz.1) moved to `IMPLEMENTED`
-  with evidence (Gossip/IBLT/XOR/LiveTruthResolver all built). The
-  quarterly underclaimed on this axis for 12 days.
+- `Zone Isolation` stays `LIMITED`; the host-backed path still has an opt-in
+  `allowed_zones` branch.
+- `Secretless Connectors` stays `IMPLEMENTED`; credential injection and
+  authorization exist, but broad connector-family proof is still incomplete.
+- `Mesh-Native Architecture` stays `STEADY-STATE TARGET (NOT YET OPERATIONAL)`;
+  mesh components are real, but production operator invoke remains host-first.
 
 ## Debiasing Notes
 
-- The MOR analysis (Modes of Reasoning) identified optimism bias in the
-  README's teaching order (now fixed by C2.1) but not in the status labels
-  themselves. The labels were already honest.
-- Multi-agent development has not produced status label inflation in this
-  codebase. This may be because the status legend is well-defined and agents
-  check test counts before claiming status levels.
-- The strongest evidence gap is between `IMPLEMENTED` and `PROVEN` — several
-  features (Revocation, Egress, Secretless) have strong unit test coverage
-  but limited E2E proof. Future reports should track E2E test additions.
-- **Stale quarterly drift (br-rx347, br-lvz4t):** this report froze at
-  2026-04-10 20:17 but three status changes landed afterward:
-  Mesh-Native upgrade, Zone Isolation downgrade, and the later
-  Mesh-Native production-evidence downgrade. A quarterly that claims
-  "all labels accurate" while its own table records stale statuses is
-  itself an overclaim. Future quarterlies should either re-reconcile at
-  publish time or ship with an explicit "frozen at commit X" banner and
-  a subsequent drift-delta section — this one now carries both.
+- The May security/evidence wave created more underclaims than overclaims.
+  The README lagged behind new E2E/conformance evidence in 11 rows.
+- The single overclaim was important: status labels must incorporate known
+  open security findings, not just count tests. `flywheel_connectors-01yaq`
+  prevents the capability-token row from staying `PROVEN`.
+- `PROVEN` should remain an evidence label, not a production-deployment label.
+  The Mesh-Native row stays explicitly non-operational even though many mesh
+  components are implemented and tested.
+- Future quarterly passes should always re-measure connector inventory counts;
+  `OperationInfo` coverage moved from 137 to 147 without the README being
+  updated.
 
 ## Actions Taken
 
-- README feature table now includes an Evidence column with file paths and test counts (C2.4)
-- README teaching order restructured to lead with host-first reality (C2.1)
-- Operational model versions documented (V1 Host-First / V2 Mesh-Native) (C2.2)
-- Zone-wide TruthPrecedencePolicy implemented for consistent operator answers (C2.3)
+- README feature status labels reconciled to the 2026-05-03 live checkout.
+- README audit-status note updated to point at this quarterly report.
+- README connector inventory corrected from 137 to 147 `OperationInfo` structs.
+- README egress evidence paths corrected from removed `fcp-host/src/egress.rs`
+  to `fcp-sandbox/src/egress.rs` plus the E2E scenario.
+- README CPU-overhead proof wording updated to name the host-backed benchmark.
 
 ## Next Quarter Focus
 
-- Track which `IMPLEMENTED` features gain E2E proof and could be upgraded to `PROVEN`
-- Watch for new features added without status labels
-- Verify that V2 transition milestones remain accurately described as non-operational
+- Resolve `flywheel_connectors-01yaq`; if instance-binding semantics are
+  repaired or split into distinct typestates, re-evaluate Capability Tokens.
+- Decide what proof would let Secretless Connectors graduate from
+  `IMPLEMENTED` to `PROVEN`.
+- Keep Mesh-Native non-operational wording pinned until ordinary `fwc invoke`
+  uses a real mesh-backed path with E2E evidence.
+- Re-run connector inventory measurements rather than carrying forward counts.

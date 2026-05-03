@@ -8,7 +8,7 @@
 > target. `FCP_Specification_V2.md` is retained as historical / legacy-interoperability context.
 > When descriptions conflict, trust V3 for intended semantics and the code for current behavior.
 
-A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **34 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and a smaller set remain thinner or explicitly incubating/quarantined.
+A secure connector protocol and Rust platform for AI agent operations across zones, hosts, and personal device meshes. The current tree includes **34 platform crates** under `crates/`, **150 connector crates** under `connectors/`, and a single agent-first CLI (`fwc`) that refuses to fabricate runtime state. Connector maturity is intentionally described as uneven: all 150 currently ship a `manifest.toml` and tests, 138 follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, 147 publish explicit `OperationInfo` structs, and a smaller set remain thinner or explicitly incubating/quarantined.
 
 ---
 
@@ -42,30 +42,30 @@ A secure connector protocol and Rust platform for AI agent operations across zon
 
 The table below starts with the current operational surface (what works today), then lists the security and protocol features, and finally the target architecture features that are designed but not yet operational.
 
-Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `LIMITED` = functional at the stated scope but narrower than the mature target (e.g. threshold-gated rather than adaptive), `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet.
+Status legend: `PROVEN` = backed by direct proof in the current repo, `IMPLEMENTED` = code and tests exist but wider end-to-end proof or production hardening is incomplete, `LIMITED` = functional at the stated scope but narrower than the mature target (e.g. threshold-gated rather than adaptive), `DESIGNED` = architectural target or type-level/runtime scaffolding exists but the operational story is not yet complete, `PLANNED` = intended direction with little or no built surface yet. `PROVEN` is repository evidence, not a claim that the feature has been deployed in a live production mesh.
 
 | Feature | Status | What It Does | Evidence |
 |---------|--------|--------------|----------|
-| **Host-First Control Plane** | `IMPLEMENTED` | **Current transitional operator path.** `fwc` + `fcp-host` is the proven provisioning boundary. Operators use this path today while mesh-backed truth converges to steady state. | `fcp-host/src/{supervisor,enforcement,health}.rs` (240+ tests) |
-| **Truthful Runtime Resolution** | `IMPLEMENTED` | `fwc` resolves runtime mode explicitly and classifies answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. | `fwc/src/{truth,catalog}.rs` (980+ tests) |
+| **Host-First Control Plane** | `PROVEN` | **Current transitional operator path.** `fwc` + `fcp-host` is the proven provisioning boundary. Operators use this path today while mesh-backed truth converges to steady state. | `fcp-host/src/{supervisor,enforcement,health}.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs` |
+| **Truthful Runtime Resolution** | `PROVEN` | `fwc` resolves runtime mode explicitly and classifies answers as mesh-backed, host-backed, node-local, or offline instead of fabricating a single "live" answer. | `fwc/src/{truth,catalog}.rs`, `fwc/tests/{cual_integration,readme_status_pinning}.rs` |
 | **Zone Isolation** | `LIMITED` | Core cryptographic namespaces are proven; host-side connector zone binding is enforced when operators configure `allowed_zones`. | `fcp-core/src/{zone_keys,pcs,policy}.rs`, `fcp-host/src/bin/fcp-host.rs` (420+ tests, E2E enforcement) |
-| **Capability Tokens (CWT/COSE)** | `PROVEN` | Provable authority with `grant_object_ids`; tokens are canonically CBOR-encoded and COSE-signed for interoperability. | `fcp-crypto/src/cose.rs`, `fcp-core/src/capability.rs` (249+ tests) |
+| **Capability Tokens (CWT/COSE)** | `IMPLEMENTED` | COSE/CWT signing, canonical CBOR, constraints, and typestate enforcement exist; full instance-binding semantics remain under follow-up because `BoundVerified` currently accepts instance-agnostic tokens. | `fcp-crypto/src/cose.rs`, `fcp-core/src/capability.rs`, `crates/fcp-conformance/tests/capability_*.rs`, open finding `flywheel_connectors-01yaq` |
 | **Tamper-Evident Audit** | `PROVEN` | Hash-linked audit chain with monotonic sequence numbers and quorum-signed checkpoints. | `fcp-audit/`, `fcp-core/src/audit.rs` (473+ tests, golden vectors) |
-| **Revocation** | `IMPLEMENTED` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. | `fcp-core/src/revocation.rs` (104 tests) |
-| **Egress Proxy** | `IMPLEMENTED` | Connector network access is routed through manifest-aware guardrails with CIDR deny defaults; some end-to-end proof beads are still open. | `fcp-host/src/egress.rs`, `fcp-sandbox/` (270+ tests) |
-| **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. | `fcp-host/src/egress.rs` (credential_id injection path) |
+| **Revocation** | `PROVEN` | First-class revocation objects and O(1)-style freshness checks exist in the current evidence/core surfaces. | `fcp-core/src/revocation.rs`, `crates/fcp-e2e/tests/{revocation_cascade,capability_enforcement_concurrent}_e2e.rs` |
+| **Egress Proxy** | `PROVEN` | Connector network access is routed through manifest-aware guardrails with CIDR deny defaults and denial audit evidence. | `fcp-sandbox/src/egress.rs`, `crates/fcp-e2e/tests/egress_proxy_e2e.rs` |
+| **Secretless Connectors** | `IMPLEMENTED` | Egress proxy and `credential_id` flows exist so connectors can rely on host-side credential injection; broader proof work is still open. | `fcp-sandbox/src/egress.rs` (credential_id injection path) |
+| **Threshold Owner Key** | `PROVEN` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. | `fcp-bootstrap/src/ceremony.rs`, `crates/fcp-e2e/tests/threshold_owner_key_e2e.rs` |
+| **Threshold Secrets** | `PROVEN` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. | `fcp-core/src/secret.rs`, `crates/fcp-e2e/tests/threshold_secrets_e2e.rs` |
+| **Supply Chain Attestations** | `PROVEN` | Registry-side attestation schemas, signature checks, TUF/cosign verification adapters, and host gate proof exist; release-distribution proof remains outside this repo. | `fcp-registry/src/lib.rs`, `crates/fcp-e2e/tests/supply_chain_attestation_e2e.rs` |
+| **Offline Access** | `PROVEN` | `ObjectPlacementPolicy`, repair controllers, cache-while-offline, queued writes, and drain-on-restore are covered by E2E proof. | `fcp-store/src/offline.rs`, `crates/fcp-e2e/tests/{offline_access,offline_repair}_e2e.rs` |
+| **Mesh-Stored Policy Objects** | `PROVEN` | Zone definitions and policy bundles exist as owner-signed objects with mesh gossip, verification, policy evaluation, and revocation proof; the wider mesh-backed invoke cutover remains in progress. | `fcp-core/src/policy.rs`, `crates/fcp-e2e/tests/mesh_policy_object_e2e.rs` |
+| **Symbol-First Protocol** | `PROVEN` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. | `fcp-raptorq/`, `crates/fcp-e2e/tests/symbol_first_protocol_e2e.rs`, golden vectors |
+| **Mesh-Native Architecture** | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested as building blocks, but the production `fwc → fcp-host → connector subprocess` invoke path remains host-first (see [Operational Model Versions](#operational-model-versions) — V1, the only operational model today). The mesh-native cutover is the target steady state and has zero production evidence. Pinned by `crates/fwc/tests/readme_status_pinning.rs` (br-lvz4t). | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
+| **Computation Migration** | `PROVEN` | Reference migrate-and-resume proof exists for a connector operation, including CRIU-format checkpoint handoff, lease transfer, replay, and byte-equivalent completion; automatic optimal-device execution is still hardening. | `fcp-kernel/src/computation_migration.rs`, `crates/fcp-e2e/tests/computation_migration_reference.rs` |
 
 _Audit note:_ In the current host-backed path, `allowed_zones` is opt-in. An empty set preserves a back-compat permissive branch in `crates/fcp-host/src/bin/fcp-host.rs` (`allowed_zones()` and `verify_live_request()`).
-| **Threshold Owner Key** | `IMPLEMENTED` | FROST ceremony/signing support exists in `fcp-bootstrap`, but it is not yet the universal operational default. | `fcp-bootstrap/src/ceremony.rs` (93 tests) |
-| **Threshold Secrets** | `IMPLEMENTED` | Shamir secret sharing exists for device-distributed recovery so raw secret material need not live on one machine. | `fcp-core/src/secret.rs` (123 tests, GF(2^8) Shamir) |
-| **Supply Chain Attestations** | `IMPLEMENTED` | Registry-side attestation schemas and verification policy exist; packaging/release proof is still incomplete. | `fcp-registry/src/lib.rs` (347 tests) |
-| **Offline Access** | `IMPLEMENTED` | `ObjectPlacementPolicy` and repair controllers exist for SLO-driven object durability and recovery. | `fcp-store/src/offline.rs` (185+ tests incl. E2E repair) |
-| **Mesh-Stored Policy Objects** | `IMPLEMENTED` | Zone definitions and policy bundles exist as owner-signed objects; the wider mesh-backed cutover remains in progress. | `fcp-core/src/policy.rs` (128 tests) |
-| **Symbol-First Protocol** | `IMPLEMENTED` | RaptorQ/object-symbol framing, reconstruction, and repair machinery exist in-tree for multipath aggregation and offline resilience. | `fcp-raptorq/` (96+ tests, golden vectors) |
-| **Mesh-Native Architecture** | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | Gossip, IBLT, XOR filters, and LiveTruthResolver are built and tested as building blocks, but the production `fwc → fcp-host → connector subprocess` invoke path remains host-first (see [Operational Model Versions](#operational-model-versions) — V1, the only operational model today). The mesh-native cutover is the target steady state and has zero production evidence. Pinned by `crates/fwc/tests/readme_status_pinning.rs` (br-lvz4t). | `fcp-mesh/src/` (259+ tests, gossip/IBLT/XOR), `fwc/src/truth.rs` (78 tests) |
-| **Computation Migration** | `IMPLEMENTED` | Reference migrate-and-resume proof exists for a connector operation, including CRIU-format checkpoint handoff, lease transfer, replay, and byte-equivalent completion; automatic optimal-device execution is still hardening. | `fcp-core/src/migration.rs`, `crates/fcp-e2e/tests/computation_migration_reference.rs` |
 
-> **Audit status**: All 16 feature status labels last reconciled 2026-05-02 (br-lvz4t downgraded "Mesh-Native Architecture" from `IMPLEMENTED` to `STEADY-STATE TARGET (NOT YET OPERATIONAL)` to match the actual production invoke path). See [docs/Claims_vs_Reality_Audit_C2_4.md](docs/Claims_vs_Reality_Audit_C2_4.md) for the full reconciliation table with evidence.
+> **Audit status**: All 16 feature status labels last reconciled 2026-05-03. This pass kept the br-lvz4t Mesh-Native downgrade, downgraded Capability Tokens from `PROVEN` to `IMPLEMENTED` for the open instance-binding semantics finding (`flywheel_connectors-01yaq`), and promoted rows with direct E2E/conformance/golden proof. See [docs/quarterly/2026-Q2-claims-vs-reality.md](docs/quarterly/2026-Q2-claims-vs-reality.md).
 
 ### Quick Example: Current Provisioning Path (Host-First, transitional)
 
@@ -210,7 +210,11 @@ Every node has a **NodeKeyAttestation** signed by the owner, binding the Tailsca
 
 ### Security Invariants
 
-These are **hard requirements** that FCP enforces mechanically:
+These are the protocol invariants FCP is built to enforce mechanically. The
+feature-status table above is the current proof ledger: today, zone isolation is
+`LIMITED` in the host-backed path because `allowed_zones` is opt-in, and
+capability-token instance binding remains under follow-up
+(`flywheel_connectors-01yaq`).
 
 1. **Single-Zone Binding**: A connector instance MUST bind to exactly one zone for its lifetime
 2. **Default Deny**: If a capability is not explicitly granted to a zone, it MUST be impossible to invoke
@@ -735,7 +739,7 @@ These unlock entire categories of autonomous agent work.
 
 ### Connector Inventory (150 connector crates)
 
-The live tree currently contains 150 connector crates. All 150 ship a `manifest.toml`, tests, and `ConnectorErrorMapping`; 138 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 137 currently publish explicit `OperationInfo` structs. That means the workspace is broad, but the connector surface is not perfectly uniform.
+The live tree currently contains 150 connector crates. All 150 ship a `manifest.toml`, tests, and `ConnectorErrorMapping`; 138 currently follow the full `src/client.rs` + `src/connector.rs` + `src/types.rs` layout, and 147 currently publish explicit `OperationInfo` structs. That means the workspace is broad, but the connector surface is not perfectly uniform.
 
 The authoritative inventory is the `connectors/` directory or manifest-backed `fwc list --offline`, not a handwritten static table. The older audits in [`docs/connector_census_v3.md`](docs/connector_census_v3.md) and [`docs/V3_Connector_Audit_Matrix.md`](docs/V3_Connector_Audit_Matrix.md) are useful historical snapshots, but they only cover an earlier 89-connector window and should not be treated as the live inventory. Recent additions in the current wave include BlueBubbles, Synology Chat, Google Places, Email Generic, Sonos, Hue, Apple Notes, and Apple Reminders.
 
@@ -1338,7 +1342,7 @@ Owner policy can enforce:
 | Symbol reconstruction (1MB) | < 50ms / < 250ms | RaptorQ benchmark harness |
 | Secret reconstruction (k-of-n) | < 150ms / < 750ms | Secret reconstruction benchmark harness |
 | Memory overhead | < 10MB per connector | Host-backed RSS process-tree benchmark; current proof: `docs/perf/memory_overhead_evidence.md` |
-| CPU overhead | < 1% idle | Event-driven architecture |
+| CPU overhead | < 1% idle | Host-backed idle CPU benchmark harness |
 
 ### Benchmarks
 

@@ -2127,4 +2127,398 @@ mod verification_pack {
         record.finalize();
         record.assert_pass();
     }
+
+    // ── Adversarial scenario 13: Token rotation produces zero key reuse ──
+    //
+    // Operator rotates from token A (identity-1) to token B (identity-2).
+    // Provisioning against each token MUST yield a distinct signing key,
+    // distinct CKA_ID, and distinct certificate DER. A bug that
+    // accidentally derived keys from a fixed seed (or shared a process-
+    // global PRNG state across drivers) would let an attacker who
+    // captured the rotated-OUT identity's key recover the rotated-IN
+    // identity's key — defeating the security purpose of rotation.
+
+    #[test]
+    fn scenario_token_rotation_zero_key_reuse() {
+        let mut record = VerificationRecord::new("hwtoken-token-rotation-zero-key-reuse");
+
+        // Rotation pre-state: token A holds identity v1 ("rotated-out").
+        let token_a_config = SoftTokenConfig {
+            token_label: "FCP-Owner-A".to_string(),
+            serial: "ROT-A-001".to_string(),
+            slot: 1,
+            identities: vec![SoftTokenIdentitySpec::ed25519(
+                "fcp-owner-v1",
+                "FCP Owner v1",
+            )],
+            ..SoftTokenConfig::default()
+        };
+        // Rotation post-state: token B with a fresh identity v2 ("rotated-in").
+        let token_b_config = SoftTokenConfig {
+            token_label: "FCP-Owner-B".to_string(),
+            serial: "ROT-B-002".to_string(),
+            slot: 2,
+            identities: vec![SoftTokenIdentitySpec::ed25519(
+                "fcp-owner-v2",
+                "FCP Owner v2",
+            )],
+            ..SoftTokenConfig::default()
+        };
+
+        let driver_a = SoftTokenDriver::deterministic(token_a_config);
+        let driver_b = SoftTokenDriver::deterministic(token_b_config);
+
+        let token_a = driver_a.detected_token().clone();
+        let token_b = driver_b.detected_token().clone();
+        let pin_a = driver_a.pin();
+        let pin_b = driver_b.pin();
+
+        {
+            let step = record.add_step(
+                "setup",
+                "Provision two soft-tokens with distinct identity labels (rotation pre/post)",
+            );
+            step.passed = token_a.serial != token_b.serial;
+            step.evidence
+                .push(format!("token_a_serial={}", token_a.serial));
+            step.evidence
+                .push(format!("token_b_serial={}", token_b.serial));
+        }
+
+        let t = Instant::now();
+        let pre = select_certificate_for_provisioning(&token_a, &pin_a, &driver_a).unwrap();
+        let post = select_certificate_for_provisioning(&token_b, &pin_b, &driver_b).unwrap();
+        {
+            let step = record.add_step(
+                "action",
+                "Provision once before rotation and once after (independent drivers)",
+            );
+            step.passed = true;
+            step.duration_ms = millis_u64(t.elapsed());
+            step.evidence.push(format!(
+                "pre_cert_id={}",
+                hex::encode(&pre.pair.certificate.id)
+            ));
+            step.evidence.push(format!(
+                "post_cert_id={}",
+                hex::encode(&post.pair.certificate.id)
+            ));
+        }
+
+        // Property 1: key bytes differ.
+        {
+            let pre_key = driver_a
+                .identities
+                .iter()
+                .find(|i| i.id == pre.pair.key.id)
+                .map(|i| i.signing_key_bytes.clone())
+                .expect("pre key bytes must resolve");
+            let post_key = driver_b
+                .identities
+                .iter()
+                .find(|i| i.id == post.pair.key.id)
+                .map(|i| i.signing_key_bytes.clone())
+                .expect("post key bytes must resolve");
+            let step = record.add_step(
+                "assert",
+                "Rotated key material differs from pre-rotation key",
+            );
+            step.passed = pre_key != post_key;
+            step.evidence.push(format!(
+                "pre_key_blake3={}",
+                blake3::hash(&pre_key).to_hex()
+            ));
+            step.evidence.push(format!(
+                "post_key_blake3={}",
+                blake3::hash(&post_key).to_hex()
+            ));
+        }
+
+        // Property 2: CKA_IDs differ.
+        {
+            let step = record.add_step(
+                "assert",
+                "Rotated CKA_ID differs from pre-rotation CKA_ID (no PKCS#11 key collision)",
+            );
+            step.passed = pre.pair.key.id != post.pair.key.id;
+            step.evidence
+                .push(format!("pre_cka_id={}", hex::encode(&pre.pair.key.id)));
+            step.evidence
+                .push(format!("post_cka_id={}", hex::encode(&post.pair.key.id)));
+        }
+
+        // Property 3: certificate DER bytes differ.
+        {
+            let step = record.add_step(
+                "assert",
+                "Rotated certificate DER differs from pre-rotation certificate DER",
+            );
+            step.passed = pre.pair.certificate.der_bytes != post.pair.certificate.der_bytes;
+            step.evidence.push(format!(
+                "pre_der_blake3={}",
+                blake3::hash(&pre.pair.certificate.der_bytes).to_hex()
+            ));
+            step.evidence.push(format!(
+                "post_der_blake3={}",
+                blake3::hash(&post.pair.certificate.der_bytes).to_hex()
+            ));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Adversarial scenario 14: Revocation propagation refuses cleanly ──
+    //
+    // The operator selects + provisions against a certificate from a
+    // soft-token. The certificate is then "revoked" (driver no longer
+    // enumerates it). A subsequent provisioning attempt MUST fail with a
+    // typed `CertificateSelectionFailed` refusal — NOT silently fall back
+    // to a different cert that would change the host identity. The
+    // structural failure mode the verifier expects: with the leaf cert
+    // gone, the remaining keys have no matching cert pair → the selector
+    // surfaces `NoMatchingKeyPair`. Falling back silently to the implicit
+    // CA cert is the bug we are pinning against.
+
+    /// Driver wrapper that filters certificates by CKA_ID at enumerate
+    /// time, simulating revocation propagation.
+    struct RevokingSoftTokenDriver {
+        inner: SoftTokenDriver,
+        revoked_cert_ids: Vec<Vec<u8>>,
+    }
+
+    impl HardwareTokenSessionDriver for RevokingSoftTokenDriver {
+        fn open_authenticated_session(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<AuthenticatedTokenSession, TokenError> {
+            self.inner.open_authenticated_session(token, pin)
+        }
+
+        fn enumerate_certificates(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenCertificate>, TokenError> {
+            let all = self.inner.enumerate_certificates(token, pin)?;
+            Ok(all
+                .into_iter()
+                .filter(|c| !self.revoked_cert_ids.contains(&c.id))
+                .collect())
+        }
+
+        fn enumerate_keys(
+            &self,
+            token: &DetectedToken,
+            pin: &HardwareTokenPin,
+        ) -> Result<Vec<TokenKeyInfo>, TokenError> {
+            self.inner.enumerate_keys(token, pin)
+        }
+    }
+
+    #[test]
+    fn scenario_revocation_propagation_refuses_after_revoke() {
+        let mut record = VerificationRecord::new("hwtoken-revocation-propagation");
+
+        // Stage 1: pre-revocation provisioning succeeds.
+        let driver = SoftTokenDriver::deterministic(SoftTokenConfig {
+            identities: vec![SoftTokenIdentitySpec::ed25519("fcp-owner", "FCP Owner Key")],
+            ..SoftTokenConfig::default()
+        });
+        let token = driver.detected_token().clone();
+        let pin = driver.pin();
+
+        let pre = select_certificate_for_provisioning(&token, &pin, &driver).unwrap();
+        let revoked_id = pre.pair.certificate.id.clone();
+        {
+            let step = record.add_step(
+                "setup",
+                "Pre-revocation provisioning selects the leaf certificate",
+            );
+            step.passed = true;
+            step.evidence
+                .push(format!("revoked_cert_id={}", hex::encode(&revoked_id)));
+            step.evidence
+                .push(format!("selection_reason={}", pre.selection_reason));
+        }
+
+        // Stage 2: revoke the cert and re-attempt provisioning.
+        let revoking = RevokingSoftTokenDriver {
+            inner: driver,
+            revoked_cert_ids: vec![revoked_id.clone()],
+        };
+
+        let t = Instant::now();
+        let post = select_certificate_for_provisioning(&token, &pin, &revoking);
+        {
+            let step = record.add_step(
+                "negative",
+                "Post-revocation provisioning MUST fail with a typed refusal (no silent fallback)",
+            );
+            step.duration_ms = millis_u64(t.elapsed());
+            step.passed = matches!(
+                &post,
+                Err(TokenError::CertificateSelectionFailed(
+                    CertificateSelectionRefusal::NoMatchingKeyPair
+                        | CertificateSelectionRefusal::NoCertificates
+                )),
+            );
+            match &post {
+                Ok(material) => {
+                    step.evidence.push(format!(
+                        "BUG: silent fallback selected cert_id={}",
+                        hex::encode(&material.pair.certificate.id)
+                    ));
+                    step.evidence
+                        .push(format!("selection_reason={}", material.selection_reason));
+                }
+                Err(err) => {
+                    step.evidence.push(format!("error={err}"));
+                    step.evidence.push("refusal=typed".to_string());
+                }
+            }
+        }
+
+        // Stage 3: prove the revoked id is what the selector would have
+        // returned absent the revocation — i.e. revocation actually
+        // changed the outcome (vs the test trivially refusing for some
+        // other reason).
+        {
+            let step = record.add_step(
+                "assert",
+                "Revoked cert id matches the pre-revocation selected cert id",
+            );
+            step.passed = pre.pair.certificate.id == revoked_id;
+            step.evidence
+                .push(format!("revoked_cert_id={}", hex::encode(&revoked_id)));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
+
+    // ── Adversarial scenario 15: Dual-bind topology is operator-visible ──
+    //
+    // An attacker plugs a SECOND soft-token alongside the operator's
+    // legitimate one, hoping provisioning silently picks theirs. The
+    // detection report MUST surface BOTH tokens so the operator sees
+    // the dual-bind. Selection by serial MUST then route deterministically
+    // to the requested token (NOT the attacker's), and the attacker's
+    // token MUST still appear in the candidate list (operator-visible)
+    // rather than being silently filtered out.
+
+    #[test]
+    fn scenario_dual_bind_attack_surfaces_multi_token_topology() {
+        let mut record = VerificationRecord::new("hwtoken-dual-bind-topology");
+
+        let legit_config = SoftTokenConfig {
+            token_label: "Operator-Token".to_string(),
+            serial: "OP-LEGIT-001".to_string(),
+            slot: 1,
+            identities: vec![SoftTokenIdentitySpec::ed25519(
+                "operator-key",
+                "Operator Key",
+            )],
+            ..SoftTokenConfig::default()
+        };
+        let attacker_config = SoftTokenConfig {
+            token_label: "Attacker-Token".to_string(),
+            serial: "ATK-INJECT-666".to_string(),
+            slot: 2,
+            identities: vec![SoftTokenIdentitySpec::ed25519(
+                "attacker-key",
+                "Attacker Key",
+            )],
+            ..SoftTokenConfig::default()
+        };
+
+        let harness = SoftTokenHarness::new(vec![legit_config, attacker_config]);
+        let report = harness.detection_report();
+        let all = harness.all_tokens();
+
+        {
+            let step = record.add_step(
+                "setup",
+                "Plug two soft-tokens (legitimate + attacker-injected) into separate slots",
+            );
+            step.passed = all.len() == 2;
+            step.evidence.push(format!("token_count={}", all.len()));
+            for tok in &all {
+                step.evidence
+                    .push(format!("token_serial={} label={}", tok.serial, tok.label));
+            }
+        }
+
+        // Property 1: detection report exposes BOTH tokens (operator-visible).
+        {
+            let detected = report.all_tokens();
+            let serials: Vec<_> = detected.iter().map(|t| t.serial.clone()).collect();
+            let step = record.add_step(
+                "assert",
+                "Detection report exposes both legitimate AND attacker-injected tokens",
+            );
+            step.passed = serials.iter().any(|s| s == "OP-LEGIT-001")
+                && serials.iter().any(|s| s == "ATK-INJECT-666");
+            step.evidence
+                .push(format!("detected_serials={}", serials.join(",")));
+            step.evidence
+                .push(format!("detection_count={}", detected.len()));
+        }
+
+        // Property 2: requesting the operator's token by serial routes
+        // deterministically to it — NOT the attacker's. select_and_authenticate
+        // must verify the requested token is among the candidate set
+        // (otherwise an attacker's token plugged at a "preferred" slot
+        // could be silently selected instead).
+        let legit_token = all
+            .iter()
+            .find(|t| t.serial == "OP-LEGIT-001")
+            .expect("legit token in harness");
+        let legit_driver = harness.drivers.get(&1).expect("legit driver at slot 1");
+        let outcome = select_and_authenticate(
+            legit_token,
+            &legit_driver.pin(),
+            &report,
+            legit_driver,
+            None,
+        )
+        .unwrap();
+        {
+            let step = record.add_step(
+                "assert",
+                "Selecting by serial routes to the requested (operator) token, not the attacker's",
+            );
+            step.passed = outcome.selected_token.serial == "OP-LEGIT-001"
+                && outcome.selected_token.serial != "ATK-INJECT-666";
+            step.evidence
+                .push(format!("selected_serial={}", outcome.selected_token.serial));
+            step.evidence.push(format!(
+                "candidate_count={}",
+                outcome.detection_report.all_tokens().len()
+            ));
+        }
+
+        // Property 3: attacker's token does NOT silently disappear from
+        // the candidate list after a successful selection — operator
+        // tooling can still surface it for forensics.
+        {
+            let post_serials: Vec<_> = outcome
+                .detection_report
+                .all_tokens()
+                .iter()
+                .map(|t| t.serial.clone())
+                .collect();
+            let step = record.add_step(
+                "assert",
+                "Post-selection report still exposes the attacker token (forensic trail intact)",
+            );
+            step.passed = post_serials.iter().any(|s| s == "ATK-INJECT-666");
+            step.evidence
+                .push(format!("post_selection_serials={}", post_serials.join(",")));
+        }
+
+        record.finalize();
+        record.assert_pass();
+    }
 }

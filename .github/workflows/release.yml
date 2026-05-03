@@ -11,7 +11,7 @@ on:
         type: string
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   # Let a fresh manual retry on the same ref cancel a stale queued release run.
@@ -240,12 +240,19 @@ jobs:
 
       - name: Extract version
         id: version
+        env:
+          RELEASE_INPUT_VERSION: ${{ inputs.version }}
         run: |
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+            version="${RELEASE_INPUT_VERSION}"
           else
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            version="${GITHUB_REF#refs/tags/v}"
           fi
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::Release version must look like 1.2.3 or 1.2.3-rc.1"
+            exit 2
+          fi
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
 
       - name: Generate combined checksums
         run: |
@@ -348,5 +355,3 @@ jobs:
           # etc.
           echo "Dry run: would publish crates to crates.io"
           cargo publish -p fcp-cbor --dry-run || true
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

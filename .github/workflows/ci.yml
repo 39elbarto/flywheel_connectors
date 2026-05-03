@@ -213,6 +213,8 @@ jobs:
     if: ${{ github.event_name == 'workflow_dispatch' && inputs.lane == 'focused' }}
     runs-on: ubuntu-latest
     timeout-minutes: 25
+    env:
+      FOCUS_CRATE: ${{ inputs.focus_crate }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@nightly
@@ -226,11 +228,15 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ -z "${{ inputs.focus_crate }}" ]]; then
+          if [[ -z "${FOCUS_CRATE}" ]]; then
             echo "::error::focus_crate input is required for focused lane"
             exit 2
           fi
-          echo "Focused crate: ${{ inputs.focus_crate }}"
+          if [[ ! "${FOCUS_CRATE}" =~ ^[A-Za-z0-9_-]+$ ]]; then
+            echo "::error::focus_crate must be a Cargo package name"
+            exit 2
+          fi
+          echo "Focused crate: ${FOCUS_CRATE}"
 
       - name: Focused check
         shell: bash
@@ -238,7 +244,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/asupersync/focused
           start_epoch="$(date +%s)"
-          cargo check -p ${{ inputs.focus_crate }} --all-targets
+          cargo check -p "${FOCUS_CRATE}" --all-targets
           end_epoch="$(date +%s)"
           jq -cn \
             --arg step "focused_check" \
@@ -252,7 +258,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/asupersync/focused
           start_epoch="$(date +%s)"
-          cargo clippy -p ${{ inputs.focus_crate }} --all-targets -- -D warnings
+          cargo clippy -p "${FOCUS_CRATE}" --all-targets -- -D warnings
           end_epoch="$(date +%s)"
           jq -cn \
             --arg step "focused_clippy" \
@@ -266,7 +272,7 @@ jobs:
           set -euo pipefail
           mkdir -p artifacts/asupersync/focused
           start_epoch="$(date +%s)"
-          cargo test -p ${{ inputs.focus_crate }} --all-targets -- --nocapture
+          cargo test -p "${FOCUS_CRATE}" --all-targets -- --nocapture
           end_epoch="$(date +%s)"
           jq -cn \
             --arg step "focused_test" \
@@ -566,14 +572,15 @@ jobs:
           key: build-${{ matrix.target }}
 
       - name: Build release (CLI)
-        run: cargo build --release --package fcp-cli --target ${{ matrix.target }}
+        run: cargo build --release --package fwc --bin fwc --target ${{ matrix.target }}
 
       - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
         with:
-          name: fcp-cli-${{ matrix.target }}
+          name: fwc-${{ matrix.target }}
           path: |
             target/${{ matrix.target }}/release/fcp*
+            target/${{ matrix.target }}/release/fwc*
             !target/${{ matrix.target }}/release/*.d
           retention-days: 7
 

@@ -57,7 +57,9 @@ jobs:
 
       - name: Skip if specific target requested
         if: inputs.target != 'all' && inputs.target != matrix.target
-        run: echo "Skipping ${{ matrix.target }} (requested: ${{ inputs.target }})" && exit 0
+        run: |
+          echo "Skipping ${{ matrix.target }} (requested: ${{ inputs.target }})"
+          exit 0
 
       - uses: dtolnay/rust-toolchain@nightly
       - uses: Swatinem/rust-cache@v2
@@ -76,23 +78,35 @@ jobs:
             fuzz-corpus-${{ matrix.target }}-
 
       - name: Run fuzzer
+        id: run-fuzzer
+        shell: bash
         run: |
+          set -o pipefail
           FUZZ_TIME="${{ inputs.fuzz_time || '600' }}"
           echo "Fuzzing ${{ matrix.target }} for ${FUZZ_TIME} seconds..."
+          set +e
           cargo fuzz run ${{ matrix.target }} -- \
             -max_total_time=${FUZZ_TIME} \
             -print_final_stats=1 \
             2>&1 | tee fuzz-${{ matrix.target }}.log
+          status="${PIPESTATUS[0]}"
+          echo "exit_code=${status}" >> "$GITHUB_OUTPUT"
+          exit 0
         continue-on-error: true
 
       - name: Check for crashes
         id: check
+        shell: bash
         run: |
           ARTIFACTS_DIR="fuzz/artifacts/${{ matrix.target }}"
           if [[ -d "$ARTIFACTS_DIR" ]] && [[ -n "$(ls -A $ARTIFACTS_DIR 2>/dev/null)" ]]; then
             echo "::error::Fuzzer found crashes in ${{ matrix.target }}!"
             echo "crashes=true" >> $GITHUB_OUTPUT
             ls -la "$ARTIFACTS_DIR"
+          elif [[ "${{ steps.run-fuzzer.outputs.exit_code }}" != "0" ]]; then
+            echo "::error::cargo fuzz failed for ${{ matrix.target }} without producing crash artifacts"
+            echo "crashes=false" >> "$GITHUB_OUTPUT"
+            exit "${{ steps.run-fuzzer.outputs.exit_code }}"
           else
             echo "No crashes found"
             echo "crashes=false" >> $GITHUB_OUTPUT

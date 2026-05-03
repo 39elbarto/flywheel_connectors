@@ -81,10 +81,16 @@ fn http_error_from_head(status: u16, reason: String, headers: &[(String, String)
         }
     }
 
+    let retry_after = if status == 429 {
+        header_value(headers, "retry-after").and_then(parse_retry_after)
+    } else {
+        None
+    };
+
     StreamError::HttpError {
         status,
         message: reason,
-        retry_after: None,
+        retry_after,
     }
 }
 
@@ -780,6 +786,15 @@ mod tests {
 
         assert!(err.is_terminal_backpressure());
         assert_eq!(err.retry_after(), Some(Duration::from_secs(9)));
+    }
+
+    #[test]
+    fn sse_429_preserves_retry_after_for_reconnect_backoff() {
+        let headers = vec![("Retry-After".to_string(), "7".to_string())];
+
+        let err = http_error_from_head(429, "Too Many Requests".to_string(), &headers);
+
+        assert_eq!(err.retry_after(), Some(Duration::from_secs(7)));
     }
 
     #[test]

@@ -233,6 +233,28 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler cargo test -p fc
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler-bench cargo bench -p fcp-host --bench batch_scheduler -- --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
 
+### Resource-Pool Placement Evidence
+
+Mesh placement now has a default-off resource-pool admission surface for
+high-core workers. When a `PlannerInput` supplies explicit pool state and the
+`PlannerContext` asks for a pool class, the planner admits or rejects candidates
+against per-node, per-zone CPU/memory budgets. Placement evidence can include
+the selected pool, CPU and memory headroom, and machine-readable refusal reasons
+for exhausted or missing pools.
+
+Swarm latency evidence fingerprints also carry runner-supplied physical core
+count and NUMA node count (`FCP_SWARM_PHYSICAL_CPU_COUNT` and
+`FCP_SWARM_NUMA_NODE_COUNT`) alongside logical CPU count, worker identity,
+memory bytes, target dir, command line, and source revision.
+
+Targeted verification:
+
+```bash
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-placement-pools cargo test -p fcp-mesh resource_pool --lib
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-topology-evidence cargo test -p fcp-testkit swarm_latency_bundle --lib
+```
+
 ## Known Flakes and Workarounds
 
 ### fcp-streaming health.rs timing tests

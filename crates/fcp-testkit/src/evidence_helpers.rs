@@ -341,6 +341,12 @@ pub struct SwarmRunEnvironment {
     pub worker_id: String,
     /// Logical CPU count visible to the run.
     pub cpu_count: usize,
+    /// Physical CPU core count when supplied by the runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub physical_cpu_count: Option<usize>,
+    /// NUMA node count when supplied by the runner.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub numa_node_count: Option<usize>,
     /// Total memory in bytes when supplied by the runner.
     pub memory_bytes: Option<u64>,
     /// Cargo target directory used for the run.
@@ -362,14 +368,16 @@ impl SwarmRunEnvironment {
             .or_else(|_| std::env::var("HOSTNAME"))
             .unwrap_or_else(|_| "local".to_string());
         let cpu_count = std::thread::available_parallelism().map_or(1, usize::from);
-        let memory_bytes = std::env::var("FCP_SWARM_MEMORY_BYTES")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok());
+        let physical_cpu_count = parse_env_usize("FCP_SWARM_PHYSICAL_CPU_COUNT");
+        let numa_node_count = parse_env_usize("FCP_SWARM_NUMA_NODE_COUNT");
+        let memory_bytes = parse_env_u64("FCP_SWARM_MEMORY_BYTES");
         let cargo_target_dir = std::env::var("CARGO_TARGET_DIR").ok();
 
         Self {
             worker_id,
             cpu_count,
+            physical_cpu_count,
+            numa_node_count,
             memory_bytes,
             cargo_target_dir,
             command_line,
@@ -377,6 +385,18 @@ impl SwarmRunEnvironment {
             captured_at: Utc::now(),
         }
     }
+}
+
+fn parse_env_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+}
+
+fn parse_env_u64(name: &str) -> Option<u64> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
 }
 
 /// Latency component used to explain tail behavior.
@@ -1633,6 +1653,8 @@ mod tests {
         let environment = SwarmRunEnvironment {
             worker_id: "worker-1".to_string(),
             cpu_count: 64,
+            physical_cpu_count: Some(32),
+            numa_node_count: Some(2),
             memory_bytes: Some(256 * 1024 * 1024 * 1024),
             cargo_target_dir: Some("/tmp/fcp-swarm-target".to_string()),
             command_line: vec!["cargo".to_string(), "test".to_string()],
@@ -1671,6 +1693,8 @@ mod tests {
         let environment = SwarmRunEnvironment {
             worker_id: "worker-64c".to_string(),
             cpu_count: 64,
+            physical_cpu_count: Some(32),
+            numa_node_count: Some(2),
             memory_bytes: Some(256 * 1024 * 1024 * 1024),
             cargo_target_dir: Some("/tmp/fcp-swarm-target".to_string()),
             command_line: vec![
@@ -1721,6 +1745,8 @@ mod tests {
                 .count(),
             2
         );
+        assert_eq!(bundle.environment.physical_cpu_count, Some(32));
+        assert_eq!(bundle.environment.numa_node_count, Some(2));
         assert_eq!(bundle.summaries[0].total.p99_ns, 750);
         Ok(())
     }

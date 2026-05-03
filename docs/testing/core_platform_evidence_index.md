@@ -253,7 +253,18 @@ Targeted verification:
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-placement-pools cargo test -p fcp-mesh resource_pool --lib
 
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-topology-evidence cargo test -p fcp-testkit swarm_latency_bundle --lib
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-placement-bench cargo bench -p fcp-mesh --bench mesh_benchmarks -- resource_pool_placement --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
+
+The resource-pool benchmark uses synthetic 64-node and 256-node pool states to
+prove the placement effect: default device fitness selects the largest
+64-core/256 GiB node, while pool-aware evidence rejects that exhausted pool and
+selects the next eligible node. The current shared worker used for this slice is
+not high-core hardware (10 logical CPUs, 58 GiB RAM, one NUMA node), so the
+remaining promotion gate is to rerun this benchmark and the swarm latency bundle
+on a real 64+ CPU / 256+ GiB worker with physical core and NUMA environment
+fields populated.
 
 ## Known Flakes and Workarounds
 

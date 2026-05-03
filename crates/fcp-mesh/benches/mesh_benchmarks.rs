@@ -6,17 +6,23 @@
 //! - Session MAC operations (authenticate each frame)
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use std::collections::HashSet;
 use std::hint::black_box;
 
-use fcp_prelude::{ConnectorId, ObjectId};
+use fcp_core::ZoneId;
 use fcp_mesh::{
     admission::{AdmissionController, AdmissionPolicy},
     device::{
-        CpuArch, DeviceProfile, FitnessContext, FitnessScore, GpuProfile, GpuVendor,
-        InstalledConnector, PowerSource,
+        AvailabilityProfile, CpuArch, DeviceProfile, FitnessContext, FitnessScore, GpuProfile,
+        GpuVendor, InstalledConnector, LatencyClass, PowerSource,
+    },
+    planner::{
+        ExecutionPlanner, NodeInfo, PlacementPolicy, PlannerContext, PlannerInput,
+        ResourcePoolClass, ResourcePoolStatus,
     },
     session::MeshSession,
 };
+use fcp_prelude::{ConnectorId, ObjectId};
 use fcp_protocol::session::{
     MeshSessionId, SessionCryptoSuite, SessionKeys, SessionReplayPolicy, TransportLimits,
 };
@@ -126,6 +132,162 @@ fn bench_fitness_score_with_connector(c: &mut Criterion) {
             let _ = FitnessScore::compute(black_box(&profile), black_box(&ctx));
         });
     });
+}
+
+// ============================================================================
+// Resource-Pool Placement Benchmarks
+// ============================================================================
+
+fn resource_pool_connector_id() -> ConnectorId {
+    ConnectorId::new("fcp", "resource-pool-benchmark", "1.0.0").unwrap()
+}
+
+fn make_resource_pool_node(index: usize, connector_id: &ConnectorId, zone: &ZoneId) -> NodeInfo {
+    let node_id = NodeId::new(format!("node-{index:03}"));
+    let memory_mb = if index == 0 {
+        262_144
+    } else {
+        131_072_u32.saturating_sub(u32::try_from(index).unwrap_or(u32::MAX).saturating_mul(256))
+    };
+
+    let profile = DeviceProfile::builder(node_id)
+        .cpu_cores(if index == 0 { 64 } else { 32 })
+        .cpu_arch(CpuArch::X86_64)
+        .memory_mb(memory_mb.max(16_384))
+        .power_source(PowerSource::Mains)
+        .latency_class(LatencyClass::Local)
+        .availability(AvailabilityProfile::AlwaysOn)
+        .add_connector(InstalledConnector::new(
+            connector_id.clone(),
+            "1.0.0",
+            ObjectId::from_bytes([index as u8; 32]),
+        ))
+        .build();
+
+    NodeInfo {
+        profile,
+        local_symbols: HashSet::new(),
+        held_leases: Vec::new(),
+        zones: vec![zone.clone()],
+    }
+}
+
+fn make_resource_pool_input(node_count: usize, zone: &ZoneId) -> PlannerInput {
+    let connector_id = resource_pool_connector_id();
+    let nodes: Vec<NodeInfo> = (0..node_count)
+        .map(|index| make_resource_pool_node(index, &connector_id, zone))
+        .collect();
+    PlannerInput::new(nodes, 1_000_000)
+}
+
+fn attach_resource_pool_state(input: PlannerInput, zone: &ZoneId) -> PlannerInput {
+    let pools: Vec<ResourcePoolStatus> = input
+        .nodes
+        .iter()
+        .enumerate()
+        .map(|(index, node)| {
+            let limit = if index == 0 { 64 } else { 32 };
+            let used = if index == 0 {
+                limit
+            } else {
+                (index % 8) as u16
+            };
+            ResourcePoolStatus::new(
+                format!("rr-work-{index:03}"),
+                node.node_id().clone(),
+                Some(zone.clone()),
+                ResourcePoolClass::RequestResponse,
+                limit,
+                65_536,
+            )
+            .with_usage(used, 8_192)
+        })
+        .collect();
+    input.with_resource_pools(pools)
+}
+
+fn resource_pool_context(zone: ZoneId) -> PlannerContext {
+    PlannerContext::new(resource_pool_connector_id())
+        .with_target_zone(zone)
+        .with_resource_pool_class(ResourcePoolClass::RequestResponse)
+        .with_requested_cpu_cores(4)
+        .with_min_memory_mb(2_048)
+}
+
+fn bench_resource_pool_placement(c: &mut Criterion) {
+    let planner = ExecutionPlanner::new();
+    let zone = ZoneId::work();
+    let context = resource_pool_context(zone.clone());
+    let mut group = c.benchmark_group("resource_pool_placement");
+
+    for &node_count in &[64usize, 256] {
+        let default_input = make_resource_pool_input(node_count, &zone);
+        let pool_input = attach_resource_pool_state(default_input.clone(), &zone);
+        let evidence_connector_id = resource_pool_connector_id();
+        let policy = PlacementPolicy::default();
+
+        let default_selected = planner
+            .select_best(&default_input, &context)
+            .expect("benchmark default placement should select a node");
+        assert_eq!(default_selected.node_id.as_str(), "node-000");
+
+        let pooled_plan = planner.plan_with_policy(&pool_input, &context, &policy);
+        assert_eq!(
+            pooled_plan
+                .selected
+                .as_ref()
+                .map(|node| node.node_id.as_str()),
+            Some("node-001")
+        );
+        let pooled_evidence = planner.evidence_from_plan_with_resource_pools(
+            &pooled_plan,
+            &pool_input,
+            &context,
+            &evidence_connector_id,
+            None,
+        );
+        assert_eq!(pooled_evidence.resource_pool_decisions.len(), node_count);
+        assert!(
+            pooled_evidence
+                .resource_pool_decisions
+                .iter()
+                .any(|decision| !decision.admitted && decision.node_id.as_str() == "node-000")
+        );
+
+        group.throughput(Throughput::Elements(node_count as u64));
+        group.bench_function(format!("default_{node_count}_nodes"), |b| {
+            b.iter(|| {
+                let candidates = planner.plan(black_box(&default_input), black_box(&context));
+                black_box(
+                    candidates
+                        .first()
+                        .map(|candidate| candidate.node_id.as_str()),
+                )
+            });
+        });
+        group.bench_function(format!("pool_aware_evidence_{node_count}_nodes"), |b| {
+            b.iter(|| {
+                let plan = planner.plan_with_policy(
+                    black_box(&pool_input),
+                    black_box(&context),
+                    black_box(&policy),
+                );
+                let evidence = planner.evidence_from_plan_with_resource_pools(
+                    black_box(&plan),
+                    black_box(&pool_input),
+                    black_box(&context),
+                    black_box(&evidence_connector_id),
+                    None,
+                );
+                black_box((
+                    plan.selected.as_ref().map(|node| node.node_id.as_str()),
+                    evidence.resource_pool_decisions.len(),
+                ))
+            });
+        });
+    }
+
+    group.finish();
 }
 
 // ============================================================================
@@ -253,6 +415,7 @@ criterion_group!(
     bench_fitness_score_basic,
     bench_fitness_score_with_gpu,
     bench_fitness_score_with_connector,
+    bench_resource_pool_placement,
 );
 
 criterion_group!(

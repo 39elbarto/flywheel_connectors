@@ -262,6 +262,15 @@ pub const SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION: &str = "swarm-evidence-bundle/v1
 /// Schema tag for CI/nightly swarm performance regression gates.
 pub const SWARM_REGRESSION_GATE_SCHEMA_VERSION: &str = "swarm-regression-gate/v1";
 
+/// Schema tag for the integrated massive-swarm proof gauntlet.
+pub const SWARM_GAUNTLET_SCHEMA_VERSION: &str = "swarm-gauntlet/v1";
+
+/// Schema tag for one structured gauntlet log record.
+pub const SWARM_GAUNTLET_LOG_SCHEMA_VERSION: &str = "swarm-gauntlet-log/v1";
+
+/// Schema tag for 64-core/256GiB promotion qualification records.
+pub const SWARM_PROMOTION_SCHEMA_VERSION: &str = "swarm-promotion/v1";
+
 /// Synthetic-but-realistic workload families used for swarm latency baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -865,6 +874,1124 @@ impl fmt::Display for SwarmEvidenceBundleError {
 }
 
 impl Error for SwarmEvidenceBundleError {}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Integrated swarm gauntlet
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Surface that must be exercised by an integrated swarm gauntlet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmGauntletPhase {
+    /// Operator path through the canonical CLI.
+    Fwc,
+    /// Host orchestration and invoke path.
+    Host,
+    /// Mesh control plane, placement, or routing surface.
+    Mesh,
+    /// Connector or testkit fixture surface.
+    ConnectorTestkit,
+    /// Host scheduler decision records.
+    Scheduler,
+    /// Resource-pool or topology placement decisions.
+    Placement,
+    /// Admission, delay, shed, or fallback backpressure decisions.
+    Backpressure,
+    /// Audit append or event combiner behavior.
+    Audit,
+    /// Store/cache/allocation behavior under high-K metadata pressure.
+    Store,
+    /// Replayable evidence bundle emission.
+    EvidenceBundle,
+}
+
+impl SwarmGauntletPhase {
+    /// Every phase required by the second-generation proof gauntlet.
+    pub const REQUIRED: [Self; 10] = [
+        Self::Fwc,
+        Self::Host,
+        Self::Mesh,
+        Self::ConnectorTestkit,
+        Self::Scheduler,
+        Self::Placement,
+        Self::Backpressure,
+        Self::Audit,
+        Self::Store,
+        Self::EvidenceBundle,
+    ];
+
+    /// Stable machine label for the phase.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Fwc => "fwc",
+            Self::Host => "host",
+            Self::Mesh => "mesh",
+            Self::ConnectorTestkit => "connector_testkit",
+            Self::Scheduler => "scheduler",
+            Self::Placement => "placement",
+            Self::Backpressure => "backpressure",
+            Self::Audit => "audit",
+            Self::Store => "store",
+            Self::EvidenceBundle => "evidence_bundle",
+        }
+    }
+}
+
+/// One prerequisite for a smoke, soak, or promotion gauntlet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletPrerequisite {
+    /// Stable prerequisite name.
+    pub name: String,
+    /// Whether this prerequisite was satisfied for the current run.
+    pub satisfied: bool,
+    /// Operator-readable detail or remediation.
+    pub detail: String,
+}
+
+impl SwarmGauntletPrerequisite {
+    /// Build a prerequisite record.
+    #[must_use]
+    pub fn new(name: impl Into<String>, satisfied: bool, detail: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            satisfied,
+            detail: detail.into(),
+        }
+    }
+}
+
+/// Controller mode that must be compared during hardware promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmPromotionControllerMode {
+    /// Baseline placement and invoke behavior.
+    DefaultPlacement,
+    /// Resource-pool and NUMA-aware placement only.
+    PoolAwarePlacement,
+    /// Adaptive scheduler only.
+    SchedulerOnly,
+    /// Backpressure controller only.
+    BackpressureOnly,
+    /// Scheduler, placement, and backpressure enabled together.
+    CombinedController,
+}
+
+impl SwarmPromotionControllerMode {
+    /// Every controller mode needed before promotion.
+    pub const REQUIRED: [Self; 5] = [
+        Self::DefaultPlacement,
+        Self::PoolAwarePlacement,
+        Self::SchedulerOnly,
+        Self::BackpressureOnly,
+        Self::CombinedController,
+    ];
+
+    /// Stable machine label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::DefaultPlacement => "default_placement",
+            Self::PoolAwarePlacement => "pool_aware_placement",
+            Self::SchedulerOnly => "scheduler_only",
+            Self::BackpressureOnly => "backpressure_only",
+            Self::CombinedController => "combined_controller",
+        }
+    }
+}
+
+/// Minimum hardware envelope for promoting massive-swarm defaults.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPromotionEnvelope {
+    /// Envelope schema version.
+    pub schema_version: String,
+    /// Scenario being promoted.
+    pub scenario_id: String,
+    /// Minimum logical CPU count.
+    pub min_logical_cpus: u32,
+    /// Minimum memory in bytes.
+    pub min_memory_bytes: u64,
+    /// Required controller comparisons.
+    pub required_controller_modes: Vec<SwarmPromotionControllerMode>,
+    /// Exact command to rerun on qualifying hardware.
+    pub rerun_command: Vec<String>,
+}
+
+impl SwarmPromotionEnvelope {
+    /// Build the canonical 64-core/256GiB promotion envelope.
+    #[must_use]
+    pub fn high_core_256gib(rerun_command: Vec<String>) -> Self {
+        Self {
+            schema_version: SWARM_PROMOTION_SCHEMA_VERSION.to_string(),
+            scenario_id: "integrated_swarm_gauntlet_10000_promotion".to_string(),
+            min_logical_cpus: 64,
+            min_memory_bytes: 256 * 1024 * 1024 * 1024,
+            required_controller_modes: SwarmPromotionControllerMode::REQUIRED.to_vec(),
+            rerun_command,
+        }
+    }
+
+    /// Validate the promotion envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error when the envelope is incomplete or
+    /// omits a required controller comparison.
+    pub fn validate(&self) -> Result<(), SwarmPromotionEnvelopeError> {
+        if self.schema_version != SWARM_PROMOTION_SCHEMA_VERSION {
+            return Err(SwarmPromotionEnvelopeError::SchemaMismatch {
+                expected: SWARM_PROMOTION_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        if self.scenario_id.trim().is_empty() {
+            return Err(SwarmPromotionEnvelopeError::EmptyScenarioId);
+        }
+        if self.min_logical_cpus == 0 {
+            return Err(SwarmPromotionEnvelopeError::EmptyLogicalCpuRequirement);
+        }
+        if self.min_memory_bytes == 0 {
+            return Err(SwarmPromotionEnvelopeError::EmptyMemoryRequirement);
+        }
+        if self.rerun_command.is_empty()
+            || self.rerun_command.iter().any(|part| part.trim().is_empty())
+        {
+            return Err(SwarmPromotionEnvelopeError::EmptyRerunCommand);
+        }
+        let observed: BTreeSet<_> = self.required_controller_modes.iter().copied().collect();
+        for mode in SwarmPromotionControllerMode::REQUIRED {
+            if !observed.contains(&mode) {
+                return Err(SwarmPromotionEnvelopeError::MissingControllerMode { mode });
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Error raised when validating hardware promotion envelopes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmPromotionEnvelopeError {
+    /// Schema tag was unsupported.
+    SchemaMismatch {
+        /// Supported schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// Scenario id was empty.
+    EmptyScenarioId,
+    /// Logical CPU requirement was zero.
+    EmptyLogicalCpuRequirement,
+    /// Memory requirement was zero.
+    EmptyMemoryRequirement,
+    /// Rerun command was absent or contained empty parts.
+    EmptyRerunCommand,
+    /// A required controller comparison was absent.
+    MissingControllerMode {
+        /// Missing controller mode.
+        mode: SwarmPromotionControllerMode,
+    },
+}
+
+impl fmt::Display for SwarmPromotionEnvelopeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => write!(
+                f,
+                "swarm promotion schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::EmptyScenarioId => write!(f, "swarm promotion scenario id is empty"),
+            Self::EmptyLogicalCpuRequirement => {
+                write!(f, "swarm promotion logical CPU requirement is empty")
+            }
+            Self::EmptyMemoryRequirement => {
+                write!(f, "swarm promotion memory requirement is empty")
+            }
+            Self::EmptyRerunCommand => write!(f, "swarm promotion rerun command is empty"),
+            Self::MissingControllerMode { mode } => write!(
+                f,
+                "swarm promotion is missing controller mode '{}'",
+                mode.as_str()
+            ),
+        }
+    }
+}
+
+impl Error for SwarmPromotionEnvelopeError {}
+
+/// Hardware and operating-system topology captured for promotion evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPromotionTopology {
+    /// Worker or host identity.
+    pub worker_id: String,
+    /// Logical CPUs visible to the process.
+    pub logical_cpus: u32,
+    /// Physical CPU/core count, when available.
+    pub physical_cpus: Option<u32>,
+    /// NUMA node count, when available.
+    pub numa_nodes: Option<u32>,
+    /// Total host memory in bytes, when available.
+    pub memory_bytes: Option<u64>,
+    /// Operating system name/version.
+    pub os: String,
+    /// Kernel release/version.
+    pub kernel: String,
+    /// CPU governor or power policy.
+    pub cpu_governor: Option<String>,
+    /// Storage class used for target/artifact paths.
+    pub storage_class: Option<String>,
+}
+
+impl SwarmPromotionTopology {
+    /// Capture topology around an existing run environment.
+    ///
+    /// `SwarmRunEnvironment` stores CPU and NUMA counts as `usize` (the
+    /// shape returned by `std::thread::available_parallelism` and the env
+    /// parser); the topology record exposes them as `u32` so the JSON
+    /// schema is portable across 32/64-bit hosts. Counts that exceed
+    /// `u32::MAX` (~4 billion) cannot occur on real hardware, so the
+    /// saturating conversion is a no-op on every realistic input but
+    /// keeps the cast lossless and panic-free.
+    #[must_use]
+    pub fn from_environment(
+        environment: &SwarmRunEnvironment,
+        os: impl Into<String>,
+        kernel: impl Into<String>,
+        cpu_governor: Option<String>,
+        storage_class: Option<String>,
+    ) -> Self {
+        Self {
+            worker_id: environment.worker_id.clone(),
+            logical_cpus: usize_to_u32_saturating(environment.cpu_count),
+            physical_cpus: environment.physical_cpu_count.map(usize_to_u32_saturating),
+            numa_nodes: environment.numa_node_count.map(usize_to_u32_saturating),
+            memory_bytes: environment.memory_bytes,
+            os: os.into(),
+            kernel: kernel.into(),
+            cpu_governor,
+            storage_class,
+        }
+    }
+}
+
+/// Saturating `usize → u32` conversion used by topology capture.
+///
+/// CPU and NUMA-node counts cannot realistically exceed `u32::MAX`; this
+/// helper is the explicit bridge between the 64-bit-native env parser and
+/// the 32-bit-portable JSON schema. Pulled out as a free function so a
+/// regression test can pin the saturation behavior directly.
+fn usize_to_u32_saturating(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// Machine-readable reason a worker cannot produce promotion evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmPromotionSkipReason {
+    /// Worker identity was not captured.
+    MissingWorkerIdentity,
+    /// Logical CPU capacity is below the promotion envelope.
+    InsufficientLogicalCpus {
+        /// Required CPU count.
+        required: u32,
+        /// Observed CPU count.
+        actual: u32,
+    },
+    /// Physical core topology was not captured.
+    MissingPhysicalCpuTopology,
+    /// NUMA topology was not captured.
+    MissingNumaTopology,
+    /// Total memory was not captured.
+    MissingMemoryMeasurement {
+        /// Required memory bytes.
+        required_bytes: u64,
+    },
+    /// Total memory is below the promotion envelope.
+    InsufficientMemory {
+        /// Required memory bytes.
+        required_bytes: u64,
+        /// Observed memory bytes.
+        actual_bytes: u64,
+    },
+    /// OS name/version was not captured.
+    MissingOs,
+    /// Kernel release/version was not captured.
+    MissingKernel,
+    /// CPU governor or power policy was not captured.
+    MissingCpuGovernor,
+    /// Storage class was not captured.
+    MissingStorageClass,
+}
+
+impl SwarmPromotionSkipReason {
+    /// Stable code for logs and dashboards.
+    #[must_use]
+    pub const fn code(&self) -> &'static str {
+        match self {
+            Self::MissingWorkerIdentity => "missing_worker_identity",
+            Self::InsufficientLogicalCpus { .. } => "insufficient_logical_cpus",
+            Self::MissingPhysicalCpuTopology => "missing_physical_cpu_topology",
+            Self::MissingNumaTopology => "missing_numa_topology",
+            Self::MissingMemoryMeasurement { .. } => "missing_memory_measurement",
+            Self::InsufficientMemory { .. } => "insufficient_memory",
+            Self::MissingOs => "missing_os",
+            Self::MissingKernel => "missing_kernel",
+            Self::MissingCpuGovernor => "missing_cpu_governor",
+            Self::MissingStorageClass => "missing_storage_class",
+        }
+    }
+}
+
+/// Result of checking a worker against a promotion envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPromotionQualification {
+    /// Envelope that was evaluated.
+    pub envelope: SwarmPromotionEnvelope,
+    /// Captured hardware and OS topology.
+    pub topology: SwarmPromotionTopology,
+    /// Machine-readable skip reasons. Empty means qualified.
+    pub skip_reasons: Vec<SwarmPromotionSkipReason>,
+}
+
+impl SwarmPromotionQualification {
+    /// Evaluate topology against a promotion envelope.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the envelope is malformed.
+    pub fn evaluate(
+        envelope: SwarmPromotionEnvelope,
+        topology: SwarmPromotionTopology,
+    ) -> Result<Self, SwarmPromotionEnvelopeError> {
+        envelope.validate()?;
+        let mut skip_reasons = Vec::new();
+        if topology.worker_id.trim().is_empty() {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingWorkerIdentity);
+        }
+        if topology.logical_cpus < envelope.min_logical_cpus {
+            skip_reasons.push(SwarmPromotionSkipReason::InsufficientLogicalCpus {
+                required: envelope.min_logical_cpus,
+                actual: topology.logical_cpus,
+            });
+        }
+        if topology.physical_cpus.unwrap_or_default() == 0 {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingPhysicalCpuTopology);
+        }
+        if topology.numa_nodes.unwrap_or_default() == 0 {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingNumaTopology);
+        }
+        match topology.memory_bytes {
+            Some(actual_bytes) if actual_bytes < envelope.min_memory_bytes => {
+                skip_reasons.push(SwarmPromotionSkipReason::InsufficientMemory {
+                    required_bytes: envelope.min_memory_bytes,
+                    actual_bytes,
+                });
+            }
+            Some(_) => {}
+            None => {
+                skip_reasons.push(SwarmPromotionSkipReason::MissingMemoryMeasurement {
+                    required_bytes: envelope.min_memory_bytes,
+                });
+            }
+        }
+        if topology.os.trim().is_empty() {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingOs);
+        }
+        if topology.kernel.trim().is_empty() {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingKernel);
+        }
+        if topology
+            .cpu_governor
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingCpuGovernor);
+        }
+        if topology
+            .storage_class
+            .as_deref()
+            .is_none_or(|value| value.trim().is_empty())
+        {
+            skip_reasons.push(SwarmPromotionSkipReason::MissingStorageClass);
+        }
+        Ok(Self {
+            envelope,
+            topology,
+            skip_reasons,
+        })
+    }
+
+    /// Whether this worker qualifies for hardware promotion.
+    #[must_use]
+    pub fn is_qualified(&self) -> bool {
+        self.skip_reasons.is_empty()
+    }
+}
+
+/// Structured artifact emitted when hardware promotion cannot run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPromotionSkipArtifact {
+    /// Skip artifact schema version.
+    pub schema_version: String,
+    /// Qualification result that explains the skip.
+    pub qualification: SwarmPromotionQualification,
+    /// Exact command to rerun on qualifying hardware.
+    pub rerun_command: Vec<String>,
+    /// Creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmPromotionSkipArtifact {
+    /// Build a skip artifact only when promotion prerequisites are missing.
+    #[must_use]
+    pub fn from_qualification(qualification: SwarmPromotionQualification) -> Option<Self> {
+        if qualification.is_qualified() {
+            return None;
+        }
+        Some(Self {
+            schema_version: SWARM_PROMOTION_SCHEMA_VERSION.to_string(),
+            rerun_command: qualification.envelope.rerun_command.clone(),
+            qualification,
+            generated_at: Utc::now(),
+        })
+    }
+
+    /// Render the skip as replayable JSONL records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the artifact cannot be converted to JSON.
+    pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
+        Ok(vec![
+            json!({
+                "record_type": "swarm_promotion_envelope",
+                "schema_version": SWARM_PROMOTION_SCHEMA_VERSION,
+                "envelope": serde_json::to_value(&self.qualification.envelope)?,
+            }),
+            json!({
+                "record_type": "swarm_promotion_topology",
+                "schema_version": SWARM_PROMOTION_SCHEMA_VERSION,
+                "topology": serde_json::to_value(&self.qualification.topology)?,
+            }),
+            json!({
+                "record_type": "swarm_promotion_skip",
+                "schema_version": SWARM_PROMOTION_SCHEMA_VERSION,
+                "skip_reason_codes": self.qualification.skip_reasons.iter().map(SwarmPromotionSkipReason::code).collect::<Vec<_>>(),
+                "rerun_command": self.rerun_command,
+                "artifact": serde_json::to_value(self)?,
+            }),
+        ])
+    }
+}
+
+/// Declarative manifest for the integrated swarm gauntlet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletManifest {
+    /// Manifest schema version.
+    pub schema_version: String,
+    /// Stable gauntlet scenario identifier.
+    pub scenario_id: String,
+    /// Smoke or soak execution mode.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Whether the run is offline, host-backed, or live.
+    pub source_kind: SwarmEvidenceSourceKind,
+    /// Agent count represented by the scenario.
+    pub agent_count: u32,
+    /// Minimum raw samples expected for the scenario.
+    pub sample_budget: usize,
+    /// Phases that must have evidence in the run.
+    pub required_phases: Vec<SwarmGauntletPhase>,
+    /// Rerunnable command line for the smoke or soak lane.
+    pub command_line: Vec<String>,
+    /// Prerequisites that decide whether the run executes or emits a skip.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<SwarmGauntletPrerequisite>,
+}
+
+impl SwarmGauntletManifest {
+    /// Build a bounded, no-live-service smoke manifest.
+    #[must_use]
+    pub fn smoke(command_line: Vec<String>) -> Self {
+        Self {
+            schema_version: SWARM_GAUNTLET_SCHEMA_VERSION.to_string(),
+            scenario_id: "integrated_swarm_gauntlet_1000".to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_kind: SwarmEvidenceSourceKind::Offline,
+            agent_count: 1_000,
+            sample_budget: 1,
+            required_phases: SwarmGauntletPhase::REQUIRED.to_vec(),
+            command_line,
+            prerequisites: Vec::new(),
+        }
+    }
+
+    /// Build a long-soak manifest with explicit hardware/network prerequisites.
+    #[must_use]
+    pub fn soak(command_line: Vec<String>, prerequisites: Vec<SwarmGauntletPrerequisite>) -> Self {
+        Self {
+            schema_version: SWARM_GAUNTLET_SCHEMA_VERSION.to_string(),
+            scenario_id: "integrated_swarm_gauntlet_10000".to_string(),
+            execution_mode: SwarmEvidenceExecutionMode::Soak,
+            source_kind: SwarmEvidenceSourceKind::HostBacked,
+            agent_count: 10_000,
+            sample_budget: 30,
+            required_phases: SwarmGauntletPhase::REQUIRED.to_vec(),
+            command_line,
+            prerequisites,
+        }
+    }
+
+    /// Parse and validate a manifest from JSON.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error when JSON parsing or validation fails.
+    pub fn from_json_value(value: Value) -> Result<Self, SwarmGauntletManifestError> {
+        let manifest: Self = serde_json::from_value(value)
+            .map_err(|err| SwarmGauntletManifestError::InvalidJson(err.to_string()))?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    /// Validate the manifest contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error for unsupported schema, missing fields,
+    /// unsupported agent counts, or incomplete phase coverage.
+    pub fn validate(&self) -> Result<(), SwarmGauntletManifestError> {
+        if self.schema_version != SWARM_GAUNTLET_SCHEMA_VERSION {
+            return Err(SwarmGauntletManifestError::SchemaMismatch {
+                expected: SWARM_GAUNTLET_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        if self.scenario_id.trim().is_empty() {
+            return Err(SwarmGauntletManifestError::EmptyScenarioId);
+        }
+        if !matches!(self.agent_count, 1_000 | 10_000) {
+            return Err(SwarmGauntletManifestError::UnsupportedAgentCount {
+                actual: self.agent_count,
+            });
+        }
+        if self.sample_budget == 0 {
+            return Err(SwarmGauntletManifestError::EmptySampleBudget);
+        }
+        if self.command_line.is_empty()
+            || self.command_line.iter().any(|part| part.trim().is_empty())
+        {
+            return Err(SwarmGauntletManifestError::EmptyCommandLine);
+        }
+        if self.required_phases.is_empty() {
+            return Err(SwarmGauntletManifestError::EmptyRequiredPhases);
+        }
+        for prerequisite in &self.prerequisites {
+            if prerequisite.name.trim().is_empty() {
+                return Err(SwarmGauntletManifestError::EmptyPrerequisiteName);
+            }
+        }
+        let phases: BTreeSet<_> = self.required_phases.iter().copied().collect();
+        for phase in SwarmGauntletPhase::REQUIRED {
+            if !phases.contains(&phase) {
+                return Err(SwarmGauntletManifestError::MissingRequiredPhase { phase });
+            }
+        }
+        Ok(())
+    }
+
+    /// Unsatisfied prerequisites for the current run.
+    #[must_use]
+    pub fn missing_prerequisites(&self) -> Vec<&SwarmGauntletPrerequisite> {
+        self.prerequisites
+            .iter()
+            .filter(|prerequisite| !prerequisite.satisfied)
+            .collect()
+    }
+}
+
+/// Error raised when parsing or validating a gauntlet manifest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmGauntletManifestError {
+    /// JSON could not be deserialized into the manifest type.
+    InvalidJson(String),
+    /// Schema tag was unsupported.
+    SchemaMismatch {
+        /// Supported schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// Scenario id was empty.
+    EmptyScenarioId,
+    /// Only the canonical 1k smoke and 10k soak scenarios are accepted.
+    UnsupportedAgentCount {
+        /// Observed agent count.
+        actual: u32,
+    },
+    /// The run would emit no raw samples.
+    EmptySampleBudget,
+    /// Command line was absent or contained an empty part.
+    EmptyCommandLine,
+    /// No required phases were listed.
+    EmptyRequiredPhases,
+    /// One of the required gauntlet phases was absent.
+    MissingRequiredPhase {
+        /// Missing phase.
+        phase: SwarmGauntletPhase,
+    },
+    /// A prerequisite name was empty.
+    EmptyPrerequisiteName,
+}
+
+impl fmt::Display for SwarmGauntletManifestError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidJson(err) => write!(f, "invalid swarm gauntlet manifest JSON: {err}"),
+            Self::SchemaMismatch { expected, actual } => write!(
+                f,
+                "swarm gauntlet schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::EmptyScenarioId => write!(f, "swarm gauntlet scenario id is empty"),
+            Self::UnsupportedAgentCount { actual } => {
+                write!(f, "unsupported swarm gauntlet agent count {actual}")
+            }
+            Self::EmptySampleBudget => write!(f, "swarm gauntlet sample budget is empty"),
+            Self::EmptyCommandLine => write!(f, "swarm gauntlet command line is empty"),
+            Self::EmptyRequiredPhases => write!(f, "swarm gauntlet phases are empty"),
+            Self::MissingRequiredPhase { phase } => {
+                write!(f, "swarm gauntlet is missing phase '{}'", phase.as_str())
+            }
+            Self::EmptyPrerequisiteName => write!(f, "swarm gauntlet prerequisite name is empty"),
+        }
+    }
+}
+
+impl Error for SwarmGauntletManifestError {}
+
+/// Machine-readable skip artifact for soak or promotion prerequisites.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletSkipArtifact {
+    /// Skip artifact schema version.
+    pub schema_version: String,
+    /// Scenario that could not run.
+    pub scenario_id: String,
+    /// Smoke or soak lane.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Source class that was requested.
+    pub source_kind: SwarmEvidenceSourceKind,
+    /// Unsatisfied prerequisite names.
+    pub missing_prerequisites: Vec<String>,
+    /// Exact command to rerun after prerequisites are satisfied.
+    pub rerun_command: Vec<String>,
+    /// Worker that produced the skip artifact.
+    pub worker_id: String,
+    /// Creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmGauntletSkipArtifact {
+    /// Build a skip artifact when prerequisites are missing.
+    #[must_use]
+    pub fn from_manifest(
+        manifest: &SwarmGauntletManifest,
+        environment: &SwarmRunEnvironment,
+    ) -> Option<Self> {
+        let missing_prerequisites: Vec<String> = manifest
+            .missing_prerequisites()
+            .into_iter()
+            .map(|prerequisite| prerequisite.name.clone())
+            .collect();
+        if missing_prerequisites.is_empty() {
+            return None;
+        }
+        Some(Self {
+            schema_version: SWARM_GAUNTLET_SCHEMA_VERSION.to_string(),
+            scenario_id: manifest.scenario_id.clone(),
+            execution_mode: manifest.execution_mode,
+            source_kind: manifest.source_kind,
+            missing_prerequisites,
+            rerun_command: manifest.command_line.clone(),
+            worker_id: environment.worker_id.clone(),
+            generated_at: Utc::now(),
+        })
+    }
+
+    /// Render the skip as a JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the artifact cannot be converted to JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, serde_json::Error> {
+        Ok(json!({
+            "record_type": "swarm_gauntlet_skip",
+            "schema_version": self.schema_version,
+            "skip": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+/// Evidence pointer proving that one gauntlet phase was exercised.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletPhaseEvidence {
+    /// Phase being proven.
+    pub phase: SwarmGauntletPhase,
+    /// Component or crate that produced the evidence.
+    pub component: String,
+    /// Stable handle inside logs, summaries, or bundle artifacts.
+    pub evidence_handle: String,
+}
+
+impl SwarmGauntletPhaseEvidence {
+    /// Build a phase evidence record.
+    #[must_use]
+    pub fn new(
+        phase: SwarmGauntletPhase,
+        component: impl Into<String>,
+        evidence_handle: impl Into<String>,
+    ) -> Self {
+        Self {
+            phase,
+            component: component.into(),
+            evidence_handle: evidence_handle.into(),
+        }
+    }
+}
+
+/// Counters that prove audit and store surfaces participated in the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletCounters {
+    /// Audit or event records emitted by the integrated path.
+    pub audit_event_count: u64,
+    /// Same-zone audit append operations represented by the run.
+    pub same_zone_audit_appends: u64,
+    /// Sparse or high-K store metadata events represented by the run.
+    pub sparse_high_k_metadata_events: u64,
+}
+
+/// Integrated gauntlet evidence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletEvidenceBundle {
+    /// Declarative manifest for the run.
+    pub manifest: SwarmGauntletManifest,
+    /// Existing swarm latency and raw-sample bundle.
+    pub latency_bundle: SwarmLatencyEvidenceBundle,
+    /// Resource snapshots corresponding to each summarized scenario.
+    pub resource_snapshots: Vec<SwarmRegressionMetricSnapshot>,
+    /// Scheduler, placement, and backpressure decision cards.
+    pub decision_cards: Vec<SwarmDecisionCard>,
+    /// Phase evidence proving the integrated surface was exercised.
+    pub phase_evidence: Vec<SwarmGauntletPhaseEvidence>,
+    /// Audit/store counters.
+    pub counters: SwarmGauntletCounters,
+    /// Optional skip artifact for a soak/promotion lane.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_artifact: Option<SwarmGauntletSkipArtifact>,
+}
+
+impl SwarmGauntletEvidenceBundle {
+    /// Build and validate an integrated gauntlet evidence bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error when the manifest is invalid or when
+    /// required phase, decision, resource, audit, or store evidence is missing.
+    pub fn new(
+        manifest: SwarmGauntletManifest,
+        latency_bundle: SwarmLatencyEvidenceBundle,
+        resource_snapshots: Vec<SwarmRegressionMetricSnapshot>,
+        decision_cards: Vec<SwarmDecisionCard>,
+        phase_evidence: Vec<SwarmGauntletPhaseEvidence>,
+        counters: SwarmGauntletCounters,
+        skip_artifact: Option<SwarmGauntletSkipArtifact>,
+    ) -> Result<Self, SwarmGauntletError> {
+        manifest.validate()?;
+        validate_gauntlet_phase_evidence(&manifest, &phase_evidence)?;
+        validate_gauntlet_decisions(&manifest, &decision_cards)?;
+        validate_gauntlet_resources(&latency_bundle, &resource_snapshots)?;
+        validate_gauntlet_counters(&manifest, counters)?;
+        Ok(Self {
+            manifest,
+            latency_bundle,
+            resource_snapshots,
+            decision_cards,
+            phase_evidence,
+            counters,
+            skip_artifact,
+        })
+    }
+
+    /// Render an operator and agent friendly summary.
+    #[must_use]
+    pub fn summary(&self) -> SwarmGauntletSummary {
+        SwarmGauntletSummary {
+            schema_version: SWARM_GAUNTLET_SCHEMA_VERSION.to_string(),
+            scenario_id: self.manifest.scenario_id.clone(),
+            execution_mode: self.manifest.execution_mode,
+            source_kind: self.manifest.source_kind,
+            agent_count: self.manifest.agent_count,
+            sample_count: self.latency_bundle.samples.len(),
+            summary_count: self.latency_bundle.summaries.len(),
+            decision_card_ids: self
+                .decision_cards
+                .iter()
+                .map(|card| card.card_id.clone())
+                .collect(),
+            phase_count: self.phase_evidence.len(),
+            counters: self.counters,
+            skipped: self.skip_artifact.is_some(),
+            generated_at: Utc::now(),
+        }
+    }
+
+    /// Render the integrated gauntlet as typed JSONL records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if any record cannot be converted to JSON.
+    pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
+        let mut records = Vec::new();
+        records.push(json!({
+            "record_type": "swarm_gauntlet_manifest",
+            "schema_version": SWARM_GAUNTLET_SCHEMA_VERSION,
+            "manifest": serde_json::to_value(&self.manifest)?,
+        }));
+        records.extend(self.latency_bundle.to_jsonl_values()?);
+        for card in &self.decision_cards {
+            records.push(card.to_jsonl_value()?);
+        }
+        for phase in &self.phase_evidence {
+            records.push(json!({
+                "record_type": "swarm_gauntlet_phase_evidence",
+                "schema_version": SWARM_GAUNTLET_SCHEMA_VERSION,
+                "phase_evidence": serde_json::to_value(phase)?,
+            }));
+        }
+        if let Some(skip_artifact) = &self.skip_artifact {
+            records.push(skip_artifact.to_jsonl_value()?);
+        }
+        records.push(json!({
+            "record_type": "swarm_gauntlet_summary",
+            "schema_version": SWARM_GAUNTLET_SCHEMA_VERSION,
+            "summary": serde_json::to_value(self.summary())?,
+        }));
+        for summary in &self.latency_bundle.summaries {
+            records.push(self.log_record(summary));
+        }
+        Ok(records)
+    }
+
+    fn log_record(&self, summary: &SwarmLatencySummary) -> Value {
+        let resource = self
+            .resource_snapshots
+            .iter()
+            .find(|snapshot| snapshot.scenario_id == summary.scenario_id);
+        json!({
+            "record_type": "swarm_gauntlet_log",
+            "schema_version": SWARM_GAUNTLET_LOG_SCHEMA_VERSION,
+            "scenario_id": self.manifest.scenario_id,
+            "latency_scenario_id": summary.scenario_id,
+            "execution_mode": self.manifest.execution_mode,
+            "source_kind": self.manifest.source_kind,
+            "command_line": self.latency_bundle.environment.command_line,
+            "git_revision": self.latency_bundle.environment.source_revision,
+            "worker_id": self.latency_bundle.environment.worker_id,
+            "cargo_target_dir": self.latency_bundle.environment.cargo_target_dir,
+            "topology": {
+                "logical_cpus": self.latency_bundle.environment.cpu_count,
+                "physical_cpus": self.latency_bundle.environment.physical_cpu_count,
+                "numa_nodes": self.latency_bundle.environment.numa_node_count,
+                "memory_bytes": self.latency_bundle.environment.memory_bytes,
+            },
+            "sample_count": summary.sample_count,
+            "raw_samples_record_type": "swarm_latency_sample",
+            "p50_ns": summary.total.p50_ns,
+            "p95_ns": summary.total.p95_ns,
+            "p99_ns": summary.total.p99_ns,
+            "p999_ns": summary.total.p999_ns,
+            "throughput_ops_per_second": resource.map(|snapshot| snapshot.throughput_ops_per_second),
+            "queue_depth": resource.map(|snapshot| snapshot.max_queue_depth),
+            "retry_amplification_microunits": resource.map(|snapshot| snapshot.retry_amplification_microunits),
+            "rss_bytes": resource.map(|snapshot| snapshot.rss_bytes),
+            "cpu_microunits": resource.map(|snapshot| snapshot.cpu_microunits),
+            "decision_card_ids": self.decision_cards.iter().map(|card| card.card_id.as_str()).collect::<Vec<_>>(),
+            "evidence_bundle_id": self.latency_bundle.artifact_manifest.as_ref().map(|manifest| manifest.bundle_id.as_str()),
+            "skip_reason": self.skip_artifact.as_ref().map(|skip| skip.missing_prerequisites.join(",")),
+            "audit_event_count": self.counters.audit_event_count,
+            "same_zone_audit_appends": self.counters.same_zone_audit_appends,
+            "sparse_high_k_metadata_events": self.counters.sparse_high_k_metadata_events,
+        })
+    }
+}
+
+/// Compact gauntlet summary carried as its own JSONL record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmGauntletSummary {
+    /// Summary schema version.
+    pub schema_version: String,
+    /// Gauntlet scenario identifier.
+    pub scenario_id: String,
+    /// Smoke or soak lane.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Source class.
+    pub source_kind: SwarmEvidenceSourceKind,
+    /// Agent count represented by the run.
+    pub agent_count: u32,
+    /// Raw latency sample count.
+    pub sample_count: usize,
+    /// Number of latency summaries emitted.
+    pub summary_count: usize,
+    /// Decision cards included in the run.
+    pub decision_card_ids: Vec<String>,
+    /// Number of phase evidence records.
+    pub phase_count: usize,
+    /// Audit/store counters.
+    pub counters: SwarmGauntletCounters,
+    /// Whether this record represents a structured skip.
+    pub skipped: bool,
+    /// Creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+/// Error raised when assembling integrated gauntlet evidence.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmGauntletError {
+    /// Manifest validation failed.
+    Manifest(SwarmGauntletManifestError),
+    /// A required phase had no evidence handle.
+    MissingPhaseEvidence {
+        /// Missing phase.
+        phase: SwarmGauntletPhase,
+    },
+    /// A required decision-card domain was absent.
+    MissingDecisionDomain {
+        /// Missing decision domain.
+        domain: SwarmDecisionDomain,
+    },
+    /// A summarized latency scenario lacked resource metrics.
+    MissingResourceSnapshot {
+        /// Missing latency scenario id.
+        scenario_id: String,
+    },
+    /// Audit phase was requested but no audit events were recorded.
+    MissingAuditEvidence,
+    /// Store phase was requested but no high-K/sparse store events were recorded.
+    MissingStoreEvidence,
+}
+
+impl From<SwarmGauntletManifestError> for SwarmGauntletError {
+    fn from(value: SwarmGauntletManifestError) -> Self {
+        Self::Manifest(value)
+    }
+}
+
+impl fmt::Display for SwarmGauntletError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Manifest(err) => write!(f, "{err}"),
+            Self::MissingPhaseEvidence { phase } => {
+                write!(f, "missing swarm gauntlet phase '{}'", phase.as_str())
+            }
+            Self::MissingDecisionDomain { domain } => {
+                write!(
+                    f,
+                    "missing swarm gauntlet decision domain '{}'",
+                    domain.as_str()
+                )
+            }
+            Self::MissingResourceSnapshot { scenario_id } => {
+                write!(
+                    f,
+                    "missing swarm gauntlet resource snapshot '{scenario_id}'"
+                )
+            }
+            Self::MissingAuditEvidence => write!(f, "missing swarm gauntlet audit evidence"),
+            Self::MissingStoreEvidence => write!(f, "missing swarm gauntlet store evidence"),
+        }
+    }
+}
+
+impl Error for SwarmGauntletError {}
+
+fn validate_gauntlet_phase_evidence(
+    manifest: &SwarmGauntletManifest,
+    phase_evidence: &[SwarmGauntletPhaseEvidence],
+) -> Result<(), SwarmGauntletError> {
+    let observed: BTreeSet<_> = phase_evidence
+        .iter()
+        .map(|evidence| evidence.phase)
+        .collect();
+    for phase in &manifest.required_phases {
+        if !observed.contains(phase) {
+            return Err(SwarmGauntletError::MissingPhaseEvidence { phase: *phase });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gauntlet_decisions(
+    manifest: &SwarmGauntletManifest,
+    decision_cards: &[SwarmDecisionCard],
+) -> Result<(), SwarmGauntletError> {
+    let observed: BTreeSet<_> = decision_cards.iter().map(|card| card.domain).collect();
+    for (phase, domain) in [
+        (
+            SwarmGauntletPhase::Scheduler,
+            SwarmDecisionDomain::Scheduler,
+        ),
+        (
+            SwarmGauntletPhase::Placement,
+            SwarmDecisionDomain::Placement,
+        ),
+        (
+            SwarmGauntletPhase::Backpressure,
+            SwarmDecisionDomain::Backpressure,
+        ),
+    ] {
+        if manifest.required_phases.contains(&phase) && !observed.contains(&domain) {
+            return Err(SwarmGauntletError::MissingDecisionDomain { domain });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gauntlet_resources(
+    latency_bundle: &SwarmLatencyEvidenceBundle,
+    resource_snapshots: &[SwarmRegressionMetricSnapshot],
+) -> Result<(), SwarmGauntletError> {
+    let observed: BTreeSet<&str> = resource_snapshots
+        .iter()
+        .map(|snapshot| snapshot.scenario_id.as_str())
+        .collect();
+    for summary in &latency_bundle.summaries {
+        if !observed.contains(summary.scenario_id.as_str()) {
+            return Err(SwarmGauntletError::MissingResourceSnapshot {
+                scenario_id: summary.scenario_id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gauntlet_counters(
+    manifest: &SwarmGauntletManifest,
+    counters: SwarmGauntletCounters,
+) -> Result<(), SwarmGauntletError> {
+    if manifest
+        .required_phases
+        .contains(&SwarmGauntletPhase::Audit)
+        && counters.audit_event_count == 0
+    {
+        return Err(SwarmGauntletError::MissingAuditEvidence);
+    }
+    if manifest
+        .required_phases
+        .contains(&SwarmGauntletPhase::Store)
+        && counters.sparse_high_k_metadata_events == 0
+    {
+        return Err(SwarmGauntletError::MissingStoreEvidence);
+    }
+    Ok(())
+}
 
 /// Latency component used to explain tail behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2323,6 +3450,31 @@ mod tests {
     use super::*;
     use crate::live_suite::{EnvironmentManifest, LiveEnvironment};
 
+    /// Pin the `usize → u32` bridge `from_environment` uses for CPU/NUMA
+    /// counts. Realistic values must round-trip identically; the
+    /// `u32::MAX + 1` boundary must saturate (panic-free) so the topology
+    /// schema stays portable across 32/64-bit hosts.
+    #[test]
+    fn usize_to_u32_saturating_round_trips_realistic_counts_and_saturates_overflow() {
+        // Real hardware sweep: 1, 64, 1024 cores, 4 GiB-equivalent count.
+        for value in [0_usize, 1, 64, 1_024, 65_535, u32::MAX as usize] {
+            assert_eq!(
+                u64::from(usize_to_u32_saturating(value)),
+                u64::try_from(value).expect("test inputs fit u64"),
+                "realistic count {value} must round-trip identically"
+            );
+        }
+
+        // Boundary: u32::MAX + 1 saturates to u32::MAX rather than wrapping
+        // to 0. (On 32-bit hosts `usize::MAX == u32::MAX` so this branch
+        // is no-op; this test only exercises the saturating arm on 64-bit.)
+        if usize::BITS > u32::BITS {
+            let oversize = (u32::MAX as usize) + 1;
+            assert_eq!(usize_to_u32_saturating(oversize), u32::MAX);
+            assert_eq!(usize_to_u32_saturating(usize::MAX), u32::MAX);
+        }
+    }
+
     fn swarm_test_environment() -> SwarmRunEnvironment {
         SwarmRunEnvironment {
             worker_id: "rch-worker-64c".to_string(),
@@ -2362,6 +3514,184 @@ mod tests {
             max_queue_depth: 1_000,
             retry_amplification_microunits: 100_000,
         }
+    }
+
+    fn gauntlet_phase_evidence() -> Vec<SwarmGauntletPhaseEvidence> {
+        vec![
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Fwc,
+                "fwc",
+                "command_log.txt#fwc-bench",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Host,
+                "fcp-host",
+                "summary.json#host",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Mesh,
+                "fcp-mesh",
+                "summary.json#mesh",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::ConnectorTestkit,
+                "fcp-testkit",
+                "raw_samples.jsonl#connector",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Scheduler,
+                "fcp-host",
+                "decision-card:scheduler",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Placement,
+                "fcp-mesh",
+                "decision-card:placement",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Backpressure,
+                "fcp-host",
+                "decision-card:backpressure",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Audit,
+                "fcp-host",
+                "raw_samples.jsonl#audit",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::Store,
+                "fcp-store",
+                "raw_samples.jsonl#sparse-high-k",
+            ),
+            SwarmGauntletPhaseEvidence::new(
+                SwarmGauntletPhase::EvidenceBundle,
+                "fcp-testkit",
+                "manifest.json",
+            ),
+        ]
+    }
+
+    fn gauntlet_decision_cards(scenario_id: &str) -> Vec<SwarmDecisionCard> {
+        [
+            (
+                "card:scheduler",
+                SwarmDecisionDomain::Scheduler,
+                SwarmDecisionAction::Dispatch,
+                "queue_congested",
+                "p99_queueing",
+            ),
+            (
+                "card:placement",
+                SwarmDecisionDomain::Placement,
+                SwarmDecisionAction::Place,
+                "numa_pressure",
+                "cross_numa_hops",
+            ),
+            (
+                "card:backpressure",
+                SwarmDecisionDomain::Backpressure,
+                SwarmDecisionAction::Delay,
+                "downstream_throttled",
+                "retry_amplification",
+            ),
+        ]
+        .into_iter()
+        .map(|(card_id, domain, action, state, loss_term)| {
+            SwarmDecisionCard::new(
+                card_id,
+                domain,
+                "connector:gauntlet-fixture",
+                state,
+                action,
+                100,
+                SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+            )
+            .with_scenario(scenario_id)
+            .with_loss_terms(vec![SwarmDecisionLossTerm::new(
+                loss_term, 10, 1_000_000, "score",
+            )])
+            .with_counterfactual(SwarmDecisionCounterfactual::new(
+                SwarmDecisionAction::Fallback,
+                120,
+                "counterfactual retained for replay",
+            ))
+            .with_evidence_pointers(vec![SwarmDecisionEvidencePointer::bundle_artifact(
+                format!("raw_samples.jsonl#{scenario_id}"),
+                "blake3:raw",
+                true,
+            )])
+            .with_replay_inputs(BTreeMap::from([
+                ("scenario_id".to_string(), json!(scenario_id)),
+                ("queue_depth".to_string(), json!(512)),
+            ]))
+        })
+        .collect()
+    }
+
+    fn gauntlet_latency_bundle() -> Result<SwarmLatencyEvidenceBundle, Box<dyn Error>> {
+        let scenarios = vec![
+            SwarmLatencyScenario::new(SwarmWorkloadKind::FwcHostConnector, 1_000),
+            SwarmLatencyScenario::new(SwarmWorkloadKind::HostBatchInvoke, 1_000),
+            SwarmLatencyScenario::new(SwarmWorkloadKind::MeshGossipUpdate, 1_000),
+            SwarmLatencyScenario::new(SwarmWorkloadKind::AuditEvidenceRecording, 1_000),
+        ];
+        let samples: Vec<_> = scenarios
+            .iter()
+            .enumerate()
+            .flat_map(|(scenario_index, scenario)| {
+                (0_u64..3).map(move |sample_index| {
+                    let offset = u64::try_from(scenario_index).unwrap_or(u64::MAX) * 10;
+                    SwarmLatencySample::new(
+                        scenario.id.clone(),
+                        format!("agent-{sample_index}"),
+                        format!("op-{scenario_index}-{sample_index}"),
+                        sample_index,
+                        LatencyBreakdown::new(
+                            100 + offset + sample_index,
+                            200 + offset,
+                            30,
+                            sample_index,
+                            40,
+                            10,
+                        ),
+                    )
+                })
+            })
+            .collect();
+        let environment = swarm_test_environment();
+        let manifest = SwarmEvidenceArtifactManifest::from_environment(
+            "gauntlet-smoke",
+            SwarmEvidenceSourceKind::HostBacked,
+            SwarmEvidenceExecutionMode::Smoke,
+            &environment,
+            required_swarm_artifacts(),
+            SwarmEvidenceRedactionPolicy::conservative(),
+        )?;
+        Ok(
+            SwarmLatencyEvidenceBundle::from_samples(environment, scenarios, samples)?
+                .with_artifact_manifest(manifest)?,
+        )
+    }
+
+    fn gauntlet_resource_snapshots(
+        bundle: &SwarmLatencyEvidenceBundle,
+    ) -> Vec<SwarmRegressionMetricSnapshot> {
+        bundle
+            .summaries
+            .iter()
+            .map(|summary| {
+                SwarmRegressionMetricSnapshot::from_summary(
+                    summary,
+                    SwarmRegressionResourceMetrics {
+                        throughput_ops_per_second: 10_000,
+                        cpu_microunits: 4_000_000,
+                        rss_bytes: 128 * 1024 * 1024,
+                        max_queue_depth: 64,
+                        retry_amplification_microunits: 100_000,
+                    },
+                )
+            })
+            .collect()
     }
 
     #[test]
@@ -2906,6 +4236,322 @@ mod tests {
         assert!(SwarmCalibrationStatus::DriftDetected.requires_fallback());
         assert!(SwarmCalibrationStatus::MissingTelemetry.requires_fallback());
         assert!(SwarmCalibrationStatus::ReplayMismatch.requires_fallback());
+    }
+
+    #[test]
+    fn swarm_promotion_envelope_requires_all_controller_modes() {
+        let mut envelope = SwarmPromotionEnvelope::high_core_256gib(vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "cargo".to_string(),
+            "bench".to_string(),
+        ]);
+        envelope
+            .required_controller_modes
+            .retain(|mode| *mode != SwarmPromotionControllerMode::CombinedController);
+
+        assert_eq!(
+            envelope.validate(),
+            Err(SwarmPromotionEnvelopeError::MissingControllerMode {
+                mode: SwarmPromotionControllerMode::CombinedController
+            })
+        );
+    }
+
+    #[test]
+    fn swarm_promotion_qualification_accepts_complete_64c_256gib_topology()
+    -> Result<(), Box<dyn Error>> {
+        let envelope =
+            SwarmPromotionEnvelope::high_core_256gib(vec!["rch".to_string(), "exec".to_string()]);
+        let topology = SwarmPromotionTopology::from_environment(
+            &swarm_test_environment(),
+            "linux 6.8",
+            "6.8.0-fcp",
+            Some("performance".to_string()),
+            Some("local-nvme".to_string()),
+        );
+
+        let qualification = SwarmPromotionQualification::evaluate(envelope, topology)?;
+
+        assert!(qualification.is_qualified());
+        assert!(qualification.skip_reasons.is_empty());
+        assert_eq!(qualification.topology.logical_cpus, 64);
+        assert_eq!(qualification.topology.numa_nodes, Some(2));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_promotion_qualification_classifies_missing_hardware_prerequisites()
+    -> Result<(), Box<dyn Error>> {
+        let mut environment = swarm_test_environment();
+        environment.worker_id.clear();
+        environment.cpu_count = 16;
+        environment.physical_cpu_count = None;
+        environment.numa_node_count = None;
+        environment.memory_bytes = Some(32 * 1024 * 1024 * 1024);
+        let envelope =
+            SwarmPromotionEnvelope::high_core_256gib(vec!["rch".to_string(), "exec".to_string()]);
+        let topology = SwarmPromotionTopology::from_environment(
+            &environment,
+            "",
+            "",
+            Some(String::new()),
+            None,
+        );
+
+        let qualification = SwarmPromotionQualification::evaluate(envelope, topology)?;
+        let codes: BTreeSet<_> = qualification
+            .skip_reasons
+            .iter()
+            .map(SwarmPromotionSkipReason::code)
+            .collect();
+
+        assert!(!qualification.is_qualified());
+        assert!(codes.contains("missing_worker_identity"));
+        assert!(codes.contains("insufficient_logical_cpus"));
+        assert!(codes.contains("missing_physical_cpu_topology"));
+        assert!(codes.contains("missing_numa_topology"));
+        assert!(codes.contains("insufficient_memory"));
+        assert!(codes.contains("missing_os"));
+        assert!(codes.contains("missing_kernel"));
+        assert!(codes.contains("missing_cpu_governor"));
+        assert!(codes.contains("missing_storage_class"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_promotion_skip_artifact_emits_rerunnable_jsonl() -> Result<(), Box<dyn Error>> {
+        let mut environment = swarm_test_environment();
+        environment.cpu_count = 8;
+        environment.memory_bytes = None;
+        let envelope = SwarmPromotionEnvelope::high_core_256gib(vec![
+            "rch".to_string(),
+            "exec".to_string(),
+            "--".to_string(),
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
+        let topology = SwarmPromotionTopology::from_environment(
+            &environment,
+            "macos 15",
+            "24.4.0",
+            Some("automatic".to_string()),
+            Some("local-ssd".to_string()),
+        );
+        let qualification = SwarmPromotionQualification::evaluate(envelope, topology)?;
+        let artifact = SwarmPromotionSkipArtifact::from_qualification(qualification)
+            .ok_or("non-qualifying topology should emit promotion skip artifact")?;
+
+        let records = artifact.to_jsonl_values()?;
+        let record_types: BTreeSet<_> = records
+            .iter()
+            .filter_map(|record| record["record_type"].as_str())
+            .collect();
+        let skip_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_promotion_skip")
+            .ok_or("promotion skip record should be emitted")?;
+        let jsonl = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        assert!(record_types.contains("swarm_promotion_envelope"));
+        assert!(record_types.contains("swarm_promotion_topology"));
+        assert!(record_types.contains("swarm_promotion_skip"));
+        assert_eq!(
+            skip_record["schema_version"],
+            SWARM_PROMOTION_SCHEMA_VERSION
+        );
+        assert!(
+            skip_record["skip_reason_codes"]
+                .as_array()
+                .ok_or("skip reason codes should be an array")?
+                .iter()
+                .any(|code| code == "missing_memory_measurement")
+        );
+        assert!(jsonl.contains("swarm_gauntlet_e2e"));
+        for line in jsonl.lines() {
+            serde_json::from_str::<Value>(line)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_manifest_parser_validates_required_contract() -> Result<(), Box<dyn Error>> {
+        let manifest_json = json!({
+            "schema_version": SWARM_GAUNTLET_SCHEMA_VERSION,
+            "scenario_id": "integrated_swarm_gauntlet_1000",
+            "execution_mode": "smoke",
+            "source_kind": "offline",
+            "agent_count": 1000,
+            "sample_budget": 1,
+            "required_phases": SwarmGauntletPhase::REQUIRED,
+            "command_line": ["cargo", "test", "-p", "fcp-e2e", "--test", "swarm_gauntlet_e2e"],
+        });
+
+        let manifest = SwarmGauntletManifest::from_json_value(manifest_json)?;
+
+        assert_eq!(manifest.schema_version, SWARM_GAUNTLET_SCHEMA_VERSION);
+        assert_eq!(manifest.agent_count, 1_000);
+        assert_eq!(manifest.execution_mode, SwarmEvidenceExecutionMode::Smoke);
+        assert_eq!(manifest.required_phases, SwarmGauntletPhase::REQUIRED);
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_manifest_rejects_missing_phase() {
+        let mut manifest = SwarmGauntletManifest::smoke(vec!["cargo".to_string()]);
+        manifest
+            .required_phases
+            .retain(|phase| *phase != SwarmGauntletPhase::Backpressure);
+
+        let err = manifest.validate().expect_err("missing phase must fail");
+
+        assert_eq!(
+            err,
+            SwarmGauntletManifestError::MissingRequiredPhase {
+                phase: SwarmGauntletPhase::Backpressure
+            }
+        );
+    }
+
+    #[test]
+    fn swarm_gauntlet_soak_manifest_emits_structured_skip_artifact() -> Result<(), Box<dyn Error>> {
+        let manifest = SwarmGauntletManifest::soak(
+            vec![
+                "rch".to_string(),
+                "exec".to_string(),
+                "--".to_string(),
+                "cargo".to_string(),
+                "test".to_string(),
+                "-p".to_string(),
+                "fcp-e2e".to_string(),
+                "--test".to_string(),
+                "swarm_gauntlet_e2e".to_string(),
+            ],
+            vec![
+                SwarmGauntletPrerequisite::new("64-logical-cpus", false, "need promotion host"),
+                SwarmGauntletPrerequisite::new("256gib-memory", false, "need promotion host"),
+            ],
+        );
+        let skip = SwarmGauntletSkipArtifact::from_manifest(&manifest, &swarm_test_environment())
+            .ok_or("missing prerequisites should create skip artifact")?;
+
+        assert_eq!(skip.scenario_id, "integrated_swarm_gauntlet_10000");
+        assert_eq!(skip.execution_mode, SwarmEvidenceExecutionMode::Soak);
+        assert_eq!(
+            skip.missing_prerequisites,
+            vec!["64-logical-cpus".to_string(), "256gib-memory".to_string()]
+        );
+        assert!(skip.rerun_command.contains(&"rch".to_string()));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_summary_aggregates_existing_evidence_surfaces() -> Result<(), Box<dyn Error>>
+    {
+        let manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
+        let latency_bundle = gauntlet_latency_bundle()?;
+        let resources = gauntlet_resource_snapshots(&latency_bundle);
+        let first_scenario = latency_bundle.summaries[0].scenario_id.clone();
+        let gauntlet = SwarmGauntletEvidenceBundle::new(
+            manifest,
+            latency_bundle,
+            resources,
+            gauntlet_decision_cards(&first_scenario),
+            gauntlet_phase_evidence(),
+            SwarmGauntletCounters {
+                audit_event_count: 4,
+                same_zone_audit_appends: 512,
+                sparse_high_k_metadata_events: 3,
+            },
+            None,
+        )?;
+        let summary = gauntlet.summary();
+
+        assert_eq!(summary.agent_count, 1_000);
+        assert_eq!(summary.sample_count, 12);
+        assert_eq!(summary.summary_count, 4);
+        assert_eq!(summary.decision_card_ids.len(), 3);
+        assert_eq!(summary.phase_count, SwarmGauntletPhase::REQUIRED.len());
+        assert_eq!(summary.counters.same_zone_audit_appends, 512);
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_jsonl_logs_include_required_debug_fields() -> Result<(), Box<dyn Error>> {
+        let manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
+        let latency_bundle = gauntlet_latency_bundle()?;
+        let resources = gauntlet_resource_snapshots(&latency_bundle);
+        let first_scenario = latency_bundle.summaries[0].scenario_id.clone();
+        let gauntlet = SwarmGauntletEvidenceBundle::new(
+            manifest,
+            latency_bundle,
+            resources,
+            gauntlet_decision_cards(&first_scenario),
+            gauntlet_phase_evidence(),
+            SwarmGauntletCounters {
+                audit_event_count: 4,
+                same_zone_audit_appends: 512,
+                sparse_high_k_metadata_events: 3,
+            },
+            None,
+        )?;
+
+        let records = gauntlet.to_jsonl_values()?;
+        let log_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_gauntlet_log")
+            .ok_or("gauntlet log record must be emitted")?;
+        let serialized = serde_json::to_string(&records)?;
+
+        assert_eq!(
+            log_record["schema_version"],
+            SWARM_GAUNTLET_LOG_SCHEMA_VERSION
+        );
+        assert!(log_record["command_line"].is_array());
+        assert_eq!(log_record["git_revision"], "abc123");
+        assert_eq!(log_record["worker_id"], "rch-worker-64c");
+        assert_eq!(log_record["cargo_target_dir"], "/tmp/fcp-swarm-target");
+        assert_eq!(log_record["topology"]["logical_cpus"], 64);
+        assert!(log_record["p50_ns"].is_u64());
+        assert!(log_record["p95_ns"].is_u64());
+        assert!(log_record["p99_ns"].is_u64());
+        assert!(log_record["p999_ns"].is_u64());
+        assert!(log_record["throughput_ops_per_second"].is_u64());
+        assert!(log_record["queue_depth"].is_u64());
+        assert!(log_record["retry_amplification_microunits"].is_u64());
+        assert!(log_record["rss_bytes"].is_u64());
+        assert!(log_record["cpu_microunits"].is_u64());
+        assert!(log_record["decision_card_ids"].is_array());
+        assert_eq!(log_record["evidence_bundle_id"], "gauntlet-smoke");
+        assert!(serialized.contains("\"record_type\":\"swarm_latency_sample\""));
+        assert!(serialized.contains("\"record_type\":\"swarm_decision_card\""));
+        assert!(!serialized.contains("sk-live-"));
+        assert!(!serialized.contains("Bearer test-token"));
+        assert!(!serialized.contains("super-secret-value"));
+        Ok(())
     }
 
     #[test]

@@ -86,6 +86,15 @@ rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-evidence-gates cargo test -p fcp
 # Swarm operator decision cards (scheduler/placement/backpressure replay contract)
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-decision-cards cargo test -p fcp-testkit decision_card --lib
 
+# Integrated 1k swarm gauntlet smoke: fwc -> host -> mesh -> connector/testkit evidence shape
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-gauntlet-smoke cargo test -p fcp-e2e --test swarm_gauntlet_e2e -- --nocapture
+
+# Integrated 10k swarm gauntlet soak/promotion contract; emits skip artifact if prerequisites are absent
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-gauntlet-soak cargo test -p fcp-testkit swarm_gauntlet_soak --lib -- --nocapture
+
+# 64-core/256GiB promotion envelope and hardware skip artifact
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-promotion-skip cargo test -p fcp-e2e --test swarm_gauntlet_e2e swarm_promotion_skip -- --nocapture
+
 # Streaming health model
 rch exec -- cargo test -p fcp-streaming -- health
 
@@ -248,6 +257,44 @@ budgets, one-sample minimum). Soak thresholds are stricter (`+3%` p99/p999,
 Reports serialize as JSONL with explicit failed metric records so CI can
 distinguish true responsiveness regressions from insufficient evidence or worker
 environment drift.
+
+### Integrated Swarm Gauntlet
+
+`swarm-gauntlet/v1` ties the first-generation swarm evidence surfaces together
+so one run proves the combined path instead of isolated components. The smoke
+lane is offline/replayable and represents the 1k-agent scenario; the soak lane
+represents 10k agents and carries explicit hardware/network prerequisites. If a
+soak prerequisite is missing, the runner emits `swarm_gauntlet_skip` with the
+missing prerequisite names and exact rerun command instead of silently passing.
+
+The gauntlet manifest requires evidence for `fwc`, `host`, `mesh`,
+`connector_testkit`, `scheduler`, `placement`, `backpressure`, `audit`, `store`,
+and `evidence_bundle`. Its JSONL output includes the existing
+`swarm_latency_sample`, `swarm_latency_summary`, artifact manifest, and
+`swarm_decision_card` records, plus `swarm_gauntlet_phase_evidence`,
+`swarm_gauntlet_summary`, and `swarm_gauntlet_log`. Each log record carries the
+command line, source revision, worker id, `CARGO_TARGET_DIR`, topology,
+p50/p95/p99/p999, throughput, queue depth, retry amplification, RSS, CPU,
+decision-card ids, evidence-bundle id, audit counters, sparse/high-K store
+counters, and a machine-readable skip reason when applicable.
+
+### 64-Core/256GiB Promotion Envelope
+
+`swarm-promotion/v1` defines the promotion gate for turning massive-swarm
+controllers on by default. A qualifying run must capture at least 64 logical
+CPUs, 256 GiB memory, physical-core topology, NUMA node count, worker identity,
+OS/kernel, CPU governor, storage class, and the exact rerun command. The
+required comparison modes are `default_placement`, `pool_aware_placement`,
+`scheduler_only`, `backpressure_only`, and `combined_controller`; a promotion
+bundle that omits any mode is invalid.
+
+When the current worker is too small or missing topology data, the offline e2e
+lane emits `swarm_promotion_envelope`, `swarm_promotion_topology`, and
+`swarm_promotion_skip` JSONL records. Skip reasons are machine codes such as
+`insufficient_logical_cpus`, `missing_memory_measurement`,
+`missing_numa_topology`, and `missing_storage_class`, so CI and agents can
+distinguish "not enough hardware" from a failing benchmark while preserving the
+exact command to rerun on a qualifying 64-core/256GiB host.
 
 ### Adaptive Batch Scheduler
 

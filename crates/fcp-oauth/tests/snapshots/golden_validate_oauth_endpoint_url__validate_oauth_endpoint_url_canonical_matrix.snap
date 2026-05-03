@@ -1,0 +1,28 @@
+---
+source: crates/fcp-oauth/tests/golden_validate_oauth_endpoint_url.rs
+expression: actual
+---
+# validate_oauth_endpoint_url canonical golden vector
+# br-f34558bc9: dedup canonical predicate; this golden is the
+#   reviewable accept/reject matrix for every documented branch.
+# Format: <pad-input>  | <verdict and class>
+#   ACCEPT rows include the normalized URL the validator returns.
+#   REJECT rows tag a stable error class (parse_error,
+#   missing_host, embedded_credentials, fragment, insecure_scheme).
+
+<empty>                                               | REJECT  class=parse_error
+data:text/plain,hi                                    | REJECT  class=missing_host
+file:///etc/passwd                                    | REJECT  class=missing_host
+http://127.0.0.1:8080/oauth/token                     | ACCEPT  normalized=`http://127.0.0.1:8080/oauth/token`
+http://localhost:9999/oauth/auth                      | ACCEPT  normalized=`http://localhost:9999/oauth/auth`
+http://provider.example.com/oauth/authorize           | REJECT  class=insecure_scheme
+https://                                              | REJECT  class=parse_error
+https://api.example.com/v2/oauth?audience=widgets     | ACCEPT  normalized=`https://api.example.com/v2/oauth?audience=widgets`
+https://provider.example.com/oauth/authorize          | ACCEPT  normalized=`https://provider.example.com/oauth/authorize`
+https://provider.example.com/oauth/authorize#frag     | REJECT  class=fragment
+https://provider.example.com/path/with/slashes        | ACCEPT  normalized=`https://provider.example.com/path/with/slashes`
+https://provider.example.com:8443/oauth/token         | ACCEPT  normalized=`https://provider.example.com:8443/oauth/token`
+https://user:pw@provider.example.com/oauth/authorize  | REJECT  class=embedded_credentials
+https://user@provider.example.com/oauth/authorize     | REJECT  class=embedded_credentials
+https://very-long-subdomain.example.com/oauth         | ACCEPT  normalized=`https://very-long-subdomain.example.com/oauth`
+not a url at all                                      | REJECT  class=parse_error

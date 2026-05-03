@@ -1980,7 +1980,7 @@ Connectors in `credential_id` mode never see raw API keys. The egress proxy reso
 
 **Replay protection**:
 - Deterministic event IDs: `SHA256(provider ‖ 0x00 ‖ event_type ‖ 0x00 ‖ body)`, so the same input always produces the same ID
-- Atomic claim via RwLock: `check_replay()` verifies, then `claim_event()` atomically checks-and-records under write lock
+- Atomic claim via RwLock: `claim_event()` checks and records under one write lock; the older split `check_replay()` / `record_event()` pair is deprecated because it is TOCTOU-racy
 - TTL-based cleanup (default 24 hours) with periodic garbage collection
 
 **Provider-specific parsing**:

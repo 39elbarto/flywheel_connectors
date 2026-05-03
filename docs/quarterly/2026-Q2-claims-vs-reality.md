@@ -4,7 +4,7 @@
 > Auditor: SunnyMoose (Claude Opus 4.6)
 > Prior report: N/A (first report — baseline from MOR/C2.4 audit)
 > Snapshot date: 2026-04-10 20:17 UTC (commit 70978239)
-> **Post-report corrections:** Two status rows drifted after this
+> **Post-report corrections:** Three status rows drifted after this
 > snapshot was written. See the post-snapshot-deltas section below
 > before citing numbers from this report.
 
@@ -18,15 +18,15 @@ the snapshot date**.
 **Result at snapshot date:** All 16 labels accurate, no overclaims, no
 underclaims.
 
-**Post-snapshot status:** Two labels were subsequently changed in the
+**Post-snapshot status:** Three labels were subsequently changed in the
 README and the quarterly table has been re-reconciled in-place to match
-(br-rx347). The original "no overclaims, no underclaims" claim above is
-preserved for historical honesty; see the post-snapshot-deltas section
-for the two rows that were re-audited.
+(br-rx347, br-lvz4t). The original "no overclaims, no underclaims" claim
+above is preserved for historical honesty; see the post-snapshot-deltas
+section for the rows that were re-audited.
 
 ## Feature Status Delta Table
 
-Current Status reflects the latest README (re-reconciled 2026-04-23).
+Current Status reflects the latest README (re-reconciled 2026-05-03).
 Snapshot Status preserves the 2026-04-10 audit answer so the drift is
 visible.
 
@@ -46,15 +46,14 @@ visible.
 | Offline Access | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 185+ tests (77 E2E) | PlacementPolicy + repair controllers |
 | Mesh-Stored Policy Objects | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 128 tests | Owner-signed; mesh distribution TBD |
 | Symbol-First Protocol | N/A | `IMPLEMENTED` | `IMPLEMENTED` | Baseline | 96+ tests | RaptorQ, chunking, golden vectors |
-| Mesh-Native Architecture | N/A | `DESIGNED` | `IMPLEMENTED` | ↑ Upgraded 2026-04-10 21:43 (z1nkz.1 / cfd9c0f5) | 259+ tests + `fwc/src/truth.rs` (78 tests) | README now frames as "converging"; Gossip/IBLT/XOR/LiveTruthResolver all built and tested, production cutover gating in progress |
+| Mesh-Native Architecture | N/A | `DESIGNED` | `STEADY-STATE TARGET (NOT YET OPERATIONAL)` | ↓ Downgraded 2026-05-02 (br-lvz4t) | 259+ tests + `fwc/src/truth.rs` (78 tests) | Gossip/IBLT/XOR/LiveTruthResolver are built and tested, but the production invoke path remains `fwc -> fcp-host -> connector subprocesses`; zero mesh-native production evidence |
 | Computation Migration | N/A | `DESIGNED` | `DESIGNED` | Baseline | 205 tests | State machines only; not operational |
 
 ## Post-snapshot deltas (br-rx347)
 
-Two rows above diverged from the README between the 2026-04-10 snapshot
-and the next quarterly review. Both README edits preceded the
-reconciliation; neither was an overclaim by the README at its edit time.
-Both changes were audited and accepted.
+Three rows above diverged from the README between the 2026-04-10
+snapshot and this re-check. The README edits preceded reconciliation;
+the table now records each drift point explicitly.
 
 1. **Mesh-Native Architecture** `DESIGNED` → `IMPLEMENTED` (2026-04-10
    21:43, commit cfd9c0f5, z1nkz.1 teaching-surface rewrite). The
@@ -66,6 +65,11 @@ Both changes were audited and accepted.
    the current host-backed path and an empty set preserves a
    back-compat permissive branch. The quarterly's `PROVEN` cell
    overclaimed for the 12 days between 04-10 and 04-22.
+3. **Mesh-Native Architecture** `IMPLEMENTED` →
+   `STEADY-STATE TARGET (NOT YET OPERATIONAL)` (2026-05-02, br-lvz4t).
+   The downgrade matches the README's current operational model: mesh
+   building blocks are implemented, but the only production invoke path
+   remains host-first and has zero mesh-native production evidence.
 
 ## Overclaims Found (at re-reconciliation, 2026-04-23)
 
@@ -94,9 +98,10 @@ Both changes were audited and accepted.
 - The strongest evidence gap is between `IMPLEMENTED` and `PROVEN` — several
   features (Revocation, Egress, Secretless) have strong unit test coverage
   but limited E2E proof. Future reports should track E2E test additions.
-- **Stale quarterly drift (br-rx347):** this report froze at 2026-04-10
-  20:17 but two rows drifted within hours (Mesh-Native upgrade, same
-  day) and 12 days (Zone Isolation downgrade). A quarterly that claims
+- **Stale quarterly drift (br-rx347, br-lvz4t):** this report froze at
+  2026-04-10 20:17 but three status changes landed afterward:
+  Mesh-Native upgrade, Zone Isolation downgrade, and the later
+  Mesh-Native production-evidence downgrade. A quarterly that claims
   "all labels accurate" while its own table records stale statuses is
   itself an overclaim. Future quarterlies should either re-reconcile at
   publish time or ship with an explicit "frozen at commit X" banner and

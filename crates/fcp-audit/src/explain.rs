@@ -368,16 +368,23 @@ fn select_admission_entry<'a>(
     entries: &'a [AuditEntry],
     invocation: &'a AuditEntry,
 ) -> Option<&'a AuditEntry> {
-    entries
-        .iter()
-        .find(|entry| {
-            entry_matches_invocation(entry, invocation)
-                && (entry.event_type.contains("admission")
-                    || metadata_value_contains(&entry.metadata, "decision", "allow")
-                    || metadata_value_contains(&entry.metadata, "admission", "allow")
-                    || metadata_value_contains(&entry.metadata, "admitted", "true"))
-        })
-        .or(Some(invocation))
+    // br-vs4nt completion: do NOT fall back to the invocation entry
+    // itself when no actual admission audit was recorded. Pre-fix the
+    // `.or(Some(invocation))` made `admission_entry` always Some, which
+    // suppressed the "no admission audit event matched" warning AND
+    // injected a misleading `AuditAdmission` reason claiming the
+    // invocation entry "recorded the admitted invocation". A bundle
+    // with NO real admission audit thus rendered as if admission had
+    // been confirmed before dispatch — exactly the cross-evidence
+    // borrowing pattern vs4nt closed for capability_token + receipt,
+    // missed for admission_entry.
+    entries.iter().find(|entry| {
+        entry_matches_invocation(entry, invocation)
+            && (entry.event_type.contains("admission")
+                || metadata_value_contains(&entry.metadata, "decision", "allow")
+                || metadata_value_contains(&entry.metadata, "admission", "allow")
+                || metadata_value_contains(&entry.metadata, "admitted", "true"))
+    })
 }
 
 fn select_receipt<'a>(
@@ -460,15 +467,19 @@ fn capability_reason(token: &Value, invocation: &AuditEntry) -> CausalReason {
     }
 }
 
-fn admission_reason(entry: &AuditEntry, invocation: &AuditEntry) -> CausalReason {
-    let verb = if entry.id == invocation.id {
-        "recorded the admitted invocation"
-    } else {
-        "confirmed admission before connector dispatch"
-    };
+fn admission_reason(entry: &AuditEntry, _invocation: &AuditEntry) -> CausalReason {
+    // The `entry.id == invocation.id` shortcut existed to soften the
+    // misleading message produced when select_admission_entry's
+    // pre-vs4nt fallback handed the invocation back as its own
+    // admission. With the fallback removed (br-vs4nt completion),
+    // `entry` is always a real admission audit and we always render
+    // the literal "confirmed admission" statement.
     CausalReason {
         kind: CausalReasonKind::AuditAdmission,
-        statement: format!("audit event {} (seq {}) {verb}", entry.id, entry.seq),
+        statement: format!(
+            "audit event {} (seq {}) confirmed admission before connector dispatch",
+            entry.id, entry.seq
+        ),
         evidence: vec![format!("audit_entry:{}", entry.id)],
     }
 }
@@ -757,6 +768,38 @@ mod tests {
         assert!(!human.contains("slack.messages.write"));
         assert!(!human.contains("receipt-slack-allow"));
         assert!(!human.contains("returned allow"));
+
+        // br-vs4nt completion: the same anti-pattern existed for
+        // admission entries — `select_admission_entry` used to fall
+        // back to `Some(invocation)` so the invocation entry rendered
+        // as its own admission proof. Pin that we now surface the
+        // missing-admission warning AND do not emit a false admission
+        // claim. Without this pin the bundle would render an
+        // AuditAdmission reason pointing at the invocation itself.
+        assert!(
+            human.contains(&format!(
+                "no admission audit event matched invocation {}",
+                invocation.id
+            )),
+            "br-vs4nt admission seam: missing-admission warning must surface, got: {human}"
+        );
+        assert!(
+            !human.contains("recorded the admitted invocation"),
+            "br-vs4nt admission seam: must not borrow invocation as admission, got: {human}"
+        );
+        assert!(
+            !human.contains("confirmed admission before connector dispatch"),
+            "br-vs4nt admission seam: must not synthesize admission claim from invocation, got: {human}"
+        );
+        assert!(
+            !explanation
+                .reasons
+                .iter()
+                .any(|reason| matches!(reason.kind, CausalReasonKind::AuditAdmission)),
+            "br-vs4nt admission seam: bundle without admission audit must not produce an \
+             AuditAdmission reason, got reasons: {:?}",
+            explanation.reasons,
+        );
     }
 
     #[test]

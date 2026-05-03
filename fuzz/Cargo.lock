@@ -1123,6 +1123,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77727bb15fa921304124b128af125e7e3b968275d1b108b379190264f4423710"
 dependencies = [
  "hybrid-array",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -1175,9 +1176,24 @@ dependencies = [
  "cpufeatures 0.2.17",
  "curve25519-dalek-derive",
  "digest 0.10.7",
- "fiat-crypto",
+ "fiat-crypto 0.2.9",
  "group",
  "rand_core 0.6.4",
+ "rustc_version",
+ "subtle",
+ "zeroize",
+]
+
+[[package]]
+name = "curve25519-dalek"
+version = "5.0.0-pre.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "335f1947f241137a14106b6f5acc5918a5ede29c9d71d3f2cb1678d5075d9fc3"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "curve25519-dalek-derive",
+ "fiat-crypto 0.3.0",
  "rustc_version",
  "subtle",
  "zeroize",
@@ -1222,6 +1238,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7c1832837b905bbfb5101e07cc24c8deddf52f93225eee6ead5f4d63d53ddcb"
 dependencies = [
  "const-oid 0.9.6",
+ "zeroize",
+]
+
+[[package]]
+name = "der"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "71fd89660b2dc699704064e59e9dba0147b903e85319429e131620d022be411b"
+dependencies = [
+ "const-oid 0.10.2",
  "zeroize",
 ]
 
@@ -1346,8 +1372,8 @@ version = "2.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "115531babc129696a58c64a4fef0a8bf9e9698629fb97e9e40767d235cfbcd53"
 dependencies = [
- "pkcs8",
- "signature",
+ "pkcs8 0.10.2",
+ "signature 2.2.0",
 ]
 
 [[package]]
@@ -1356,7 +1382,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70e796c081cee67dc755e1a36a0a172b897fab85fc3f6bc48307991f64e4eca9"
 dependencies = [
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "ed25519",
  "rand_core 0.6.4",
  "serde",
@@ -1468,6 +1494,7 @@ dependencies = [
  "base64",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "hex",
  "reqwest 0.13.2",
@@ -1490,6 +1517,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "futures-util",
  "reqwest 0.13.2",
@@ -1510,6 +1538,7 @@ dependencies = [
  "base64",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",
  "serde",
@@ -1582,6 +1611,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-prelude",
  "frost-ed25519",
  "hex",
  "hkdf",
@@ -1595,7 +1625,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tracing",
  "windows",
- "x25519-dalek",
+ "x25519-dalek 2.0.1",
  "x509-parser",
  "zeroize",
 ]
@@ -1635,6 +1665,7 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 2.0.17",
  "tracing",
+ "url",
  "uuid",
  "zeroize",
 ]
@@ -1649,15 +1680,18 @@ dependencies = [
  "chrono",
  "ciborium",
  "coset",
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "ed25519-dalek",
  "fcp-auth-schema",
  "fcp-cbor",
  "frost-ed25519",
+ "getrandom 0.3.4",
  "hex",
  "hkdf",
  "hpke",
+ "ml-dsa",
  "rand 0.8.5",
+ "rand_core 0.10.1",
  "rand_core 0.6.4",
  "serde",
  "serde_bytes",
@@ -1665,8 +1699,20 @@ dependencies = [
  "subtle",
  "thiserror 2.0.17",
  "tracing",
- "x25519-dalek",
+ "x-wing",
+ "x25519-dalek 2.0.1",
  "zeroize",
+]
+
+[[package]]
+name = "fcp-crypto-pq"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "hex",
+ "serde",
+ "subtle",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1678,6 +1724,7 @@ dependencies = [
  "base64",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "hex",
  "reqwest 0.13.2",
@@ -1701,6 +1748,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "fcp-streaming",
  "hex",
@@ -1718,9 +1766,15 @@ dependencies = [
 name = "fcp-evidence"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "ciborium",
+ "fcp-cbor",
  "fcp-core",
+ "fcp-crypto",
+ "hex",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
 ]
 
 [[package]]
@@ -1787,6 +1841,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-oauth",
+ "fcp-prelude",
  "fcp-sdk",
  "futures-util",
  "percent-encoding",
@@ -1811,6 +1866,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-google-discovery",
+ "fcp-prelude",
  "fcp-sdk",
  "futures-util",
  "percent-encoding",
@@ -1831,6 +1887,7 @@ dependencies = [
  "chrono",
  "fcp-core",
  "fcp-oauth",
+ "fcp-prelude",
  "percent-encoding",
  "reqwest 0.13.2",
  "serde",
@@ -1847,6 +1904,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-google-discovery",
+ "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",
  "serde",
@@ -1865,6 +1923,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-google-discovery",
+ "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",
  "serde",
@@ -1881,6 +1940,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-streaming",
  "futures-util",
  "jsonschema",
@@ -1899,6 +1959,7 @@ dependencies = [
  "async-trait",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "hex",
  "reqwest 0.13.2",
@@ -1922,17 +1983,24 @@ dependencies = [
  "chrono",
  "ciborium",
  "fcp-async-core",
+ "fcp-audit",
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
  "fcp-evidence",
  "fcp-kernel",
+ "fcp-mesh",
  "fcp-policy",
+ "fcp-prelude",
+ "fcp-raptorq",
+ "fcp-ratelimit",
  "fcp-sandbox",
+ "fcp-store",
  "futures-util",
  "hex",
  "hyper",
  "hyper-util",
+ "mach2",
  "semver",
  "serde",
  "serde_json",
@@ -1962,6 +2030,7 @@ dependencies = [
  "blake3",
  "fcp-cbor",
  "fcp-core",
+ "fcp-prelude",
  "hex",
  "ipnet",
  "semver",
@@ -1983,6 +2052,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-policy",
+ "fcp-prelude",
  "fcp-protocol",
  "fcp-raptorq",
  "fcp-store",
@@ -2009,6 +2079,7 @@ dependencies = [
  "async-trait",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",
  "serde",
@@ -2045,9 +2116,25 @@ dependencies = [
 name = "fcp-policy"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "fcp-core",
+ "fcp-crypto-pq",
+ "fcp-evidence",
+ "hex",
  "serde",
  "serde_json",
+ "thiserror 2.0.17",
+ "tracing",
+]
+
+[[package]]
+name = "fcp-prelude"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fcp-core",
+ "uuid",
 ]
 
 [[package]]
@@ -2061,6 +2148,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-prelude",
  "fcp-tailscale",
  "hmac 0.12.1",
  "rand 0.8.5",
@@ -2078,6 +2166,7 @@ dependencies = [
  "async-trait",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "hex",
  "reqwest 0.13.2",
@@ -2100,6 +2189,7 @@ dependencies = [
  "fcp-cbor",
  "fcp-core",
  "fcp-crypto",
+ "fcp-prelude",
  "fcp-tailscale",
  "parking_lot",
  "serde",
@@ -2114,6 +2204,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "parking_lot",
  "rand 0.9.2",
  "serde",
@@ -2137,6 +2228,7 @@ dependencies = [
  "fcp-core",
  "fcp-crypto",
  "fcp-manifest",
+ "fcp-prelude",
  "fcp-raptorq",
  "fcp-store",
  "hex",
@@ -2187,6 +2279,7 @@ dependencies = [
  "fcp-kernel",
  "fcp-manifest",
  "fcp-policy",
+ "fcp-prelude",
  "hex",
  "hmac 0.12.1",
  "jsonschema",
@@ -2209,6 +2302,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "fcp-sdk",
  "fcp-streaming",
  "percent-encoding",
@@ -2228,14 +2322,21 @@ dependencies = [
  "async-trait",
  "blake3",
  "bytes",
+ "ciborium",
  "fcp-async-core",
+ "fcp-cbor",
  "fcp-core",
+ "fcp-crypto",
+ "fcp-evidence",
+ "fcp-prelude",
  "fcp-raptorq",
  "fcp-telemetry",
  "parking_lot",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+ "tokio",
  "tracing",
 ]
 
@@ -2267,6 +2368,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-prelude",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -2282,6 +2384,7 @@ dependencies = [
  "ciborium",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "hex",
  "metrics",
  "metrics-exporter-prometheus",
@@ -2310,6 +2413,7 @@ dependencies = [
  "ed25519-dalek",
  "fcp-async-core",
  "fcp-core",
+ "fcp-prelude",
  "hex",
  "hmac 0.12.1",
  "parking_lot",
@@ -2348,6 +2452,12 @@ name = "fiat-crypto"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "28dea519a9695b9977216879a3ebfddf92f1c08c05d984f8996aecd6ecdc811d"
+
+[[package]]
+name = "fiat-crypto"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
@@ -2467,7 +2577,7 @@ version = "2.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f73eb5fa9311d33450c2320199ad1663b5af7a50061d9627d2e0dc776f0acb27"
 dependencies = [
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "document-features",
  "frost-core",
  "frost-rerandomized",
@@ -2864,7 +2974,7 @@ dependencies = [
  "rand_core 0.6.4",
  "sha2 0.10.9",
  "subtle",
- "x25519-dalek",
+ "x25519-dalek 2.0.1",
  "zeroize",
 ]
 
@@ -2919,7 +3029,9 @@ version = "0.4.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3944cf8cf766b40e2a1a333ee5e9b563f854d5fa49d6a8ca2764e97c6eddb214"
 dependencies = [
+ "ctutils",
  "typenum",
+ "zeroize",
 ]
 
 [[package]]
@@ -3332,6 +3444,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "keccak"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e24a010dd405bd7ed803e5253182815b41bf2e6a80cc3bfc066658e03a198aa"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+]
+
+[[package]]
+name = "kem"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01737161ba802849cfd486b5bd209d38ba4943494c249a8126005170c7621edd"
+dependencies = [
+ "crypto-common 0.2.1",
+ "rand_core 0.10.1",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3568,6 +3700,48 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "ml-dsa"
+version = "0.1.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3a596bd65985e2b343c3fd6cc4ade15cdd76da66b15936cfbce72ea661cdbb2"
+dependencies = [
+ "ctutils",
+ "hybrid-array",
+ "module-lattice",
+ "pkcs8 0.11.0",
+ "rand_core 0.10.1",
+ "sha3",
+ "signature 3.0.0",
+ "zeroize",
+]
+
+[[package]]
+name = "ml-kem"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "68c77d5ff6d755d09a0ef4d4d28c2b7e83658fe83e8c736d55e93d43e380d1cd"
+dependencies = [
+ "hybrid-array",
+ "kem",
+ "module-lattice",
+ "rand_core 0.10.1",
+ "sha3",
+ "zeroize",
+]
+
+[[package]]
+name = "module-lattice"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc7c90d33a0dac244570c26461d761ffaeadb3bfc2b17cc625ae2185cafdffae"
+dependencies = [
+ "ctutils",
+ "hybrid-array",
+ "num-traits",
+ "zeroize",
 ]
 
 [[package]]
@@ -3905,8 +4079,18 @@ version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f950b2377845cebe5cf8b5165cb3cc1a5e0fa5cfa3e1f7f55707d8fd82e0a7b7"
 dependencies = [
- "der",
- "spki",
+ "der 0.7.10",
+ "spki 0.7.3",
+]
+
+[[package]]
+name = "pkcs8"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "451913da69c775a56034ea8d9003d27ee8948e12443eae7c038ba100a4f21cb7"
+dependencies = [
+ "der 0.8.0",
+ "spki 0.8.0",
 ]
 
 [[package]]
@@ -4236,6 +4420,12 @@ checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
+
+[[package]]
+name = "rand_core"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63b8176103e19a2643978565ca18b50549f6101881c443590420e4dc998a3c69"
 
 [[package]]
 name = "rand_xoshiro"
@@ -4697,7 +4887,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3e97a565f76233a6003f9f5c54be1d9c5bdfa3eccfb189469f11ec4901c47dc"
 dependencies = [
  "base16ct",
- "der",
+ "der 0.7.10",
  "generic-array",
  "subtle",
  "zeroize",
@@ -4904,6 +5094,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha3"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be176f1a57ce4e3d31c1a166222d9768de5954f811601fb7ca06fc8203905ce1"
+dependencies = [
+ "digest 0.11.2",
+ "keccak",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4945,6 +5145,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "rand_core 0.6.4",
+]
+
+[[package]]
+name = "signature"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28d567dcbaf0049cb8ac2608a76cd95ff9e4412e1899d389ee400918ca7537f5"
+dependencies = [
+ "digest 0.11.2",
+ "rand_core 0.10.1",
 ]
 
 [[package]]
@@ -5004,7 +5214,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d91ed6c858b01f942cd56b37a94b3e0a1798290327d1236e4d9cf4eaca44d29d"
 dependencies = [
  "base64ct",
- "der",
+ "der 0.7.10",
+]
+
+[[package]]
+name = "spki"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1d9efca8738c78ee9484207732f728b1ef517bbb1833d6fc0879ca898a522f6f"
+dependencies = [
+ "base64ct",
+ "der 0.8.0",
 ]
 
 [[package]]
@@ -5214,7 +5434,9 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
+ "parking_lot",
  "pin-project-lite",
+ "signal-hook-registry",
  "socket2",
  "tokio-macros",
  "windows-sys 0.61.2",
@@ -6809,14 +7031,39 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
 
 [[package]]
+name = "x-wing"
+version = "0.1.0-rc.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17d0d5f4d1f26b9b9e7477af1d3bef960e1d1fb64edab7912fde472a8a8432e"
+dependencies = [
+ "kem",
+ "ml-kem",
+ "rand_core 0.10.1",
+ "sha3",
+ "x25519-dalek 3.0.0-pre.6",
+ "zeroize",
+]
+
+[[package]]
 name = "x25519-dalek"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c7e468321c81fb07fa7f4c636c3972b9100f0346e5b6a9f2bd0603a52f7ed277"
 dependencies = [
- "curve25519-dalek",
+ "curve25519-dalek 4.1.3",
  "rand_core 0.6.4",
  "serde",
+ "zeroize",
+]
+
+[[package]]
+name = "x25519-dalek"
+version = "3.0.0-pre.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3d5d6ff67acd3945b933e592bfa7143db4fcbb2f871754b6b9fbd7847fc5aea"
+dependencies = [
+ "curve25519-dalek 5.0.0-pre.6",
+ "rand_core 0.10.1",
  "zeroize",
 ]
 

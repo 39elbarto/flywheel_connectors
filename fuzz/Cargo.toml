@@ -1240,5 +1240,37 @@ test = false
 doc = false
 bench = false
 
+# AmberLark proptest→libFuzzer port (commit 2ace18e83 follow-up).
+# Each of these mirrors an oracle pinned in
+# crates/fcp-protocol/tests/protocol_parser_fuzz.rs.
+
+[[bin]]
+name = "fuzz_fcpc_oversize_payload_guard"
+path = "fuzz_targets/fcpc_oversize_payload_guard.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_fcps_session_handshake_cbor"
+path = "fuzz_targets/fcps_session_handshake_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cwt_claims_from_cbor"
+path = "fuzz_targets/cwt_claims_from_cbor.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "fuzz_cose_envelope_tamper_oracle"
+path = "fuzz_targets/cose_envelope_tamper_oracle.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

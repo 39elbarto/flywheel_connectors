@@ -5293,6 +5293,7 @@ dependencies = [
  "hex",
  "hmac 0.12.1",
  "insta",
+ "proptest",
  "rand 0.8.6",
  "semver",
  "serde",

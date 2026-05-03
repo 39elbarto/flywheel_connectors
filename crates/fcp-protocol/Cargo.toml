@@ -37,6 +37,8 @@ hex.workspace = true
 semver.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
 insta.workspace = true
+proptest.workspace = true
+ciborium.workspace = true
 
 [[bench]]
 name = "fcps_parsing"

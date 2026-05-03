@@ -44,6 +44,7 @@ const JSON_CONTENT_TYPE: &str = "application/json";
 const RETRY_AFTER_HEADER: &str = "Retry-After";
 const BATCH_CORRELATION_EXTENSION: &str = "fcpBatchIndex";
 const EMPTY_BEARER_TOKEN_MESSAGE: &str = "GraphQL bearer token must not be empty or whitespace";
+const DEFAULT_MAX_BATCH_ITEMS: usize = 50;
 
 /// GraphQL client metrics.
 #[derive(Debug, Default)]
@@ -330,6 +331,8 @@ pub struct GraphqlClientConfig {
     pub validation: SchemaValidationMode,
     /// Query resource limits enforced before transport dispatch.
     pub query_limits: GraphqlQueryLimits,
+    /// Maximum number of GraphQL operations allowed in one batch request.
+    pub max_batch_items: usize,
     /// Deduplicate in-flight requests.
     pub dedup_in_flight: bool,
 }
@@ -355,6 +358,7 @@ impl fmt::Debug for GraphqlClientConfig {
             .field("retry", &self.retry)
             .field("validation", &self.validation)
             .field("query_limits", &self.query_limits)
+            .field("max_batch_items", &self.max_batch_items)
             .field("dedup_in_flight", &self.dedup_in_flight)
             .finish()
     }
@@ -371,6 +375,7 @@ impl Default for GraphqlClientConfig {
             retry: RetryPolicy::default(),
             validation: SchemaValidationMode::Off,
             query_limits: GraphqlQueryLimits::default(),
+            max_batch_items: DEFAULT_MAX_BATCH_ITEMS,
             dedup_in_flight: false,
         }
     }
@@ -493,6 +498,13 @@ impl GraphqlClientBuilder {
     #[must_use]
     pub const fn with_query_limits(mut self, limits: GraphqlQueryLimits) -> Self {
         self.config.query_limits = limits;
+        self
+    }
+
+    /// Set the maximum number of operations allowed in a batch request.
+    #[must_use]
+    pub const fn with_max_batch_items(mut self, max_batch_items: usize) -> Self {
+        self.config.max_batch_items = max_batch_items;
         self
     }
 
@@ -761,6 +773,16 @@ impl GraphqlClient {
     {
         if items.is_empty() {
             return Ok(Vec::new());
+        }
+
+        if items.len() > self.config.max_batch_items {
+            return Err(GraphqlClientError::Protocol {
+                message: format!(
+                    "GraphQL batch has {} items, exceeding limit {}",
+                    items.len(),
+                    self.config.max_batch_items
+                ),
+            });
         }
 
         for item in &items {
@@ -1243,6 +1265,13 @@ mod tests {
     }
 
     #[test]
+    fn builder_with_max_batch_items() {
+        let builder =
+            GraphqlClientBuilder::new("https://api.test.com/graphql").with_max_batch_items(4);
+        assert_eq!(builder.config.max_batch_items, 4);
+    }
+
+    #[test]
     fn builder_chaining() {
         let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
             .with_service_name("github")
@@ -1250,7 +1279,8 @@ mod tests {
             .with_timeout(Duration::from_secs(10))
             .with_dedup_in_flight(true)
             .with_validation_mode(SchemaValidationMode::ResponseOnly)
-            .with_query_limits(GraphqlQueryLimits::new(1024, 4, 8, 12));
+            .with_query_limits(GraphqlQueryLimits::new(1024, 4, 8, 12))
+            .with_max_batch_items(8);
         assert_eq!(builder.config.service_name, "github");
         assert_eq!(builder.config.timeout, Duration::from_secs(10));
         assert!(builder.config.dedup_in_flight);
@@ -1262,6 +1292,7 @@ mod tests {
             builder.config.query_limits,
             GraphqlQueryLimits::new(1024, 4, 8, 12)
         );
+        assert_eq!(builder.config.max_batch_items, 8);
     }
 
     #[test]
@@ -2274,6 +2305,7 @@ mod tests {
         assert_eq!(config.retry.max_attempts, 3);
         assert_eq!(config.retry.strategy, RetryStrategy::IdempotentOnly);
         assert_eq!(config.query_limits, GraphqlQueryLimits::default());
+        assert_eq!(config.max_batch_items, DEFAULT_MAX_BATCH_ITEMS);
     }
 
     // ---- GraphqlClientBuilder: endpoint edge cases ----

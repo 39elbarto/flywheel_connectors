@@ -606,6 +606,36 @@ async fn rejects_batch_query_limit_violation_before_http_dispatch() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn rejects_oversized_batch_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_max_batch_items(2)
+        .build()
+        .expect("client");
+    let items = (0..3)
+        .map(|_| {
+            fcp_graphql::GraphqlBatchItem::new(
+                GraphqlQuery::new(ViewerQuery::QUERY),
+                serde_json::json!({}),
+            )
+        })
+        .collect();
+
+    let err = client
+        .execute_batch_request::<_, serde_json::Value>(items, None, None, true)
+        .await
+        .expect_err("oversized batch should be rejected before dispatch");
+
+    match err {
+        GraphqlClientError::Protocol { message } => {
+            assert!(message.contains("exceeding limit 2"), "got: {message}");
+        }
+        other => panic!("expected protocol error, got {other:?}"),
+    }
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
 async fn rejects_subscription_query_limit_violation_before_connect() {
     let client = GraphqlSubscriptionClient::new("ws://127.0.0.1:9/graphql", "test");
     let err = match client.subscribe::<TooDeepSubscription>(EmptyVars {}).await {
@@ -1701,10 +1731,9 @@ async fn subscription_full_result_buffer_handles_ping_then_closes_on_overflow() 
     let mut ok_items = 0_usize;
     let mut overflow_err_observed = false;
     let mut other_err_count = 0_usize;
-    while let Some(item) =
-        fcp_async_core::time::timeout(Duration::from_secs(5), stream.next())
-            .await
-            .expect("subscription stream did not yield in time")
+    while let Some(item) = fcp_async_core::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .expect("subscription stream did not yield in time")
     {
         match item {
             Ok(_) => {

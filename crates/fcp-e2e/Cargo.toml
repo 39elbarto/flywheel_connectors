@@ -327,3 +327,8 @@ tokio = { workspace = true }
 tempfile = "3"
 bytes = { workspace = true }
 fcp-oauth = { workspace = true }
+# Capability enforcement concurrent e2e (CrimsonWolf): RevocationObject
+# construction needs fcp_cbor::SchemaId + semver::Version directly,
+# both referenced by `tests/capability_enforcement_concurrent_e2e.rs`.
+fcp-cbor = { workspace = true }
+semver = { workspace = true }

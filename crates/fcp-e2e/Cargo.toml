@@ -326,3 +326,4 @@ zeroize = { workspace = true }
 tokio = { workspace = true }
 tempfile = "3"
 bytes = { workspace = true }
+fcp-oauth = { workspace = true }

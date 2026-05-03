@@ -1,0 +1,45 @@
+---
+source: crates/fcp-host/tests/golden_capability_rejection_matrix.rs
+assertion_line: 338
+expression: actual
+---
+# Golden vector — capability rejection matrix
+# br-6d16bf953 (AmberLark conformance) + br-167d9c812 (CrimsonWolf concurrent)
+# Format:
+#   <scenario> | seq=<n> genesis=<bool> event_type=<s> severity=<s>
+#               actor=<s> zone=<s> connector=<s> op_id=<s>
+#               correlation=<s> occurred_at=<u> prev_present=<bool>
+#               metadata.reason=<s>
+# Notes:
+#   - id is content-hash; intentionally omitted so a BLAKE3 internal
+#     change does not bleed into this golden.
+#   - All scenarios MUST classify Severity::Warning — the operator
+#     evidence trail relies on this for triage filtering.
+
+[0] zone_mismatch
+  seq=0 genesis=true event_type=invoke.deny severity=Warning
+  computed_severity=Info actor=user:golden-rejection-matrix zone=z:work
+  connector=fcp.test.golden_rejection operation_id=op-golden-zone_mismatch correlation=corr-golden-zone_mismatch
+  occurred_at=1735689600 prev_present=false
+  metadata.reason=zone-mismatch: Zone violation: Token audience mismatch
+
+[1] capability_mismatch
+  seq=1 genesis=false event_type=invoke.deny severity=Warning
+  computed_severity=Info actor=user:golden-rejection-matrix zone=z:work
+  connector=fcp.test.golden_rejection operation_id=op-golden-capability_mismatch correlation=corr-golden-capability_mismatch
+  occurred_at=1735689600 prev_present=true
+  metadata.reason=capability-mismatch: Operation not granted: op.test.invoke
+
+[2] expired_token
+  seq=2 genesis=false event_type=invoke.deny severity=Warning
+  computed_severity=Info actor=user:golden-rejection-matrix zone=z:work
+  connector=fcp.test.golden_rejection operation_id=op-golden-expired_token correlation=corr-golden-expired_token
+  occurred_at=1735689600 prev_present=true
+  metadata.reason=expired-token: Token expired
+
+[3] revoked_token
+  seq=3 genesis=false event_type=invoke.deny severity=Warning
+  computed_severity=Info actor=user:golden-rejection-matrix zone=z:work
+  connector=fcp.test.golden_rejection operation_id=op-golden-revoked_token correlation=corr-golden-revoked_token
+  occurred_at=1735689600 prev_present=true
+  metadata.reason=revoked-token: capability ObjectId abfdb60a0ef4f0bf610f9aa9174f2f5d0167f205d75b1be60cfbc8a67bfe43c0 revoked via registry

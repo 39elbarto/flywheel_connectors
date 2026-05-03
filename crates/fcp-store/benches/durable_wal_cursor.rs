@@ -3,19 +3,27 @@
 use std::hint::black_box;
 use std::time::Duration;
 
+use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fcp_async_core::runtime::Runtime;
 use fcp_prelude::{
     ObjectHeader, ObjectId, Provenance, RetentionClass, StorageMeta, StoredObject, ZoneId,
 };
 use fcp_store::{
-    DurableObjectStore, DurableObjectStoreConfig, GcRoots, ObjectStore, snapshot_zone_lifecycle,
+    DurableObjectStore, DurableObjectStoreConfig, DurableSymbolStore, DurableSymbolStoreConfig,
+    GcRoots, ObjectStore, ObjectSymbolMeta, ObjectTransmissionInfo, StoredSymbol, SymbolMeta,
+    SymbolStore, snapshot_zone_lifecycle,
 };
 use tempfile::TempDir;
 
 struct DurableFixture {
     _dir: TempDir,
     store: DurableObjectStore,
+}
+
+struct DurableSymbolFixture {
+    _dir: TempDir,
+    store: DurableSymbolStore,
 }
 
 fn bench_zone() -> ZoneId {
@@ -64,6 +72,49 @@ fn durable_fixture() -> DurableFixture {
     config.checkpoint_after_ops = 0;
     let store = DurableObjectStore::open(config).unwrap();
     DurableFixture { _dir: dir, store }
+}
+
+fn durable_symbol_fixture() -> DurableSymbolFixture {
+    let dir = TempDir::new().unwrap();
+    let mut config = DurableSymbolStoreConfig::new(dir.path().join("symbols"));
+    config.max_bytes = 512 * 1024 * 1024;
+    config.checkpoint_after_ops = 0;
+    let store = DurableSymbolStore::open(config).unwrap();
+    DurableSymbolFixture { _dir: dir, store }
+}
+
+fn bench_symbol_oti(source_symbols: u32, symbol_size: usize) -> ObjectTransmissionInfo {
+    ObjectTransmissionInfo {
+        transfer_length: u64::from(source_symbols) * u64::try_from(symbol_size).unwrap(),
+        symbol_size: u16::try_from(symbol_size).unwrap(),
+        source_blocks: 1,
+        sub_blocks: 1,
+        alignment: 1,
+        payload_hash: None,
+    }
+}
+
+fn bench_symbol_meta(index: u64, source_symbols: u32, symbol_size: usize) -> ObjectSymbolMeta {
+    ObjectSymbolMeta {
+        object_id: bench_object_id(index),
+        zone_id: bench_zone(),
+        oti: bench_symbol_oti(source_symbols, symbol_size),
+        source_symbols,
+        first_symbol_at: 1_700_000_000_u64.saturating_add(index),
+    }
+}
+
+fn bench_symbol(index: u64, esi: u32, symbol_size: usize) -> StoredSymbol {
+    StoredSymbol {
+        meta: SymbolMeta {
+            object_id: bench_object_id(index),
+            esi,
+            zone_id: bench_zone(),
+            source_node: Some(1),
+            stored_at: 1_700_000_000_u64.saturating_add(index),
+        },
+        data: Bytes::from(vec![u8::try_from(esi % 251).unwrap(); symbol_size]),
+    }
 }
 
 fn populated_fixture(rt: &Runtime, object_count: u64) -> DurableFixture {
@@ -168,12 +219,52 @@ fn bench_cursor_walk_latency(c: &mut Criterion) {
     lifecycle_group.finish();
 }
 
+fn bench_durable_symbol_mutation_flow(c: &mut Criterion) {
+    let rt = Runtime::new().unwrap();
+    let mut group = c.benchmark_group("durable_symbol_mutation_flow");
+
+    for (source_symbols, symbol_size) in [(8_u32, 256_usize), (64, 1_024)] {
+        let fixture = durable_symbol_fixture();
+        let mut object_index = 0_u64;
+
+        group.throughput(Throughput::Bytes(
+            u64::from(source_symbols) * u64::try_from(symbol_size).unwrap(),
+        ));
+        group.bench_with_input(
+            BenchmarkId::new(
+                "put_meta_plus_symbols",
+                format!("{source_symbols}x{symbol_size}"),
+            ),
+            &(source_symbols, symbol_size),
+            |b, &(source_symbols, symbol_size)| {
+                b.iter(|| {
+                    object_index = object_index.saturating_add(1);
+                    let meta = bench_symbol_meta(object_index, source_symbols, symbol_size);
+                    rt.block_on(async {
+                        fixture.store.put_object_meta(meta).await.unwrap();
+                        for esi in 0..source_symbols {
+                            fixture
+                                .store
+                                .put_symbol(bench_symbol(object_index, esi, symbol_size))
+                                .await
+                                .unwrap();
+                        }
+                    });
+                    black_box(object_index);
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group! {
     name = benches;
     config = Criterion::default()
         .sample_size(10)
         .warm_up_time(Duration::from_millis(500))
         .measurement_time(Duration::from_secs(2));
-    targets = bench_wal_append_throughput, bench_cursor_walk_latency
+    targets = bench_wal_append_throughput, bench_cursor_walk_latency, bench_durable_symbol_mutation_flow
 }
 criterion_main!(benches);

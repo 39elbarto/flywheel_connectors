@@ -477,7 +477,8 @@ impl SlackWebhook {
     /// Create a new Slack webhook handler.
     #[must_use]
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
-        Self::try_new(signing_secret).expect("Slack webhook signing secret must meet minimum length")
+        Self::try_new(signing_secret)
+            .expect("Slack webhook signing secret must meet minimum length")
     }
 
     /// Try to create a new Slack webhook handler.

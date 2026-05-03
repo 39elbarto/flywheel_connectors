@@ -636,7 +636,11 @@ fn operation_variant_exhaustive_match_sentinel() {
             | V4Operation::DelegateNode => (),
         }
     }
-    assert_eq!(probes.len(), 6, "V4Operation variant count drift: expected 6");
+    assert_eq!(
+        probes.len(),
+        6,
+        "V4Operation variant count drift: expected 6"
+    );
 }
 
 #[test]
@@ -704,9 +708,18 @@ sm = DEADBEEF
     assert_eq!(records[0].count, 0);
     assert_eq!(records[1].count, 1);
     // Hex fields decoded correctly:
-    assert_eq!(records[0].fields.get("msg").unwrap(), &vec![0xD8, 0x1C, 0x4D, 0x8D]);
-    assert_eq!(records[0].fields.get("pk").unwrap(), &vec![0xAA, 0xBB, 0xCC, 0xDD]);
-    assert_eq!(records[1].fields.get("sm").unwrap(), &vec![0xDE, 0xAD, 0xBE, 0xEF]);
+    assert_eq!(
+        records[0].fields.get("msg").unwrap(),
+        &vec![0xD8, 0x1C, 0x4D, 0x8D]
+    );
+    assert_eq!(
+        records[0].fields.get("pk").unwrap(),
+        &vec![0xAA, 0xBB, 0xCC, 0xDD]
+    );
+    assert_eq!(
+        records[1].fields.get("sm").unwrap(),
+        &vec![0xDE, 0xAD, 0xBE, 0xEF]
+    );
     // Numeric fields preserved as ASCII bytes (per parser doc):
     assert_eq!(records[0].fields.get("mlen").unwrap(), b"4");
     assert_eq!(records[1].fields.get("smlen").unwrap(), b"4");
@@ -754,6 +767,9 @@ fn vector_index_uniquely_identifies_vector_within_alg_op_pair() {
     let mut seen = std::collections::HashSet::new();
     for v in full_vector_set() {
         let key = (v.alg, v.op, v.index);
-        assert!(seen.insert(key), "duplicate (alg, op, index) tuple: {key:?}");
+        assert!(
+            seen.insert(key),
+            "duplicate (alg, op, index) tuple: {key:?}"
+        );
     }
 }

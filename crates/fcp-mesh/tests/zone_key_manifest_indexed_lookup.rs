@@ -44,8 +44,14 @@ fn make_manifest_with_n_recipients(n: usize) -> ZoneKeyManifest {
     for i in 0..n {
         let sk = X25519SecretKey::generate();
         let recipient = TailscaleNodeId::new(format!("100.64.{}.{}", (i / 256) % 256, i % 256));
-        let wrap = wrap_zone_key(&sk.public_key(), &zone, &recipient, 1_700_000_000, &zone_key)
-            .expect("HPKE wrap");
+        let wrap = wrap_zone_key(
+            &sk.public_key(),
+            &zone,
+            &recipient,
+            1_700_000_000,
+            &zone_key,
+        )
+        .expect("HPKE wrap");
         wrapped.push(wrap);
     }
     ZoneKeyManifest {
@@ -72,8 +78,11 @@ fn indexed_lookup_v3_hit_matches_linear_scan_for_every_recipient() {
     // O(n) linear scan for every recipient that is present in the
     // manifest.
     let manifest = make_manifest_with_n_recipients(32);
-    let recipients: Vec<TailscaleNodeId> =
-        manifest.wrapped_keys.iter().map(|w| w.recipient.clone()).collect();
+    let recipients: Vec<TailscaleNodeId> = manifest
+        .wrapped_keys
+        .iter()
+        .map(|w| w.recipient.clone())
+        .collect();
     let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
 
     for r in &recipients {
@@ -109,9 +118,13 @@ fn indexed_lookup_v4_hit_matches_linear_scan() {
     for i in 0..8 {
         let recipient = TailscaleNodeId::new(format!("100.65.0.{i}"));
         let (pk, _sk) = provider.generate().unwrap();
-        let aad = Fcp4Aad::for_zone_key(zone.as_bytes(), recipient.as_str().as_bytes(), 1_700_000_000)
-            .encode()
-            .unwrap();
+        let aad = Fcp4Aad::for_zone_key(
+            zone.as_bytes(),
+            recipient.as_str().as_bytes(),
+            1_700_000_000,
+        )
+        .encode()
+        .unwrap();
         let sealed = provider.seal(&pk, b"zone-key-bytes", &aad).unwrap();
         manifest.wrapped_keys_v4.push(WrappedZoneKeyV4 {
             recipient: recipient.clone(),
@@ -144,8 +157,14 @@ fn indexed_resolved_wrapped_key_for_prefers_v4_then_v3() {
     // Alice: V3-only recipient.
     let alice_sk = X25519SecretKey::generate();
     let alice = TailscaleNodeId::new("100.66.0.1");
-    let alice_v3 =
-        wrap_zone_key(&alice_sk.public_key(), &zone, &alice, 1_700_000_000, &zone_key).unwrap();
+    let alice_v3 = wrap_zone_key(
+        &alice_sk.public_key(),
+        &zone,
+        &alice,
+        1_700_000_000,
+        &zone_key,
+    )
+    .unwrap();
 
     // Bob: V4-only recipient.
     let provider = XWingProvider::new();
@@ -154,7 +173,9 @@ fn indexed_resolved_wrapped_key_for_prefers_v4_then_v3() {
     let bob_aad = Fcp4Aad::for_zone_key(zone.as_bytes(), bob.as_str().as_bytes(), 1_700_000_001)
         .encode()
         .unwrap();
-    let bob_sealed = provider.seal(&bob_pk, zone_key.as_bytes(), &bob_aad).unwrap();
+    let bob_sealed = provider
+        .seal(&bob_pk, zone_key.as_bytes(), &bob_aad)
+        .unwrap();
 
     let mut manifest = make_manifest_with_n_recipients(0);
     manifest.kem = ZoneKemAlgorithm::XWing;
@@ -168,14 +189,22 @@ fn indexed_resolved_wrapped_key_for_prefers_v4_then_v3() {
     let indexed = IndexedZoneKeyManifest::new(manifest.clone()).expect("unique recipients");
 
     // Alice resolves via V3 fallback in BOTH paths.
-    let alice_lin = manifest.resolved_wrapped_key_for(&alice).expect("alice via linear");
-    let alice_idx = indexed.resolved_wrapped_key_for(&alice).expect("alice via indexed");
+    let alice_lin = manifest
+        .resolved_wrapped_key_for(&alice)
+        .expect("alice via linear");
+    let alice_idx = indexed
+        .resolved_wrapped_key_for(&alice)
+        .expect("alice via indexed");
     assert_eq!(alice_lin.kem(), alice_idx.kem());
     assert_eq!(alice_lin.kem(), ZoneKemAlgorithm::HpkeX25519);
 
     // Bob resolves via V4 in BOTH paths.
-    let bob_lin = manifest.resolved_wrapped_key_for(&bob).expect("bob via linear");
-    let bob_idx = indexed.resolved_wrapped_key_for(&bob).expect("bob via indexed");
+    let bob_lin = manifest
+        .resolved_wrapped_key_for(&bob)
+        .expect("bob via linear");
+    let bob_idx = indexed
+        .resolved_wrapped_key_for(&bob)
+        .expect("bob via indexed");
     assert_eq!(bob_lin.kem(), bob_idx.kem());
     assert_eq!(bob_lin.kem(), ZoneKemAlgorithm::XWing);
 }
@@ -186,13 +215,11 @@ fn indexed_into_inner_returns_byte_equal_manifest() {
     // through into_inner + canonical CBOR must produce the same
     // bytes as the original manifest.
     let manifest = make_manifest_with_n_recipients(16);
-    let original_cbor =
-        fcp_cbor::to_canonical_cbor(&manifest).expect("original encodes");
+    let original_cbor = fcp_cbor::to_canonical_cbor(&manifest).expect("original encodes");
 
     let indexed = IndexedZoneKeyManifest::new(manifest).expect("unique recipients");
     let recovered = indexed.into_inner();
-    let recovered_cbor =
-        fcp_cbor::to_canonical_cbor(&recovered).expect("recovered encodes");
+    let recovered_cbor = fcp_cbor::to_canonical_cbor(&recovered).expect("recovered encodes");
 
     assert_eq!(
         original_cbor, recovered_cbor,

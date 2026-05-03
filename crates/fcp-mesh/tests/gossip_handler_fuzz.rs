@@ -45,7 +45,11 @@ use proptest::prelude::*;
 const MAX_REVOKED_IDS: usize = 4;
 const MAX_IBLT_BYTES: usize = 64;
 
-fn build_real_mesh_node(name: &'static str, sender_instance_id: u64, local_node_id: u64) -> MeshNode {
+fn build_real_mesh_node(
+    name: &'static str,
+    sender_instance_id: u64,
+    local_node_id: u64,
+) -> MeshNode {
     let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
     let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
         local_node_id,
@@ -79,21 +83,23 @@ fn arb_object_id() -> impl Strategy<Value = ObjectId> {
 
 fn arb_node_signature() -> impl Strategy<Value = NodeSignature> {
     (any::<[u8; 64]>(), "[a-z][a-z0-9_-]{0,15}", any::<u64>()).prop_map(
-        |(sig_bytes, name, signed_at)| NodeSignature::new(FcpNodeId::new(name), sig_bytes, signed_at),
+        |(sig_bytes, name, signed_at)| {
+            NodeSignature::new(FcpNodeId::new(name), sig_bytes, signed_at)
+        },
     )
 }
 
 fn arb_gossip_summary() -> impl Strategy<Value = GossipSummary> {
     (
-        arb_tailscale_node_id(),                 // from
-        arb_zone_id(),                            // zone_id
-        any::<u64>(),                             // epoch_id
-        any::<[u8; 32]>(),                        // object_filter_digest
-        any::<[u8; 32]>(),                        // symbol_filter_digest
-        any::<u32>(),                             // object_count
-        any::<u32>(),                             // symbol_count
-        vec(any::<u8>(), 0..MAX_IBLT_BYTES),      // iblt
-        any::<u64>(),                             // timestamp
+        arb_tailscale_node_id(),             // from
+        arb_zone_id(),                       // zone_id
+        any::<u64>(),                        // epoch_id
+        any::<[u8; 32]>(),                   // object_filter_digest
+        any::<[u8; 32]>(),                   // symbol_filter_digest
+        any::<u32>(),                        // object_count
+        any::<u32>(),                        // symbol_count
+        vec(any::<u8>(), 0..MAX_IBLT_BYTES), // iblt
+        any::<u64>(),                        // timestamp
         proptest::option::of(arb_node_signature()),
     )
         .prop_map(
@@ -130,8 +136,8 @@ fn arb_revocation_push() -> impl Strategy<Value = RevocationPushMessage> {
         arb_tailscale_node_id(),
         arb_zone_id(),
         vec(arb_object_id(), 0..MAX_REVOKED_IDS),
-        any::<u64>(),                       // new_rev_seq
-        any::<u64>(),                       // timestamp
+        any::<u64>(), // new_rev_seq
+        any::<u64>(), // timestamp
         proptest::option::of(arb_node_signature()),
         proptest::option::of(arb_node_signature()),
     )

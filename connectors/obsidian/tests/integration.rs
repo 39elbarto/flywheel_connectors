@@ -12,12 +12,12 @@
 use std::fs;
 
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_obsidian::connector::{ObsidianConnector, operations_info};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_obsidian::connector::{ObsidianConnector, operations_info};
 use fcp_testkit::readiness_helpers::{assert_doctor_response_valid, assert_self_check_ready};
 use serde_json::json;
 use tempfile::TempDir;

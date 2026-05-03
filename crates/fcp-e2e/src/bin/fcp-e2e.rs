@@ -8,13 +8,13 @@ use std::io::{self, BufRead};
 use std::path::{Path, PathBuf};
 use std::{env, process};
 
-use fcp_prelude::CorrelationId;
 use fcp_e2e::{
     AssertionsSummary, ConnectorProcessRunner, E2eArtifactRecord, E2eCommandMetadata,
     E2eFailureSummary, E2eLogEntry, E2eLogger, E2ePrerequisiteState, E2eReport, E2eRunReport,
     E2eRunner, E2eStepReport, LogScanReport, ScriptStep, SessionTranscript, StepOutcome,
     scan_log_jsonl, validate_log_entry_value,
 };
+use fcp_prelude::CorrelationId;
 use serde::Serialize;
 
 #[derive(Debug, Default)]

@@ -73,7 +73,8 @@ fn build_real_mesh_node(
 }
 
 fn deterministic_signing_key(seed_byte: u8) -> Ed25519SigningKey {
-    Ed25519SigningKey::from_bytes(&[seed_byte; 32]).expect("32-byte seed is always a valid Ed25519 key")
+    Ed25519SigningKey::from_bytes(&[seed_byte; 32])
+        .expect("32-byte seed is always a valid Ed25519 key")
 }
 
 #[test]
@@ -96,7 +97,11 @@ fn e2e_two_real_mesh_nodes_register_peers_and_zones_independently() {
     let phase = info_span!("phase.build_two_nodes").entered();
     let phase_start = Instant::now();
 
-    let mut node_a = build_real_mesh_node("alice-node", /* sender_instance_id */ 0xA1, /* local_node_id */ 1001);
+    let mut node_a = build_real_mesh_node(
+        "alice-node",
+        /* sender_instance_id */ 0xA1,
+        /* local_node_id */ 1001,
+    );
     let mut node_b = build_real_mesh_node("bob-node", 0xB2, 1002);
 
     let alice_id = NodeId::new("alice-node");
@@ -122,8 +127,14 @@ fn e2e_two_real_mesh_nodes_register_peers_and_zones_independently() {
     // Both nodes start with zero peers and empty zone sets.
     assert_eq!(node_a.peer_count(), 0, "fresh node A starts with 0 peers");
     assert_eq!(node_b.peer_count(), 0, "fresh node B starts with 0 peers");
-    assert!(node_a.local_zones().is_empty(), "fresh node A has no local zones");
-    assert!(node_b.local_zones().is_empty(), "fresh node B has no local zones");
+    assert!(
+        node_a.local_zones().is_empty(),
+        "fresh node A has no local zones"
+    );
+    assert!(
+        node_b.local_zones().is_empty(),
+        "fresh node B has no local zones"
+    );
 
     // ── Phase 2: each node registers the OTHER as a peer + signing key ──
     let phase = info_span!("phase.mutual_peer_registration").entered();
@@ -272,7 +283,11 @@ fn e2e_zone_owner_key_state_is_per_mesh_node() {
     // not a panic. Pins idempotent removal across instances.
     let phase = info_span!("phase.remove_unregistered_on_node_b_is_noop").entered();
     node_b.remove_zone_owner_key(&work_zone);
-    info!(scenario_id, phase = "remove_unregistered_on_node_b_is_noop", "ok");
+    info!(
+        scenario_id,
+        phase = "remove_unregistered_on_node_b_is_noop",
+        "ok"
+    );
     drop(phase);
 
     // Removing on node A must also succeed without panic.

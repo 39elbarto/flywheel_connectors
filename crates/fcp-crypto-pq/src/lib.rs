@@ -578,8 +578,7 @@ mod tests {
         let (master_pub, master_trap) = trap_gen(p).unwrap();
         let mut wrong = p;
         wrong.n = 256;
-        let err =
-            delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), wrong).unwrap_err();
+        let err = delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), wrong).unwrap_err();
         assert!(
             matches!(err, LatticePqError::ParameterMismatch { .. }),
             "got {err:?}"
@@ -655,8 +654,7 @@ mod tests {
         let p = LatticeParams::V4_REFERENCE;
         let (master_pub, master_trap) = trap_gen(p).unwrap();
         let period = ref_period();
-        let (zp_pub, _) =
-            delegate(&master_pub, &master_trap, [0u8; 32], period, p).unwrap();
+        let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], period, p).unwrap();
         let h = operation_hash(&[0u8; 32], period, b"op", b"princ");
         let placeholder_pre = LatticePreimage { bytes: [0u8; 64] };
 
@@ -677,7 +675,13 @@ mod tests {
         // 2000 is the exclusive upper bound.
         let err = verify(&zp_pub, h, &placeholder_pre, 2_000, p).unwrap_err();
         assert!(
-            matches!(err, LatticePqError::OutsidePeriod { now_secs: 2_000, .. }),
+            matches!(
+                err,
+                LatticePqError::OutsidePeriod {
+                    now_secs: 2_000,
+                    ..
+                }
+            ),
             "got {err:?}"
         );
     }
@@ -686,8 +690,7 @@ mod tests {
     fn verify_rejects_param_mismatch_before_reaching_not_implemented() {
         let p = LatticeParams::V4_REFERENCE;
         let (master_pub, master_trap) = trap_gen(p).unwrap();
-        let (zp_pub, _) =
-            delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), p).unwrap();
+        let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), p).unwrap();
         let h = operation_hash(&[0u8; 32], ref_period(), b"op", b"princ");
         let placeholder_pre = LatticePreimage { bytes: [0u8; 64] };
 

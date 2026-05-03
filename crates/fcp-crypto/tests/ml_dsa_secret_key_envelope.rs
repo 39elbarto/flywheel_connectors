@@ -17,9 +17,7 @@
 //! 14 tests total, mirroring the kfr9j shape (short / long / correct
 //! length / round-trip / JSON-path / enclosing-struct paths).
 
-use fcp_crypto::{
-    CryptoError, ML_DSA_65_SEED_BYTES, MlDsa65SecretKeyBytes, MlDsa65SigningKey,
-};
+use fcp_crypto::{CryptoError, ML_DSA_65_SEED_BYTES, MlDsa65SecretKeyBytes, MlDsa65SigningKey};
 
 // ── Length invariant on Deserialize (kfr9j) ─────────────────────────
 
@@ -63,8 +61,7 @@ fn ml_dsa_secret_key_bytes_round_trip_through_cbor_preserves_bytes() {
         .expect("correct length");
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&original, &mut cbor).expect("serialize");
-    let decoded: MlDsa65SecretKeyBytes =
-        ciborium::from_reader(cbor.as_slice()).expect("decode");
+    let decoded: MlDsa65SecretKeyBytes = ciborium::from_reader(cbor.as_slice()).expect("decode");
     assert_eq!(decoded.as_bytes(), original.as_bytes());
 }
 
@@ -73,7 +70,10 @@ fn ml_dsa_secret_key_bytes_json_path_rejects_wrong_length() {
     let wrong = serde_bytes::ByteBuf::from(vec![0u8; 8]);
     let json = serde_json::to_string(&wrong).unwrap();
     let result: Result<MlDsa65SecretKeyBytes, _> = serde_json::from_str(&json);
-    assert!(result.is_err(), "br-6bz52: JSON path must reject wrong-length too");
+    assert!(
+        result.is_err(),
+        "br-6bz52: JSON path must reject wrong-length too"
+    );
 }
 
 #[test]
@@ -141,8 +141,14 @@ fn ml_dsa_secret_key_bytes_eq_distinguishes_last_byte_diff() {
 fn ml_dsa_secret_key_bytes_debug_redacts_seed() {
     let sk = MlDsa65SecretKeyBytes::try_from_bytes(vec![0xCDu8; ML_DSA_65_SEED_BYTES]).unwrap();
     let dbg = format!("{sk:?}");
-    assert!(dbg.contains("redacted"), "br-6bz52: Debug must redact: {dbg}");
-    assert!(!dbg.contains("cdcd"), "br-6bz52: Debug must not leak hex: {dbg}");
+    assert!(
+        dbg.contains("redacted"),
+        "br-6bz52: Debug must redact: {dbg}"
+    );
+    assert!(
+        !dbg.contains("cdcd"),
+        "br-6bz52: Debug must not leak hex: {dbg}"
+    );
 }
 
 // ── MlDsa65SigningKey envelope round-trip (the canonical persistence path)
@@ -161,8 +167,7 @@ fn ml_dsa_secret_key_bytes_into_bytes_returns_seed_unchanged() {
 
 #[test]
 fn ml_dsa_signing_key_to_envelope_preserves_seed_bytes() {
-    let sk = MlDsa65SigningKey::from_seed(&[0x07u8; ML_DSA_65_SEED_BYTES])
-        .expect("seed wraps");
+    let sk = MlDsa65SigningKey::from_seed(&[0x07u8; ML_DSA_65_SEED_BYTES]).expect("seed wraps");
     let envelope = sk.to_envelope();
     assert_eq!(envelope.as_bytes(), sk.seed().as_slice());
     assert_eq!(envelope.as_bytes().len(), ML_DSA_65_SEED_BYTES);
@@ -181,8 +186,7 @@ fn ml_dsa_signing_key_envelope_round_trip_recovers_identity() {
     // Through CBOR — the on-the-wire form.
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&envelope, &mut cbor).unwrap();
-    let recovered_envelope: MlDsa65SecretKeyBytes =
-        ciborium::from_reader(cbor.as_slice()).unwrap();
+    let recovered_envelope: MlDsa65SecretKeyBytes = ciborium::from_reader(cbor.as_slice()).unwrap();
     let recovered_sk = MlDsa65SigningKey::from_envelope(&recovered_envelope).unwrap();
 
     // Verifying keys must match.

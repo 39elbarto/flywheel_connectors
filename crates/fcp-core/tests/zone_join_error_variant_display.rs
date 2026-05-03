@@ -168,8 +168,7 @@ fn all_five_variants_have_distinct_display() {
             node_id: "n1".to_string(),
         },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

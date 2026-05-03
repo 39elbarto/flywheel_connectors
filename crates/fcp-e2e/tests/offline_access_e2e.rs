@@ -55,8 +55,8 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use fcp_testkit::MockApiServer;
 use serde_json::{Value, json};
@@ -149,10 +149,7 @@ impl NetworkAvailabilityClient {
             .map_err(|e| HttpError::Transport(e.to_string()))?;
         let status = response.status().as_u16();
         let resp_body: Value = if response.status().is_success() {
-            response
-                .json()
-                .await
-                .unwrap_or(Value::Null)
+            response.json().await.unwrap_or(Value::Null)
         } else {
             let _ = response.text().await;
             return Err(HttpError::Status(status));
@@ -269,7 +266,10 @@ struct QueuedOperation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum DrainOutcome {
     /// Queued write succeeded against the live remote.
-    Applied { idempotency_key: String, status: u16 },
+    Applied {
+        idempotency_key: String,
+        status: u16,
+    },
     /// Conflict detected (remote returned non-success status that
     /// indicates divergence, e.g. 409 Conflict). Resolution policy
     /// applied.
@@ -315,11 +315,7 @@ impl OperationQueue {
     /// Drain the queue against `client`. Each entry is replayed in
     /// FIFO order. Successful entries are removed; deferred entries
     /// stay queued.
-    async fn drain(
-        &self,
-        client: &NetworkAvailabilityClient,
-        base_url: &str,
-    ) -> Vec<DrainOutcome> {
+    async fn drain(&self, client: &NetworkAvailabilityClient, base_url: &str) -> Vec<DrainOutcome> {
         let mut outcomes = Vec::new();
         // Take a snapshot then mutate the queue based on outcomes —
         // avoids holding the mutex across .await points.
@@ -482,9 +478,17 @@ enum ReadError {
 
 #[derive(Debug, PartialEq, Eq)]
 enum WriteOutcome {
-    Applied { idempotency_key: String, status: u16 },
-    Queued { idempotency_key: String },
-    TransportError { idempotency_key: String, reason: String },
+    Applied {
+        idempotency_key: String,
+        status: u16,
+    },
+    Queued {
+        idempotency_key: String,
+    },
+    TransportError {
+        idempotency_key: String,
+        reason: String,
+    },
 }
 
 fn now_ms() -> u64 {
@@ -513,9 +517,7 @@ async fn build_wiremock_for_writes() -> MockApiServer {
     use wiremock::{Mock, ResponseTemplate};
     Mock::given(method("PUT"))
         .and(path("/users/octocat/name"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({"updated": true})),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"updated": true})))
         .mount(mock.inner())
         .await;
     mock
@@ -527,9 +529,7 @@ async fn build_wiremock_returning_409_on_put() -> MockApiServer {
     use wiremock::{Mock, ResponseTemplate};
     Mock::given(method("PUT"))
         .and(path("/users/octocat/name"))
-        .respond_with(
-            ResponseTemplate::new(409).set_body_string("conflict"),
-        )
+        .respond_with(ResponseTemplate::new(409).set_body_string("conflict"))
         .mount(mock.inner())
         .await;
     mock
@@ -553,12 +553,8 @@ async fn online_read_populates_cache_and_returns_live_source() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache.clone(),
-        queue,
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache.clone(), queue);
 
     let resp = connector.read(PROFILE_PATH).await.expect("read");
     assert_eq!(resp.source, ResponseSource::Live);
@@ -572,12 +568,8 @@ async fn offline_read_returns_cached_value_with_cache_source() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache.clone(),
-        queue,
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache.clone(), queue);
 
     // Online read populates cache.
     connector.read(PROFILE_PATH).await.expect("first read live");
@@ -597,12 +589,8 @@ async fn offline_read_with_no_cache_entry_surfaces_typed_error() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue,
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue);
     availability.set_offline();
     let err = connector.read(PROFILE_PATH).await.expect_err("must fail");
     assert_eq!(err, ReadError::NetworkUnavailableAndCacheMiss);
@@ -614,12 +602,8 @@ async fn offline_write_enqueues_with_idempotency_key() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
 
     availability.set_offline();
     let outcome = connector
@@ -648,12 +632,8 @@ async fn offline_writes_preserve_fifo_order_in_queue() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
 
     availability.set_offline();
     for i in 0..5 {
@@ -680,12 +660,8 @@ async fn drain_replays_queued_writes_in_fifo_order_against_live_remote() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
 
     // Enqueue three writes while offline.
     availability.set_offline();
@@ -726,12 +702,8 @@ async fn drain_under_offline_state_defers_all_entries() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
     availability.set_offline();
     connector
         .write(
@@ -763,12 +735,8 @@ async fn drain_applies_last_writer_wins_on_409_conflict() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
     availability.set_offline();
     connector
         .write(
@@ -803,12 +771,8 @@ async fn drain_applies_server_wins_on_409_conflict() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability.clone(),
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability.clone(), cache, queue.clone());
     availability.set_offline();
     connector
         .write(
@@ -828,7 +792,10 @@ async fn drain_applies_server_wins_on_409_conflict() {
             ..
         } => {
             assert_eq!(*resolution, ConflictResolution::ServerWins);
-            assert!(!*applied, "ServerWins must report applied=false (server's value retained)");
+            assert!(
+                !*applied,
+                "ServerWins must report applied=false (server's value retained)"
+            );
         }
         other => panic!("expected Conflict, got {other:?}"),
     }
@@ -880,7 +847,10 @@ async fn full_lifecycle_online_offline_restore_drain() {
     availability.set_offline();
 
     // Phase 3: cached read serves cached value.
-    let cached = read_connector.read(PROFILE_PATH).await.expect("cached read");
+    let cached = read_connector
+        .read(PROFILE_PATH)
+        .await
+        .expect("cached read");
     assert_eq!(cached.source, ResponseSource::Cache);
 
     // Phase 4: write enqueues.
@@ -916,12 +886,8 @@ async fn online_write_does_not_enqueue() {
     let availability = NetworkAvailability::online();
     let cache = Arc::new(OperationCache::new());
     let queue = Arc::new(OperationQueue::new());
-    let connector = OfflineCapableConnector::new(
-        mock.base_url(),
-        availability,
-        cache,
-        queue.clone(),
-    );
+    let connector =
+        OfflineCapableConnector::new(mock.base_url(), availability, cache, queue.clone());
     let outcome = connector
         .write(
             NAME_PATH,
@@ -930,10 +896,7 @@ async fn online_write_does_not_enqueue() {
             ConflictResolution::LastWriterWins,
         )
         .await;
-    assert!(matches!(
-        outcome,
-        WriteOutcome::Applied { status: 200, .. }
-    ));
+    assert!(matches!(outcome, WriteOutcome::Applied { status: 200, .. }));
     assert_eq!(queue.len(), 0, "online write must NOT enqueue");
 }
 
@@ -988,7 +951,13 @@ async fn drain_outcome_classification_handles_each_case() {
     assert!(matches!(applied, DrainOutcome::Applied { status: 200, .. }));
     // Conflict: 409.
     let conflict = classify_drain(&op, Err(HttpError::Status(409)));
-    assert!(matches!(conflict, DrainOutcome::Conflict { observed_status: 409, .. }));
+    assert!(matches!(
+        conflict,
+        DrainOutcome::Conflict {
+            observed_status: 409,
+            ..
+        }
+    ));
     // Deferred: NetworkUnavailable.
     let deferred = classify_drain(&op, Err(HttpError::NetworkUnavailable));
     assert!(matches!(deferred, DrainOutcome::Deferred { .. }));

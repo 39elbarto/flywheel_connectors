@@ -6,12 +6,12 @@
 
 use base64::Engine;
 use fcp_cbor::MAX_CANONICAL_OBJECT_BYTES;
+use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
 use fcp_prelude::{
     CapabilityId, DecisionReceiptPolicy, ObjectIdKey, Provenance, ZoneId, ZonePolicyObject,
     ZoneTransportPolicy,
 };
-use fcp_crypto::ed25519::Ed25519SigningKey;
-use fcp_manifest::{AttestationType, Base64Bytes, ConnectorManifest};
 use fcp_raptorq::RaptorQConfig;
 use fcp_registry::{
     AttestationEvidence, ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBundle,

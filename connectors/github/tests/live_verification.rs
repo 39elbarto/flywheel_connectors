@@ -9,10 +9,10 @@
 //!
 //! Bead: kzabz.1
 
-use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_github::connector::GitHubConnector;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 
 use chrono::{Duration, Utc};
 use serde_json::json;

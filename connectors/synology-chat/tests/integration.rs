@@ -1,11 +1,11 @@
 //! Integration tests for the Synology Chat connector.
 
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_synology_chat::SynologyChatConnector;
 use serde_json::{Value, json};
 use wiremock::{

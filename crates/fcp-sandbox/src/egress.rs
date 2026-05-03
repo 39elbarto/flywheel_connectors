@@ -763,9 +763,7 @@ impl EgressGuard {
             .map(|cidr_str| {
                 cidr_str.parse::<IpNet>().map_err(|e| {
                     warn!(cidr = %cidr_str, error = %e, "rejecting unparseable CIDR deny rule");
-                    EgressError::InvalidRequest(format!(
-                        "invalid cidr_deny rule `{cidr_str}`: {e}"
-                    ))
+                    EgressError::InvalidRequest(format!("invalid cidr_deny rule `{cidr_str}`: {e}"))
                 })
             })
             .collect::<Result<_, _>>()?;

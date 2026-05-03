@@ -889,8 +889,8 @@ impl DockerHubConnector {
 #[cfg(test)]
 mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
 
     use super::*;
 

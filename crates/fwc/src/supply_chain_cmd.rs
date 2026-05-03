@@ -7,11 +7,6 @@ use std::process::Command;
 use anyhow::{Context, Result};
 use base64::Engine;
 use clap::{Args, Subcommand};
-use fcp_prelude::{
-    AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorTarget,
-    SUPPLY_CHAIN_ATTESTATION_FORMAT, SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION,
-    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SupplyChainSignature, TrustRootBinding,
-};
 use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_kernel::{
     CanonicalEncoding, HashAlgorithm, SoftwareBillOfMaterials, SupplyChainAttestation,
@@ -21,6 +16,11 @@ use fcp_kernel::{
 use fcp_manifest::{
     AttestationType, Base64Bytes, ConnectorManifest, SignatureEntry, SignatureThreshold,
     SignaturesSection,
+};
+use fcp_prelude::{
+    AttestationMaterial, AttestationMetadata, AttestationPredicateType, ConnectorTarget,
+    SUPPLY_CHAIN_ATTESTATION_FORMAT, SUPPLY_CHAIN_ATTESTATION_SCHEMA_VERSION,
+    SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SupplyChainSignature, TrustRootBinding,
 };
 use fcp_registry::{
     AttestationEvidence, ConnectorBundle, MANIFEST_SIGNATURE_CONTEXT, ManifestSignatureArtifact,

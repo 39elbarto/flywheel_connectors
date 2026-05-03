@@ -31,9 +31,7 @@ use core::convert::Infallible;
 
 use fcp_crypto::{XWING_ENC_SIZE, XWING_SECRET_KEY_SIZE, XWingKem, XWingProvider, XWingPublicKey};
 use serde::Deserialize;
-use x_wing::{
-    Decapsulate, DecapsulationKey, Decapsulator, Encapsulate, KeyExport, kem::Generate,
-};
+use x_wing::{Decapsulate, DecapsulationKey, Decapsulator, Encapsulate, KeyExport, kem::Generate};
 
 #[derive(Debug, Deserialize)]
 struct TestVector {

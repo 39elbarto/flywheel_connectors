@@ -10,12 +10,12 @@
 )]
 
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_package_registry::connector::{PackageRegistryConnector, operations_info};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, InvokeStatus, OperationId, RequestId, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_package_registry::connector::{PackageRegistryConnector, operations_info};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };

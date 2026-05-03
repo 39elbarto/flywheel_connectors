@@ -1053,9 +1053,9 @@ impl BlueBubblesConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

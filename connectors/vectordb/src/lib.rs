@@ -1271,10 +1271,10 @@ fn vectordb_operations() -> Vec<OperationInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
+    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{
         CapabilityId, CapabilityToken, HandshakeRequest, IdempotencyClass, InstanceId, ZoneId,
     };
-    use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_testkit::LogCapture;
     use std::time::Instant;
 

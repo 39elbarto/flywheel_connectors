@@ -7,9 +7,9 @@
 //! All operations are READ-ONLY (`gmail.list_labels`) and do not create, modify,
 //! or delete any data.
 
-use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 
 use chrono::{Duration, Utc};
 use serde_json::json;

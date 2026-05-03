@@ -14,9 +14,9 @@
 use std::ops::{Deref, DerefMut};
 
 use chrono::{Duration, Utc};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpResult};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpResult};
 use serde_json::Value;
 use serde_json::json;
 use wiremock::matchers::{header, method, path};

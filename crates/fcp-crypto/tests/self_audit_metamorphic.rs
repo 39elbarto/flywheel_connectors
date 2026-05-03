@@ -178,10 +178,7 @@ macro_rules! metamorphic_assert {
     ($cond:expr, $rel:expr, $details:expr $(,)?) => {
         if !$cond {
             let _ = auto_bead::report_regression($rel, $details);
-            panic!(
-                "metamorphic relation `{}` violated: {}",
-                $rel, $details
-            );
+            panic!("metamorphic relation `{}` violated: {}", $rel, $details);
         }
     };
 }
@@ -346,13 +343,7 @@ fn signing_key_from_seed(seed: u64) -> Ed25519SigningKey {
     // proptest reproducible and avoids OS RNG dependency.
     let mut key_bytes = [0u8; 32];
     let salt = b"FCP_SELF_AUDIT_ED25519_SEED";
-    hkdf_sha256(
-        Some(salt),
-        &seed.to_be_bytes(),
-        b"sk",
-        &mut key_bytes,
-    )
-    .expect("hkdf");
+    hkdf_sha256(Some(salt), &seed.to_be_bytes(), b"sk", &mut key_bytes).expect("hkdf");
     Ed25519SigningKey::from_bytes(&key_bytes).expect("valid signing key")
 }
 
@@ -573,8 +564,8 @@ fn meta_auto_bead_helper_writes_regression_log_line() {
     assert!(first, "first call must report `true` (first sighting)");
 
     let log = auto_bead::log_path();
-    let contents = std::fs::read_to_string(&log)
-        .unwrap_or_else(|e| panic!("read log {}: {e}", log.display()));
+    let contents =
+        std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read log {}: {e}", log.display()));
     assert!(
         contents.contains(&relation),
         "regression log missing relation `{relation}`; tail: {}",
@@ -621,8 +612,7 @@ fn meta_metamorphic_assert_macro_records_then_panics_on_failure() {
 
     // Regression log must contain the relation name.
     let log = auto_bead::log_path();
-    let contents =
-        std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read log: {e}"));
+    let contents = std::fs::read_to_string(&log).unwrap_or_else(|e| panic!("read log: {e}"));
     assert!(
         contents.contains(&relation),
         "macro did not record regression to log"

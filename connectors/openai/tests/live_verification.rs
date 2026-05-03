@@ -8,10 +8,10 @@
 //! and `max_tokens: 5` to minimise cost. No fine-tuning, image generation,
 //! or other write-heavy operations are exercised.
 
-use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_openai::connector::OpenAIConnector;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 
 use chrono::{Duration, Utc};
 use serde_json::json;

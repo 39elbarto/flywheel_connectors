@@ -2,12 +2,12 @@
 
 use std::sync::Arc;
 
+use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
-use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use reqwest::Url;
 use serde_json::json;
 use tracing::info;

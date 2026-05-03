@@ -13,9 +13,9 @@
 #![allow(clippy::doc_markdown)]
 
 use chrono::{Duration, Utc};
-use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_testkit::{AsyncTestContext, MockApiServer};
 use futures_util::StreamExt;
 use serde_json::json;

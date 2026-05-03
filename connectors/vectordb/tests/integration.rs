@@ -12,12 +12,12 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, SecondsFormat, Utc};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpError, HandshakeRequest,
     IdempotencyClass, InstanceId, RiskLevel, SafetyTier, ZoneId,
 };
-use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::LogCapture;
 use serde_json::json;
 use std::time::Instant;

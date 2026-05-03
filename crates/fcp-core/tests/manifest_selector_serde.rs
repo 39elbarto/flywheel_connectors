@@ -160,7 +160,13 @@ fn manifest_version_display_matches_semver_string_form() {
 
 #[test]
 fn manifest_version_from_str_fixed_point() {
-    let cases = ["0.1.0", "1.0.0", "2.5.0", "10.20.30-beta.1", "1.2.3+build.42"];
+    let cases = [
+        "0.1.0",
+        "1.0.0",
+        "2.5.0",
+        "10.20.30-beta.1",
+        "1.2.3+build.42",
+    ];
     for s in cases {
         let parsed: ManifestVersion = s.parse().unwrap();
         assert_eq!(parsed.to_string(), s);

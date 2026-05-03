@@ -11,7 +11,10 @@
 
 use fcp_crypto::{
     XWING_PUBLIC_KEY_SIZE, XWingPublicKey,
-    owner_key::{ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes, MlDsa65VerifyingKeyBytes},
+    owner_key::{
+        ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes,
+        MlDsa65VerifyingKeyBytes,
+    },
 };
 
 // ── ML-DSA-65 verifying key envelope ─────────────────────────────
@@ -36,7 +39,10 @@ fn ml_dsa_verifying_key_bytes_deserialise_rejects_long_cbor() {
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&serde_bytes::Bytes::new(&too_long), &mut cbor).unwrap();
     let result: Result<MlDsa65VerifyingKeyBytes, _> = ciborium::from_reader(cbor.as_slice());
-    assert!(result.is_err(), "br-kfr9j: oversized envelope must be rejected");
+    assert!(
+        result.is_err(),
+        "br-kfr9j: oversized envelope must be rejected"
+    );
 }
 
 #[test]
@@ -55,8 +61,7 @@ fn ml_dsa_verifying_key_bytes_round_trip_through_cbor_preserves_length() {
         .expect("correct length");
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&original, &mut cbor).expect("serialize");
-    let decoded: MlDsa65VerifyingKeyBytes =
-        ciborium::from_reader(cbor.as_slice()).expect("decode");
+    let decoded: MlDsa65VerifyingKeyBytes = ciborium::from_reader(cbor.as_slice()).expect("decode");
     assert_eq!(decoded.as_bytes(), original.as_bytes());
 }
 
@@ -141,8 +146,8 @@ fn xwing_public_key_deserialise_accepts_correct_length() {
 
 #[test]
 fn xwing_public_key_round_trip_through_cbor_preserves_length() {
-    let original = XWingPublicKey::from_bytes(&vec![0x11; XWING_PUBLIC_KEY_SIZE])
-        .expect("correct length");
+    let original =
+        XWingPublicKey::from_bytes(&vec![0x11; XWING_PUBLIC_KEY_SIZE]).expect("correct length");
     let mut cbor = Vec::new();
     ciborium::ser::into_writer(&original, &mut cbor).expect("serialize");
     let decoded: XWingPublicKey = ciborium::from_reader(cbor.as_slice()).expect("decode");

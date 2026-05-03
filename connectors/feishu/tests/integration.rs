@@ -10,13 +10,13 @@
 )]
 
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_feishu::connector::{FeishuConnector, operations_info};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
     SafetyTier, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_feishu::connector::{FeishuConnector, operations_info};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };

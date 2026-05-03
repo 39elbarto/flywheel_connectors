@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use chrono::Utc;
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_google_calendar::{
     client::GoogleCalendarClient, connector::GoogleCalendarConnector, error::GoogleCalendarError,
 };
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use serde_json::json;
 use wiremock::matchers::{bearer_token, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};

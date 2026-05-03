@@ -2423,9 +2423,9 @@ fn discord_thread_info(payload: &serde_json::Value) -> Option<ThreadInfo> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
     use fcp_crypto::cose::CapabilityTokenBuilder as CapabilityBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityToken as CapabilityArtifact, ConnectorId, InstanceId};
     use uuid::Uuid;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,

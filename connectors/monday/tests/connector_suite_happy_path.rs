@@ -1,4 +1,7 @@
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_monday::connector::MondayConnector;
 use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken, ConnectorId,
     ConnectorMetrics, EventCaps, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse,
@@ -7,9 +10,6 @@ use fcp_prelude::{
     SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
     ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_monday::connector::MondayConnector;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

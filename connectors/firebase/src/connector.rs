@@ -3,11 +3,11 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fcp_google_discovery::auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult,
     IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };
-use fcp_google_discovery::auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth};
 use reqwest::Url;
 use serde::Serialize;
 use serde_json::{Value, json};

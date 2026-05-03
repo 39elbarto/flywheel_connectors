@@ -3,8 +3,8 @@
 //! These tests provide deterministic vectors for interoperability testing
 //! and regression detection of the FCPS wire format.
 
-use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_crypto::AeadKey;
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneIdHash, ZoneKeyId};
 use fcp_protocol::{
     FCPS_HEADER_LEN,
     FCPS_MAGIC,

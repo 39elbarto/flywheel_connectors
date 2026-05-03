@@ -1,6 +1,9 @@
 use std::sync::Once;
 
 use chrono::{Duration as ChronoDuration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_google_drive::connector::DriveConnector;
 use fcp_prelude::{
     AgentHint, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
@@ -8,9 +11,6 @@ use fcp_prelude::{
     RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest, SimulateResponse,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_google_drive::connector::DriveConnector;
 use serde_json::json;
 use tracing::info;
 use wiremock::{

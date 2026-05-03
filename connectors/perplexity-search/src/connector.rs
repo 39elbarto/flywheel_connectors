@@ -629,11 +629,11 @@ impl FcpConnector for PerplexitySearchConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
+    use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{
         CapabilityConstraints, CapabilityToken, ConnectorId, RequestId, SelfCheckStatus, ZoneId,
     };
-    use fcp_crypto::cose::CapabilityTokenBuilder;
-    use fcp_crypto::ed25519::Ed25519SigningKey;
 
     fn valid_config() -> serde_json::Value {
         json!({

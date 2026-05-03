@@ -11,15 +11,23 @@
 //!
 //! Bead: flywheel_connectors-5fztw.
 
-use fcp_cbor::{SchemaHash, SchemaIdError, SerializationError, SCHEMA_HASH_LEN};
+use fcp_cbor::{SCHEMA_HASH_LEN, SchemaHash, SchemaIdError, SerializationError};
 
 // ── SchemaIdError ───────────────────────────────────────────────────────
 
 #[test]
 fn schema_id_error_reserved_separator_display_matches_field_and_char() {
     let cases: &[(&'static str, char, &str)] = &[
-        ("namespace", ':', "SchemaId namespace contains reserved separator ':'"),
-        ("namespace", '@', "SchemaId namespace contains reserved separator '@'"),
+        (
+            "namespace",
+            ':',
+            "SchemaId namespace contains reserved separator ':'",
+        ),
+        (
+            "namespace",
+            '@',
+            "SchemaId namespace contains reserved separator '@'",
+        ),
         ("name", ':', "SchemaId name contains reserved separator ':'"),
         ("name", '@', "SchemaId name contains reserved separator '@'"),
     ];

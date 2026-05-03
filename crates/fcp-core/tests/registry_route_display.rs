@@ -153,15 +153,10 @@ fn sbom_component_5_field_json_shape_pinned() {
     let v = serde_json::to_value(&comp).unwrap();
     let obj = v.as_object().unwrap();
 
-    let expected: std::collections::BTreeSet<&str> = [
-        "component_id",
-        "name",
-        "version",
-        "hashes",
-        "licenses",
-    ]
-    .into_iter()
-    .collect();
+    let expected: std::collections::BTreeSet<&str> =
+        ["component_id", "name", "version", "hashes", "licenses"]
+            .into_iter()
+            .collect();
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(actual, expected, "SbomComponent shape drift: {obj:?}");
 
@@ -301,7 +296,10 @@ fn sbom_format_works_as_hashmap_key_for_format_bucketing() {
         SbomFormat::Cyclonedx,
         SbomFormat::Cyclonedx,
     ];
-    let cyc = observed.iter().filter(|f| **f == SbomFormat::Cyclonedx).count();
+    let cyc = observed
+        .iter()
+        .filter(|f| **f == SbomFormat::Cyclonedx)
+        .count();
     let spdx = observed.iter().filter(|f| **f == SbomFormat::Spdx).count();
     assert_eq!(cyc, 3);
     assert_eq!(spdx, 1);

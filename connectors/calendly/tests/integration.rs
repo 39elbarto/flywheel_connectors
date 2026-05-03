@@ -11,12 +11,12 @@
 
 use chrono::{Duration, Utc};
 use fcp_calendly::connector::{CalendlyConnector, operations_info};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
     RiskLevel, SafetyTier, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };

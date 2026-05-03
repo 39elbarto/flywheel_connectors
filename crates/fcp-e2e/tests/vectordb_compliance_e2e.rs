@@ -16,15 +16,15 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector, FcpError,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, InvokeStatus, OperationId, RequestId, ShutdownRequest, SimulateRequest,
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 
 use fcp_vectordb::VectorDbConnector;

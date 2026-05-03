@@ -124,7 +124,11 @@ fn v2_cutover_mechanism_deployment_tier_at_canonical_index_3() {
     log_event(scenario, "setup", "started", None);
 
     let order = EnforcementCheckOrder::canonical_order();
-    assert_eq!(order.len(), 13, "canonical order MUST be 13 checks post-nsrx3");
+    assert_eq!(
+        order.len(),
+        13,
+        "canonical order MUST be 13 checks post-nsrx3"
+    );
     assert_eq!(order[2], EnforcementCheckId::CapabilityVerify);
     assert_eq!(
         order[3],

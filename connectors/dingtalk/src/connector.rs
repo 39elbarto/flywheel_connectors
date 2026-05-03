@@ -750,8 +750,8 @@ mod tests {
     use super::*;
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, RequestId, ZoneId};
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{body_partial_json, method, path, query_param},

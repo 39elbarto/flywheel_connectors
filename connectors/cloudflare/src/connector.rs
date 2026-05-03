@@ -1654,9 +1654,9 @@ fn resource_uris_for_operation(
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
 
     fn tc() -> serde_json::Value {
         json!({"mode": "api_token", "api_token": "t", "account_id": "a"})

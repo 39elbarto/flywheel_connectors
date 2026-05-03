@@ -25,8 +25,8 @@
 
 use fcp_cbor::SchemaId;
 use fcp_core::{
-    NodeId, NodeSignature, ObjectHeader, ObjectId, OperationReceipt, Provenance,
-    TailscaleNodeId, UsageMetric, ZoneId,
+    NodeId, NodeSignature, ObjectHeader, ObjectId, OperationReceipt, Provenance, TailscaleNodeId,
+    UsageMetric, ZoneId,
 };
 use semver::Version;
 use serde_json::json;
@@ -59,10 +59,7 @@ fn populated_receipt() -> OperationReceipt {
         idempotency_key: Some("idem-1".to_string()),
         outcome_object_ids: vec![obj(0x20), obj(0x21)],
         resource_object_ids: vec![obj(0x30)],
-        usage_metrics: Some(vec![
-            UsageMetric::tokens(100),
-            UsageMetric::api_credits(5),
-        ]),
+        usage_metrics: Some(vec![UsageMetric::tokens(100), UsageMetric::api_credits(5)]),
         executed_at: 1_700_000_200,
         executed_by: TailscaleNodeId::new("executor-node"),
         signature: signature(),
@@ -102,9 +99,11 @@ fn populated_receipt_full_field_set_pinned() {
     ]
     .into_iter()
     .collect();
-    let actual: std::collections::BTreeSet<&str> =
-        obj_value.keys().map(String::as_str).collect();
-    assert_eq!(actual, expected, "OperationReceipt shape drift: {obj_value:?}");
+    let actual: std::collections::BTreeSet<&str> = obj_value.keys().map(String::as_str).collect();
+    assert_eq!(
+        actual, expected,
+        "OperationReceipt shape drift: {obj_value:?}"
+    );
 }
 
 #[test]
@@ -207,11 +206,7 @@ fn total_objects_produced_truth_table() {
     assert_eq!(r.total_objects_produced(), 1);
 
     r.resource_object_ids = vec![obj(0x30), obj(0x31)];
-    assert_eq!(
-        r.total_objects_produced(),
-        3,
-        "1 outcome + 2 resources = 3"
-    );
+    assert_eq!(r.total_objects_produced(), 3, "1 outcome + 2 resources = 3");
 
     r.outcome_object_ids = vec![obj(0x20), obj(0x21), obj(0x22)];
     assert_eq!(r.total_objects_produced(), 5);

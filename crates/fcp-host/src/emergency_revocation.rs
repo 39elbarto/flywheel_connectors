@@ -21,16 +21,15 @@
 use std::collections::{HashMap, HashSet};
 
 use blake3::Hasher;
-use fcp_prelude::{ConnectorId, NodeSignature, PrincipalId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
+use fcp_prelude::{ConnectorId, NodeSignature, PrincipalId, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Domain separator for [`EmergencyRevocationRequest::signing_bytes`]
 /// — the owner signs over a transcript prefixed with this string so a
 /// signature for an emergency-revocation request cannot be replayed
 /// against any other transcript shape.
-pub const EMERGENCY_REVOCATION_REQUEST_DOMAIN: &[u8] =
-    b"FCP2-EMERGENCY-REVOCATION-REQUEST-V1";
+pub const EMERGENCY_REVOCATION_REQUEST_DOMAIN: &[u8] = b"FCP2-EMERGENCY-REVOCATION-REQUEST-V1";
 
 /// Default per-zone rate-limit window (mirrors
 /// `PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS`).
@@ -353,10 +352,7 @@ impl NonceReplayStore {
     /// already seen for this zone (caller MUST reject as
     /// `NonceReplay`).
     pub fn observe(&mut self, zone_id: &ZoneId, nonce: [u8; 16]) -> bool {
-        let entry = self
-            .seen_per_zone
-            .entry(zone_id.clone())
-            .or_default();
+        let entry = self.seen_per_zone.entry(zone_id.clone()).or_default();
         if entry.contains(&nonce) {
             return false;
         }
@@ -429,7 +425,8 @@ impl EmergencyRevocationRateLimiter {
                 return Err(retry_after_secs);
             }
         }
-        self.last_revoke_unix_ms.insert(zone_id.clone(), now_unix_ms);
+        self.last_revoke_unix_ms
+            .insert(zone_id.clone(), now_unix_ms);
         Ok(())
     }
 
@@ -454,8 +451,8 @@ pub fn request_digest(request: &EmergencyRevocationRequest) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_prelude::NodeId;
     use fcp_crypto::Ed25519SigningKey;
+    use fcp_prelude::NodeId;
 
     fn signing_key_from_seed(seed: u8) -> Ed25519SigningKey {
         Ed25519SigningKey::from_bytes(&[seed; 32]).expect("valid signing key")
@@ -537,9 +534,8 @@ mod tests {
         assert_ne!(baseline, altered_window_high.signing_bytes());
 
         let mut altered_connector = base.clone();
-        altered_connector.connector = Some(
-            ConnectorId::from_static("github:request_response:1.0.0"),
-        );
+        altered_connector.connector =
+            Some(ConnectorId::from_static("github:request_response:1.0.0"));
         assert_ne!(baseline, altered_connector.signing_bytes());
     }
 
@@ -561,9 +557,7 @@ mod tests {
         let sk_attacker = signing_key_from_seed(0x12);
         let pk_owner = sk_owner.verifying_key();
         let req = sample_request();
-        let signed = req
-            .clone()
-            .with_signature(sign_request(&req, &sk_attacker));
+        let signed = req.clone().with_signature(sign_request(&req, &sk_attacker));
         signed
             .verify_owner_signature(&pk_owner)
             .expect_err("owner-key verifier must reject attacker signature");
@@ -604,7 +598,10 @@ mod tests {
         let public: ZoneId = "z:public".parse().unwrap();
         let nonce = [0x88; 16];
         assert!(store.observe(&work, nonce));
-        assert!(store.observe(&public, nonce), "different zone must accept same nonce");
+        assert!(
+            store.observe(&public, nonce),
+            "different zone must accept same nonce"
+        );
     }
 
     #[test]
@@ -623,7 +620,10 @@ mod tests {
             .get(&zone)
             .map(HashSet::len)
             .unwrap_or(0);
-        assert!(stored_count <= 2, "capacity exceeded: stored {stored_count}");
+        assert!(
+            stored_count <= 2,
+            "capacity exceeded: stored {stored_count}"
+        );
     }
 
     #[test]
@@ -631,9 +631,9 @@ mod tests {
         let req = sample_request();
         assert!(req.is_within_validity_window(req.not_before_unix_ms));
         assert!(req.is_within_validity_window(req.not_after_unix_ms));
-        assert!(req.is_within_validity_window(
-            (req.not_before_unix_ms + req.not_after_unix_ms) / 2
-        ));
+        assert!(
+            req.is_within_validity_window((req.not_before_unix_ms + req.not_after_unix_ms) / 2)
+        );
         assert!(!req.is_within_validity_window(req.not_before_unix_ms - 1));
         assert!(!req.is_within_validity_window(req.not_after_unix_ms + 1));
     }
@@ -777,7 +777,9 @@ mod tests {
             EmergencyRevocationRefusal::InvalidOwnerSignature,
             EmergencyRevocationRefusal::NonceReplay,
             EmergencyRevocationRefusal::OutsideValidityWindow { now_unix_ms: 0 },
-            EmergencyRevocationRefusal::RateLimited { retry_after_secs: 0 },
+            EmergencyRevocationRefusal::RateLimited {
+                retry_after_secs: 0,
+            },
         ];
         for refusal in probes {
             match refusal {
@@ -815,12 +817,9 @@ mod tests {
     fn audit_event_round_trips_through_json() {
         let event = EmergencyRevocationAuditEvent {
             emergency_revoke_id: [0xAB; 16],
-            invoker_principal: PrincipalId::new("alice")
-                .expect("valid principal id"),
+            invoker_principal: PrincipalId::new("alice").expect("valid principal id"),
             zone_id: "z:work".parse().unwrap(),
-            connector: Some(
-                ConnectorId::from_static("github:request_response:1.0.0"),
-            ),
+            connector: Some(ConnectorId::from_static("github:request_response:1.0.0")),
             reason: "incident-2026-05-02".to_string(),
             revocation_head_seq: 42,
             started_at_unix_ms: 1_700_000_000_000,

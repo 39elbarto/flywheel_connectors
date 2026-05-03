@@ -30,13 +30,11 @@
 //!    confirm the receiver opens it cleanly with the V4 secret.
 
 use fcp_core::{
-    NodeId, NodeSignature, ObjectHeader, Provenance, TailscaleNodeId, WrappedKey,
+    NodeId, NodeSignature, ObjectHeader, ObjectIdKeyId, Provenance, TailscaleNodeId, WrappedKey,
     WrappedZoneKey, WrappedZoneKeyV4, ZoneId, ZoneKemAlgorithm, ZoneKey, ZoneKeyAlgorithm,
-    ZoneKeyId, ZoneKeyManifest, ObjectIdKeyId, wrap_zone_key,
+    ZoneKeyId, ZoneKeyManifest, wrap_zone_key,
 };
-use fcp_crypto::{
-    Fcp4Aad, X25519SecretKey, XWingKem, XWingProvider, XWingSealedBox,
-};
+use fcp_crypto::{Fcp4Aad, X25519SecretKey, XWingKem, XWingProvider, XWingSealedBox};
 
 // ── Test helpers ────────────────────────────────────────────────────────
 
@@ -73,11 +71,7 @@ fn test_header(zone: &ZoneId) -> ObjectHeader {
     }
 }
 
-fn make_v3_manifest(
-    zone: &ZoneId,
-    valid_from: u64,
-    wraps: Vec<WrappedZoneKey>,
-) -> ZoneKeyManifest {
+fn make_v3_manifest(zone: &ZoneId, valid_from: u64, wraps: Vec<WrappedZoneKey>) -> ZoneKeyManifest {
     ZoneKeyManifest {
         header: test_header(zone),
         zone_id: zone.clone(),
@@ -159,21 +153,28 @@ fn zone_key_manifest_v4_migrated_to_v4_promotes_v3_wraps() {
     let zone_key = test_zone_key();
     let alice_sk = X25519SecretKey::generate();
     let alice_node = test_node("alice");
-    let alice_v3 =
-        wrap_zone_key(&alice_sk.public_key(), &zone, &alice_node, 1_700_000_000, &zone_key)
-            .expect("HPKE wrap must succeed");
+    let alice_v3 = wrap_zone_key(
+        &alice_sk.public_key(),
+        &zone,
+        &alice_node,
+        1_700_000_000,
+        &zone_key,
+    )
+    .expect("HPKE wrap must succeed");
 
     let bob_sk = X25519SecretKey::generate();
     let bob_node = test_node("bob");
-    let bob_v3 =
-        wrap_zone_key(&bob_sk.public_key(), &zone, &bob_node, 1_700_000_001, &zone_key)
-            .expect("HPKE wrap must succeed");
-
-    let v3_manifest = make_v3_manifest(
+    let bob_v3 = wrap_zone_key(
+        &bob_sk.public_key(),
         &zone,
-        1_700_000_000,
-        vec![alice_v3.clone(), bob_v3.clone()],
-    );
+        &bob_node,
+        1_700_000_001,
+        &zone_key,
+    )
+    .expect("HPKE wrap must succeed");
+
+    let v3_manifest =
+        make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3.clone(), bob_v3.clone()]);
 
     // br-z8bsg: migrated_to_v4 returns UnsignedV4Manifest (typestate
     // enforcement). Inspection is via .as_payload(); a real publisher
@@ -224,8 +225,14 @@ fn zone_key_manifest_v4_migrated_to_v4_is_idempotent_for_already_migrated_recipi
     let zone_key = test_zone_key();
     let alice_sk = X25519SecretKey::generate();
     let alice = test_node("alice");
-    let alice_v3 =
-        wrap_zone_key(&alice_sk.public_key(), &zone, &alice, 1_700_000_000, &zone_key).unwrap();
+    let alice_v3 = wrap_zone_key(
+        &alice_sk.public_key(),
+        &zone,
+        &alice,
+        1_700_000_000,
+        &zone_key,
+    )
+    .unwrap();
 
     let v3 = make_v3_manifest(&zone, 1_700_000_000, vec![alice_v3]);
     // br-z8bsg: typestate. once.migrated_to_v4 delegates re-migration
@@ -254,8 +261,14 @@ fn zone_key_manifest_v4_supports_mixed_v3_and_v4_wraps() {
     // V3-only recipient: alice
     let alice_sk = X25519SecretKey::generate();
     let alice = test_node("alice");
-    let alice_v3 =
-        wrap_zone_key(&alice_sk.public_key(), &zone, &alice, 1_700_000_000, &zone_key).unwrap();
+    let alice_v3 = wrap_zone_key(
+        &alice_sk.public_key(),
+        &zone,
+        &alice,
+        1_700_000_000,
+        &zone_key,
+    )
+    .unwrap();
 
     // V4 recipient: bob
     let provider = XWingProvider::new();
@@ -358,9 +371,13 @@ fn zone_key_manifest_v4_xwing_wrap_round_trips_via_manifest() {
     let (recipient_pk, recipient_sk) = provider.generate().unwrap();
     let recipient = test_node("recipient");
 
-    let aad = Fcp4Aad::for_zone_key(zone.as_bytes(), recipient.as_str().as_bytes(), 1_700_000_000)
-        .encode()
-        .unwrap();
+    let aad = Fcp4Aad::for_zone_key(
+        zone.as_bytes(),
+        recipient.as_str().as_bytes(),
+        1_700_000_000,
+    )
+    .encode()
+    .unwrap();
     let sealed = provider
         .seal(&recipient_pk, zone_key.as_bytes(), &aad)
         .unwrap();

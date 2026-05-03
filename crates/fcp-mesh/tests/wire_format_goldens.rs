@@ -25,8 +25,8 @@
 
 use std::fmt::Write as _;
 
-use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::gossip::{GossipSummary, RevocationPushMessage};
+use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
 
 /// Deterministic fixture node ID — never change this in-place; bump the
 /// fixture name and add a new test instead.

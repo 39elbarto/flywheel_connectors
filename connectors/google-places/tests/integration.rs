@@ -1,10 +1,6 @@
 //! Integration tests for the Google Places connector.
 
 use chrono::Utc;
-use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
-    IdempotencyClass, InvokeRequest, OperationId, RequestId, RiskLevel, SafetyTier, ZoneId,
-};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_google_places::{
@@ -13,6 +9,10 @@ use fcp_google_places::{
         DEFAULT_AUTOCOMPLETE_FIELD_MASK, DEFAULT_PLACE_DETAILS_FIELD_MASK,
         DEFAULT_SEARCH_TEXT_FIELD_MASK,
     },
+};
+use fcp_prelude::{
+    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
+    IdempotencyClass, InvokeRequest, OperationId, RequestId, RiskLevel, SafetyTier, ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::json;

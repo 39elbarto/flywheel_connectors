@@ -110,7 +110,10 @@ impl InMemorySecretRegistry {
     }
 
     fn put(&self, id: CredentialId, secret: &[u8]) {
-        self.inner.lock().expect("registry").insert(id, secret.to_vec());
+        self.inner
+            .lock()
+            .expect("registry")
+            .insert(id, secret.to_vec());
     }
 
     /// Atomically replace the secret material for `id`. Used by the
@@ -201,8 +204,8 @@ impl SecretlessGitHubClient {
         // Construct the bearer string in a tightly scoped block so it
         // lives no longer than the request itself. `Zeroizing<Vec<u8>>`
         // derefs to &[u8].
-        let bearer = String::from_utf8((*secret).clone())
-            .map_err(|_| ClientError::InvalidSecretEncoding)?;
+        let bearer =
+            String::from_utf8((*secret).clone()).map_err(|_| ClientError::InvalidSecretEncoding)?;
 
         let url = format!("{}/repos/{owner}/{repo}/issues", self.base_url);
         // Avoid logging the bearer at any level — only log the URL

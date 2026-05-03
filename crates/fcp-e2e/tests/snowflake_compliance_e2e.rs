@@ -13,6 +13,12 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
+    validate_log_entry_value,
+};
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::InvokeStatus;
 use fcp_prelude::{
     CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
@@ -21,12 +27,6 @@ use fcp_prelude::{
     SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest,
     SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{
-    ComplianceSuite, ConnectorSuite, E2eReport, E2eRunner, InvokeExpectations, scan_log_jsonl,
-    validate_log_entry_value,
-};
-use fcp_manifest::ConnectorManifest;
 use fcp_snowflake::connector::SnowflakeConnector;
 use fcp_testkit::MockApiServer;
 use serde_json::json;

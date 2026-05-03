@@ -9,12 +9,12 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     HealthState, InvokeRequest, OperationId, RequestId, SelfCheckStatus, ShutdownRequest, ZoneId,
 };
-use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_testkit::AsyncTestContext;
 use hmac::{Hmac, Mac};
 use serde_json::{Value, json};

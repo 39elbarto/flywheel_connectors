@@ -9,9 +9,9 @@
 //! key and confirms structured FCP error mapping.
 
 use fcp_anthropic::connector::AnthropicConnector;
-use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 use fcp_crypto::Ed25519SigningKey;
 use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken};
 
 use chrono::{Duration, Utc};
 use serde_json::json;

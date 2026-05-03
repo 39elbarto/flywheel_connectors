@@ -14,11 +14,11 @@ use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::RwLock;
-use fcp_prelude::{ApprovalToken, CapabilityId, CapabilityToken, RiskLevel, SafetyTier, ZoneId};
 use fcp_kernel::{
     AgentHint, ApprovalMode, ConnectorHealth, ConnectorId, IdempotencyClass, Introspection,
     OperationInfo, RateLimitDeclarations, RequestId, SelfCheckReport, UsageBudgetSnapshot,
 };
+use fcp_prelude::{ApprovalToken, CapabilityId, CapabilityToken, RiskLevel, SafetyTier, ZoneId};
 use serde::{Deserialize, Serialize};
 
 use crate::{HostError, HostResult};
@@ -2671,8 +2671,8 @@ mod tests {
 
     #[test]
     fn preflight_response_serialization_roundtrip() {
-        use fcp_prelude::ZoneId;
         use fcp_kernel::{BudgetEnforcement, BudgetStatus, UsageBudgetUsage, UsageMetricKind};
+        use fcp_prelude::ZoneId;
 
         let mut resp = PreflightResponse::denied("rate limited");
         resp.missing_capabilities = vec!["cap.send".to_string()];
@@ -2826,8 +2826,8 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────────────
 
     fn make_operation(id: &str, description: Option<&str>) -> OperationInfo {
-        use fcp_prelude::RateLimit;
         use fcp_kernel::OperationId;
+        use fcp_prelude::RateLimit;
         OperationInfo {
             id: OperationId::new(id).expect("valid operation id"),
             summary: format!("{id} summary"),

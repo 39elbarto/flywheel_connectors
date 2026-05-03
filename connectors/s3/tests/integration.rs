@@ -6,12 +6,12 @@
 use std::time::Duration;
 
 use chrono::Utc;
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, CapabilityConstraints, CapabilityToken, ExecutionScope, FcpError,
     ZoneId,
 };
-use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_s3::{client::S3Client, connector::S3Connector, error::S3Error};
 use serde_json::json;
 use wiremock::matchers::{method, path};

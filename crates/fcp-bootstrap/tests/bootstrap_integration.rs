@@ -8,8 +8,8 @@ use fcp_bootstrap::{
     BootstrapConfig, BootstrapError, BootstrapMode, BootstrapWorkflow, ColdRecovery, DetectedToken,
     GenesisState, GenesisValidationError, RecoveryPhrase, RecoveryPhraseError,
 };
-use fcp_prelude::Uuid;
 use fcp_crypto::Ed25519SigningKey;
+use fcp_prelude::Uuid;
 use serde::Serialize;
 use std::path::PathBuf;
 use tempfile::TempDir;

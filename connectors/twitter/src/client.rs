@@ -1430,8 +1430,7 @@ mod tests {
         let with_query = "https://api.twitter.com/2/users/123/tweets?max_results=100&pagination_token=secret-token-bytes";
         let redacted = redact_url(with_query);
         assert_eq!(
-            redacted,
-            "https://api.twitter.com/<id>/users/<id>/tweets",
+            redacted, "https://api.twitter.com/<id>/users/<id>/tweets",
             "query string MUST be dropped + numeric segments redacted"
         );
         assert!(!redacted.contains("pagination_token"));

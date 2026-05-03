@@ -12,13 +12,13 @@
 
 #![allow(clippy::too_many_lines)]
 
+use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
 use fcp_prelude::{
     ApprovalScope, ApprovalToken, ConfidentialityLevel, DeclassificationScope, ElevationScope,
     ExecutionScope, FlowCheckResult, InputConstraint, IntegrityLevel, ObjectId, ProvenanceRecord,
     ProvenanceViolation, SafetyTier, SanitizerReceipt, TaintDecision, TaintFlag, TaintFlags,
     ZoneId,
 };
-use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
 use serde_json::json;
 
 // ─────────────────────────────────────────────────────────────────────────────

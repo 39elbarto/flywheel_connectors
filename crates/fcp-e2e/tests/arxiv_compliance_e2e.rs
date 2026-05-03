@@ -15,6 +15,11 @@
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_arxiv::connector::ArxivConnector;
 use fcp_conformance::DynamicSuite;
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{
+    ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations, validate_log_entry_value,
+};
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     AgentHint, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot,
@@ -23,11 +28,6 @@ use fcp_prelude::{
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{
-    ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations, validate_log_entry_value,
-};
-use fcp_manifest::ConnectorManifest;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

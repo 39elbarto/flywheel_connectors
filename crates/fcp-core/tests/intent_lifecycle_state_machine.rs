@@ -45,7 +45,11 @@ fn obj(byte: u8) -> ObjectId {
     ObjectId::from_bytes([byte; 32])
 }
 
-fn make_entry(status: IntentStatus, receipt_id: Option<ObjectId>, expires_at: u64) -> IdempotencyEntry {
+fn make_entry(
+    status: IntentStatus,
+    receipt_id: Option<ObjectId>,
+    expires_at: u64,
+) -> IdempotencyEntry {
     IdempotencyEntry {
         key: "k".to_string(),
         zone_id: ZoneId::work(),
@@ -69,8 +73,7 @@ fn is_documented_legal_transition(from: IntentStatus, to: IntentStatus) -> bool 
     use IntentStatus::*;
     matches!(
         (from, to),
-        (Pending, InProgress | Orphaned)
-            | (InProgress, Completed | Failed | Orphaned)
+        (Pending, InProgress | Orphaned) | (InProgress, Completed | Failed | Orphaned)
     )
 }
 
@@ -124,8 +127,14 @@ fn intent_status_pending_only_advances_to_in_progress_or_orphaned() {
     // From Pending, only InProgress (start) and Orphaned (timeout) are
     // legal — completion/failure cannot happen without first being
     // InProgress.
-    assert!(is_documented_legal_transition(IntentStatus::Pending, IntentStatus::InProgress));
-    assert!(is_documented_legal_transition(IntentStatus::Pending, IntentStatus::Orphaned));
+    assert!(is_documented_legal_transition(
+        IntentStatus::Pending,
+        IntentStatus::InProgress
+    ));
+    assert!(is_documented_legal_transition(
+        IntentStatus::Pending,
+        IntentStatus::Orphaned
+    ));
     assert!(!is_documented_legal_transition(
         IntentStatus::Pending,
         IntentStatus::Completed
@@ -186,7 +195,10 @@ fn is_terminal_truth_table_includes_only_completed_and_failed() {
 fn is_expired_boundary_truth_table() {
     let entry = make_entry(IntentStatus::Completed, Some(obj(0x20)), 1_000);
 
-    assert!(!entry.is_expired(999), "now < expires_at must NOT be expired");
+    assert!(
+        !entry.is_expired(999),
+        "now < expires_at must NOT be expired"
+    );
     assert!(entry.is_expired(1_000), "now == expires_at IS expired");
     assert!(entry.is_expired(1_001), "now > expires_at IS expired");
     assert!(entry.is_expired(u64::MAX));
@@ -358,7 +370,10 @@ fn idempotency_key_mismatch_display_with_some() {
         expected: Some("a".to_string()),
         got: Some("b".to_string()),
     };
-    assert_eq!(err.to_string(), "idempotency key mismatch: expected a, got b");
+    assert_eq!(
+        err.to_string(),
+        "idempotency key mismatch: expected a, got b"
+    );
 }
 
 #[test]
@@ -397,7 +412,10 @@ fn zone_mismatch_display() {
         expected: ZoneId::work(),
         got: ZoneId::owner(),
     };
-    assert_eq!(err.to_string(), "zone mismatch: expected z:work, got z:owner");
+    assert_eq!(
+        err.to_string(),
+        "zone mismatch: expected z:work, got z:owner"
+    );
 }
 
 #[test]
@@ -412,7 +430,10 @@ fn intent_reference_missing_display() {
 
 #[test]
 fn lease_seq_mismatch_display() {
-    let err = OperationValidationError::LeaseSeqMismatch { expected: 42, got: 41 };
+    let err = OperationValidationError::LeaseSeqMismatch {
+        expected: 42,
+        got: 41,
+    };
     assert_eq!(err.to_string(), "lease seq mismatch: expected 42, got 41");
 }
 
@@ -468,7 +489,10 @@ fn all_nine_validation_error_variants_have_distinct_display() {
         OperationValidationError::IntentReferenceMissing {
             receipt_id: obj(0x42),
         },
-        OperationValidationError::LeaseSeqMismatch { expected: 1, got: 2 },
+        OperationValidationError::LeaseSeqMismatch {
+            expected: 1,
+            got: 2,
+        },
         OperationValidationError::IntentOrphaned {
             intent_id: obj(0x10),
             planned_at: 1,
@@ -481,8 +505,7 @@ fn all_nine_validation_error_variants_have_distinct_display() {
             got: obj(0x22),
         },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

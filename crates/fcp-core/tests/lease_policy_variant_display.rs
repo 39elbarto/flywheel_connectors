@@ -30,11 +30,11 @@
 //!     the documented variant (precedence test — first-failing rule wins),
 //!   * std::error::Error impl.
 
+use fcp_cbor::SchemaId;
 use fcp_core::{
     Lease, LeaseHandoff, LeaseParams, LeasePurpose, LeaseTransferValidationError, ObjectId,
     Provenance, SignatureSet, TailscaleNodeId, ZoneId, validate_lease_handoff,
 };
-use fcp_cbor::SchemaId;
 use semver::Version;
 
 fn obj(byte: u8) -> ObjectId {
@@ -220,9 +220,7 @@ fn all_nine_variants_have_distinct_display() {
         LeaseTransferValidationError::LeaseIdReused {
             lease_id: obj(0x01),
         },
-        LeaseTransferValidationError::SelfTransfer {
-            holder: node("a"),
-        },
+        LeaseTransferValidationError::SelfTransfer { holder: node("a") },
         LeaseTransferValidationError::FromHolderMismatch {
             expected: node("a"),
             got: node("b"),
@@ -248,8 +246,7 @@ fn all_nine_variants_have_distinct_display() {
             next: 5,
         },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

@@ -139,9 +139,7 @@ fn looks_like_opaque_id(segment: &str) -> bool {
         return true;
     }
     // All-hex AND length ≥ 8 → hash/uuid-shaped id.
-    let all_hex = segment
-        .chars()
-        .all(|c| c.is_ascii_hexdigit() || c == '-');
+    let all_hex = segment.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     if all_hex && segment.len() >= 8 {
         return true;
     }
@@ -201,9 +199,7 @@ mod tests {
             "https://obj.example.com/blob/<id>"
         );
         assert_eq!(
-            redact_url(
-                "https://obj.example.com/blob/c5e8a4b1f9d3a7e8c2b5d9f1a4e7c0d3"
-            ),
+            redact_url("https://obj.example.com/blob/c5e8a4b1f9d3a7e8c2b5d9f1a4e7c0d3"),
             "https://obj.example.com/blob/<id>"
         );
     }
@@ -340,14 +336,10 @@ mod tests {
         assert!(looks_like_opaque_id("42"));
         assert!(looks_like_opaque_id("123456789"));
         // UUID:
-        assert!(looks_like_opaque_id(
-            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
-        ));
+        assert!(looks_like_opaque_id("f47ac10b-58cc-4372-a567-0e02b2c3d479"));
         // Hex of length >= 8:
         assert!(looks_like_opaque_id("deadbeef"));
-        assert!(looks_like_opaque_id(
-            "c5e8a4b1f9d3a7e8c2b5d9f1a4e7c0d3"
-        ));
+        assert!(looks_like_opaque_id("c5e8a4b1f9d3a7e8c2b5d9f1a4e7c0d3"));
         // Long opaque alphanumeric (>= 16 chars):
         assert!(looks_like_opaque_id("aZbYcXdWeVfUgThS"));
         // NOT opaque:

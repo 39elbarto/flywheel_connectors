@@ -139,7 +139,10 @@ fn can_flow_to_blocks_both_when_target_is_more_strict_in_both_axes() {
 #[test]
 fn can_flow_to_owner_into_owner_with_full_credentials_is_allowed() {
     let record = ProvenanceRecord::new(ZoneId::owner());
-    assert_eq!(record.can_flow_to(&ZoneId::owner()), FlowCheckResult::Allowed);
+    assert_eq!(
+        record.can_flow_to(&ZoneId::owner()),
+        FlowCheckResult::Allowed
+    );
 }
 
 #[test]
@@ -188,7 +191,10 @@ fn can_flow_to_full_5x5_zone_truth_table() {
 #[test]
 fn provenance_violation_public_input_for_dangerous_operation_display() {
     let err = ProvenanceViolation::PublicInputForDangerousOperation;
-    assert_eq!(err.to_string(), "public input cannot drive dangerous operation");
+    assert_eq!(
+        err.to_string(),
+        "public input cannot drive dangerous operation"
+    );
 }
 
 #[test]
@@ -259,7 +265,10 @@ fn provenance_violation_invalid_declassification_display() {
 #[test]
 fn provenance_violation_sanitizer_coverage_insufficient_display() {
     let err = ProvenanceViolation::SanitizerCoverageInsufficient;
-    assert_eq!(err.to_string(), "sanitizer receipt does not cover required inputs");
+    assert_eq!(
+        err.to_string(),
+        "sanitizer receipt does not cover required inputs"
+    );
 }
 
 #[test]
@@ -302,8 +311,7 @@ fn all_ten_provenance_violation_variants_have_distinct_display() {
         ProvenanceViolation::ApprovalTokenInvalid,
         ProvenanceViolation::ForbiddenOperation,
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

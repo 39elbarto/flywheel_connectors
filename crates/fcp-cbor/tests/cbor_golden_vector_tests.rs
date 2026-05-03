@@ -6,7 +6,7 @@
 #![allow(dead_code)]
 
 use ciborium::value::Value;
-use fcp_cbor::{to_canonical_cbor, CanonicalSerializer, SchemaId};
+use fcp_cbor::{CanonicalSerializer, SchemaId, to_canonical_cbor};
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

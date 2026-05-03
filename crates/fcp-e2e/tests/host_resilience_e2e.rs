@@ -15,13 +15,13 @@
 
 use std::time::Duration;
 
-use fcp_prelude::{ConnectorHealth, ConnectorId};
 use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
 use fcp_host::{
     BulkheadConfig, CircuitBreakerConfig, CircuitState, FailurePredicate, HealthRouterConfig,
     LoadShedConfig, RequestPriority, ResilienceConfig, ResilienceError, ResilienceLayer,
     ResilienceMetricsSnapshot, RoutingDecision, merge_connector_health,
 };
+use fcp_prelude::{ConnectorHealth, ConnectorId};
 use serde_json::json;
 
 // ─────────────────────────────────────────────────────────────────────────────

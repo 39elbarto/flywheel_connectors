@@ -34,8 +34,7 @@ use std::fmt::Write as _;
 use fcp_cbor::to_canonical_cbor;
 use fcp_core::{CapabilityConstraints, CredentialId};
 use fcp_policy::{
-    OperationalModelSelection, OperationalModelVersion,
-    select_operational_model_for_deployment,
+    OperationalModelSelection, OperationalModelVersion, select_operational_model_for_deployment,
 };
 
 /// Render bytes as a hex dump with section labels for human review.
@@ -95,10 +94,7 @@ fn full_constraints() -> CapabilityConstraints {
     let cred_a = CredentialId::from_uuid(uuid::Uuid::from_bytes([0x42; 16]));
     let cred_b = CredentialId::from_uuid(uuid::Uuid::from_bytes([0x69; 16]));
     CapabilityConstraints {
-        resource_allow: vec![
-            "/v1/messages".to_string(),
-            "/v1/threads/*".to_string(),
-        ],
+        resource_allow: vec!["/v1/messages".to_string(), "/v1/threads/*".to_string()],
         resource_deny: vec!["/v1/admin/*".to_string()],
         max_calls: Some(100),
         max_bytes: Some(1_048_576),
@@ -148,12 +144,7 @@ fn v1_selection() -> OperationalModelSelection {
 /// Fixture: V2 requested with degraded opt-in on single-host. The
 /// post-br-4la3k recommended single-host shape.
 fn v2_with_degraded_opt_in_selection() -> OperationalModelSelection {
-    select_operational_model_for_deployment(
-        OperationalModelVersion::V2MeshNative,
-        true,
-        true,
-        true,
-    )
+    select_operational_model_for_deployment(OperationalModelVersion::V2MeshNative, true, true, true)
 }
 
 /// Fixture: V2 requested without opt-in on single-host. Falls back to
@@ -207,8 +198,5 @@ fn operational_model_selection_v2_fallback_warning_text_pin() {
     // Pin the EXACT warning string so log-aggregator alerts don't
     // silently break when the warning text drifts. This is the
     // operator-facing diagnostic for the V2-fallback decision path.
-    insta::assert_snapshot!(
-        "operational_model_v2_fallback_warning_text",
-        warning_text
-    );
+    insta::assert_snapshot!("operational_model_v2_fallback_warning_text", warning_text);
 }

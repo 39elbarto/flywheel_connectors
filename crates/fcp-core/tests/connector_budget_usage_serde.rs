@@ -57,11 +57,7 @@ fn usage_metric_kind_as_str_matches_serde_wire_form() {
     // It must agree with serde wire form byte-for-byte; otherwise
     // signable bytes diverge from JSON wire form.
     for &(variant, wire) in ALL_KINDS {
-        assert_eq!(
-            variant.as_str(),
-            wire,
-            "as_str for {variant:?} != `{wire}`"
-        );
+        assert_eq!(variant.as_str(), wire, "as_str for {variant:?} != `{wire}`");
     }
 }
 
@@ -95,7 +91,10 @@ fn usage_metric_kind_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_KINDS {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
 }
 
@@ -105,8 +104,9 @@ fn usage_metric_full_json_shape_pinned_when_unit_and_custom_id_present() {
     let v = serde_json::to_value(&metric).unwrap();
     let obj = v.as_object().expect("must be object");
 
-    let expected: std::collections::BTreeSet<&str> =
-        ["kind", "amount", "unit", "custom_id"].into_iter().collect();
+    let expected: std::collections::BTreeSet<&str> = ["kind", "amount", "unit", "custom_id"]
+        .into_iter()
+        .collect();
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(actual, expected, "UsageMetric shape drift: {obj:?}");
 
@@ -124,8 +124,7 @@ fn usage_metric_minimal_omits_unit_and_custom_id_when_none() {
     let v = serde_json::to_value(&metric).unwrap();
     let obj = v.as_object().expect("must be object");
 
-    let expected: std::collections::BTreeSet<&str> =
-        ["kind", "amount"].into_iter().collect();
+    let expected: std::collections::BTreeSet<&str> = ["kind", "amount"].into_iter().collect();
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(actual, expected, "UsageMetric minimal shape drift: {obj:?}");
 
@@ -135,7 +134,10 @@ fn usage_metric_minimal_omits_unit_and_custom_id_when_none() {
 
 #[test]
 fn usage_metric_constructor_helpers_produce_expected_variants() {
-    assert_eq!(UsageMetric::api_credits(10).kind, UsageMetricKind::ApiCredits);
+    assert_eq!(
+        UsageMetric::api_credits(10).kind,
+        UsageMetricKind::ApiCredits
+    );
     assert_eq!(UsageMetric::api_credits(10).amount, 10);
     assert!(UsageMetric::api_credits(10).unit.is_none());
     assert!(UsageMetric::api_credits(10).custom_id.is_none());

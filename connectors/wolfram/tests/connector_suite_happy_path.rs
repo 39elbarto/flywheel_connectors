@@ -1,10 +1,10 @@
+use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_prelude::{
     CapabilityId, CapabilityToken, ConnectorId, ConnectorMetrics, FcpConnector, FcpError,
     HandshakeRequest, HandshakeResponse, HealthSnapshot, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, OperationId, RequestId, ShutdownRequest, SimulateRequest, SimulateResponse,
     SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_wolfram::WolframConnector;
 use serde_json::json;
 use wiremock::{

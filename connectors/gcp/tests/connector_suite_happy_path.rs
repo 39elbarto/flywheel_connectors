@@ -1,11 +1,11 @@
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_gcp::connector::GcpConnector;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
     InstanceId, InvokeRequest, OperationId, RequestId, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_gcp::connector::GcpConnector;
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

@@ -649,8 +649,8 @@ fn operation(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
 
     fn build_token(signing_key: &Ed25519SigningKey, cap: &str, operation: &str) -> CapabilityToken {
         let now = Utc::now();

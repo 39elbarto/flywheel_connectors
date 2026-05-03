@@ -21,11 +21,11 @@
 //! immediately.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };
-use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder};
 use serde_json::json;
 
 /// Emit a structured JSONL log entry matching the /testing-perfect-e2e
@@ -328,4 +328,3 @@ fn wrong_operation_token_is_rejected_with_operation_not_granted() {
     };
     log_event(scenario, "verify", "rejected", Some(class));
 }
-

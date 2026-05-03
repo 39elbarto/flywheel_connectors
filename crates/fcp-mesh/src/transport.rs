@@ -7,8 +7,8 @@
 #![forbid(unsafe_code)]
 
 use blake3::Hasher;
-use fcp_prelude::{ObjectId, TransportMode};
 use fcp_policy::{DecisionReasonCode, ZoneTransportPolicy};
+use fcp_prelude::{ObjectId, TransportMode};
 use fcp_tailscale::NodeId;
 use std::cmp::Reverse;
 

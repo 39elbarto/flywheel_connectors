@@ -12,13 +12,13 @@ use std::path::{Path, PathBuf};
 use blake3::hash;
 use chrono::{DateTime, Utc};
 use fcp_async_core::sync::{Mutex, RwLock};
-use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
-    CredentialId, ObjectPlacementPolicy, OperationId,
-};
 use fcp_kernel::{
     ConnectorHealth, ConnectorId, LifecycleError, LifecycleManager, LifecycleRecord,
     LifecycleState, LifecycleStatus, TransitionReason,
+};
+use fcp_prelude::{
+    ApprovalToken, CapabilityConstraints, CapabilityGrant, CapabilityId, CapabilityToken,
+    CredentialId, ObjectPlacementPolicy, OperationId,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -5126,9 +5126,9 @@ const fn is_false(value: &bool) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, TimeZone};
-    use fcp_prelude::SafetyTier;
     use fcp_crypto::cose::CoseToken;
     use fcp_kernel::{CanaryPolicy, ConnectorHealth, HealthMetrics};
+    use fcp_prelude::SafetyTier;
 
     fn canonicalize_json(value: Value) -> Value {
         match value {

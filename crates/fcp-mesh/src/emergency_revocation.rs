@@ -12,8 +12,8 @@
 //!
 //! [`PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES`]: super::gossip::PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES
 
-use fcp_prelude::{NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
+use fcp_prelude::{NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use serde::{Deserialize, Serialize};
 
 /// Domain separator for [`RevocationWitness::witness_signing_bytes`]
@@ -155,10 +155,7 @@ impl RevocationWitness {
     ///
     /// Returns [`CryptoError::MissingField`] if `signature` is `None`,
     /// or the verifier's error if signature verification fails.
-    pub fn verify_signature(
-        &self,
-        verifying_key: &Ed25519VerifyingKey,
-    ) -> Result<(), CryptoError> {
+    pub fn verify_signature(&self, verifying_key: &Ed25519VerifyingKey) -> Result<(), CryptoError> {
         let signature = self
             .signature
             .as_ref()
@@ -211,14 +208,18 @@ impl QuorumStatus {
 pub const fn effective_quorum_target(online_peers: u32) -> u32 {
     let majority = online_peers.div_ceil(2);
     let nominal = super::gossip::PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES as u32;
-    if majority < nominal { majority } else { nominal }
+    if majority < nominal {
+        majority
+    } else {
+        nominal
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_prelude::NodeId;
     use fcp_crypto::Ed25519SigningKey;
+    use fcp_prelude::NodeId;
 
     fn signing_key_from_seed(seed: u8) -> Ed25519SigningKey {
         let bytes = [seed; 32];
@@ -260,7 +261,11 @@ mod tests {
 
         let mut altered_seq = base.clone();
         altered_seq.revocation_head_seq = 8;
-        assert_ne!(baseline, altered_seq.witness_signing_bytes(), "head_seq drift");
+        assert_ne!(
+            baseline,
+            altered_seq.witness_signing_bytes(),
+            "head_seq drift"
+        );
 
         let mut altered_hash = base.clone();
         altered_hash.revoked_ids_hash = [0xBB; 32];
@@ -268,7 +273,11 @@ mod tests {
 
         let mut altered_ts = base.clone();
         altered_ts.witnessed_at_unix_ms = 1_700_000_000_001;
-        assert_ne!(baseline, altered_ts.witness_signing_bytes(), "timestamp drift");
+        assert_ne!(
+            baseline,
+            altered_ts.witness_signing_bytes(),
+            "timestamp drift"
+        );
 
         let mut altered_zone = base.clone();
         altered_zone.zone_id = "z:public".parse().expect("valid zone id");
@@ -300,14 +309,14 @@ mod tests {
         let pk = sk.verifying_key();
         let witness = sample_witness(7);
         let sig_bytes = sk.sign(&witness.witness_signing_bytes());
-        let signed = witness
-            .clone()
-            .with_signature(NodeSignature::new(
-                NodeId::new("node-witness"),
-                sig_bytes.to_bytes(),
-                1_700_000_000,
-            ));
-        signed.verify_signature(&pk).expect("witness signature verifies");
+        let signed = witness.clone().with_signature(NodeSignature::new(
+            NodeId::new("node-witness"),
+            sig_bytes.to_bytes(),
+            1_700_000_000,
+        ));
+        signed
+            .verify_signature(&pk)
+            .expect("witness signature verifies");
     }
 
     #[test]
@@ -317,13 +326,11 @@ mod tests {
         let pk_b = sk_b.verifying_key();
         let witness = sample_witness(7);
         let sig_bytes = sk_a.sign(&witness.witness_signing_bytes());
-        let signed = witness
-            .clone()
-            .with_signature(NodeSignature::new(
-                NodeId::new("node-witness"),
-                sig_bytes.to_bytes(),
-                1_700_000_000,
-            ));
+        let signed = witness.clone().with_signature(NodeSignature::new(
+            NodeId::new("node-witness"),
+            sig_bytes.to_bytes(),
+            1_700_000_000,
+        ));
         signed
             .verify_signature(&pk_b)
             .expect_err("witness signed by A must not verify under B");

@@ -13,11 +13,6 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{DateTime, Utc};
 use clap::{Args, Subcommand};
 use fcp_cbor::SchemaId;
-use fcp_prelude::{
-    DecisionReceipt, ObjectHeader, POLICY_BUNDLE_SIGNED_FIELDS, PolicyPreviewSample,
-    PolicySimulationError, PolicySimulationInput, compute_policy_bundle_hash, diff_policy_bundles,
-    preview_policy_bundles, simulate_policy_decision,
-};
 use fcp_crypto::ed25519::{Ed25519SigningKey, SECRET_KEY_SIZE};
 use fcp_kernel::{CapabilityId, InvokeRequest, ObjectId, SafetyTier};
 use fcp_policy::{
@@ -26,17 +21,22 @@ use fcp_policy::{
     ResourceObject, RoleObject, TransportMode, ZoneDefinitionObject, ZoneId, ZonePolicyObject,
     ZoneTransportPolicy,
 };
+use fcp_prelude::{
+    DecisionReceipt, ObjectHeader, POLICY_BUNDLE_SIGNED_FIELDS, PolicyPreviewSample,
+    PolicySimulationError, PolicySimulationInput, compute_policy_bundle_hash, diff_policy_bundles,
+    preview_policy_bundles, simulate_policy_decision,
+};
 use hex::decode as hex_decode;
 use semver::Version;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 #[cfg(test)]
-use fcp_prelude::NodeId;
-#[cfg(test)]
 use fcp_kernel::{NodeSignature, RequestId};
 #[cfg(test)]
 use fcp_policy::{CapabilityToken, ConfidentialityLevel, IntegrityLevel};
+#[cfg(test)]
+use fcp_prelude::NodeId;
 
 /// Arguments for the `fcp policy` command.
 #[derive(Args, Debug)]

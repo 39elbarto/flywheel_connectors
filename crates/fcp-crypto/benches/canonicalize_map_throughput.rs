@@ -47,7 +47,10 @@ fn nested_reverse_sorted_map(outer: usize, inner: usize) -> Value {
                 Value::Integer(Integer::from(j as u64)),
             ));
         }
-        entries.push((Value::Text(format!("outer-{i:04}")), Value::Map(inner_entries)));
+        entries.push((
+            Value::Text(format!("outer-{i:04}")),
+            Value::Map(inner_entries),
+        ));
     }
     Value::Map(entries)
 }

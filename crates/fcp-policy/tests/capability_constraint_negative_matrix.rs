@@ -93,10 +93,16 @@ fn mandatory_kind_object_id_allowlist_denies_on_mismatch() {
     let allowed = vec![obj("repo:public-docs"), obj("repo:flywheel-public")];
     let observed = obj("repo:flywheel-private");
     let outcome = enforcer.enforce_object_id_allowlist(&allowed, &observed);
-    assert!(outcome.is_deny(), "expected deny for {observed} not in allowlist");
+    assert!(
+        outcome.is_deny(),
+        "expected deny for {observed} not in allowlist"
+    );
     match &outcome.deny_reason().expect("deny reason present").kind {
         ConstraintDenialKind::ObjectIdNotInAllowlist { observed: o } => {
-            assert_eq!(*o, observed, "denial reason must carry the rejected object_id");
+            assert_eq!(
+                *o, observed,
+                "denial reason must carry the rejected object_id"
+            );
         }
         other => panic!("expected ObjectIdNotInAllowlist, got {other:?}"),
     }
@@ -109,7 +115,10 @@ fn mandatory_kind_object_id_allowlist_allows_on_match() {
     let target = obj("repo:flywheel-public");
     let allowed = vec![obj("repo:public-docs"), target];
     let outcome = enforcer.enforce_object_id_allowlist(&allowed, &target);
-    assert!(outcome.is_allow(), "expected allow when object_id is in allowlist");
+    assert!(
+        outcome.is_allow(),
+        "expected allow when object_id is in allowlist"
+    );
 }
 
 // ── 2. host allowlist ───────────────────────────────────────────────────
@@ -194,7 +203,10 @@ fn mandatory_kind_time_window_allows_within_bounds() {
 fn mandatory_kind_scope_ceiling_denies_when_max_calls_exceeded() {
     let enforcer = DefaultConstraintEnforcer::new();
     let outcome = enforcer.enforce_scope_ceiling(Some(10), Some(1_000_000), 11, 0);
-    assert!(outcome.is_deny(), "expected deny when observed_calls > max_calls");
+    assert!(
+        outcome.is_deny(),
+        "expected deny when observed_calls > max_calls"
+    );
     match &outcome.deny_reason().expect("deny reason present").kind {
         ConstraintDenialKind::ScopeCeilingExceeded {
             observed_calls,
@@ -216,7 +228,10 @@ fn mandatory_kind_scope_ceiling_denies_when_max_calls_exceeded() {
 fn mandatory_kind_scope_ceiling_denies_when_max_bytes_exceeded() {
     let enforcer = DefaultConstraintEnforcer::new();
     let outcome = enforcer.enforce_scope_ceiling(Some(100), Some(2048), 0, 2049);
-    assert!(outcome.is_deny(), "expected deny when observed_bytes > max_bytes");
+    assert!(
+        outcome.is_deny(),
+        "expected deny when observed_bytes > max_bytes"
+    );
     assert!(matches!(
         outcome.deny_reason().expect("deny reason present").kind,
         ConstraintDenialKind::ScopeCeilingExceeded { .. }
@@ -228,7 +243,10 @@ fn mandatory_kind_scope_ceiling_allows_at_inclusive_boundary() {
     let enforcer = DefaultConstraintEnforcer::new();
     // Exactly equal to the ceiling is allowed (deny is `>`, not `>=`).
     let outcome = enforcer.enforce_scope_ceiling(Some(10), Some(1024), 10, 1024);
-    assert!(outcome.is_allow(), "max_calls / max_bytes are inclusive bounds");
+    assert!(
+        outcome.is_allow(),
+        "max_calls / max_bytes are inclusive bounds"
+    );
 }
 
 // ── 5. principal binding ────────────────────────────────────────────────
@@ -250,9 +268,7 @@ fn mandatory_kind_principal_binding_denies_when_request_principal_differs() {
         }
         other => panic!("expected PrincipalNotBound, got {other:?}"),
     }
-    assert_no_side_effects(|| {
-        enforcer.enforce_principal_binding(Some(&bound), &observed)
-    });
+    assert_no_side_effects(|| enforcer.enforce_principal_binding(Some(&bound), &observed));
 }
 
 #[test]
@@ -283,9 +299,7 @@ fn denial_kind_exhaustive_match_sentinel() {
     // why the new kind is exempt from A.4 coverage).
     let probes = [
         ConstraintDenialKind::EmptyConstraintSet,
-        ConstraintDenialKind::ObjectIdNotInAllowlist {
-            observed: obj("x"),
-        },
+        ConstraintDenialKind::ObjectIdNotInAllowlist { observed: obj("x") },
         ConstraintDenialKind::HostNotInAllowlist {
             observed: "x".to_string(),
         },

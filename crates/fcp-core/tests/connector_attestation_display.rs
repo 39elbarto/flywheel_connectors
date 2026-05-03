@@ -43,16 +43,27 @@ const ALL_ATTRIBUTE_KEYS: &[(PostureAttributeKey, &str)] = &[
     (PostureAttributeKey::OsVersion, "os_version"),
     (PostureAttributeKey::DiskEncryption, "disk_encryption"),
     (PostureAttributeKey::FirewallEnabled, "firewall_enabled"),
-    (PostureAttributeKey::ScreenLockEnabled, "screen_lock_enabled"),
-    (PostureAttributeKey::ScreenLockTimeout, "screen_lock_timeout"),
+    (
+        PostureAttributeKey::ScreenLockEnabled,
+        "screen_lock_enabled",
+    ),
+    (
+        PostureAttributeKey::ScreenLockTimeout,
+        "screen_lock_timeout",
+    ),
     (PostureAttributeKey::AntivirusActive, "antivirus_active"),
     (PostureAttributeKey::DeviceManaged, "device_managed"),
-    (PostureAttributeKey::SecureBootEnabled, "secure_boot_enabled"),
+    (
+        PostureAttributeKey::SecureBootEnabled,
+        "secure_boot_enabled",
+    ),
     (PostureAttributeKey::TpmPresent, "tpm_present"),
 ];
 
 fn ts(year: i32, month: u32, day: u32) -> DateTime<Utc> {
-    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0).single().unwrap()
+    Utc.with_ymd_and_hms(year, month, day, 0, 0, 0)
+        .single()
+        .unwrap()
 }
 
 fn populated_attestation() -> PostureAttestation {
@@ -184,7 +195,9 @@ fn attribute_getter_helpers_truth_table() {
 
     // Missing attribute → None.
     let mut sparse = populated_attestation();
-    sparse.attributes.remove(&PostureAttributeKey::DiskEncryption);
+    sparse
+        .attributes
+        .remove(&PostureAttributeKey::DiskEncryption);
     assert!(sparse.disk_encryption_enabled().is_none());
 }
 
@@ -258,7 +271,11 @@ fn posture_attribute_value_untagged_serializes_as_bare_scalar() {
 fn posture_attribute_value_getters_truth_table() {
     assert_eq!(PostureAttributeValue::Bool(true).as_bool(), Some(true));
     assert_eq!(PostureAttributeValue::Bool(false).as_bool(), Some(false));
-    assert!(PostureAttributeValue::String("x".to_string()).as_bool().is_none());
+    assert!(
+        PostureAttributeValue::String("x".to_string())
+            .as_bool()
+            .is_none()
+    );
     assert!(PostureAttributeValue::Number(1).as_bool().is_none());
 
     assert_eq!(
@@ -270,7 +287,11 @@ fn posture_attribute_value_getters_truth_table() {
 
     assert_eq!(PostureAttributeValue::Number(42).as_number(), Some(42));
     assert!(PostureAttributeValue::Bool(true).as_number().is_none());
-    assert!(PostureAttributeValue::String("x".to_string()).as_number().is_none());
+    assert!(
+        PostureAttributeValue::String("x".to_string())
+            .as_number()
+            .is_none()
+    );
 }
 
 #[test]
@@ -318,7 +339,10 @@ fn distinct_verifier_id_produces_distinct_json() {
     let mut b = populated_attestation();
     a.verifier_id = "verifier.alpha".to_string();
     b.verifier_id = "verifier.bravo".to_string();
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -327,7 +351,10 @@ fn distinct_node_id_produces_distinct_json() {
     let mut b = populated_attestation();
     a.node_id = NodeId::new("node-1");
     b.node_id = NodeId::new("node-2");
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -336,7 +363,10 @@ fn distinct_signature_produces_distinct_json() {
     let mut b = populated_attestation();
     a.signature = "sig-A".to_string();
     b.signature = "sig-B".to_string();
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -355,7 +385,10 @@ fn posture_attribute_key_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for (variant, _) in ALL_ATTRIBUTE_KEYS {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
     // Custom is a payload variant — its JSON form differs from any unit form.
     let custom_v = serde_json::to_value(&PostureAttributeKey::Custom("x".to_string())).unwrap();

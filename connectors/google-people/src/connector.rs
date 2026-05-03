@@ -3,17 +3,17 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
-    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
-};
 use fcp_google_discovery::{
     ServiceAliasRegistry,
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
     policy::{GooglePolicyCatalog, PolicyApprovalMode, PolicyRiskLevel, PolicySafetyTier},
     provisioning::load_default_google_provisioning_bundle,
+};
+use fcp_prelude::{
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -1435,13 +1435,13 @@ fn value_has_meaningful_content(value: &Value) -> bool {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_google_discovery::{
         DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
         normalize_snapshot_bytes,
     };
+    use fcp_prelude::{CapabilityConstraints, ZoneId};
 
     fn config_with_test_bearer(extra: &[(&str, Value)]) -> Value {
         let mut params = serde_json::Map::new();

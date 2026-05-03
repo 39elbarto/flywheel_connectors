@@ -74,7 +74,10 @@ fn as_bytes_matches_as_str_bytes_for_each_canonical_zone() {
 
 #[test]
 fn all_canonical_zones_are_pairwise_distinct() {
-    let zones: Vec<ZoneId> = ALL_CANONICAL_ZONES.iter().map(|&(_, ctor)| ctor()).collect();
+    let zones: Vec<ZoneId> = ALL_CANONICAL_ZONES
+        .iter()
+        .map(|&(_, ctor)| ctor())
+        .collect();
     for i in 0..zones.len() {
         for j in 0..zones.len() {
             if i == j {
@@ -120,8 +123,8 @@ fn zone_id_json_decode_rejects_non_canonical_strings() {
     let cases = [
         json!(""),
         json!("owner"),    // missing z: prefix
-        json!("Z:owner"), // uppercase prefix
-        json!("z:OWNER"), // uppercase content
+        json!("Z:owner"),  // uppercase prefix
+        json!("z:OWNER"),  // uppercase content
         json!("z:"),       // missing identifier
         json!("z::owner"), // empty segment
     ];
@@ -175,7 +178,10 @@ fn zone_id_error_empty_display() {
 #[test]
 fn zone_id_error_empty_segment_display() {
     let err = ZoneIdError::EmptySegment { index: 2 };
-    assert_eq!(err.to_string(), "zone id contains an empty segment at byte 2");
+    assert_eq!(
+        err.to_string(),
+        "zone id contains an empty segment at byte 2"
+    );
 }
 
 #[test]
@@ -227,13 +233,9 @@ fn all_eight_zone_id_error_variants_have_distinct_display() {
         ZoneIdError::MissingPrefix,
         ZoneIdError::InvalidTailscaleTagPrefix,
         ZoneIdError::ReservedPrefix { prefix: "z:x-" },
-        ZoneIdError::InvalidChar {
-            ch: '@',
-            index: 0,
-        },
+        ZoneIdError::InvalidChar { ch: '@', index: 0 },
     ];
-    let strings: std::collections::HashSet<_> =
-        variants.iter().map(ToString::to_string).collect();
+    let strings: std::collections::HashSet<_> = variants.iter().map(ToString::to_string).collect();
     assert_eq!(
         strings.len(),
         variants.len(),

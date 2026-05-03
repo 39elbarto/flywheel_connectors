@@ -6,16 +6,16 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 
+use fcp_oauth::{
+    AuthorizationCallback, OAuth2Client, OAuthError, OAuthProvider,
+    ensure_allowlisted_redirect_uri, ensure_callback_redirect_is_allowlisted,
+    normalize_registered_redirect_uri,
+};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
-};
-use fcp_oauth::{
-    AuthorizationCallback, OAuth2Client, OAuthError, OAuthProvider,
-    ensure_allowlisted_redirect_uri, ensure_callback_redirect_is_allowlisted,
-    normalize_registered_redirect_uri,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -1866,10 +1866,10 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::CapabilityConstraints;
     use std::path::PathBuf;
 
     fn generate_token_with_cap(

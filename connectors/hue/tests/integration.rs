@@ -1,12 +1,12 @@
 //! Integration tests for the Hue connector.
 
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_hue::HueConnector;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_hue::HueConnector;
 use serde_json::{Value, json};
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

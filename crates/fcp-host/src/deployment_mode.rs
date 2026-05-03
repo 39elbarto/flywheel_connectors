@@ -1068,8 +1068,7 @@ mod tests {
     }
 
     #[test]
-    fn signed_signals_classifier_promotes_to_mesh_active_when_signature_valid_and_quorum_healthy()
-    {
+    fn signed_signals_classifier_promotes_to_mesh_active_when_signature_valid_and_quorum_healthy() {
         let signed = fully_active_signed_by_a();
         let classification = classify_deployment_mode_verified(&signed, |kid| {
             (kid == &signing_key_a().key_id()).then(|| signing_key_a().verifying_key())
@@ -1096,10 +1095,9 @@ mod tests {
     #[test]
     fn signed_signals_classifier_rejects_signature_under_wrong_key() {
         let signed = fully_active_signed_by_a();
-        let err = classify_deployment_mode_verified(&signed, |_| {
-            Some(signing_key_b().verifying_key())
-        })
-        .expect_err("verified classifier MUST reject signature under wrong key");
+        let err =
+            classify_deployment_mode_verified(&signed, |_| Some(signing_key_b().verifying_key()))
+                .expect_err("verified classifier MUST reject signature under wrong key");
         assert!(matches!(
             err,
             DeploymentClassifierError::SignatureVerificationFailed { .. }
@@ -1114,10 +1112,9 @@ mod tests {
         // attached signature was over the ORIGINAL signals.
         let mut tampered = fully_active_signed_by_a();
         tampered.signals.healthy_peer_count = 999;
-        let err = classify_deployment_mode_verified(&tampered, |_| {
-            Some(signing_key_a().verifying_key())
-        })
-        .expect_err("verified classifier MUST reject post-signing tampering");
+        let err =
+            classify_deployment_mode_verified(&tampered, |_| Some(signing_key_a().verifying_key()))
+                .expect_err("verified classifier MUST reject post-signing tampering");
         assert!(matches!(
             err,
             DeploymentClassifierError::SignatureVerificationFailed { .. }
@@ -1136,10 +1133,9 @@ mod tests {
         // changed attesting_kid in the transcript so signature
         // verification fails because the bytes-being-verified differ
         // from what was signed.
-        let err = classify_deployment_mode_verified(&swapped, |_| {
-            Some(signing_key_a().verifying_key())
-        })
-        .expect_err("kid swap MUST invalidate the signature");
+        let err =
+            classify_deployment_mode_verified(&swapped, |_| Some(signing_key_a().verifying_key()))
+                .expect_err("kid swap MUST invalidate the signature");
         assert!(matches!(
             err,
             DeploymentClassifierError::SignatureVerificationFailed { .. }
@@ -1153,10 +1149,9 @@ mod tests {
         // Signature is about authenticity, not about authorizing a
         // mode upgrade beyond what the signals support.
         let signed = evaluation_signed_by_a();
-        let classification = classify_deployment_mode_verified(&signed, |_| {
-            Some(signing_key_a().verifying_key())
-        })
-        .expect("signature valid");
+        let classification =
+            classify_deployment_mode_verified(&signed, |_| Some(signing_key_a().verifying_key()))
+                .expect("signature valid");
         assert_eq!(classification.mode, DeploymentMode::Evaluation);
         // Reason is the underlying signals reason, NOT
         // SignedSignalsRejected (which is reserved for verification
@@ -1217,10 +1212,10 @@ mod tests {
         // (signed-classifier + admit_safety_tier) chain.
         let attacker_signed = fully_active_signed_by_a();
         // Resolver returns the WRONG key (signature won't verify).
-        let classification = classify_deployment_mode_verified_or_evaluation(
-            &attacker_signed,
-            |_| Some(signing_key_b().verifying_key()),
-        );
+        let classification =
+            classify_deployment_mode_verified_or_evaluation(&attacker_signed, |_| {
+                Some(signing_key_b().verifying_key())
+            });
         let refusal = admit_safety_tier(&classification, SafetyTier::Risky)
             .expect_err("Risky MUST be refused under unverified signals");
         assert!(matches!(

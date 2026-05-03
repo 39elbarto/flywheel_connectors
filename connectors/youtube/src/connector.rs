@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use fcp_google_discovery::{ServiceAliasRegistry, auth::GoogleAuthSelection};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_google_discovery::{ServiceAliasRegistry, auth::GoogleAuthSelection};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};

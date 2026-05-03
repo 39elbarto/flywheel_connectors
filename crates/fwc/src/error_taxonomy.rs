@@ -2405,8 +2405,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_from_budget_exceeded_metric_is_snake_case_per_serde(
-    ) {
+    fn structured_from_budget_exceeded_metric_is_snake_case_per_serde() {
         // br-i57zy: the `metric` field MUST serialize via serde
         // (snake_case) — NOT via Debug (PascalCase). Pin one
         // representative variant per observed casing class.
@@ -2432,8 +2431,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_from_budget_exceeded_metric_matches_canonical_fcp_core_path(
-    ) {
+    fn structured_from_budget_exceeded_metric_matches_canonical_fcp_core_path() {
         // br-i57zy invariant: the fwc taxonomy path MUST agree
         // byte-for-byte with the fcp-core::FcpError::details() path
         // for the metric field. Otherwise downstream tooling that
@@ -2444,11 +2442,8 @@ mod tests {
             limit: 50,
             window_seconds: 60,
         };
-        let fwc_metric = structured_from_fcp_error(&err)
-            .details
-            .as_ref()
-            .unwrap()["metric"]
-            .clone();
+        let fwc_metric =
+            structured_from_fcp_error(&err).details.as_ref().unwrap()["metric"].clone();
         let canonical_metric = err.details().unwrap()["metric"].clone();
         assert_eq!(
             fwc_metric, canonical_metric,
@@ -2471,8 +2466,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_from_capability_constraint_denied_kind_is_snake_case_per_serde(
-    ) {
+    fn structured_from_capability_constraint_denied_kind_is_snake_case_per_serde() {
         // br-i57zy: the `kind` field MUST serialize via serde
         // (snake_case) — NOT via Debug (PascalCase). Sample the
         // first variant to lock the casing contract.
@@ -2493,8 +2487,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_from_capability_constraint_denied_kind_matches_canonical_fcp_core_path(
-    ) {
+    fn structured_from_capability_constraint_denied_kind_matches_canonical_fcp_core_path() {
         // br-i57zy invariant: fwc taxonomy and fcp-core canonical
         // path produce identical JSON for the kind field.
         let err = FcpError::CapabilityConstraintDenied {
@@ -2502,11 +2495,7 @@ mod tests {
             claim_type: "issuer".into(),
             detail: "drift".into(),
         };
-        let fwc_kind = structured_from_fcp_error(&err)
-            .details
-            .as_ref()
-            .unwrap()["kind"]
-            .clone();
+        let fwc_kind = structured_from_fcp_error(&err).details.as_ref().unwrap()["kind"].clone();
         let canonical_kind = err.details().unwrap()["kind"].clone();
         assert_eq!(
             fwc_kind, canonical_kind,

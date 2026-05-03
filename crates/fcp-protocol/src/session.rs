@@ -3,11 +3,11 @@
 //! Implements the normative session handshake defined in `FCP_Specification_V3.md`
 //! §9.7.1 (Handshake and Session Establishment) and §9.7.2 (Mesh Session Authentication).
 use fcp_cbor::{SerializationError, to_canonical_cbor};
-use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::{
     CryptoError, Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey, HkdfSha256,
     X25519PublicKey, X25519SharedSecret,
 };
+use fcp_prelude::TailscaleNodeId;
 use fcp_tailscale::{MeshIdentity, TailscaleError};
 use hmac::{Hmac, Mac};
 use rand::RngCore;

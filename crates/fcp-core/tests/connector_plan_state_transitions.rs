@@ -83,11 +83,20 @@ fn full_5x5_transition_truth_table_matches_documented_allow_list() {
 #[test]
 fn loaded_only_advances_to_activated() {
     let from = ConnectorLifecycleState::Loaded;
-    assert!(is_documented_legal(from, ConnectorLifecycleState::Activated));
+    assert!(is_documented_legal(
+        from,
+        ConnectorLifecycleState::Activated
+    ));
     // Loaded cannot skip to Running directly.
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Running));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Suspended));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Terminated));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Suspended
+    ));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Terminated
+    ));
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Loaded));
 }
 
@@ -95,21 +104,39 @@ fn loaded_only_advances_to_activated() {
 fn activated_advances_to_running_or_terminated() {
     let from = ConnectorLifecycleState::Activated;
     assert!(is_documented_legal(from, ConnectorLifecycleState::Running));
-    assert!(is_documented_legal(from, ConnectorLifecycleState::Terminated));
+    assert!(is_documented_legal(
+        from,
+        ConnectorLifecycleState::Terminated
+    ));
     // Activated cannot reverse to Loaded or skip to Suspended.
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Loaded));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Suspended));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Activated));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Suspended
+    ));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Activated
+    ));
 }
 
 #[test]
 fn running_advances_to_suspended_or_terminated() {
     let from = ConnectorLifecycleState::Running;
-    assert!(is_documented_legal(from, ConnectorLifecycleState::Suspended));
-    assert!(is_documented_legal(from, ConnectorLifecycleState::Terminated));
+    assert!(is_documented_legal(
+        from,
+        ConnectorLifecycleState::Suspended
+    ));
+    assert!(is_documented_legal(
+        from,
+        ConnectorLifecycleState::Terminated
+    ));
     // Running cannot reverse to Loaded/Activated or self-loop.
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Loaded));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Activated));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Activated
+    ));
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Running));
 }
 
@@ -117,11 +144,20 @@ fn running_advances_to_suspended_or_terminated() {
 fn suspended_advances_to_running_or_terminated() {
     let from = ConnectorLifecycleState::Suspended;
     assert!(is_documented_legal(from, ConnectorLifecycleState::Running));
-    assert!(is_documented_legal(from, ConnectorLifecycleState::Terminated));
+    assert!(is_documented_legal(
+        from,
+        ConnectorLifecycleState::Terminated
+    ));
     // Suspended cannot reverse to earlier states or self-loop.
     assert!(!is_documented_legal(from, ConnectorLifecycleState::Loaded));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Activated));
-    assert!(!is_documented_legal(from, ConnectorLifecycleState::Suspended));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Activated
+    ));
+    assert!(!is_documented_legal(
+        from,
+        ConnectorLifecycleState::Suspended
+    ));
 }
 
 #[test]
@@ -225,8 +261,7 @@ fn cbor_text_scalar_per_variant() {
 #[test]
 fn pascal_case_rejected_via_serde_and_from_str() {
     for bad in ["Loaded", "Activated", "Running", "Suspended", "Terminated"] {
-        let serde_result: Result<ConnectorLifecycleState, _> =
-            serde_json::from_value(json!(bad));
+        let serde_result: Result<ConnectorLifecycleState, _> = serde_json::from_value(json!(bad));
         assert!(
             serde_result.is_err(),
             "serde must reject PascalCase `{bad}`"
@@ -258,7 +293,10 @@ fn distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(state, _) in ALL_STATES {
         let v = serde_json::to_value(state).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {state:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {state:?}: {v:?}"
+        );
     }
     assert_eq!(seen.len(), 5);
 }
@@ -268,7 +306,9 @@ fn states_work_as_hashmap_key_for_status_bucketing() {
     let mut counts: std::collections::HashMap<ConnectorLifecycleState, u32> =
         std::collections::HashMap::new();
     *counts.entry(ConnectorLifecycleState::Running).or_insert(0) += 5;
-    *counts.entry(ConnectorLifecycleState::Suspended).or_insert(0) += 2;
+    *counts
+        .entry(ConnectorLifecycleState::Suspended)
+        .or_insert(0) += 2;
     *counts.entry(ConnectorLifecycleState::Running).or_insert(0) += 3;
     assert_eq!(counts.get(&ConnectorLifecycleState::Running), Some(&8));
     assert_eq!(counts.get(&ConnectorLifecycleState::Suspended), Some(&2));

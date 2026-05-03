@@ -27,7 +27,10 @@
 
 use fcp_crypto::{
     XWING_SECRET_KEY_SIZE, XWingSecretKey,
-    owner_key::{ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes, MlDsa65VerifyingKeyBytes},
+    owner_key::{
+        ML_DSA_65_PUBLIC_KEY_SIZE, ML_DSA_65_SIGNATURE_SIZE, MlDsa65SignatureBytes,
+        MlDsa65VerifyingKeyBytes,
+    },
 };
 
 // ── XWingSecretKey ──────────────────────────────────────────────────
@@ -111,14 +114,17 @@ fn ml_dsa_signature_bytes_eq_no_panic_on_round_trip_compare() {
 
 #[test]
 fn ml_dsa_verifying_key_bytes_eq_reflects_byte_equality() {
-    let a = MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
-    let b = MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
+    let a =
+        MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
+    let b =
+        MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
     assert_eq!(a, b);
 }
 
 #[test]
 fn ml_dsa_verifying_key_bytes_eq_distinguishes_diff() {
-    let a = MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
+    let a =
+        MlDsa65VerifyingKeyBytes::try_from_bytes(vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE]).unwrap();
     let mut other = vec![0x77; ML_DSA_65_PUBLIC_KEY_SIZE];
     other[ML_DSA_65_PUBLIC_KEY_SIZE / 2] = 0xFF;
     let b = MlDsa65VerifyingKeyBytes::try_from_bytes(other).unwrap();

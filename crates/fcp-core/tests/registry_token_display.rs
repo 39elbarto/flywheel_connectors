@@ -25,10 +25,7 @@
 use fcp_core::{PrincipalId, SecretAccessToken, SecretId, ZoneId};
 use uuid::Uuid;
 
-fn make_token(
-    expires_at: u64,
-    max_uses: u32,
-) -> SecretAccessToken {
+fn make_token(expires_at: u64, max_uses: u32) -> SecretAccessToken {
     SecretAccessToken::new(
         SecretId::from_uuid(Uuid::from_bytes([0xab; 16])),
         ZoneId::work(),
@@ -50,7 +47,10 @@ fn debug_format_redacts_authorization_bytes() {
     let tok = make_token(2_000_000_000, 3);
     let debug = format!("{tok:?}");
 
-    assert!(debug.contains("[redacted]"), "Debug must include `[redacted]`");
+    assert!(
+        debug.contains("[redacted]"),
+        "Debug must include `[redacted]`"
+    );
     assert!(
         !debug.contains("authorization-bytes-secret"),
         "Debug must NOT include raw authorization bytes: {debug}"
@@ -100,14 +100,23 @@ fn is_expired_truth_table_at_boundary() {
 #[test]
 fn is_exhausted_truth_table() {
     let mut tok = make_token(2_000_000_000, 3);
-    assert!(!tok.is_exhausted(), "use_count=0, max_uses=3 → not exhausted");
+    assert!(
+        !tok.is_exhausted(),
+        "use_count=0, max_uses=3 → not exhausted"
+    );
 
     assert!(tok.record_use());
-    assert!(!tok.is_exhausted(), "use_count=1, max_uses=3 → not exhausted");
+    assert!(
+        !tok.is_exhausted(),
+        "use_count=1, max_uses=3 → not exhausted"
+    );
 
     assert!(tok.record_use());
     assert!(tok.record_use());
-    assert!(tok.is_exhausted(), "use_count=3, max_uses=3 → IS exhausted (>= rule)");
+    assert!(
+        tok.is_exhausted(),
+        "use_count=3, max_uses=3 → IS exhausted (>= rule)"
+    );
 }
 
 #[test]

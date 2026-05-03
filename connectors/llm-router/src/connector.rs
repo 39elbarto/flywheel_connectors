@@ -1317,9 +1317,9 @@ impl LlmRouterConnector {
 mod tests {
     use super::*;
     use chrono::Duration;
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
 
     fn test_config_params() -> serde_json::Value {
         json!({

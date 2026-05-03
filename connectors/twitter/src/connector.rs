@@ -1816,9 +1816,9 @@ fn tw_op(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, SelfCheckStatus, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityConstraints, SelfCheckStatus, ZoneId};
 
     fn signed_token(
         signing_key: &Ed25519SigningKey,

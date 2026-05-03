@@ -7,18 +7,14 @@
 //! tampered manifests onto disk or post them to a future admin
 //! endpoint, and the parser must hold up.
 
-use fcp_core::{
-    ZoneKeyManifest, WrappedKey, WrappedZoneKeyV4, ZoneKemAlgorithm,
-};
+use fcp_core::{WrappedKey, WrappedZoneKeyV4, ZoneKemAlgorithm, ZoneKeyManifest};
 use proptest::prelude::*;
 
 // ── Targeted regression cases ───────────────────────────────────────
 
 #[test]
 fn zone_key_manifest_v4_empty_bytes_is_decisive_err() {
-    let result = std::panic::catch_unwind(|| {
-        ciborium::from_reader::<ZoneKeyManifest, _>(&[][..])
-    });
+    let result = std::panic::catch_unwind(|| ciborium::from_reader::<ZoneKeyManifest, _>(&[][..]));
     assert!(result.is_ok(), "deserialise panicked on empty input");
     assert!(result.unwrap().is_err());
 }
@@ -27,9 +23,8 @@ fn zone_key_manifest_v4_empty_bytes_is_decisive_err() {
 fn zone_key_manifest_v4_zone_kem_algorithm_arbitrary_string_is_typed_err() {
     // Deserialising a non-recognised kem string into ZoneKemAlgorithm
     // must surface a serde error, not a panic.
-    let result = std::panic::catch_unwind(|| {
-        serde_json::from_str::<ZoneKemAlgorithm>(r#""nonsense_kem""#)
-    });
+    let result =
+        std::panic::catch_unwind(|| serde_json::from_str::<ZoneKemAlgorithm>(r#""nonsense_kem""#));
     assert!(result.is_ok());
     assert!(result.unwrap().is_err());
 }

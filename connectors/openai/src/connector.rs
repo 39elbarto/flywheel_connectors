@@ -3314,9 +3314,9 @@ impl Default for OpenAIConnector {
 mod tests {
     use super::*;
     use chrono::{Duration, SecondsFormat, Utc};
-    use fcp_prelude::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CredentialId;
     use fcp_testkit::LogCapture;
     use std::time::Instant;
     use uuid::Uuid;

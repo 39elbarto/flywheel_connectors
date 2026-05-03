@@ -1228,9 +1228,9 @@ impl AwsConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
 
     const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
     const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";

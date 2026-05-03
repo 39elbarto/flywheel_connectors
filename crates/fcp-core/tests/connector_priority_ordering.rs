@@ -157,7 +157,10 @@ fn required_quorum_is_monotonic_along_priority_ladder() {
         let dangerous = required_quorum(n, f, RiskTier::Dangerous);
         let critical = required_quorum(n, f, RiskTier::CriticalWrite);
 
-        assert!(safe <= risky, "Safe ({safe}) must be ≤ Risky ({risky}) at (n={n},f={f})");
+        assert!(
+            safe <= risky,
+            "Safe ({safe}) must be ≤ Risky ({risky}) at (n={n},f={f})"
+        );
         assert!(
             risky <= dangerous,
             "Risky ({risky}) must be ≤ Dangerous ({dangerous}) at (n={n},f={f})"
@@ -184,7 +187,10 @@ fn required_quorum_strict_inequality_holds_for_n_strictly_greater_than_2f_plus_o
         let safe = required_quorum(n, f, RiskTier::Safe);
         let risky = required_quorum(n, f, RiskTier::Risky);
         let dangerous = required_quorum(n, f, RiskTier::Dangerous);
-        assert!(safe < risky, "Safe ({safe}) < Risky ({risky}) at (n={n},f={f})");
+        assert!(
+            safe < risky,
+            "Safe ({safe}) < Risky ({risky}) at (n={n},f={f})"
+        );
         assert!(
             risky < dangerous,
             "Risky ({risky}) < Dangerous ({dangerous}) at (n={n},f={f})"
@@ -307,10 +313,7 @@ fn quorum_purpose_default_risk_tier_priority_ladder_sentinel() {
         QuorumPurpose::RiskyLease.default_risk_tier(),
         RiskTier::Risky
     );
-    assert_eq!(
-        QuorumPurpose::SafeLease.default_risk_tier(),
-        RiskTier::Safe
-    );
+    assert_eq!(QuorumPurpose::SafeLease.default_risk_tier(), RiskTier::Safe);
 }
 
 #[test]

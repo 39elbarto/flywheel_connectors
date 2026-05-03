@@ -35,7 +35,12 @@ fn period_open() -> DelegationPeriod {
     }
 }
 
-fn cert(id_byte: u8, parent: Option<u8>, zone_id: ZoneId, period: DelegationPeriod) -> DelegationCertificate {
+fn cert(
+    id_byte: u8,
+    parent: Option<u8>,
+    zone_id: ZoneId,
+    period: DelegationPeriod,
+) -> DelegationCertificate {
     DelegationCertificate {
         cert_id: cert_id(id_byte),
         zone_id,

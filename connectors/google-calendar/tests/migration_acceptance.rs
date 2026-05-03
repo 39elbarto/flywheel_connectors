@@ -7,8 +7,8 @@
 
 #![allow(clippy::too_many_lines)]
 
-use fcp_prelude::{CredentialId, FcpError};
 use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
+use fcp_prelude::{CredentialId, FcpError};
 use serde_json::json;
 
 use fcp_google_calendar::{client::GoogleCalendarClient, connector::GoogleCalendarConnector};

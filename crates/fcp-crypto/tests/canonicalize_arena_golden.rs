@@ -54,22 +54,22 @@ fn canonicalize_arena_fcp_aad_shape_is_byte_identical_to_known_golden() {
     let hex = hex::encode(&bytes);
 
     let expected = concat!(
-        "a4",                                    // map(4)
-        "67",                                    // text(7)
-        "707572706f7365",                        //   "purpose"
-        "4d",                                    // bytes(13)
-        "464350342d5a4f4e452d4b4559",            //   "FCP4-ZONE-KEY"
-        "67",                                    // text(7)
-        "7a6f6e655f6964",                        //   "zone_id"
-        "46",                                    // bytes(6)
-        "7a3a776f726b",                          //   "z:work"
-        "69",                                    // text(9)
-        "6973737565645f6174",                    //   "issued_at"
-        "1a6553f100",                            //   uint(0x6553f100 = 1_700_000_000)
-        "71",                                    // text(17)
-        "726563697069656e745f6e6f64655f6964",    //   "recipient_node_id"
-        "46",                                    // bytes(6)
-        "6e6f64652d37",                          //   "node-7"
+        "a4",                                 // map(4)
+        "67",                                 // text(7)
+        "707572706f7365",                     //   "purpose"
+        "4d",                                 // bytes(13)
+        "464350342d5a4f4e452d4b4559",         //   "FCP4-ZONE-KEY"
+        "67",                                 // text(7)
+        "7a6f6e655f6964",                     //   "zone_id"
+        "46",                                 // bytes(6)
+        "7a3a776f726b",                       //   "z:work"
+        "69",                                 // text(9)
+        "6973737565645f6174",                 //   "issued_at"
+        "1a6553f100",                         //   uint(0x6553f100 = 1_700_000_000)
+        "71",                                 // text(17)
+        "726563697069656e745f6e6f64655f6964", //   "recipient_node_id"
+        "46",                                 // bytes(6)
+        "6e6f64652d37",                       //   "node-7"
     );
 
     assert_eq!(
@@ -132,8 +132,14 @@ fn canonicalize_arena_rejects_duplicate_keys() {
     // serialize to byte-identical CBOR keys and verify the
     // canonicalizer rejects.
     let dup_map = Value::Map(vec![
-        (Value::Text("dup".to_string()), Value::Integer(Integer::from(1))),
-        (Value::Text("dup".to_string()), Value::Integer(Integer::from(2))),
+        (
+            Value::Text("dup".to_string()),
+            Value::Integer(Integer::from(1)),
+        ),
+        (
+            Value::Text("dup".to_string()),
+            Value::Integer(Integer::from(2)),
+        ),
     ]);
     let result = to_deterministic_cbor(&dup_map);
     assert!(result.is_err(), "duplicate keys must be rejected");
@@ -184,16 +190,28 @@ fn canonicalize_arena_nested_map_recursion() {
     // Construct a 3-level nested map and verify the result is
     // sorted at each level.
     let inner = Value::Map(vec![
-        (Value::Text("z".to_string()), Value::Integer(Integer::from(1))),
-        (Value::Text("a".to_string()), Value::Integer(Integer::from(2))),
+        (
+            Value::Text("z".to_string()),
+            Value::Integer(Integer::from(1)),
+        ),
+        (
+            Value::Text("a".to_string()),
+            Value::Integer(Integer::from(2)),
+        ),
     ]);
     let middle = Value::Map(vec![
         (Value::Text("y".to_string()), inner.clone()),
-        (Value::Text("b".to_string()), Value::Integer(Integer::from(3))),
+        (
+            Value::Text("b".to_string()),
+            Value::Integer(Integer::from(3)),
+        ),
     ]);
     let outer = Value::Map(vec![
         (Value::Text("x".to_string()), middle),
-        (Value::Text("c".to_string()), Value::Integer(Integer::from(4))),
+        (
+            Value::Text("c".to_string()),
+            Value::Integer(Integer::from(4)),
+        ),
     ]);
     let bytes = to_deterministic_cbor(&outer).unwrap();
     let recovered: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
@@ -232,10 +250,22 @@ fn canonicalize_arena_byte_keys_alongside_text_keys() {
     // where the key encoding tag differs but the bytewise sort
     // still must be deterministic).
     let mixed = Value::Map(vec![
-        (Value::Bytes(b"zzz".to_vec()), Value::Integer(Integer::from(1))),
-        (Value::Text("aaa".to_string()), Value::Integer(Integer::from(2))),
-        (Value::Bytes(b"aaa".to_vec()), Value::Integer(Integer::from(3))),
-        (Value::Text("zzz".to_string()), Value::Integer(Integer::from(4))),
+        (
+            Value::Bytes(b"zzz".to_vec()),
+            Value::Integer(Integer::from(1)),
+        ),
+        (
+            Value::Text("aaa".to_string()),
+            Value::Integer(Integer::from(2)),
+        ),
+        (
+            Value::Bytes(b"aaa".to_vec()),
+            Value::Integer(Integer::from(3)),
+        ),
+        (
+            Value::Text("zzz".to_string()),
+            Value::Integer(Integer::from(4)),
+        ),
     ]);
     let bytes = to_deterministic_cbor(&mixed).unwrap();
     let again: Value = ciborium::from_reader(bytes.as_slice()).unwrap();

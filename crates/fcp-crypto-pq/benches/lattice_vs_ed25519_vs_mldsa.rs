@@ -54,9 +54,7 @@ use std::time::Duration;
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
-use fcp_crypto::{
-    Ed25519SigningKey, Ed25519VerifyingKey, MlDsa65SigningKey, MlDsa65VerifyingKey,
-};
+use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, MlDsa65SigningKey, MlDsa65VerifyingKey};
 use fcp_crypto_pq::{
     DelegationPeriod, LatticeParams, LatticePreimage, MasterPublicKey, MasterTrapdoor,
     ZonePeriodPublicKey, ZonePeriodTrapdoor, delegate, operation_hash, sample_pre, trap_gen,
@@ -337,5 +335,11 @@ fn bench_end_to_end(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_keygen, bench_sign, bench_verify, bench_end_to_end);
+criterion_group!(
+    benches,
+    bench_keygen,
+    bench_sign,
+    bench_verify,
+    bench_end_to_end
+);
 criterion_main!(benches);

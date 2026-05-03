@@ -1672,8 +1672,8 @@ impl FeishuConnector {
 mod tests {
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+    use fcp_prelude::CapabilityConstraints;
 
     fn signed_token(
         signing_key: &Ed25519SigningKey,

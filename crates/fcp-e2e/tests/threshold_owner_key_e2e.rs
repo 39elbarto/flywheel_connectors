@@ -227,9 +227,8 @@ fn threshold_owner_key_e2e_two_of_three_produces_valid_ed25519_signature() {
     let message = b"FCP3-OWNER-CEREMONY: zone-key-rotation v1";
 
     log_event(scenario, "sign", "running", Some("participants=1,2"));
-    let signature =
-        threshold_sign_with_participants(&[1, 2], &key_packages, &pkpkg, message)
-            .expect("2-of-3 sign MUST succeed");
+    let signature = threshold_sign_with_participants(&[1, 2], &key_packages, &pkpkg, message)
+        .expect("2-of-3 sign MUST succeed");
     log_event(scenario, "sign", "passed", None);
 
     // Verify under the group public key — same path any downstream
@@ -259,10 +258,14 @@ fn threshold_owner_key_e2e_lose_one_node_remaining_two_can_sign() {
 
     log_event(scenario, "node_2_offline", "simulated", None);
     // Nodes 1 and 3 alone — node 2 simulated as offline.
-    log_event(scenario, "sign_with_survivors", "running", Some("participants=1,3"));
-    let signature =
-        threshold_sign_with_participants(&[1, 3], &key_packages, &pkpkg, message)
-            .expect("survivor quorum (1+3) MUST sign without node 2");
+    log_event(
+        scenario,
+        "sign_with_survivors",
+        "running",
+        Some("participants=1,3"),
+    );
+    let signature = threshold_sign_with_participants(&[1, 3], &key_packages, &pkpkg, message)
+        .expect("survivor quorum (1+3) MUST sign without node 2");
     log_event(scenario, "sign_with_survivors", "passed", None);
 
     pkpkg
@@ -288,8 +291,7 @@ fn threshold_owner_key_e2e_k_minus_one_alone_cannot_proceed() {
 
     // Try to build a signing package with only ONE participant's
     // commitments — must be rejected.
-    let (_nonces, commitments) =
-        commit(key_packages.get(&1).unwrap()).expect("commit ok");
+    let (_nonces, commitments) = commit(key_packages.get(&1).unwrap()).expect("commit ok");
     let mut single_commitment_map = BTreeMap::new();
     single_commitment_map.insert(1_u16, commitments);
 
@@ -417,9 +419,8 @@ fn threshold_owner_key_e2e_revocation_object_signing_byte_equivalent() {
         "running",
         Some(&format!("transcript_bytes={}", transcript.len())),
     );
-    let signature =
-        threshold_sign_with_participants(&[2, 3], &key_packages, &pkpkg, &transcript)
-            .expect("2-of-3 sign ok over revocation transcript");
+    let signature = threshold_sign_with_participants(&[2, 3], &key_packages, &pkpkg, &transcript)
+        .expect("2-of-3 sign ok over revocation transcript");
     log_event(scenario, "sign_revocation_transcript", "passed", None);
 
     pkpkg
@@ -449,7 +450,10 @@ fn threshold_owner_key_e2e_owner_signer_trait_signs_via_coordinator() {
 
     // owner_key_id MUST be the group key's KeyId — fcp-audit and
     // fcp-evidence consumers key off this.
-    assert_eq!(coordinator.owner_key_id(), pkpkg.group_public_key().key_id());
+    assert_eq!(
+        coordinator.owner_key_id(),
+        pkpkg.group_public_key().key_id()
+    );
 
     let message = b"FCP3-OWNER-CEREMONY: owner_signer trait integration";
     log_event(scenario, "owner_sign", "running", None);

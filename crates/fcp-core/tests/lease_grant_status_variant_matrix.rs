@@ -44,10 +44,19 @@ const ALL_RESUME_CAUSES: &[(ResumeCause, &str)] = &[
 
 const ALL_DUPLICATE_CLASSES: &[(DuplicateDeliveryClass, &str)] = &[
     (DuplicateDeliveryClass::Fresh, "fresh"),
-    (DuplicateDeliveryClass::DuplicateCommitted, "duplicate_committed"),
+    (
+        DuplicateDeliveryClass::DuplicateCommitted,
+        "duplicate_committed",
+    ),
     (DuplicateDeliveryClass::ReplaySafeRetry, "replay_safe_retry"),
-    (DuplicateDeliveryClass::AmbiguousExternal, "ambiguous_external"),
-    (DuplicateDeliveryClass::EvidenceConflict, "evidence_conflict"),
+    (
+        DuplicateDeliveryClass::AmbiguousExternal,
+        "ambiguous_external",
+    ),
+    (
+        DuplicateDeliveryClass::EvidenceConflict,
+        "evidence_conflict",
+    ),
 ];
 
 #[test]
@@ -103,7 +112,10 @@ fn resume_cause_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_RESUME_CAUSES {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
 }
 
@@ -158,7 +170,10 @@ fn duplicate_delivery_class_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_DUPLICATE_CLASSES {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
 }
 
@@ -182,7 +197,12 @@ fn cross_enum_token_space_is_disjoint() {
     // Also pin the total count: 4 + 5 = 9 distinct tokens.
     let mut all = resume_tokens.clone();
     all.extend(class_tokens);
-    assert_eq!(all.len(), 9, "expected 9 distinct status tokens, got {}", all.len());
+    assert_eq!(
+        all.len(),
+        9,
+        "expected 9 distinct status tokens, got {}",
+        all.len()
+    );
 }
 
 #[test]
@@ -262,7 +282,10 @@ fn evidence_conflict_signals_operator_attention_via_distinct_token() {
 
     for &(variant, wire) in ALL_DUPLICATE_CLASSES {
         if variant != DuplicateDeliveryClass::EvidenceConflict {
-            assert_ne!(wire, target, "{variant:?} accidentally aliases EvidenceConflict");
+            assert_ne!(
+                wire, target,
+                "{variant:?} accidentally aliases EvidenceConflict"
+            );
         }
     }
 }

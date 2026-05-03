@@ -254,6 +254,32 @@ impl ProviderEndpoints {
         self
     }
 
+    /// Validate every configured endpoint against the shared OAuth URL
+    /// policy and return their canonical (post-parse-normalized) forms.
+    ///
+    /// This is the single source of truth for `ProviderEndpoints`
+    /// validation: both `validate()` (predicate) and `to_oauth2_config()`
+    /// (builder) flow through here so the two surfaces cannot drift.
+    fn validated_endpoints(&self) -> OAuthResult<ValidatedEndpoints> {
+        Ok(ValidatedEndpoints {
+            authorization_url: validate_oauth_endpoint_url(
+                &self.authorization_url,
+                "authorization_url",
+            )?,
+            token_url: validate_oauth_endpoint_url(&self.token_url, "token_url")?,
+            revocation_url: self
+                .revocation_url
+                .as_deref()
+                .map(|url| validate_oauth_endpoint_url(url, "revocation_url"))
+                .transpose()?,
+            userinfo_url: self
+                .userinfo_url
+                .as_deref()
+                .map(|url| validate_oauth_endpoint_url(url, "userinfo_url"))
+                .transpose()?,
+        })
+    }
+
     /// Validate every configured endpoint against the shared OAuth URL policy.
     ///
     /// # Errors
@@ -262,15 +288,7 @@ impl ProviderEndpoints {
     /// HTTP, is not an absolute network URL, embeds credentials, or includes a
     /// fragment.
     pub fn validate(&self) -> OAuthResult<()> {
-        validate_oauth_endpoint_url(&self.authorization_url, "authorization_url")?;
-        validate_oauth_endpoint_url(&self.token_url, "token_url")?;
-        if let Some(url) = self.revocation_url.as_deref() {
-            validate_oauth_endpoint_url(url, "revocation_url")?;
-        }
-        if let Some(url) = self.userinfo_url.as_deref() {
-            validate_oauth_endpoint_url(url, "userinfo_url")?;
-        }
-        Ok(())
+        self.validated_endpoints().map(|_| ())
     }
 
     /// Build `OAuth2Config` from these endpoints.
@@ -284,23 +302,28 @@ impl ProviderEndpoints {
         client_id: &str,
         client_secret: &str,
     ) -> OAuthResult<OAuth2Config> {
-        let authorization_url =
-            validate_oauth_endpoint_url(&self.authorization_url, "authorization_url")?;
-        let token_url = validate_oauth_endpoint_url(&self.token_url, "token_url")?;
-        if let Some(url) = self.revocation_url.as_deref() {
-            validate_oauth_endpoint_url(url, "revocation_url")?;
-        }
-        if let Some(url) = self.userinfo_url.as_deref() {
-            validate_oauth_endpoint_url(url, "userinfo_url")?;
-        }
-
+        let validated = self.validated_endpoints()?;
         Ok(OAuth2Config::new(
             client_id,
             client_secret,
-            authorization_url,
-            token_url,
+            &validated.authorization_url,
+            &validated.token_url,
         ))
     }
+}
+
+/// Canonical (post-parse-normalized) endpoint URLs from a successful
+/// `ProviderEndpoints::validated_endpoints` pass.
+///
+/// `revocation_url` and `userinfo_url` are `Option` because the source
+/// endpoints are optional; their `Some` arms have already been validated.
+struct ValidatedEndpoints {
+    authorization_url: String,
+    token_url: String,
+    #[allow(dead_code)] // surfaced via validate(); not used by to_oauth2_config builder
+    revocation_url: Option<String>,
+    #[allow(dead_code)]
+    userinfo_url: Option<String>,
 }
 
 #[cfg(test)]

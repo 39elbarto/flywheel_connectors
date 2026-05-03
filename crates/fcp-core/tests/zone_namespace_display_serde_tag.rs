@@ -40,7 +40,10 @@ fn project_zone_namespace_display_roundtrips_through_tailscale_tag() -> Result<(
 
     assert_eq!(tag, "tag:fcp-proj-alpha-beta");
     assert_eq!(ZoneId::from_tailscale_tag(&tag)?, zone);
-    assert_eq!(ZoneId::from_tailscale_tag(&tag)?.to_string(), zone.to_string());
+    assert_eq!(
+        ZoneId::from_tailscale_tag(&tag)?.to_string(),
+        zone.to_string()
+    );
 
     Ok(())
 }
@@ -69,14 +72,8 @@ fn zone_namespace_json_and_cbor_are_scalar_text() -> Result<(), Box<dyn Error>> 
 #[test]
 fn zone_namespace_key_algorithm_json_tags_are_pinned() -> Result<(), Box<dyn Error>> {
     let cases = [
-        (
-            ZoneKeyAlgorithm::ChaCha20Poly1305,
-            "cha_cha20_poly1305",
-        ),
-        (
-            ZoneKeyAlgorithm::XChaCha20Poly1305,
-            "x_cha_cha20_poly1305",
-        ),
+        (ZoneKeyAlgorithm::ChaCha20Poly1305, "cha_cha20_poly1305"),
+        (ZoneKeyAlgorithm::XChaCha20Poly1305, "x_cha_cha20_poly1305"),
     ];
 
     for (algorithm, expected_tag) in cases {
@@ -93,14 +90,8 @@ fn zone_namespace_key_algorithm_json_tags_are_pinned() -> Result<(), Box<dyn Err
 #[test]
 fn zone_namespace_key_algorithm_cbor_tags_are_pinned() -> Result<(), Box<dyn Error>> {
     let cases = [
-        (
-            ZoneKeyAlgorithm::ChaCha20Poly1305,
-            "cha_cha20_poly1305",
-        ),
-        (
-            ZoneKeyAlgorithm::XChaCha20Poly1305,
-            "x_cha_cha20_poly1305",
-        ),
+        (ZoneKeyAlgorithm::ChaCha20Poly1305, "cha_cha20_poly1305"),
+        (ZoneKeyAlgorithm::XChaCha20Poly1305, "x_cha_cha20_poly1305"),
     ];
 
     for (algorithm, expected_tag) in cases {

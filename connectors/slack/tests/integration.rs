@@ -23,9 +23,9 @@ use asupersync::net::websocket::{
 use chrono::{Duration, Utc};
 use fcp_async_core::channel::oneshot;
 use fcp_async_core::net::{TcpListener, TcpStream};
-use fcp_prelude::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use std::collections::HashMap;

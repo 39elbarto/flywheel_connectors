@@ -12,7 +12,6 @@ use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use fcp_prelude::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier, ZoneId};
 use fcp_host::ConnectorArchetype;
 use fcp_kernel::{
     AgentHint, ApprovalMode, AuthCaps, ConnectorId, EventCaps, FcpError, HandshakeRequest,
@@ -20,6 +19,7 @@ use fcp_kernel::{
     InvokeResponse, OperationId, OperationInfo, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
+use fcp_prelude::{CapabilityId, OAuthConfig, ObjectId, RiskLevel, SafetyTier, ZoneId};
 use serde_json::json;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -808,8 +808,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_prelude::{CapabilityToken, ZoneId};
     use fcp_kernel::RequestId;
+    use fcp_prelude::{CapabilityToken, ZoneId};
 
     fn test_profile(require_handshake: bool) -> TestConnectorProfile {
         TestConnectorProfile {

@@ -16,9 +16,9 @@
 #![allow(clippy::doc_markdown)]
 
 use chrono::{Duration, Utc};
-use fcp_prelude::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use wiremock::{

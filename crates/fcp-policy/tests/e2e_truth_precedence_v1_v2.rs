@@ -38,10 +38,10 @@
 
 use std::time::Instant;
 
+use fcp_cbor::SchemaId;
 use fcp_core::{
     ObjectHeader, ObjectId, Provenance, RevocationObject, RevocationRegistry, RevocationScope,
 };
-use fcp_cbor::SchemaId;
 use fcp_policy::{
     OperationalModelSelection, OperationalModelVersion, ZoneId,
     select_operational_model_for_deployment,
@@ -57,11 +57,7 @@ const PHASE_BUDGET_MS: u128 = 250;
 
 fn build_object_header(zone_id: &ZoneId, created_at: u64) -> ObjectHeader {
     ObjectHeader {
-        schema: SchemaId::new(
-            "fcp.core",
-            "RevocationObject",
-            Version::new(1, 0, 0),
-        ),
+        schema: SchemaId::new("fcp.core", "RevocationObject", Version::new(1, 0, 0)),
         zone_id: zone_id.clone(),
         created_at,
         provenance: Provenance::new(zone_id.clone()),
@@ -72,11 +68,7 @@ fn build_object_header(zone_id: &ZoneId, created_at: u64) -> ObjectHeader {
     }
 }
 
-fn build_revocation(
-    zone_id: &ZoneId,
-    revoked_id: ObjectId,
-    effective_at: u64,
-) -> RevocationObject {
+fn build_revocation(zone_id: &ZoneId, revoked_id: ObjectId, effective_at: u64) -> RevocationObject {
     RevocationObject {
         header: build_object_header(zone_id, effective_at),
         revoked: vec![revoked_id],
@@ -123,12 +115,18 @@ fn e2e_truth_precedence_v1_v2_revocation_invariant() {
     // model should be V2.
     let v2_with_opt_in: OperationalModelSelection = select_operational_model_for_deployment(
         OperationalModelVersion::V2MeshNative,
-        true,  // explicit_v2_requested
-        true,  // degraded_v2_accepted
-        true,  // single_host_detected
+        true, // explicit_v2_requested
+        true, // degraded_v2_accepted
+        true, // single_host_detected
     );
-    assert_eq!(v2_with_opt_in.requested, OperationalModelVersion::V2MeshNative);
-    assert_eq!(v2_with_opt_in.effective, OperationalModelVersion::V2MeshNative);
+    assert_eq!(
+        v2_with_opt_in.requested,
+        OperationalModelVersion::V2MeshNative
+    );
+    assert_eq!(
+        v2_with_opt_in.effective,
+        OperationalModelVersion::V2MeshNative
+    );
     assert!(v2_with_opt_in.degraded_v2_opt_in);
     assert!(v2_with_opt_in.warning.is_none());
 
@@ -140,10 +138,16 @@ fn e2e_truth_precedence_v1_v2_revocation_invariant() {
         false, // degraded_v2_accepted
         true,  // single_host_detected
     );
-    assert_eq!(v2_no_opt_in.requested, OperationalModelVersion::V2MeshNative);
+    assert_eq!(
+        v2_no_opt_in.requested,
+        OperationalModelVersion::V2MeshNative
+    );
     assert_eq!(v2_no_opt_in.effective, OperationalModelVersion::V1HostFirst);
     assert!(!v2_no_opt_in.degraded_v2_opt_in);
-    assert!(v2_no_opt_in.warning.is_some(), "fallback must produce a warning");
+    assert!(
+        v2_no_opt_in.warning.is_some(),
+        "fallback must produce a warning"
+    );
     if let Some(msg) = v2_no_opt_in.warning {
         info!(scenario_id, fallback_warning = %msg, "v2-without-opt-in fell back to v1");
     }
@@ -165,7 +169,12 @@ fn e2e_truth_precedence_v1_v2_revocation_invariant() {
         PHASE_BUDGET_MS,
         phase_elapsed.as_millis()
     );
-    info!(scenario_id, phase = "select_operational_model", elapsed_ms = phase_elapsed.as_millis() as u64, "ok");
+    info!(
+        scenario_id,
+        phase = "select_operational_model",
+        elapsed_ms = phase_elapsed.as_millis() as u64,
+        "ok"
+    );
     drop(phase);
 
     // ── Phase 2: real RevocationRegistry populated with a revocation ─
@@ -176,7 +185,10 @@ fn e2e_truth_precedence_v1_v2_revocation_invariant() {
     let revocation = build_revocation(&zone_id, revoked_object_id, effective_at);
     registry.add_revocation(&revocation);
 
-    assert!(registry.is_revoked(&revoked_object_id), "registry must record the revocation");
+    assert!(
+        registry.is_revoked(&revoked_object_id),
+        "registry must record the revocation"
+    );
     assert!(
         registry.is_revoked_at(&revoked_object_id, now),
         "now ({now}) is after effective_at ({effective_at}); should be revoked"

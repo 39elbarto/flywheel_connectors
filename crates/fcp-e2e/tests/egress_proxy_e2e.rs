@@ -37,8 +37,8 @@ use serde_json::json;
 use fcp_audit::{
     AuditEntryBuilder, Severity, capability_constraint_request_descriptor_hash, event_types,
 };
-use fcp_prelude::ZoneId;
 use fcp_manifest::NetworkConstraints;
+use fcp_prelude::ZoneId;
 use fcp_sandbox::{
     DenyReason, EgressError, EgressGuard, EgressHttpRequest, EgressRequest,
     EgressTcpConnectRequest, HttpHeader, NoOpCredentialInjector,
@@ -106,9 +106,10 @@ fn audit_entry_from_denial(
     target: &str,
 ) -> fcp_audit::AuditEntry {
     let (deny_label, observed_value) = match err {
-        EgressError::Denied { code, reason } => {
-            (format!("egress.{}", deny_reason_label(*code)), reason.clone())
-        }
+        EgressError::Denied { code, reason } => (
+            format!("egress.{}", deny_reason_label(*code)),
+            reason.clone(),
+        ),
         other => panic!("expected EgressError::Denied, got {other:?}"),
     };
 
@@ -117,11 +118,9 @@ fn audit_entry_from_denial(
         scenario: &'a str,
         target: &'a str,
     }
-    let descriptor_hash = capability_constraint_request_descriptor_hash(&EgressDescriptor {
-        scenario,
-        target,
-    })
-    .expect("descriptor hash computes");
+    let descriptor_hash =
+        capability_constraint_request_descriptor_hash(&EgressDescriptor { scenario, target })
+            .expect("descriptor hash computes");
 
     AuditEntryBuilder::new()
         .id(format!("audit-egress-el1qe-{scenario}"))
@@ -132,7 +131,10 @@ fn audit_entry_from_denial(
         .event_type(event_types::SECURITY_VIOLATION)
         .severity(Severity::Warning)
         .meta("deny_reason", serde_json::Value::String(deny_label))
-        .meta("observed_host", serde_json::Value::String(target.to_string()))
+        .meta(
+            "observed_host",
+            serde_json::Value::String(target.to_string()),
+        )
         .meta(
             "request_descriptor_hash",
             serde_json::Value::String(descriptor_hash),
@@ -176,8 +178,9 @@ fn egress_proxy_e2e_allowed_host_and_port_produces_allow_decision() {
 
     let guard = EgressGuard::new();
     let constraints = production_constraints();
-    let request =
-        EgressRequest::Http(http_request("https://api.github.com/repos/owner/repo/issues"));
+    let request = EgressRequest::Http(http_request(
+        "https://api.github.com/repos/owner/repo/issues",
+    ));
 
     log_event(scenario, "evaluate", "running", None);
     let decision = guard.evaluate(&request, &constraints).expect("must allow");
@@ -272,7 +275,12 @@ fn egress_proxy_e2e_disallowed_port_denied_with_port_not_allowed() {
         other => panic!("expected Denied, got {other:?}"),
     };
     assert_eq!(code, DenyReason::PortNotAllowed);
-    log_event(scenario, "evaluate", "denied", Some(deny_reason_label(code)));
+    log_event(
+        scenario,
+        "evaluate",
+        "denied",
+        Some(deny_reason_label(code)),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -299,7 +307,12 @@ fn egress_proxy_e2e_ip_literal_denied_when_policy_forbids() {
         other => panic!("expected Denied, got {other:?}"),
     };
     assert_eq!(code, DenyReason::IpLiteralDenied);
-    log_event(scenario, "evaluate", "denied", Some(deny_reason_label(code)));
+    log_event(
+        scenario,
+        "evaluate",
+        "denied",
+        Some(deny_reason_label(code)),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -403,7 +416,12 @@ fn egress_proxy_e2e_credential_not_authorized_denied() {
         other => panic!("expected Denied, got {other:?}"),
     };
     assert_eq!(code, DenyReason::CredentialNotAuthorized);
-    log_event(scenario, "authorize", "denied", Some(deny_reason_label(code)));
+    log_event(
+        scenario,
+        "authorize",
+        "denied",
+        Some(deny_reason_label(code)),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -440,7 +458,12 @@ fn egress_proxy_e2e_tcp_connect_disallowed_host_denied() {
         other => panic!("expected Denied, got {other:?}"),
     };
     assert_eq!(code, DenyReason::HostNotAllowed);
-    log_event(scenario, "evaluate", "denied", Some(deny_reason_label(code)));
+    log_event(
+        scenario,
+        "evaluate",
+        "denied",
+        Some(deny_reason_label(code)),
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -496,8 +519,14 @@ fn egress_proxy_e2e_deny_reason_label_covers_known_variants() {
         (DenyReason::CidrDenyMatched, "cidr_deny_matched"),
         (DenyReason::SniMismatch, "sni_mismatch"),
         (DenyReason::SpkiPinMismatch, "spki_pin_mismatch"),
-        (DenyReason::CredentialNotAuthorized, "credential_not_authorized"),
-        (DenyReason::CredentialHostNotAllowed, "credential_host_not_allowed"),
+        (
+            DenyReason::CredentialNotAuthorized,
+            "credential_not_authorized",
+        ),
+        (
+            DenyReason::CredentialHostNotAllowed,
+            "credential_host_not_allowed",
+        ),
         (DenyReason::HostnameNotCanonical, "hostname_not_canonical"),
         (DenyReason::DnsMaxIpsExceeded, "dns_max_ips_exceeded"),
         (DenyReason::MaxRedirectsExceeded, "max_redirects_exceeded"),

@@ -17,8 +17,8 @@
 use chrono::Utc;
 use fcp_core::{SecretSharingScheme, SecretType};
 use fcp_crypto::{
-    open_share, reconstruct_secret, split_and_seal, SealedShamirShare, ShamirError, ShamirShare,
-    X25519SecretKey, ZeroizingSecret,
+    SealedShamirShare, ShamirError, ShamirShare, X25519SecretKey, ZeroizingSecret, open_share,
+    reconstruct_secret, split_and_seal,
 };
 use serde_json::json;
 
@@ -298,8 +298,8 @@ fn assert_secret_debug_redacted(secret: &ZeroizingSecret, plaintext: &[u8]) {
 }
 
 #[test]
-fn threshold_secrets_e2e_reconstructs_database_credential_with_k_shares(
-) -> Result<(), ThresholdSecretError> {
+fn threshold_secrets_e2e_reconstructs_database_credential_with_k_shares()
+-> Result<(), ThresholdSecretError> {
     let fixture = ApplicationSecretFixture::database_credential();
     log_event(fixture.scenario_id, "setup", "started", None);
 
@@ -328,8 +328,8 @@ fn threshold_secrets_e2e_reconstructs_database_credential_with_k_shares(
 }
 
 #[test]
-fn threshold_secrets_e2e_reconstructs_api_key_from_disjoint_k_quorum(
-) -> Result<(), ThresholdSecretError> {
+fn threshold_secrets_e2e_reconstructs_api_key_from_disjoint_k_quorum()
+-> Result<(), ThresholdSecretError> {
     let fixture = ApplicationSecretFixture::api_key();
     log_event(fixture.scenario_id, "setup", "started", None);
 
@@ -357,7 +357,7 @@ fn threshold_secrets_e2e_rejects_k_minus_one_shares() -> Result<(), ThresholdSec
         Ok(_) => {
             return Err(ThresholdSecretError::UnexpectedSuccess(
                 "K-1 reconstruction",
-            ))
+            ));
         }
         Err(err) => err,
     };
@@ -378,8 +378,8 @@ fn threshold_secrets_e2e_rejects_k_minus_one_shares() -> Result<(), ThresholdSec
 }
 
 #[test]
-fn threshold_secrets_e2e_cryptographic_proof_rejects_tampered_share(
-) -> Result<(), ThresholdSecretError> {
+fn threshold_secrets_e2e_cryptographic_proof_rejects_tampered_share()
+-> Result<(), ThresholdSecretError> {
     let fixture = ApplicationSecretFixture::database_credential();
     let scenario = "qjcg0.tampered_share";
     log_event(scenario, "setup", "started", None);
@@ -395,7 +395,7 @@ fn threshold_secrets_e2e_cryptographic_proof_rejects_tampered_share(
         Ok(_) => {
             return Err(ThresholdSecretError::UnexpectedSuccess(
                 "tampered share proof",
-            ))
+            ));
         }
         Err(err) => err,
     };
@@ -433,7 +433,7 @@ fn threshold_secrets_e2e_wrong_aad_cannot_open_wrapped_share() -> Result<(), Thr
         Ok(_) => {
             return Err(ThresholdSecretError::UnexpectedSuccess(
                 "wrong AAD share open",
-            ))
+            ));
         }
         Err(err) => err,
     };

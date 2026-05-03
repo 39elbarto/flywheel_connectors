@@ -265,9 +265,7 @@ pub enum LatticeDelegationError {
     /// as a length-mismatch failure rather than a cryptographic
     /// failure, so audit consumers can distinguish wire corruption
     /// from a genuine forgery attempt.
-    #[error(
-        "preimage bytes length mismatch: cert {cert_id} expected {expected}, got {got}"
-    )]
+    #[error("preimage bytes length mismatch: cert {cert_id} expected {expected}, got {got}")]
     PreimageEncodingMismatch {
         cert_id: String,
         expected: usize,
@@ -524,12 +522,11 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
                 });
             }
             hops = hops.saturating_add(1);
-            let parent =
-                self.certificates
-                    .get(parent_id)
-                    .ok_or_else(|| LatticeDelegationError::IncompleteDelegationChain {
-                        cert_id: current.cert_id.to_hex(),
-                    })?;
+            let parent = self.certificates.get(parent_id).ok_or_else(|| {
+                LatticeDelegationError::IncompleteDelegationChain {
+                    cert_id: current.cert_id.to_hex(),
+                }
+            })?;
             if !parent.period.contains(now_unix_ms) {
                 return Err(LatticeDelegationError::OutsidePeriod {
                     now_unix_ms,
@@ -677,7 +674,10 @@ mod tests {
         let id = cert_id(0xAB);
         let hex = id.to_hex();
         assert_eq!(hex, "ab".repeat(32));
-        assert!(hex.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(
+            hex.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+        );
     }
 
     #[test]
@@ -779,7 +779,12 @@ mod tests {
         pq::LatticeParams::V4_REFERENCE
     }
 
-    fn cert(byte: u8, zone: ZoneId, period: DelegationPeriod, parent: Option<u8>) -> DelegationCertificate {
+    fn cert(
+        byte: u8,
+        zone: ZoneId,
+        period: DelegationPeriod,
+        parent: Option<u8>,
+    ) -> DelegationCertificate {
         DelegationCertificate {
             cert_id: cert_id(byte),
             zone_id: zone,
@@ -961,7 +966,10 @@ mod tests {
             .expect_err("chain longer than params.depth MUST be rejected");
         match err {
             LatticeDelegationError::ChainTooDeep { observed, max } => {
-                assert!(observed > max, "observed {observed} should exceed max {max}");
+                assert!(
+                    observed > max,
+                    "observed {observed} should exceed max {max}"
+                );
                 assert_eq!(max, ref_params().depth);
             }
             other => panic!("expected ChainTooDeep, got {other:?}"),
@@ -1035,7 +1043,11 @@ mod tests {
         v.add_certificate(cert(0x10, ZoneId::work(), p1, None));
         assert_eq!(v.certificate_count(), 1);
         v.add_certificate(cert(0x10, ZoneId::work(), p2, None));
-        assert_eq!(v.certificate_count(), 1, "same cert_id replaces, not duplicates");
+        assert_eq!(
+            v.certificate_count(),
+            1,
+            "same cert_id replaces, not duplicates"
+        );
         // Verify the new period is the one used.
         let err = v
             .verify_sub_token(&token_for(0x10), &ZoneId::work(), 500_000)
@@ -1083,7 +1095,10 @@ mod tests {
         let h_work_b = LatticeDelegationVerifierImpl::zone_to_crypto(&ZoneId::work());
         assert_eq!(h_work_a, h_work_b, "deterministic across calls");
         let h_public = LatticeDelegationVerifierImpl::zone_to_crypto(&ZoneId::public());
-        assert_ne!(h_work_a, h_public, "different zones produce different hashes");
+        assert_ne!(
+            h_work_a, h_public,
+            "different zones produce different hashes"
+        );
         let h_owner = LatticeDelegationVerifierImpl::zone_to_crypto(&ZoneId::owner());
         assert_ne!(h_owner, h_work_a);
         assert_ne!(h_owner, h_public);

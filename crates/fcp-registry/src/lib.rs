@@ -22,11 +22,6 @@ use axum::{
 use bytes::Bytes;
 use chrono::Utc;
 use fcp_cbor::{CanonicalSerializer, MAX_CANONICAL_OBJECT_BYTES, SerializationError};
-use fcp_prelude::{
-    CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
-    RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
-    connector_manifest_signing_view_schema,
-};
 pub use fcp_core::{
     ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
     ConnectorManifestObject, ConnectorTarget,
@@ -35,6 +30,11 @@ use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey};
 use fcp_manifest::{
     AttestationType, Base64Bytes, ConnectorManifest, ManifestError, SignatureEntry,
     SignaturesSection,
+};
+use fcp_prelude::{
+    CapabilityId, ObjectHeader, ObjectId, ObjectIdKey, Provenance, RateLimitDeclarations,
+    RetentionClass, StorageMeta, StoredObject, ZoneId, ZonePolicyObject,
+    connector_manifest_signing_view_schema,
 };
 use fcp_raptorq::{DecodeError, EncodeError, RaptorQConfig, RaptorQDecoder, RaptorQEncoder};
 use fcp_store::{
@@ -3000,9 +3000,9 @@ mod tests {
     use base64::Engine;
     use chrono::Utc;
     use fcp_cbor::SchemaId;
-    use fcp_prelude::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::PolicySection;
+    use fcp_prelude::{DecisionReceiptPolicy, ZoneTransportPolicy};
     use fcp_store::{
         MemoryObjectStore, MemoryObjectStoreConfig, MemorySymbolStore, MemorySymbolStoreConfig,
     };

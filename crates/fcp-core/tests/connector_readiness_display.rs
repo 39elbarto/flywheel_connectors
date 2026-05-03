@@ -187,8 +187,7 @@ fn from_readiness_response_empty_components_with_ready_true_is_ready() {
 fn with_health_folds_status_via_descriptor_status_combine() {
     // Health::Healthy combines with current status. If current is Ready,
     // result is still Ready. If current is Failed, Failed wins.
-    let d = ReadinessDescriptor::not_yet_measured("pending")
-        .with_health(ConnectorHealth::Healthy);
+    let d = ReadinessDescriptor::not_yet_measured("pending").with_health(ConnectorHealth::Healthy);
     // not_yet_measured rank=2; Ready rank=0 → max rank wins per combine,
     // so result stays at NotYetMeasured.
     assert_eq!(d.status, DescriptorStatus::NotYetMeasured);
@@ -211,8 +210,8 @@ fn with_health_folds_status_via_descriptor_status_combine() {
 #[test]
 fn with_health_preserves_existing_summary_and_only_falls_back_when_none() {
     // With existing summary, with_health does NOT overwrite.
-    let d = ReadinessDescriptor::unverifiable("explicit summary")
-        .with_health(ConnectorHealth::Healthy);
+    let d =
+        ReadinessDescriptor::unverifiable("explicit summary").with_health(ConnectorHealth::Healthy);
     assert_eq!(d.summary.as_deref(), Some("explicit summary"));
 
     // With no summary, with_health falls back to a health-derived summary.
@@ -252,8 +251,7 @@ fn json_shape_pinned_with_minimal_unverifiable_descriptor() {
 
     // Required: status. Optional Some: summary. Optional None: health,
     // self_check, readiness. Optional empty Vec: checks (omitted).
-    let expected: std::collections::BTreeSet<&str> =
-        ["status", "summary"].into_iter().collect();
+    let expected: std::collections::BTreeSet<&str> = ["status", "summary"].into_iter().collect();
     let actual: std::collections::BTreeSet<&str> = obj.keys().map(String::as_str).collect();
     assert_eq!(actual, expected, "minimal shape drift: {obj:?}");
 
@@ -300,10 +298,9 @@ fn empty_checks_vec_is_omitted_from_wire_form() {
 #[test]
 fn json_roundtrip_preserves_all_descriptor_fields() {
     let report = SelfCheckReport::failed("rc.boom", "boom");
-    let d = ReadinessDescriptor::from_self_check(report)
-        .with_health(ConnectorHealth::Degraded {
-            reason: "slow".to_string(),
-        });
+    let d = ReadinessDescriptor::from_self_check(report).with_health(ConnectorHealth::Degraded {
+        reason: "slow".to_string(),
+    });
 
     let bytes = serde_json::to_vec(&d).unwrap();
     let back: ReadinessDescriptor = serde_json::from_slice(&bytes).unwrap();
@@ -319,8 +316,11 @@ fn json_roundtrip_preserves_all_descriptor_fields() {
 
 #[test]
 fn cbor_roundtrip_preserves_descriptor_fields() {
-    let d = ReadinessDescriptor::not_yet_measured("pending")
-        .with_check(DescriptorCheck::new("k", DescriptorStatus::Ready, "ok"));
+    let d = ReadinessDescriptor::not_yet_measured("pending").with_check(DescriptorCheck::new(
+        "k",
+        DescriptorStatus::Ready,
+        "ok",
+    ));
 
     let mut bytes = Vec::new();
     ciborium::ser::into_writer(&d, &mut bytes).unwrap();
@@ -336,10 +336,7 @@ fn descriptor_status_serializes_inside_descriptor_as_snake_case() {
     // Spot-check the wire form of the embedded DescriptorStatus across
     // a few statuses driven by different constructors.
     let cases = [
-        (
-            ReadinessDescriptor::unverifiable("x"),
-            "unverifiable",
-        ),
+        (ReadinessDescriptor::unverifiable("x"), "unverifiable"),
         (
             ReadinessDescriptor::not_yet_measured("x"),
             "not_yet_measured",

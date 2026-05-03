@@ -15,9 +15,9 @@
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64_URL;
 use chrono::{Duration, Utc};
-use fcp_prelude::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use std::io::{Cursor, Write};

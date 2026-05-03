@@ -49,8 +49,14 @@ fn make_manifest(n: usize) -> (ZoneKeyManifest, Vec<TailscaleNodeId>) {
     for i in 0..n {
         let sk = X25519SecretKey::generate();
         let recipient = TailscaleNodeId::new(format!("100.64.{}.{}", (i / 256) % 256, i % 256));
-        let wrap = wrap_zone_key(&sk.public_key(), &zone, &recipient, 1_700_000_000, &zone_key)
-            .expect("HPKE wrap");
+        let wrap = wrap_zone_key(
+            &sk.public_key(),
+            &zone,
+            &recipient,
+            1_700_000_000,
+            &zone_key,
+        )
+        .expect("HPKE wrap");
         wrapped.push(wrap);
         recipients.push(recipient);
     }
@@ -95,7 +101,8 @@ fn bench_v3_hit_lookup(c: &mut Criterion) {
             });
         });
 
-        let indexed = IndexedZoneKeyManifest::new(manifest).expect("benchmark fixtures have unique recipients");
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("benchmark fixtures have unique recipients");
         group.bench_function(format!("indexed_o1/n={n}"), |b| {
             b.iter(|| {
                 let r = black_box(indexed.wrapped_key_for(black_box(&target)));
@@ -128,7 +135,8 @@ fn bench_v3_miss_lookup(c: &mut Criterion) {
             });
         });
 
-        let indexed = IndexedZoneKeyManifest::new(manifest).expect("benchmark fixtures have unique recipients");
+        let indexed = IndexedZoneKeyManifest::new(manifest)
+            .expect("benchmark fixtures have unique recipients");
         group.bench_function(format!("indexed_o1/n={n}"), |b| {
             b.iter(|| {
                 let r = black_box(indexed.wrapped_key_for(black_box(&missing)));

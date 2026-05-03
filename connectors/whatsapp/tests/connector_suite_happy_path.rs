@@ -1,10 +1,10 @@
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
     InvokeRequest, OperationId, RequestId, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_whatsapp::connector::WhatsAppConnector;
 use hmac::{Hmac, Mac};
 use serde_json::json;

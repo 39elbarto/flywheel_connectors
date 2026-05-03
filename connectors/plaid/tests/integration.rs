@@ -11,9 +11,9 @@
 //! - Connector dispatch (full invoke pipeline with capability tokens)
 
 use chrono::{Duration, Utc};
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_plaid::{client::PlaidClient, connector::PlaidConnector, error::PlaidError};
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{

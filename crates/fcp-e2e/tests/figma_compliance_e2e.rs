@@ -14,6 +14,10 @@
 
 use chrono::{Duration as ChronoDuration, Utc};
 use fcp_conformance::DynamicSuite;
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
+use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
+use fcp_figma::connector::FigmaConnector;
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     AgentHint, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId, ConnectorMetrics,
     FcpConnector, FcpError, HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass,
@@ -21,10 +25,6 @@ use fcp_prelude::{
     OperationInfo, RequestId, RiskLevel, SafetyTier, ShutdownRequest, SimulateRequest,
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-use fcp_e2e::{ComplianceSuite, ConnectorSuite, E2eRunner, InvokeExpectations};
-use fcp_figma::connector::FigmaConnector;
-use fcp_manifest::ConnectorManifest;
 use fcp_testkit::MockApiServer;
 use serde_json::json;
 use wiremock::{

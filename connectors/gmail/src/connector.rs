@@ -8,15 +8,15 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+use fcp_google_discovery::{
+    auth::{GoogleAuthError, GoogleAuthSelection, GoogleAuthSourceKind, GoogleMaterializedAuth},
+    provisioning::load_default_google_provisioning_bundle,
+};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
     SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
-};
-use fcp_google_discovery::{
-    auth::{GoogleAuthError, GoogleAuthSelection, GoogleAuthSourceKind, GoogleMaterializedAuth},
-    provisioning::load_default_google_provisioning_bundle,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -1969,10 +1969,10 @@ fn build_raw_message_from_fields(input: &serde_json::Value) -> FcpResult<String>
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
-    use fcp_prelude::CredentialId;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
+    use fcp_prelude::CredentialId;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path, query_param},

@@ -1,7 +1,7 @@
 //! Confluence API client with retry support.
 
-use fcp_prelude::log_redaction::redact_url;
 use base64::Engine;
+use fcp_prelude::log_redaction::redact_url;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };

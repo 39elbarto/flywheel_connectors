@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use reqwest::Url;
 use serde_json::json;
 use tracing::{info, instrument};
@@ -916,9 +916,9 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
 
     fn bearer_config(value: &str) -> serde_json::Value {
         let mut params = serde_json::Map::new();

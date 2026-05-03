@@ -124,8 +124,7 @@ fn populated_event_full_field_set_pinned() {
     ]
     .into_iter()
     .collect();
-    let actual: std::collections::BTreeSet<&str> =
-        obj_value.keys().map(String::as_str).collect();
+    let actual: std::collections::BTreeSet<&str> = obj_value.keys().map(String::as_str).collect();
     assert_eq!(actual, expected, "AuditEvent shape drift: {obj_value:?}");
 }
 
@@ -150,8 +149,7 @@ fn genesis_event_omits_all_optional_fields() {
     ]
     .into_iter()
     .collect();
-    let actual: std::collections::BTreeSet<&str> =
-        obj_value.keys().map(String::as_str).collect();
+    let actual: std::collections::BTreeSet<&str> = obj_value.keys().map(String::as_str).collect();
     assert_eq!(
         actual, expected_required,
         "AuditEvent minimal shape drift: {obj_value:?}"
@@ -303,7 +301,10 @@ fn distinct_event_type_produces_distinct_json() {
     let mut b = populated_event();
     a.event_type = "capability.invoke".to_string();
     b.event_type = "secret.access".to_string();
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -312,7 +313,10 @@ fn distinct_actor_produces_distinct_json() {
     let mut b = populated_event();
     a.actor = PrincipalId::new("user:alice").unwrap();
     b.actor = PrincipalId::new("user:bob").unwrap();
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -321,7 +325,10 @@ fn distinct_seq_produces_distinct_json() {
     let mut b = populated_event();
     a.seq = 5;
     b.seq = 6;
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]
@@ -332,14 +339,20 @@ fn distinct_prev_produces_distinct_json() {
     let mut b = populated_event();
     a.prev = Some(obj(0xaa));
     b.prev = Some(obj(0xbb));
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 
     // Some vs None also distinct.
     let mut c = populated_event();
     let mut d = populated_event();
     c.prev = Some(obj(0xaa));
     d.prev = None;
-    assert_ne!(serde_json::to_value(&c).unwrap(), serde_json::to_value(&d).unwrap());
+    assert_ne!(
+        serde_json::to_value(&c).unwrap(),
+        serde_json::to_value(&d).unwrap()
+    );
 }
 
 #[test]
@@ -348,7 +361,10 @@ fn distinct_occurred_at_produces_distinct_json() {
     let mut b = populated_event();
     a.occurred_at = 1_700_000_000;
     b.occurred_at = 1_700_000_001;
-    assert_ne!(serde_json::to_value(&a).unwrap(), serde_json::to_value(&b).unwrap());
+    assert_ne!(
+        serde_json::to_value(&a).unwrap(),
+        serde_json::to_value(&b).unwrap()
+    );
 }
 
 #[test]

@@ -17,9 +17,7 @@
 use proptest::collection::vec;
 use proptest::prelude::*;
 
-use fcp_core::{
-    CapabilityConstraints, CredentialId, ObjectId, OperationId, PrincipalId,
-};
+use fcp_core::{CapabilityConstraints, CredentialId, ObjectId, OperationId, PrincipalId};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
     RequestDescriptor,
@@ -65,12 +63,12 @@ fn arb_credential_id() -> impl Strategy<Value = CredentialId> {
 
 fn arb_constraints() -> impl Strategy<Value = CapabilityConstraints> {
     (
-        vec(arb_token_string(), 0..MAX_LIST_LEN),       // resource_allow
-        vec(arb_token_string(), 0..MAX_LIST_LEN),       // resource_deny
-        proptest::option::of(any::<u32>()),             // max_calls
-        proptest::option::of(any::<u64>()),             // max_bytes
-        proptest::option::of(arb_token_string()),       // idempotency_key
-        vec(arb_credential_id(), 0..MAX_LIST_LEN),      // credential_allow
+        vec(arb_token_string(), 0..MAX_LIST_LEN),  // resource_allow
+        vec(arb_token_string(), 0..MAX_LIST_LEN),  // resource_deny
+        proptest::option::of(any::<u32>()),        // max_calls
+        proptest::option::of(any::<u64>()),        // max_bytes
+        proptest::option::of(arb_token_string()),  // idempotency_key
+        vec(arb_credential_id(), 0..MAX_LIST_LEN), // credential_allow
     )
         .prop_map(
             |(allow, deny, calls, bytes, key, credentials)| CapabilityConstraints {
@@ -89,11 +87,11 @@ fn arb_request_descriptor() -> impl Strategy<Value = RequestDescriptor> {
         arb_object_id(),
         arb_operation(),
         arb_principal(),
-        arb_token_string(),     // host
-        arb_token_string(),     // resource_uri
-        any::<u64>(),           // requested_at_unix_ms
-        any::<u32>(),           // observed_calls
-        any::<u64>(),           // observed_bytes
+        arb_token_string(), // host
+        arb_token_string(), // resource_uri
+        any::<u64>(),       // requested_at_unix_ms
+        any::<u32>(),       // observed_calls
+        any::<u64>(),       // observed_bytes
     )
         .prop_map(
             |(object_id, operation, principal, host, resource_uri, ts, calls, bytes)| {

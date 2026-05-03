@@ -3,14 +3,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+#[cfg(test)]
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
     IdempotencyClass, Introspection, OAuthRecipe, OperationId, OperationInfo, ProvisioningRecipe,
     ProvisioningStep, ProvisioningStepType, RecipeId, RiskLevel, SafetyTier, SelfCheckReport,
     StepId, WebhookRecipe, WebhookVerification,
 };
-#[cfg(test)]
-use fcp_manifest::ConnectorManifest;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;

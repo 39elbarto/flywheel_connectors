@@ -13,9 +13,9 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_prelude::CapabilityConstraints;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::CapabilityConstraints;
 use serde_json::json;
 use std::collections::HashMap;
 use std::io::{Read, Write};

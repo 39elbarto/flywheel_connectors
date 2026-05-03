@@ -144,7 +144,12 @@ fn symbol_first_e2e_source_only_decode_succeeds() {
     assert_eq!(source_symbols.len(), k as usize);
 
     let mut decoder = RaptorQDecoder::new(oti, &config);
-    log_event(scenario, "decode_source_only", "running", Some(&format!("k={k}")));
+    log_event(
+        scenario,
+        "decode_source_only",
+        "running",
+        Some(&format!("k={k}")),
+    );
     let mut decoded: Option<Vec<u8>> = None;
     for (esi, data) in source_symbols {
         if let Some(payload_out) = decoder.add_symbol(esi, data).expect("add_symbol ok") {
@@ -188,7 +193,10 @@ fn symbol_first_e2e_forward_error_correction_under_30pct_loss() {
         scenario,
         "encode",
         "passed",
-        Some(&format!("k={k} total={total} repair={}", encoder.repair_symbols())),
+        Some(&format!(
+            "k={k} total={total} repair={}",
+            encoder.repair_symbols()
+        )),
     );
 
     // Deterministic "drop every Nth" loss so the test is reproducible
@@ -222,7 +230,10 @@ fn symbol_first_e2e_forward_error_correction_under_30pct_loss() {
         }
     }
     let decoded = decoded.expect("decoder MUST reconstruct under 30% loss with 40% repair");
-    assert_eq!(decoded, payload, "FEC recovery must produce identical bytes");
+    assert_eq!(
+        decoded, payload,
+        "FEC recovery must produce identical bytes"
+    );
     log_event(
         scenario,
         "decode",
@@ -304,8 +315,7 @@ fn symbol_first_e2e_three_node_split_lose_one_reconstruct_from_two() {
     );
 
     // Drop node B entirely — simulating a node failure or partition.
-    let surviving: Vec<(u32, Vec<u8>)> =
-        node_a.into_iter().chain(node_c.into_iter()).collect();
+    let surviving: Vec<(u32, Vec<u8>)> = node_a.into_iter().chain(node_c.into_iter()).collect();
     log_event(
         scenario,
         "partition_failure",
@@ -430,8 +440,8 @@ fn symbol_first_e2e_symbol_fungibility_repair_only_decode() {
             break;
         }
     }
-    let decoded =
-        decoded.expect("symbol fungibility: repair-only decode MUST succeed when repair_count >= K");
+    let decoded = decoded
+        .expect("symbol fungibility: repair-only decode MUST succeed when repair_count >= K");
     assert_eq!(decoded, payload);
     log_event(scenario, "decode_repair_only", "passed", None);
 }
@@ -529,7 +539,10 @@ fn symbol_first_e2e_insufficient_symbols_error_path_is_structured() {
         needed >= k,
         "needed() ({needed}) MUST be at least K ({k}) — RaptorQ K'≈K×1.002 floor"
     );
-    assert!(received < needed, "received < needed while we're still below K");
+    assert!(
+        received < needed,
+        "received < needed while we're still below K"
+    );
 
     // The `needed()` accessor is the mesh's signal to keep waiting.
     // No public `force_decode` — the decoder simply returns None.
@@ -549,10 +562,7 @@ fn symbol_first_e2e_insufficient_symbols_error_path_is_structured() {
     // Belt-and-braces: verify DecodeError variants are constructible
     // (so a refactor that removes InsufficientSymbols breaks this E2E
     // and signals downstream consumers to update).
-    let err = DecodeError::InsufficientSymbols {
-        received,
-        needed,
-    };
+    let err = DecodeError::InsufficientSymbols { received, needed };
     assert!(matches!(err, DecodeError::InsufficientSymbols { .. }));
 }
 

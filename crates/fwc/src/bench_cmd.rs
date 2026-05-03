@@ -1327,8 +1327,8 @@ fn run_primitives(target: PrimitiveTarget, iterations: u32, warmup: u32) -> Vec<
 
 fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
     use fcp_cbor::SchemaId;
-    use fcp_prelude::ObjectIdKey;
     use fcp_kernel::{ObjectId, ZoneId};
+    use fcp_prelude::ObjectIdKey;
     use semver::Version;
 
     let zone = ZoneId::work();
@@ -1363,10 +1363,10 @@ fn bench_object_id(iterations: u32, warmup: u32) -> BenchmarkResult {
 
 fn bench_capability_verify(iterations: u32, warmup: u32) -> BenchmarkResult {
     use fcp_cbor::to_canonical_cbor;
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::{CapabilityTokenBuilder as CapabilityBuilder, Ed25519SigningKey};
     use fcp_kernel::{InstanceId, OperationId, ZoneId};
     use fcp_policy::{CapabilityToken as CapabilityArtifact, CapabilityVerifier};
+    use fcp_prelude::CapabilityConstraints;
 
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();

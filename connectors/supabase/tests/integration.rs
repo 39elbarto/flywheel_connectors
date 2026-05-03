@@ -13,11 +13,11 @@
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use chrono::{Duration, Utc};
+use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
     HandshakeRequest, InvokeRequest, OperationId, RequestId, ZoneId,
 };
-use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_supabase::connector::SupabaseConnector;
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,

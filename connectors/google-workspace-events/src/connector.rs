@@ -4,14 +4,14 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use fcp_google_discovery::{
+    auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
+    provisioning::load_default_google_provisioning_bundle,
+};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
     Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-};
-use fcp_google_discovery::{
-    auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
-    provisioning::load_default_google_provisioning_bundle,
 };
 use reqwest::Url;
 use serde_json::json;

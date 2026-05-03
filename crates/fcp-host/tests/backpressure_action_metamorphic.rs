@@ -291,12 +291,21 @@ fn mr_backpressure_action_smoke_floor() {
 
     // MR.subject: same decision under different subjects.
     let d_a = controller.decide(BackpressureControllerInput::new(
-        "subject-a", RequestPriority::Normal, queue_congested, valid,
+        "subject-a",
+        RequestPriority::Normal,
+        queue_congested,
+        valid,
     ));
     let d_b = controller.decide(BackpressureControllerInput::new(
-        "subject-XYZ-123", RequestPriority::Normal, queue_congested, valid,
+        "subject-XYZ-123",
+        RequestPriority::Normal,
+        queue_congested,
+        valid,
     ));
-    assert_eq!(d_a.action, d_b.action, "smoke: subject must not affect action");
+    assert_eq!(
+        d_a.action, d_b.action,
+        "smoke: subject must not affect action"
+    );
     assert_eq!(d_a.state, d_b.state, "smoke: subject must not affect state");
 
     // MR.priority-shed: a Low-priority request that's NOT shed implies
@@ -308,10 +317,16 @@ fn mr_backpressure_action_smoke_floor() {
         ..BackpressureTelemetry::default()
     };
     let low = controller.decide(BackpressureControllerInput::new(
-        "x", RequestPriority::Low, cpu_pressed, valid,
+        "x",
+        RequestPriority::Low,
+        cpu_pressed,
+        valid,
     ));
     let critical = controller.decide(BackpressureControllerInput::new(
-        "x", RequestPriority::Critical, cpu_pressed, valid,
+        "x",
+        RequestPriority::Critical,
+        cpu_pressed,
+        valid,
     ));
     let low_rejected = matches!(
         low.action,
@@ -324,13 +339,13 @@ fn mr_backpressure_action_smoke_floor() {
     assert!(
         !(critical_rejected && !low_rejected),
         "smoke: Critical rejected ({:?}) while Low admitted ({:?}) — fairness inversion",
-        critical.action, low.action,
+        critical.action,
+        low.action,
     );
 
     // MR.sequence-determinism: 4 back-to-back decisions yield identical actions.
-    let inp = BackpressureControllerInput::new(
-        "smoke", RequestPriority::Normal, queue_congested, valid,
-    );
+    let inp =
+        BackpressureControllerInput::new("smoke", RequestPriority::Normal, queue_congested, valid);
     let d1 = controller.decide(inp.clone());
     let d2 = controller.decide(inp.clone());
     let d3 = controller.decide(inp.clone());

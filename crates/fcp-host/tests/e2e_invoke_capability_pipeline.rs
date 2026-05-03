@@ -50,13 +50,10 @@ use std::time::Instant;
 use chrono::{Duration, Utc};
 use fcp_core::{
     BoundVerified, CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConstraintsEnforced, InstanceId, ObjectId, OperationId, PrincipalId, UnboundVerified,
-    ZoneId,
+    ConstraintsEnforced, InstanceId, ObjectId, OperationId, PrincipalId, UnboundVerified, ZoneId,
 };
 use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder};
-use fcp_policy::{
-    CapabilityConstraintEnforcer, DefaultConstraintEnforcer, RequestDescriptor,
-};
+use fcp_policy::{CapabilityConstraintEnforcer, DefaultConstraintEnforcer, RequestDescriptor};
 use tracing::{Level, info, info_span};
 
 /// Per-phase wall-clock budget. Catches quadratic regressions in the
@@ -174,8 +171,7 @@ fn e2e_capability_pipeline_full_typestate_ladder_allow_path() {
     let cap = CapabilityId::new(capability_id).expect("cap id");
     let op = OperationId::new(operation_id).expect("op id");
 
-    let gateway_verifier =
-        CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
+    let gateway_verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
     let unbound: CapabilityToken<UnboundVerified> = gateway_verifier
         .verify_unbound(token, &cap, &op, &[allow_uri.to_string()])
         .expect("gateway verify_unbound succeeds for valid token");
@@ -301,11 +297,8 @@ fn e2e_capability_pipeline_constraint_mismatch_denies_at_promote() {
         resource_allow: vec![token_allow.to_string()],
         ..CapabilityConstraints::default()
     };
-    let mismatched_request = build_request_descriptor(
-        operation_id,
-        "user:e2e-amberlark",
-        request_uri,
-    );
+    let mismatched_request =
+        build_request_descriptor(operation_id, "user:e2e-amberlark", request_uri);
 
     // Pre-check: the standalone evaluator agrees this should DENY.
     let evaluator_outcome = enforcer.evaluate(&constraints, &mismatched_request);

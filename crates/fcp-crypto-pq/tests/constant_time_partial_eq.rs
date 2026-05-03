@@ -10,7 +10,7 @@
 //! All three are equality candidates a future caller might compare
 //! on a hot dispatch path.
 
-use fcp_crypto_pq::{LatticePreimage, LatticeParams, trap_gen, delegate, DelegationPeriod};
+use fcp_crypto_pq::{DelegationPeriod, LatticeParams, LatticePreimage, delegate, trap_gen};
 
 #[test]
 fn lattice_preimage_eq_reflects_byte_equality() {
@@ -62,8 +62,7 @@ fn zone_period_trapdoor_eq_reflects_byte_equality() {
         start_secs: 0,
         end_secs: u64::MAX,
     };
-    let (_zp_pk, zp_td) =
-        delegate(&root_pk, &master_td, zone, period, p).expect("delegate");
+    let (_zp_pk, zp_td) = delegate(&root_pk, &master_td, zone, period, p).expect("delegate");
     let zp_td_clone = zp_td.clone();
     assert_eq!(zp_td, zp_td_clone);
 }

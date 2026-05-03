@@ -9,8 +9,8 @@
 //! These tests exercise the complete CAP pipeline from event ingestion
 //! through to actionable least-privilege recommendations.
 
-use fcp_prelude::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
 use fcp_e2e::{AssertionsSummary, E2eLogEntry, E2eLogger};
+use fcp_prelude::{CapabilityId, ConnectorId, OperationId, PrincipalId, SafetyTier, ZoneId};
 use fcp_telemetry::{
     CapabilityRecommendationReport, CapabilitySuggestionKind, CapabilityUsageEvent,
     CapabilityUsageKey, CapabilityUsageOutcome, CapabilityUsageStore, RecommendationConfig,

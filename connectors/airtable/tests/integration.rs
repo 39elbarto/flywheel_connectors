@@ -9,9 +9,9 @@ use chrono::Utc;
 use fcp_airtable::{
     client::AirtableClient, connector::AirtableConnector, error::AirtableError, types::SortSpec,
 };
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use serde_json::json;
 use wiremock::matchers::{bearer_token, body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

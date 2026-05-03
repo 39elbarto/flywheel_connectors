@@ -2,13 +2,13 @@
 
 use std::sync::Arc;
 
+use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SimulateRequest, SimulateResponse,
 };
-use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use reqwest::Url;
 use serde_json::json;
 use tracing::info;
@@ -652,9 +652,9 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::CapabilityConstraints;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::CapabilityConstraints;
     use std::future::Future;
     use wiremock::matchers::{method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};

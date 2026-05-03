@@ -15,7 +15,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
-use fcp_prelude::RolloutPolicy;
 use fcp_kernel::{
     CanaryPolicy, ConnectorHealth, ConnectorId, CrashLoopDetector, LifecycleError,
     LifecycleManager, LifecycleRecord, LifecycleState, SelfCheckReport, SelfCheckStatus,
@@ -24,6 +23,7 @@ use fcp_kernel::{
 pub use fcp_kernel::{
     RolloutAuditEvent, RolloutDecision, RolloutEvidence, RolloutObservation, RolloutOutcome,
 };
+use fcp_prelude::RolloutPolicy;
 
 use crate::{ConnectorRegistry, HostError, HostResult};
 
@@ -847,11 +847,11 @@ mod tests {
 
     use async_trait::async_trait;
     use fcp_async_core::sync::RwLock;
-    use fcp_prelude::{CapabilityId, RiskLevel, SafetyTier};
     use fcp_kernel::{
         AgentHint, ApprovalMode, ConnectorId, IdempotencyClass, Introspection, LifecycleStatus,
         OperationId, OperationInfo, RateLimitDeclarations,
     };
+    use fcp_prelude::{CapabilityId, RiskLevel, SafetyTier};
 
     fn connector_id() -> ConnectorId {
         ConnectorId::from_static("fcp.test.rollout:utility:1.0.0")

@@ -3136,10 +3136,10 @@ fn op_info(
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::{CapabilityConstraints, ZoneId};
     use std::path::PathBuf;
 
     fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {

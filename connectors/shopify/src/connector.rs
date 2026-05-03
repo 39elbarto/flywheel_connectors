@@ -1568,10 +1568,10 @@ mod tests {
     use std::path::PathBuf;
 
     use chrono::{Duration, Utc};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, ZoneId};
 
     fn tc() -> serde_json::Value {
         json!({

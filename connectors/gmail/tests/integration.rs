@@ -12,14 +12,14 @@
 #![allow(clippy::too_many_lines)]
 
 use chrono::{Duration, Utc};
-use fcp_prelude::ApprovalMode;
-use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_google_discovery::{
     DiscoveryEndpointKind, DiscoveryServiceId, generator::generate_google_service_artifacts,
     normalize_snapshot_bytes, policy::GooglePolicyCatalog,
 };
 use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
+use fcp_prelude::ApprovalMode;
+use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,

@@ -28,7 +28,7 @@ use std::fmt::Write as _;
 
 use fcp_cbor::SchemaId;
 use fcp_crypto::Ed25519Signature;
-use fcp_prelude::{ObjectId, ObjectHeader, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
+use fcp_prelude::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_protocol::{DecodeStatus, SymbolAck, SymbolAckReason};
 use semver::Version;
 

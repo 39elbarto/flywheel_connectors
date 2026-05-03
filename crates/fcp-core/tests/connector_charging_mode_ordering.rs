@@ -93,7 +93,10 @@ fn cost_estimate_confidence_distinct_variants_serialize_distinctly() {
     let mut seen = std::collections::HashSet::new();
     for &(variant, _) in ALL_CONFIDENCES {
         let v = serde_json::to_value(variant).unwrap();
-        assert!(seen.insert(v.clone()), "duplicate JSON for {variant:?}: {v:?}");
+        assert!(
+            seen.insert(v.clone()),
+            "duplicate JSON for {variant:?}: {v:?}"
+        );
     }
 }
 
@@ -128,7 +131,10 @@ fn cost_estimate_default_omits_every_optional_field() {
     let est = CostEstimate::default();
     let v = serde_json::to_value(&est).unwrap();
     let obj = v.as_object().expect("must be object");
-    assert!(obj.is_empty(), "default CostEstimate must serialize as empty object: {obj:?}");
+    assert!(
+        obj.is_empty(),
+        "default CostEstimate must serialize as empty object: {obj:?}"
+    );
 }
 
 #[test]

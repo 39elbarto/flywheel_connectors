@@ -256,6 +256,12 @@ pub fn render_live_environment_json(
 /// Schema tag for replayable swarm-latency evidence bundles.
 pub const SWARM_LATENCY_BUNDLE_SCHEMA_VERSION: &str = "swarm-latency-bundle/v1";
 
+/// Schema tag for replayable swarm performance artifact manifests.
+pub const SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION: &str = "swarm-evidence-bundle/v1";
+
+/// Schema tag for CI/nightly swarm performance regression gates.
+pub const SWARM_REGRESSION_GATE_SCHEMA_VERSION: &str = "swarm-regression-gate/v1";
+
 /// Synthetic-but-realistic workload families used for swarm latency baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -398,6 +404,463 @@ fn parse_env_u64(name: &str) -> Option<u64> {
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
 }
+
+/// Source class for a replayable swarm evidence bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmEvidenceSourceKind {
+    /// Fully synthetic or fixture-backed run; no live service dependency.
+    Offline,
+    /// Run executed against an RCH worker, CI host, or controlled benchmark host.
+    HostBacked,
+    /// Run depended on live services or production-like endpoints.
+    Live,
+}
+
+impl SwarmEvidenceSourceKind {
+    /// Stable machine label for this source class.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Offline => "offline",
+            Self::HostBacked => "host_backed",
+            Self::Live => "live",
+        }
+    }
+
+    /// Whether the source class can be replayed without live services.
+    #[must_use]
+    pub const fn replayable_offline(self) -> bool {
+        matches!(self, Self::Offline | Self::HostBacked)
+    }
+}
+
+/// Evidence mode used by CI and nightly swarm runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmEvidenceExecutionMode {
+    /// Bounded, PR-friendly smoke run.
+    Smoke,
+    /// Longer soak or promotion run for retained baselines.
+    Soak,
+}
+
+impl SwarmEvidenceExecutionMode {
+    /// Stable machine label for this execution mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Smoke => "smoke",
+            Self::Soak => "soak",
+        }
+    }
+}
+
+/// Required artifact files for replayable swarm performance claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmEvidenceArtifactKind {
+    /// Environment fingerprint.
+    EnvJson,
+    /// Artifact manifest with content hashes.
+    ManifestJson,
+    /// Raw per-operation samples.
+    RawSamplesJsonl,
+    /// Scenario summaries.
+    SummaryJson,
+    /// Command log with redacted invocations.
+    CommandLogTxt,
+    /// Git/source revision record.
+    GitRevision,
+    /// RCH worker or controlled-runner identity.
+    RchWorkerInfo,
+    /// Proof and isomorphism notes.
+    ProofNotes,
+}
+
+impl SwarmEvidenceArtifactKind {
+    /// Required artifact kinds in stable manifest order.
+    pub const REQUIRED: [Self; 8] = [
+        Self::EnvJson,
+        Self::ManifestJson,
+        Self::RawSamplesJsonl,
+        Self::SummaryJson,
+        Self::CommandLogTxt,
+        Self::GitRevision,
+        Self::RchWorkerInfo,
+        Self::ProofNotes,
+    ];
+
+    /// Stable machine label for this artifact kind.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::EnvJson => "env_json",
+            Self::ManifestJson => "manifest_json",
+            Self::RawSamplesJsonl => "raw_samples_jsonl",
+            Self::SummaryJson => "summary_json",
+            Self::CommandLogTxt => "command_log_txt",
+            Self::GitRevision => "git_revision",
+            Self::RchWorkerInfo => "rch_worker_info",
+            Self::ProofNotes => "proof_notes",
+        }
+    }
+
+    /// Canonical artifact path inside a bundle directory.
+    #[must_use]
+    pub const fn default_path(self) -> &'static str {
+        match self {
+            Self::EnvJson => "env.json",
+            Self::ManifestJson => "manifest.json",
+            Self::RawSamplesJsonl => "raw_samples.jsonl",
+            Self::SummaryJson => "summary.json",
+            Self::CommandLogTxt => "command_log.txt",
+            Self::GitRevision => "git_revision.txt",
+            Self::RchWorkerInfo => "rch_worker_info.json",
+            Self::ProofNotes => "proof_notes.md",
+        }
+    }
+}
+
+/// One content-addressed artifact entry in a swarm evidence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmEvidenceArtifact {
+    /// Artifact role.
+    pub kind: SwarmEvidenceArtifactKind,
+    /// Path relative to the bundle root.
+    pub path: String,
+    /// Content digest, typically `blake3:<hex>` or `sha256:<hex>`.
+    pub digest: String,
+    /// Whether artifact content was redacted before export.
+    pub redacted: bool,
+}
+
+impl SwarmEvidenceArtifact {
+    /// Build an artifact entry at the canonical path for its kind.
+    #[must_use]
+    pub fn new(kind: SwarmEvidenceArtifactKind, digest: impl Into<String>, redacted: bool) -> Self {
+        Self {
+            kind,
+            path: kind.default_path().to_string(),
+            digest: digest.into(),
+            redacted,
+        }
+    }
+
+    /// Build an artifact entry with an explicit relative path.
+    #[must_use]
+    pub fn with_path(
+        kind: SwarmEvidenceArtifactKind,
+        path: impl Into<String>,
+        digest: impl Into<String>,
+        redacted: bool,
+    ) -> Self {
+        Self {
+            kind,
+            path: path.into(),
+            digest: digest.into(),
+            redacted,
+        }
+    }
+}
+
+/// Redaction policy recorded with swarm performance artifacts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmEvidenceRedactionPolicy {
+    /// Environment variables and host details were redacted as needed.
+    pub environment_redacted: bool,
+    /// Command logs were redacted as needed.
+    pub command_log_redacted: bool,
+    /// Proof notes were checked for secrets/PII.
+    pub proof_notes_checked: bool,
+    /// Case-insensitive substrings treated as sensitive.
+    pub sensitive_patterns: Vec<String>,
+}
+
+impl SwarmEvidenceRedactionPolicy {
+    /// Conservative default for artifacts that may leave the local host.
+    #[must_use]
+    pub fn conservative() -> Self {
+        Self {
+            environment_redacted: true,
+            command_log_redacted: true,
+            proof_notes_checked: true,
+            sensitive_patterns: [
+                "authorization",
+                "bearer ",
+                "password",
+                "secret",
+                "token",
+                "api_key",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        }
+    }
+
+    /// Whether the policy is sufficient for host-backed or live evidence.
+    #[must_use]
+    pub fn protects_exported_artifacts(&self) -> bool {
+        self.environment_redacted
+            && self.command_log_redacted
+            && self.proof_notes_checked
+            && !self.sensitive_patterns.is_empty()
+    }
+}
+
+/// Replayable artifact manifest for a swarm performance evidence bundle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmEvidenceArtifactManifest {
+    /// Manifest schema version.
+    pub schema_version: String,
+    /// Stable bundle identifier.
+    pub bundle_id: String,
+    /// Source class for the run.
+    pub source_kind: SwarmEvidenceSourceKind,
+    /// Smoke vs soak evidence mode.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Source revision that produced the artifacts.
+    pub source_revision: String,
+    /// Worker identity that produced the artifacts.
+    pub rch_worker_id: String,
+    /// Content-addressed artifacts.
+    pub artifacts: Vec<SwarmEvidenceArtifact>,
+    /// Redaction policy applied before export.
+    pub redaction_policy: SwarmEvidenceRedactionPolicy,
+    /// Manifest creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmEvidenceArtifactManifest {
+    /// Build and validate a manifest from a captured run environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when required environment fields or artifacts are missing.
+    pub fn from_environment(
+        bundle_id: impl Into<String>,
+        source_kind: SwarmEvidenceSourceKind,
+        execution_mode: SwarmEvidenceExecutionMode,
+        environment: &SwarmRunEnvironment,
+        artifacts: Vec<SwarmEvidenceArtifact>,
+        redaction_policy: SwarmEvidenceRedactionPolicy,
+    ) -> Result<Self, SwarmEvidenceBundleError> {
+        let source_revision = environment
+            .source_revision
+            .clone()
+            .filter(|revision| !revision.trim().is_empty())
+            .ok_or(SwarmEvidenceBundleError::MissingSourceRevision)?;
+
+        let manifest = Self {
+            schema_version: SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION.to_string(),
+            bundle_id: bundle_id.into(),
+            source_kind,
+            execution_mode,
+            source_revision,
+            rch_worker_id: environment.worker_id.clone(),
+            artifacts,
+            redaction_policy,
+            generated_at: Utc::now(),
+        };
+        manifest.validate_against_environment(environment)?;
+        Ok(manifest)
+    }
+
+    /// Validate manifest completeness and freshness against the run environment.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error for missing, duplicate, stale, or unsafe fields.
+    pub fn validate_against_environment(
+        &self,
+        environment: &SwarmRunEnvironment,
+    ) -> Result<(), SwarmEvidenceBundleError> {
+        if self.schema_version != SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION {
+            return Err(SwarmEvidenceBundleError::SchemaMismatch {
+                expected: SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        if self.rch_worker_id.trim().is_empty() {
+            return Err(SwarmEvidenceBundleError::MissingRchWorkerInfo);
+        }
+        if environment
+            .source_revision
+            .as_deref()
+            .is_some_and(|revision| revision != self.source_revision)
+        {
+            return Err(SwarmEvidenceBundleError::StaleSourceRevision {
+                expected: environment.source_revision.clone().unwrap_or_default(),
+                actual: self.source_revision.clone(),
+            });
+        }
+        if environment.worker_id != self.rch_worker_id {
+            return Err(SwarmEvidenceBundleError::StaleWorkerInfo {
+                expected: environment.worker_id.clone(),
+                actual: self.rch_worker_id.clone(),
+            });
+        }
+        if self.source_kind != SwarmEvidenceSourceKind::Offline
+            && !self.redaction_policy.protects_exported_artifacts()
+        {
+            return Err(SwarmEvidenceBundleError::RedactionPolicyIncomplete);
+        }
+        validate_swarm_artifacts(&self.artifacts)
+    }
+
+    /// Whether this manifest can support offline replay.
+    #[must_use]
+    pub const fn replayable_offline(&self) -> bool {
+        self.source_kind.replayable_offline()
+    }
+
+    /// Render the manifest as a typed JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the manifest cannot be converted to JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, serde_json::Error> {
+        Ok(json!({
+            "record_type": "swarm_evidence_artifact_manifest",
+            "schema_version": self.schema_version,
+            "manifest": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+fn validate_swarm_artifacts(
+    artifacts: &[SwarmEvidenceArtifact],
+) -> Result<(), SwarmEvidenceBundleError> {
+    let mut seen = BTreeSet::new();
+    for artifact in artifacts {
+        if !seen.insert(artifact.kind) {
+            return Err(SwarmEvidenceBundleError::DuplicateArtifact {
+                kind: artifact.kind,
+            });
+        }
+        if artifact.path.trim().is_empty() {
+            return Err(SwarmEvidenceBundleError::EmptyArtifactPath {
+                kind: artifact.kind,
+            });
+        }
+        if artifact.digest.trim().is_empty() {
+            return Err(SwarmEvidenceBundleError::EmptyArtifactDigest {
+                kind: artifact.kind,
+            });
+        }
+    }
+    for kind in SwarmEvidenceArtifactKind::REQUIRED {
+        if !seen.contains(&kind) {
+            return Err(SwarmEvidenceBundleError::MissingArtifact { kind });
+        }
+    }
+    Ok(())
+}
+
+/// Error raised when validating replayable swarm evidence artifacts.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmEvidenceBundleError {
+    /// A required artifact entry was absent.
+    MissingArtifact {
+        /// Missing artifact kind.
+        kind: SwarmEvidenceArtifactKind,
+    },
+    /// An artifact kind appeared more than once.
+    DuplicateArtifact {
+        /// Duplicate artifact kind.
+        kind: SwarmEvidenceArtifactKind,
+    },
+    /// An artifact path was empty.
+    EmptyArtifactPath {
+        /// Artifact kind with the empty path.
+        kind: SwarmEvidenceArtifactKind,
+    },
+    /// An artifact digest was empty.
+    EmptyArtifactDigest {
+        /// Artifact kind with the empty digest.
+        kind: SwarmEvidenceArtifactKind,
+    },
+    /// Source revision was required but absent from the environment.
+    MissingSourceRevision,
+    /// Worker information was required but absent.
+    MissingRchWorkerInfo,
+    /// Manifest schema did not match the supported version.
+    SchemaMismatch {
+        /// Supported schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// Manifest source revision disagreed with the environment.
+    StaleSourceRevision {
+        /// Environment source revision.
+        expected: String,
+        /// Manifest source revision.
+        actual: String,
+    },
+    /// Manifest worker disagreed with the environment.
+    StaleWorkerInfo {
+        /// Environment worker identity.
+        expected: String,
+        /// Manifest worker identity.
+        actual: String,
+    },
+    /// Host-backed or live artifacts lacked an export-safe redaction policy.
+    RedactionPolicyIncomplete,
+}
+
+impl fmt::Display for SwarmEvidenceBundleError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::MissingArtifact { kind } => {
+                write!(f, "missing swarm evidence artifact '{}'", kind.as_str())
+            }
+            Self::DuplicateArtifact { kind } => {
+                write!(f, "duplicate swarm evidence artifact '{}'", kind.as_str())
+            }
+            Self::EmptyArtifactPath { kind } => {
+                write!(
+                    f,
+                    "empty path for swarm evidence artifact '{}'",
+                    kind.as_str()
+                )
+            }
+            Self::EmptyArtifactDigest { kind } => {
+                write!(
+                    f,
+                    "empty digest for swarm evidence artifact '{}'",
+                    kind.as_str()
+                )
+            }
+            Self::MissingSourceRevision => write!(f, "missing swarm evidence source revision"),
+            Self::MissingRchWorkerInfo => write!(f, "missing swarm evidence worker identity"),
+            Self::SchemaMismatch { expected, actual } => {
+                write!(
+                    f,
+                    "swarm evidence schema mismatch: expected '{expected}', got '{actual}'"
+                )
+            }
+            Self::StaleSourceRevision { expected, actual } => {
+                write!(
+                    f,
+                    "stale swarm evidence source revision: expected '{expected}', got '{actual}'"
+                )
+            }
+            Self::StaleWorkerInfo { expected, actual } => {
+                write!(
+                    f,
+                    "stale swarm evidence worker identity: expected '{expected}', got '{actual}'"
+                )
+            }
+            Self::RedactionPolicyIncomplete => {
+                write!(f, "swarm evidence redaction policy is incomplete")
+            }
+        }
+    }
+}
+
+impl Error for SwarmEvidenceBundleError {}
 
 /// Latency component used to explain tail behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -680,6 +1143,9 @@ pub struct SwarmLatencyEvidenceBundle {
     pub schema_version: String,
     /// Environment fingerprint.
     pub environment: SwarmRunEnvironment,
+    /// Optional replay artifact manifest for promoted smoke/soak evidence.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact_manifest: Option<SwarmEvidenceArtifactManifest>,
     /// Scenario descriptors known to this run.
     pub scenarios: Vec<SwarmLatencyScenario>,
     /// Raw operation samples.
@@ -716,10 +1182,25 @@ impl SwarmLatencyEvidenceBundle {
         Ok(Self {
             schema_version: SWARM_LATENCY_BUNDLE_SCHEMA_VERSION.to_string(),
             environment,
+            artifact_manifest: None,
             scenarios,
             samples,
             summaries,
         })
+    }
+
+    /// Attach and validate a replay artifact manifest.
+    ///
+    /// # Errors
+    ///
+    /// Returns a manifest validation error when required fields are missing or stale.
+    pub fn with_artifact_manifest(
+        mut self,
+        artifact_manifest: SwarmEvidenceArtifactManifest,
+    ) -> Result<Self, SwarmEvidenceBundleError> {
+        artifact_manifest.validate_against_environment(&self.environment)?;
+        self.artifact_manifest = Some(artifact_manifest);
+        Ok(self)
     }
 
     /// Render the bundle as typed JSONL records.
@@ -728,12 +1209,15 @@ impl SwarmLatencyEvidenceBundle {
     ///
     /// Returns a serde error if any bundle section cannot be converted to JSON.
     pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
-        let mut records = Vec::with_capacity(2 + self.scenarios.len() + self.samples.len());
+        let mut records = Vec::with_capacity(3 + self.scenarios.len() + self.samples.len());
         records.push(json!({
             "record_type": "swarm_latency_bundle",
             "schema_version": self.schema_version,
             "environment": serde_json::to_value(&self.environment)?,
         }));
+        if let Some(artifact_manifest) = &self.artifact_manifest {
+            records.push(artifact_manifest.to_jsonl_value()?);
+        }
         for scenario in &self.scenarios {
             records.push(json!({
                 "record_type": "swarm_latency_scenario",
@@ -813,6 +1297,347 @@ fn component_percentiles(
             .iter()
             .map(|sample| sample.breakdown.component_ns(component)),
     )
+}
+
+/// Scenario-level metric snapshot used by swarm regression gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmRegressionMetricSnapshot {
+    /// Scenario identifier.
+    pub scenario_id: String,
+    /// Raw sample count.
+    pub sample_count: usize,
+    /// Observed p99 latency in nanoseconds.
+    pub p99_ns: u64,
+    /// Observed p99.9 latency in nanoseconds.
+    pub p999_ns: u64,
+    /// Throughput in operations per second.
+    pub throughput_ops_per_second: u64,
+    /// CPU utilization in microunits, where `1_000_000` is one full core.
+    pub cpu_microunits: u64,
+    /// Resident set size in bytes.
+    pub rss_bytes: u64,
+    /// Maximum queue depth observed during the run.
+    pub max_queue_depth: u64,
+    /// Retry amplification in microunits, where `1_000_000` means one retry per op.
+    pub retry_amplification_microunits: u64,
+}
+
+impl SwarmRegressionMetricSnapshot {
+    /// Build a regression snapshot from a latency summary and side-channel resource metrics.
+    #[must_use]
+    pub fn from_summary(
+        summary: &SwarmLatencySummary,
+        resources: SwarmRegressionResourceMetrics,
+    ) -> Self {
+        Self {
+            scenario_id: summary.scenario_id.clone(),
+            sample_count: summary.sample_count,
+            p99_ns: summary.total.p99_ns,
+            p999_ns: summary.total.p999_ns,
+            throughput_ops_per_second: resources.throughput_ops_per_second,
+            cpu_microunits: resources.cpu_microunits,
+            rss_bytes: resources.rss_bytes,
+            max_queue_depth: resources.max_queue_depth,
+            retry_amplification_microunits: resources.retry_amplification_microunits,
+        }
+    }
+
+    /// Return a copy with the scenario identifier populated.
+    #[must_use]
+    pub fn with_scenario_id(mut self, scenario_id: impl Into<String>) -> Self {
+        self.scenario_id = scenario_id.into();
+        self
+    }
+}
+
+/// Side-channel resource metrics that complement latency summaries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmRegressionResourceMetrics {
+    /// Throughput in operations per second.
+    pub throughput_ops_per_second: u64,
+    /// CPU utilization in microunits, where `1_000_000` is one full core.
+    pub cpu_microunits: u64,
+    /// Resident set size in bytes.
+    pub rss_bytes: u64,
+    /// Maximum queue depth observed during the run.
+    pub max_queue_depth: u64,
+    /// Retry amplification in microunits, where `1_000_000` means one retry per op.
+    pub retry_amplification_microunits: u64,
+}
+
+/// Thresholds for CI/nightly swarm regression gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmRegressionGateThresholds {
+    /// Maximum permitted p99 latency increase.
+    pub max_p99_regression_percent: u32,
+    /// Maximum permitted p99.9 latency increase.
+    pub max_p999_regression_percent: u32,
+    /// Minimum retained throughput relative to baseline.
+    pub min_throughput_retention_percent: u32,
+    /// Maximum permitted CPU utilization increase.
+    pub max_cpu_increase_percent: u32,
+    /// Maximum permitted RSS increase.
+    pub max_rss_increase_percent: u32,
+    /// Maximum permitted queue-depth increase.
+    pub max_queue_depth_increase_percent: u32,
+    /// Maximum permitted retry-amplification increase.
+    pub max_retry_amplification_increase_percent: u32,
+    /// Minimum candidate sample count.
+    pub min_sample_count: usize,
+}
+
+impl SwarmRegressionGateThresholds {
+    /// PR-friendly smoke thresholds.
+    #[must_use]
+    pub const fn smoke() -> Self {
+        Self {
+            max_p99_regression_percent: 5,
+            max_p999_regression_percent: 5,
+            min_throughput_retention_percent: 95,
+            max_cpu_increase_percent: 10,
+            max_rss_increase_percent: 10,
+            max_queue_depth_increase_percent: 10,
+            max_retry_amplification_increase_percent: 10,
+            min_sample_count: 1,
+        }
+    }
+
+    /// Promotion thresholds for retained soak baselines.
+    #[must_use]
+    pub const fn soak() -> Self {
+        Self {
+            max_p99_regression_percent: 3,
+            max_p999_regression_percent: 3,
+            min_throughput_retention_percent: 98,
+            max_cpu_increase_percent: 5,
+            max_rss_increase_percent: 5,
+            max_queue_depth_increase_percent: 5,
+            max_retry_amplification_increase_percent: 5,
+            min_sample_count: 30,
+        }
+    }
+}
+
+/// Metric class evaluated by a swarm regression gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmRegressionMetricKind {
+    /// Scenario identifiers must match.
+    ScenarioId,
+    /// Candidate sample count must be sufficient.
+    SampleCount,
+    /// p99 latency must not regress materially.
+    P99Latency,
+    /// p99.9 latency must not regress materially.
+    P999Latency,
+    /// Throughput must retain enough of baseline.
+    Throughput,
+    /// CPU use must not increase materially.
+    Cpu,
+    /// Resident set size must not increase materially.
+    Rss,
+    /// Queue depth must not increase materially.
+    QueueDepth,
+    /// Retry amplification must not increase materially.
+    RetryAmplification,
+}
+
+/// One failed metric in a swarm regression gate report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmRegressionGateFailure {
+    /// Failed metric.
+    pub metric: SwarmRegressionMetricKind,
+    /// Baseline value.
+    pub baseline_value: u64,
+    /// Candidate value.
+    pub candidate_value: u64,
+    /// Threshold-derived allowed value.
+    pub allowed_value: u64,
+    /// Human-readable reason for operators.
+    pub reason: String,
+}
+
+/// CI/nightly regression report for one swarm scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmRegressionGateReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario under evaluation.
+    pub scenario_id: String,
+    /// Smoke or soak gate.
+    pub execution_mode: SwarmEvidenceExecutionMode,
+    /// Baseline metrics.
+    pub baseline: SwarmRegressionMetricSnapshot,
+    /// Candidate metrics.
+    pub candidate: SwarmRegressionMetricSnapshot,
+    /// Gate thresholds.
+    pub thresholds: SwarmRegressionGateThresholds,
+    /// Whether all metrics passed.
+    pub passed: bool,
+    /// Failed metric details.
+    pub failures: Vec<SwarmRegressionGateFailure>,
+}
+
+impl SwarmRegressionGateReport {
+    /// Evaluate a deterministic swarm regression gate.
+    #[must_use]
+    pub fn evaluate(
+        baseline: SwarmRegressionMetricSnapshot,
+        candidate: SwarmRegressionMetricSnapshot,
+        thresholds: SwarmRegressionGateThresholds,
+        execution_mode: SwarmEvidenceExecutionMode,
+    ) -> Self {
+        let mut failures = Vec::new();
+        if baseline.scenario_id != candidate.scenario_id {
+            failures.push(SwarmRegressionGateFailure {
+                metric: SwarmRegressionMetricKind::ScenarioId,
+                baseline_value: 0,
+                candidate_value: 0,
+                allowed_value: 0,
+                reason: format!(
+                    "candidate scenario '{}' does not match baseline '{}'",
+                    candidate.scenario_id, baseline.scenario_id
+                ),
+            });
+        }
+        let min_sample_count = u64::try_from(thresholds.min_sample_count).unwrap_or(u64::MAX);
+        if u64::try_from(candidate.sample_count).unwrap_or(u64::MAX) < min_sample_count {
+            failures.push(SwarmRegressionGateFailure {
+                metric: SwarmRegressionMetricKind::SampleCount,
+                baseline_value: u64::try_from(baseline.sample_count).unwrap_or(u64::MAX),
+                candidate_value: u64::try_from(candidate.sample_count).unwrap_or(u64::MAX),
+                allowed_value: min_sample_count,
+                reason: "candidate sample count is below gate minimum".to_string(),
+            });
+        }
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::P99Latency,
+            baseline.p99_ns,
+            candidate.p99_ns,
+            thresholds.max_p99_regression_percent,
+            "candidate p99 latency exceeded regression budget",
+        );
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::P999Latency,
+            baseline.p999_ns,
+            candidate.p999_ns,
+            thresholds.max_p999_regression_percent,
+            "candidate p999 latency exceeded regression budget",
+        );
+        push_throughput_failure(
+            &mut failures,
+            baseline.throughput_ops_per_second,
+            candidate.throughput_ops_per_second,
+            thresholds.min_throughput_retention_percent,
+        );
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::Cpu,
+            baseline.cpu_microunits,
+            candidate.cpu_microunits,
+            thresholds.max_cpu_increase_percent,
+            "candidate CPU utilization exceeded regression budget",
+        );
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::Rss,
+            baseline.rss_bytes,
+            candidate.rss_bytes,
+            thresholds.max_rss_increase_percent,
+            "candidate RSS exceeded regression budget",
+        );
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::QueueDepth,
+            baseline.max_queue_depth,
+            candidate.max_queue_depth,
+            thresholds.max_queue_depth_increase_percent,
+            "candidate queue depth exceeded regression budget",
+        );
+        push_upper_bound_failure(
+            &mut failures,
+            SwarmRegressionMetricKind::RetryAmplification,
+            baseline.retry_amplification_microunits,
+            candidate.retry_amplification_microunits,
+            thresholds.max_retry_amplification_increase_percent,
+            "candidate retry amplification exceeded regression budget",
+        );
+
+        Self {
+            schema_version: SWARM_REGRESSION_GATE_SCHEMA_VERSION.to_string(),
+            scenario_id: candidate.scenario_id.clone(),
+            execution_mode,
+            baseline,
+            candidate,
+            thresholds,
+            passed: failures.is_empty(),
+            failures,
+        }
+    }
+
+    /// Render as a typed JSONL record.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if the report cannot be converted to JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, serde_json::Error> {
+        Ok(json!({
+            "record_type": "swarm_regression_gate_report",
+            "schema_version": self.schema_version,
+            "report": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+fn push_upper_bound_failure(
+    failures: &mut Vec<SwarmRegressionGateFailure>,
+    metric: SwarmRegressionMetricKind,
+    baseline_value: u64,
+    candidate_value: u64,
+    max_increase_percent: u32,
+    reason: &str,
+) {
+    let allowed_value = increase_limit(baseline_value, max_increase_percent);
+    if candidate_value > allowed_value {
+        failures.push(SwarmRegressionGateFailure {
+            metric,
+            baseline_value,
+            candidate_value,
+            allowed_value,
+            reason: reason.to_string(),
+        });
+    }
+}
+
+fn push_throughput_failure(
+    failures: &mut Vec<SwarmRegressionGateFailure>,
+    baseline_value: u64,
+    candidate_value: u64,
+    min_retention_percent: u32,
+) {
+    let allowed_value = retention_floor(baseline_value, min_retention_percent);
+    if candidate_value < allowed_value {
+        failures.push(SwarmRegressionGateFailure {
+            metric: SwarmRegressionMetricKind::Throughput,
+            baseline_value,
+            candidate_value,
+            allowed_value,
+            reason: "candidate throughput fell below retention budget".to_string(),
+        });
+    }
+}
+
+fn increase_limit(baseline_value: u64, max_increase_percent: u32) -> u64 {
+    let scaled = u128::from(baseline_value)
+        .saturating_mul(u128::from(100_u32.saturating_add(max_increase_percent)));
+    u64::try_from(scaled.saturating_add(99) / 100).unwrap_or(u64::MAX)
+}
+
+fn retention_floor(baseline_value: u64, min_retention_percent: u32) -> u64 {
+    let scaled = u128::from(baseline_value).saturating_mul(u128::from(min_retention_percent));
+    u64::try_from(scaled.saturating_add(99) / 100).unwrap_or(u64::MAX)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1494,6 +2319,47 @@ mod tests {
     use super::*;
     use crate::live_suite::{EnvironmentManifest, LiveEnvironment};
 
+    fn swarm_test_environment() -> SwarmRunEnvironment {
+        SwarmRunEnvironment {
+            worker_id: "rch-worker-64c".to_string(),
+            cpu_count: 64,
+            physical_cpu_count: Some(32),
+            numa_node_count: Some(2),
+            memory_bytes: Some(256 * 1024 * 1024 * 1024),
+            cargo_target_dir: Some("/tmp/fcp-swarm-target".to_string()),
+            command_line: vec![
+                "rch".to_string(),
+                "exec".to_string(),
+                "--".to_string(),
+                "cargo".to_string(),
+                "bench".to_string(),
+            ],
+            source_revision: Some("abc123".to_string()),
+            captured_at: Utc::now(),
+        }
+    }
+
+    fn required_swarm_artifacts() -> Vec<SwarmEvidenceArtifact> {
+        SwarmEvidenceArtifactKind::REQUIRED
+            .into_iter()
+            .map(|kind| SwarmEvidenceArtifact::new(kind, format!("blake3:{}", kind.as_str()), true))
+            .collect()
+    }
+
+    fn baseline_regression_snapshot() -> SwarmRegressionMetricSnapshot {
+        SwarmRegressionMetricSnapshot {
+            scenario_id: "host_batch_invoke_10000".to_string(),
+            sample_count: 100,
+            p99_ns: 100_000,
+            p999_ns: 125_000,
+            throughput_ops_per_second: 1_000_000,
+            cpu_microunits: 64_000_000,
+            rss_bytes: 8 * 1024 * 1024 * 1024,
+            max_queue_depth: 1_000,
+            retry_amplification_microunits: 100_000,
+        }
+    }
+
     #[test]
     fn collector_empty_by_default() {
         let collector = EvidenceCollector::new();
@@ -1749,6 +2615,166 @@ mod tests {
         assert_eq!(bundle.environment.numa_node_count, Some(2));
         assert_eq!(bundle.summaries[0].total.p99_ns, 750);
         Ok(())
+    }
+
+    #[test]
+    fn swarm_evidence_manifest_validates_required_artifact_contract() -> Result<(), Box<dyn Error>>
+    {
+        let scenario = SwarmLatencyScenario::new(SwarmWorkloadKind::HostBatchInvoke, 1_000);
+        let samples = vec![SwarmLatencySample::new(
+            scenario.id.clone(),
+            "agent-1",
+            "op-1",
+            0,
+            LatencyBreakdown::new(100, 200, 0, 0, 0, 0),
+        )];
+        let environment = swarm_test_environment();
+        let manifest = SwarmEvidenceArtifactManifest::from_environment(
+            "bundle-smoke",
+            SwarmEvidenceSourceKind::HostBacked,
+            SwarmEvidenceExecutionMode::Smoke,
+            &environment,
+            required_swarm_artifacts(),
+            SwarmEvidenceRedactionPolicy::conservative(),
+        )?;
+        let bundle =
+            SwarmLatencyEvidenceBundle::from_samples(environment, vec![scenario], samples)?
+                .with_artifact_manifest(manifest)?;
+
+        let records = bundle.to_jsonl_values()?;
+        let manifest_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_evidence_artifact_manifest")
+            .ok_or("manifest record must be emitted")?;
+        let roundtrip: SwarmEvidenceArtifactManifest =
+            serde_json::from_value(manifest_record["manifest"].clone())?;
+
+        assert_eq!(roundtrip.bundle_id, "bundle-smoke");
+        assert_eq!(roundtrip.source_kind.as_str(), "host_backed");
+        assert_eq!(roundtrip.execution_mode.as_str(), "smoke");
+        assert!(roundtrip.replayable_offline());
+        assert_eq!(
+            roundtrip.artifacts.len(),
+            SwarmEvidenceArtifactKind::REQUIRED.len()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_evidence_manifest_rejects_missing_and_stale_fields() -> Result<(), &'static str> {
+        let environment = swarm_test_environment();
+        let mut missing_artifacts = required_swarm_artifacts();
+        missing_artifacts.retain(|artifact| artifact.kind != SwarmEvidenceArtifactKind::ProofNotes);
+        let missing_err = match SwarmEvidenceArtifactManifest::from_environment(
+            "bundle-missing",
+            SwarmEvidenceSourceKind::HostBacked,
+            SwarmEvidenceExecutionMode::Smoke,
+            &environment,
+            missing_artifacts,
+            SwarmEvidenceRedactionPolicy::conservative(),
+        ) {
+            Ok(_) => return Err("missing proof notes artifact must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            missing_err,
+            SwarmEvidenceBundleError::MissingArtifact {
+                kind: SwarmEvidenceArtifactKind::ProofNotes
+            }
+        );
+
+        let stale_manifest = SwarmEvidenceArtifactManifest {
+            schema_version: SWARM_EVIDENCE_BUNDLE_SCHEMA_VERSION.to_string(),
+            bundle_id: "bundle-stale".to_string(),
+            source_kind: SwarmEvidenceSourceKind::HostBacked,
+            execution_mode: SwarmEvidenceExecutionMode::Smoke,
+            source_revision: "def456".to_string(),
+            rch_worker_id: environment.worker_id.clone(),
+            artifacts: required_swarm_artifacts(),
+            redaction_policy: SwarmEvidenceRedactionPolicy::conservative(),
+            generated_at: Utc::now(),
+        };
+        let stale_err = match stale_manifest.validate_against_environment(&environment) {
+            Ok(()) => return Err("stale source revision must fail"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            stale_err,
+            SwarmEvidenceBundleError::StaleSourceRevision {
+                expected: "abc123".to_string(),
+                actual: "def456".to_string()
+            }
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_regression_gate_passes_bounded_smoke_budget() -> Result<(), Box<dyn Error>> {
+        let baseline = baseline_regression_snapshot();
+        let candidate = SwarmRegressionMetricSnapshot {
+            p99_ns: 104_000,
+            p999_ns: 131_000,
+            throughput_ops_per_second: 970_000,
+            cpu_microunits: 66_000_000,
+            max_queue_depth: 1_050,
+            retry_amplification_microunits: 105_000,
+            ..baseline.clone()
+        };
+        let report = SwarmRegressionGateReport::evaluate(
+            baseline,
+            candidate,
+            SwarmRegressionGateThresholds::smoke(),
+            SwarmEvidenceExecutionMode::Smoke,
+        );
+        let record = report.to_jsonl_value()?;
+
+        assert!(report.passed);
+        assert!(report.failures.is_empty());
+        assert_eq!(record["record_type"], "swarm_regression_gate_report");
+        assert_eq!(
+            record["schema_version"],
+            SWARM_REGRESSION_GATE_SCHEMA_VERSION
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_regression_gate_reports_tail_and_resource_failures() {
+        let baseline = baseline_regression_snapshot();
+        let candidate = SwarmRegressionMetricSnapshot {
+            sample_count: 5,
+            p99_ns: 112_000,
+            p999_ns: 140_000,
+            throughput_ops_per_second: 900_000,
+            cpu_microunits: 72_000_000,
+            rss_bytes: 10 * 1024 * 1024 * 1024,
+            max_queue_depth: 1_250,
+            retry_amplification_microunits: 125_000,
+            ..baseline.clone()
+        };
+        let report = SwarmRegressionGateReport::evaluate(
+            baseline,
+            candidate,
+            SwarmRegressionGateThresholds::soak(),
+            SwarmEvidenceExecutionMode::Soak,
+        );
+        let failed_metrics: BTreeSet<_> = report
+            .failures
+            .iter()
+            .map(|failure| failure.metric)
+            .collect();
+
+        assert!(!report.passed);
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::SampleCount));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::P99Latency));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::P999Latency));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::Throughput));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::Cpu));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::Rss));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::QueueDepth));
+        assert!(failed_metrics.contains(&SwarmRegressionMetricKind::RetryAmplification));
     }
 
     #[test]

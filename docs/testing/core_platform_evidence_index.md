@@ -80,6 +80,9 @@ rch exec -- cargo test -p fcp-testkit -- evidence_helpers
 # Swarm latency evidence model (1k/10k scenarios, p50/p95/p99/p999, JSONL records)
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-latency-testkit cargo test -p fcp-testkit latency --lib
 
+# Replayable swarm evidence bundles and CI/nightly regression gates
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-evidence-gates cargo test -p fcp-testkit swarm --lib
+
 # Swarm operator decision cards (scheduler/placement/backpressure replay contract)
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-decision-cards cargo test -p fcp-testkit decision_card --lib
 
@@ -208,6 +211,43 @@ Runtime health model output:
   "rate_limit": null
 }
 ```
+
+### Swarm Evidence Bundle Contract
+
+Swarm performance claims now share a stable replay contract in
+`fcp-testkit::evidence_helpers`. A promoted smoke or soak bundle can attach a
+`swarm-evidence-bundle/v1` artifact manifest to the existing
+`swarm-latency-bundle/v1` records. The required manifest entries are:
+
+- `env.json` for CPU, memory, NUMA, worker, target-dir, command, revision, and
+  capture time.
+- `manifest.json` for content hashes of every referenced artifact.
+- `raw_samples.jsonl` for per-operation latency decomposition.
+- `summary.json` for p50/p95/p99/p999 and dominant tail components.
+- `command_log.txt` with redacted command lines.
+- `git_revision.txt` for the source revision.
+- `rch_worker_info.json` for the worker or controlled-runner identity.
+- `proof_notes.md` for the isomorphism/proof note and promotion caveats.
+
+Each manifest records `source_kind` (`offline`, `host_backed`, or `live`),
+`execution_mode` (`smoke` or `soak`), the source revision, worker identity,
+content digests, and the redaction policy. Host-backed and live manifests fail
+validation unless command logs, environment values, and proof notes have been
+checked/redacted. Missing artifacts, duplicate artifact kinds, stale source
+revision, stale worker identity, empty paths, and empty digests are
+machine-readable failures.
+
+### Swarm Regression Gates
+
+The `swarm-regression-gate/v1` report compares baseline and candidate snapshots
+for one scenario. Gates cover p99, p999, throughput retention, CPU, RSS, maximum
+queue depth, retry amplification, and minimum sample count. Smoke thresholds are
+PR-friendly (`+5%` p99/p999, `95%` throughput retention, `+10%` resource/depth
+budgets, one-sample minimum). Soak thresholds are stricter (`+3%` p99/p999,
+`98%` throughput retention, `+5%` resource/depth budgets, 30-sample minimum).
+Reports serialize as JSONL with explicit failed metric records so CI can
+distinguish true responsiveness regressions from insufficient evidence or worker
+environment drift.
 
 ### Adaptive Batch Scheduler
 
@@ -364,7 +404,7 @@ rch exec -- cargo test -p fcp-testkit --test runtime_lifecycle_acceptance
 | --- | --- |
 | `crates/fcp-testkit/tests/runtime_lifecycle_acceptance.rs` | Health tracker, supervisor config, polling cursor, streaming session, session-script DSL, evidence, cleanup, HealthState serialization (30 tests) |
 | `crates/fcp-testkit/src/live_suite.rs` | Live-suite gating, secrets, cost budget, synthetic tenants, cleanup guards, environment manifests, prerequisite reports (88 tests) |
-| `crates/fcp-testkit/src/evidence_helpers.rs` | Evidence collector, audit events, receipts, decisions, secret redaction, swarm-latency scenarios, environment fingerprints, raw samples, p50/p95/p99/p999 summaries, JSONL evidence records, scheduler/placement/backpressure decision cards (34 tests) |
+| `crates/fcp-testkit/src/evidence_helpers.rs` | Evidence collector, audit events, receipts, decisions, secret redaction, swarm-latency scenarios, environment fingerprints, raw samples, p50/p95/p99/p999 summaries, JSONL evidence records, replay artifact manifests, CI/nightly regression gates, scheduler/placement/backpressure decision cards (38 tests) |
 | `crates/fcp-host/src/batch.rs` | Batch dependency validation, deterministic FIFO planning, opt-in adaptive priority/SRPT/fairness scheduling, FIFO counterfactual reports |
 | `crates/fcp-host/tests/no_mock_integration.rs` | BudgetPolicyEngine, DoctorService, discovery→introspect→preflight pipeline (2,597 lines) |
 | `crates/fcp-host/tests/host_connector_integration.rs` | Real subprocess connector integration (4,207 lines) |

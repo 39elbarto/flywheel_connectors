@@ -24,6 +24,17 @@ const MAX_PER_MILLE: u32 = 1_000;
 const DEFAULT_CONFORMAL_COVERAGE_PER_MILLE: u16 = 990;
 const DEFAULT_MIN_CONFORMAL_CALIBRATION_SAMPLES: usize = 3;
 
+/// br-6bgp1: bounds on the actual sleep applied when the
+/// backpressure controller picks `BackpressureAction::Delay`. The
+/// floor keeps the delay observable in tracing tests; the ceiling
+/// keeps it negligible against the dispatch path so a single
+/// adaptive decision cannot starve a request. Operators that want
+/// stronger backpressure should rely on bulkhead permit exhaustion
+/// (which provides the actual queueing) — `Delay` is a soft hint,
+/// not a long-tail throttle.
+const MIN_BACKPRESSURE_DELAY_MS: u64 = 1;
+const MAX_BACKPRESSURE_DELAY_MS: u64 = 10;
+
 /// Request priority used by load shedding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1330,12 +1341,22 @@ impl ResilienceLayer {
     {
         let state = self.connector_state(connector_id);
         let effective_load = self.record_request(&state);
-        self.check_load_shed(&state, connector_id, priority, operation, effective_load)?;
+        let backpressure_delay =
+            self.check_load_shed(&state, connector_id, priority, operation, effective_load)?;
         let probe_reservation = self.check_routing(connector_id, operation)?;
         if let Err(error) = Self::check_circuit(&state, connector_id, operation) {
             self.health_router
                 .cancel_probe_reservation(probe_reservation);
             return Err(error);
+        }
+        if let Some(delay) = backpressure_delay {
+            // br-6bgp1: actually apply the controller's `Delay`
+            // before claiming a bulkhead permit. The sleep is bounded
+            // (1-10ms) so a single decision cannot starve a request;
+            // operators that need stronger backpressure should rely
+            // on bulkhead permit exhaustion (which provides the
+            // unbounded-queueing path).
+            time::sleep(delay).await;
         }
         let permit = match self.acquire_bulkhead(&state, connector_id, operation).await {
             Ok(permit) => permit,
@@ -1370,7 +1391,7 @@ impl ResilienceLayer {
         priority: RequestPriority,
         operation: &str,
         effective_load: u32,
-    ) -> Result<(), ResilienceError<E>> {
+    ) -> Result<Option<Duration>, ResilienceError<E>> {
         let decision = self
             .backpressure_controller
             .decide(BackpressureControllerInput::new(
@@ -1405,7 +1426,43 @@ impl ResilienceLayer {
             });
         }
 
-        Ok(())
+        // br-6bgp1: surface and apply the controller's `Delay` action.
+        // Pre-fix the action was a no-op — control fell through to
+        // bulkhead acquisition with no sleep, so the documented
+        // contract ("Delay work through existing queueing/backoff
+        // paths") was silently violated whenever the bulkhead had
+        // free permits.
+        //
+        // br-uwih7: surface the controller's `AdmitWithWarning`
+        // action. Pre-fix this admit branch emitted no log and no
+        // metric, so the documented contract ("Admit work while
+        // exposing warning evidence to operators") was silently
+        // violated for every elevated-risk admission.
+        let delay = backpressure_delay_duration(&decision);
+        if let Some(delay) = delay {
+            tracing::info!(
+                connector_id = %connector_id,
+                operation,
+                delay_ms = delay.as_millis() as u64,
+                priority = ?priority,
+                backpressure_state = decision.state.as_str(),
+                backpressure_action = decision.action.as_str(),
+                "request delayed due to backpressure"
+            );
+        } else if decision.action == BackpressureAction::AdmitWithWarning {
+            tracing::warn!(
+                connector_id = %connector_id,
+                operation,
+                load_per_mille = effective_load,
+                priority = ?priority,
+                backpressure_state = decision.state.as_str(),
+                backpressure_action = decision.action.as_str(),
+                fallback_trigger = ?decision.fallback_trigger,
+                "request admitted with backpressure warning"
+            );
+        }
+
+        Ok(delay)
     }
 
     fn check_routing<E>(
@@ -2699,6 +2756,28 @@ fn operator_surprise_loss(state: BackpressureState, action: BackpressureAction) 
     }
 }
 
+/// br-6bgp1: derive the actual sleep duration that should be applied
+/// when the controller picks `BackpressureAction::Delay`. Returns
+/// `None` for every other action so the caller's `if let Some(delay)`
+/// is the single point that distinguishes "real delay needed" from
+/// "no delay applied". The duration scales with observed pressure
+/// inside the [`MIN_BACKPRESSURE_DELAY_MS`, `MAX_BACKPRESSURE_DELAY_MS`]
+/// envelope; downstream `retry_after_ms` overrides up to the same
+/// ceiling so an explicit upstream signal isn't silently scaled
+/// down below it.
+fn backpressure_delay_duration(decision: &BackpressureDecision) -> Option<Duration> {
+    if decision.action != BackpressureAction::Delay {
+        return None;
+    }
+    let telemetry = decision.replay.input.telemetry;
+    let pressure_delay_ms = u64::from(telemetry.max_pressure_per_mille() / 100);
+    let retry_after_ms = telemetry.downstream_retry_after_ms.unwrap_or(0);
+    let delay_ms = retry_after_ms
+        .max(MIN_BACKPRESSURE_DELAY_MS.saturating_add(pressure_delay_ms))
+        .clamp(MIN_BACKPRESSURE_DELAY_MS, MAX_BACKPRESSURE_DELAY_MS);
+    Some(Duration::from_millis(delay_ms))
+}
+
 const fn default_useful_work_per_mille(priority: RequestPriority) -> u16 {
     match priority {
         RequestPriority::Critical => 1_000,
@@ -2955,6 +3034,106 @@ mod tests {
 
         assert!(low_shed >= 80);
         assert_eq!(critical_shed, 0);
+    }
+
+    /// br-6bgp1 + br-uwih7: pin that `backpressure_delay_duration`
+    /// returns `Some(_)` ONLY for `BackpressureAction::Delay` and
+    /// `None` for every other action. Pre-fix the action enum had
+    /// six variants but the integration only branched on two of
+    /// them; this regression catches any future drift where an
+    /// action variant is added without a corresponding integration
+    /// branch (the `Delay` action would silently downgrade to
+    /// `Admit` again, the bug the original commit shipped with).
+    #[test]
+    fn br_6bgp1_backpressure_delay_duration_returns_some_only_for_delay_action() {
+        let controller = BackpressureController::default();
+        // Telemetry shape that produces Action::Delay with default weights
+        // (state=QueueCongested, Normal priority, q=900, cpu=250).
+        let delay_decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(900),
+                cpu_pressure_per_mille: Some(250),
+                useful_work_per_mille: Some(800),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+        assert_eq!(delay_decision.action, BackpressureAction::Delay);
+        let delay = backpressure_delay_duration(&delay_decision)
+            .expect("Delay action MUST yield a real sleep duration — pre-fix it returned None");
+        assert!(
+            delay.as_millis() as u64 >= MIN_BACKPRESSURE_DELAY_MS
+                && delay.as_millis() as u64 <= MAX_BACKPRESSURE_DELAY_MS,
+            "delay {delay:?} must be inside [{MIN_BACKPRESSURE_DELAY_MS}ms, \
+             {MAX_BACKPRESSURE_DELAY_MS}ms]"
+        );
+
+        // Every other action variant MUST yield None so the
+        // execute() path does not erroneously sleep for actions the
+        // controller did not ask to delay.
+        for action in [
+            BackpressureAction::Admit,
+            BackpressureAction::AdmitWithWarning,
+            BackpressureAction::Shed,
+            BackpressureAction::CancelLowPriority,
+            BackpressureAction::FallbackStaticPolicy,
+        ] {
+            let mut synthetic = delay_decision.clone();
+            synthetic.action = action;
+            assert!(
+                backpressure_delay_duration(&synthetic).is_none(),
+                "br-6bgp1: backpressure_delay_duration MUST return None for {action:?} — \
+                 only Delay should produce a sleep. Pre-fix this helper did not exist and \
+                 every action silently fell through to immediate admit"
+            );
+        }
+    }
+
+    /// br-6bgp1: the Delay sleep duration is bounded so a single
+    /// adaptive decision cannot starve a request. Pin the bounds.
+    #[test]
+    fn br_6bgp1_backpressure_delay_duration_clamps_to_envelope() {
+        let controller = BackpressureController::default();
+        let mut decision = controller.decide(BackpressureControllerInput::new(
+            "fcp.host:test:v1/invoke",
+            RequestPriority::Normal,
+            BackpressureTelemetry {
+                queue_pressure_per_mille: Some(900),
+                cpu_pressure_per_mille: Some(250),
+                useful_work_per_mille: Some(800),
+                ..BackpressureTelemetry::default()
+            },
+            BackpressureCalibration::valid(),
+        ));
+        assert_eq!(decision.action, BackpressureAction::Delay);
+
+        // Even an absurd downstream retry-after hint is clamped to MAX.
+        decision.replay.input.telemetry.downstream_retry_after_ms = Some(60_000);
+        let huge = backpressure_delay_duration(&decision).unwrap();
+        assert_eq!(
+            huge.as_millis() as u64,
+            MAX_BACKPRESSURE_DELAY_MS,
+            "br-6bgp1: 60s downstream retry-after must clamp to MAX_BACKPRESSURE_DELAY_MS, \
+             not propagate as an unbounded sleep that would let an upstream throttle starve \
+             every in-flight request"
+        );
+
+        // No pressure + no retry hint still floors at MIN, so the
+        // sleep is observable.
+        decision.replay.input.telemetry = BackpressureTelemetry {
+            queue_pressure_per_mille: Some(0),
+            cpu_pressure_per_mille: Some(0),
+            ..BackpressureTelemetry::default()
+        };
+        let tiny = backpressure_delay_duration(&decision).unwrap();
+        assert_eq!(
+            tiny.as_millis() as u64,
+            MIN_BACKPRESSURE_DELAY_MS,
+            "br-6bgp1: zero pressure must floor at MIN_BACKPRESSURE_DELAY_MS so the sleep \
+             remains observable in tracing tests"
+        );
     }
 
     #[test]

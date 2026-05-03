@@ -75,7 +75,7 @@ use fcp_async_core::sync::Mutex;
 use fcp_async_core::{task, time};
 use fcp_host::{
     BackpressureAction, BackpressureDecision, BackpressureState, BulkheadConfig, RequestPriority,
-    ResilienceConfig, ResilienceLayer,
+    ResilienceConfig, ResilienceError, ResilienceLayer,
 };
 use fcp_kernel::ConnectorId;
 
@@ -204,21 +204,19 @@ async fn spawn_permit_holders(
             };
             while keep_running.load(Ordering::SeqCst) {
                 let result = layer
-                    .execute::<_, (), std::io::Error>(
-                        &cid,
-                        priority,
-                        "permit_holder",
-                        async move {
-                            time::sleep(Duration::from_millis(hold_ms)).await;
-                            Ok(())
-                        },
-                    )
+                    .execute::<_, (), std::io::Error>(&cid, priority, "permit_holder", async move {
+                        time::sleep(Duration::from_millis(hold_ms)).await;
+                        Ok(())
+                    })
                     .await;
                 // Some attempts under saturation return LoadShed —
-                // that's fine for permit-holding purposes. We don't
-                // assert on the result here; this task's job is to
-                // create real load, not to verify outcomes.
-                let _ = result;
+                // that's fine for permit-holding purposes. Other
+                // resilience errors mean the load generator stopped
+                // exercising the intended path.
+                assert!(
+                    matches!(&result, Ok(()) | Err(ResilienceError::LoadShed { .. })),
+                    "permit-holder saw unexpected error: {result:?}",
+                );
             }
         }));
     }
@@ -276,7 +274,11 @@ async fn sweep_band_concurrently(
 /// Run a complete sweep at the given base_load level with permit-
 /// holders contending. Observations carry both the action and state
 /// distributions per priority. Returns the band's observations.
-async fn run_band(layer: Arc<ResilienceLayer>, cid: ConnectorId, base_load: u16) -> BandObservations {
+async fn run_band(
+    layer: Arc<ResilienceLayer>,
+    cid: ConnectorId,
+    base_load: u16,
+) -> BandObservations {
     layer.set_base_load_per_mille(base_load);
 
     // Spin up permit holders BEFORE sampling so the bulkhead is
@@ -306,9 +308,8 @@ async fn run_band(layer: Arc<ResilienceLayer>, cid: ConnectorId, base_load: u16)
     keep_running.store(false, Ordering::SeqCst);
     for handle in holder_handles {
         // Permit-holders may take up to PERMIT_HOLD_MS to wake up
-        // and observe the stop signal, but they never panic, so
-        // join is safe.
-        let _ = handle.await;
+        // and observe the stop signal.
+        handle.await.expect("permit-holder task joined");
     }
 
     observations

@@ -17,7 +17,7 @@ use url::Url;
 
 use crate::{
     GrantType, OAuthError, OAuthResult, OAuthTokens, Pkce, PkceMethod, ResponseMode, TokenResponse,
-    is_secure_or_loopback_redirect, normalize_registered_redirect_uri,
+    normalize_registered_redirect_uri, validate_oauth_endpoint_url,
 };
 
 const FORM_CONTENT_TYPE: &str = "application/x-www-form-urlencoded";
@@ -369,33 +369,6 @@ fn reserved_extra_token_param(key: &str) -> bool {
             | "client_secret"
             | "code_verifier"
     )
-}
-
-fn validate_oauth_endpoint_url(raw: &str, field: &str) -> OAuthResult<String> {
-    let url = Url::parse(raw).map_err(|e| {
-        OAuthError::InvalidConfig(format!("{field} must be a valid absolute URL: {e}"))
-    })?;
-    if url.cannot_be_a_base() || url.host_str().is_none() {
-        return Err(OAuthError::InvalidConfig(format!(
-            "{field} must include a network host"
-        )));
-    }
-    if !url.username().is_empty() || url.password().is_some() {
-        return Err(OAuthError::InvalidConfig(format!(
-            "{field} must not include embedded credentials"
-        )));
-    }
-    if url.fragment().is_some() {
-        return Err(OAuthError::InvalidConfig(format!(
-            "{field} must not include a fragment"
-        )));
-    }
-    if !is_secure_or_loopback_redirect(&url) {
-        return Err(OAuthError::InvalidConfig(format!(
-            "{field} must use https or loopback http"
-        )));
-    }
-    Ok(url.into())
 }
 
 fn validate_oauth2_config(mut config: OAuth2Config) -> OAuthResult<OAuth2Config> {

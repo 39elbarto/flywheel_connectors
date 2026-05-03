@@ -790,7 +790,9 @@ fn custom_provider_endpoints() {
         Some("https://custom.example.com/userinfo".to_string())
     );
 
-    let config = endpoints.to_oauth2_config("my-id", "my-secret");
+    let config = endpoints
+        .to_oauth2_config("my-id", "my-secret")
+        .expect("custom provider endpoints should validate");
     assert_eq!(config.client_id, "my-id");
     assert_eq!(
         config.authorization_url,

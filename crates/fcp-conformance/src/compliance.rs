@@ -3,11 +3,11 @@
 //! Static checks validate connector manifests. Dynamic checks execute standard
 //! methods against an in-process connector implementation.
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     FcpConnector, FcpError, HandshakeRequest, HealthState, InvokeRequest, InvokeStatus,
     SimulateRequest,
 };
-use fcp_manifest::ConnectorManifest;
 use serde::{Deserialize, Serialize};
 
 /// Compliance check status.

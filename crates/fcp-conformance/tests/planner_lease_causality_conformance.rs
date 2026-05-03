@@ -28,12 +28,12 @@
 //!    `DecisionReason::SelectedAsBest { rank: 1 }` reason on every
 //!    invocation.
 
-use fcp_prelude::{ConnectorId, ObjectId};
 use fcp_mesh::{
     AvailabilityProfile, DecisionReason, DeviceProfile, ExecutionPlanner, HeldLease,
     InstalledConnector, LatencyClass, LeasePurpose, NodeInfo, PlannerContext, PlannerInput,
     PowerSource,
 };
+use fcp_prelude::{ConnectorId, ObjectId};
 use fcp_tailscale::NodeId;
 use std::collections::HashSet;
 

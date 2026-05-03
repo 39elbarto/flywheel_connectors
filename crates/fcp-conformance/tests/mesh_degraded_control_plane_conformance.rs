@@ -35,11 +35,11 @@
 //!   keywords for each variant
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId, ZoneKeyId};
 use fcp_mesh::{
     ControlPlaneEnvelope, ControlPlaneHandler, DegradedTransportError, InMemoryControlPlaneHandler,
     RetentionClass,
 };
+use fcp_prelude::{ObjectId, ObjectIdKey, ZoneId, ZoneKeyId};
 use semver::Version;
 
 fn fake_object_id(tag: &[u8]) -> ObjectId {

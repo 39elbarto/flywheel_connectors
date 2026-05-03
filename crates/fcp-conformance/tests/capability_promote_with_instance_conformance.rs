@@ -31,12 +31,12 @@
 
 use chrono::{Duration, Utc};
 use ciborium::Value as CborValue;
+use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_prelude::{
     BoundVerified, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError, InstanceId,
     OperationId, UnboundVerified, ZoneId,
 };
-use fcp_crypto::Ed25519SigningKey;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 
 fn wildcard_constraints_cbor() -> Vec<u8> {
     let map = CborValue::Map(vec![(

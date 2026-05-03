@@ -22,6 +22,7 @@ use std::time::Duration;
 
 use fcp_cbor::SchemaId;
 use fcp_conformance::harness::{LogCollector, LogEntry, TestHarness};
+use fcp_mesh::ObjectAdmissionClass;
 #[allow(unused_imports)]
 use fcp_prelude::RiskTier;
 use fcp_prelude::{
@@ -30,7 +31,6 @@ use fcp_prelude::{
     EVENT_SECURITY_VIOLATION, EpochId, NodeSignature, ObjectHeader, ObjectId, PrincipalId,
     Provenance, SignatureSet, ZoneCheckpoint, ZoneId,
 };
-use fcp_mesh::ObjectAdmissionClass;
 use fcp_tailscale::NodeId;
 use semver::Version;
 use serde::{Deserialize, Serialize};

@@ -24,12 +24,12 @@
 
 use fcp_cbor::SchemaId;
 use fcp_conformance::{CapabilityTokenGoldenVector, DatagramMacGoldenVector};
+use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken};
+use fcp_crypto::ed25519::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_prelude::{
     DeviceSelector, ObjectHeader, ObjectIdKey, ObjectPlacementPolicy, Provenance, StoredObject,
     TaintLevel, ZoneId,
 };
-use fcp_crypto::cose::{CapabilityTokenBuilder, CoseToken};
-use fcp_crypto::ed25519::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_protocol::{
     MeshSessionId, SessionCryptoSuite, SessionDirection, compute_session_mac, verify_session_mac,
 };

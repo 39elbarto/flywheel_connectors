@@ -8,13 +8,13 @@
 //! - Priority gossip (C1.5): push latency bounds
 
 use fcp_cbor::SchemaId;
+use fcp_mesh::gossip::{
+    GossipConfig, GossipMessage, MeshGossip, PriorityGossipPolicy, RevocationPushMessage,
+};
 use fcp_prelude::{
     FreshnessPolicy, ObjectHeader, ObjectId, Provenance, RevocationDecision,
     RevocationFreshnessClass, RevocationObject, RevocationRegistry, RevocationScope,
     RevocationSlaChecker, RevocationSlaStatus, TailscaleNodeId, ZoneId,
-};
-use fcp_mesh::gossip::{
-    GossipConfig, GossipMessage, MeshGossip, PriorityGossipPolicy, RevocationPushMessage,
 };
 use semver::Version;
 

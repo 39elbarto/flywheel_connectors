@@ -9,11 +9,11 @@
 //! passes a missing-capability request through to dispatch, that is a
 //! default-deny regression.
 
-use fcp_prelude::ZoneId;
 use fcp_host::{
     EnforcementContext, EnforcementContextBuilder, EnforcementDecision, EnforcementPipeline,
     PipelineOutcome,
 };
+use fcp_prelude::ZoneId;
 
 const CANONICAL_ZONES: &[fn() -> ZoneId] = &[
     ZoneId::private,

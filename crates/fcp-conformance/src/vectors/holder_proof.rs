@@ -207,10 +207,10 @@ impl HolderProofGoldenVector {
     ///
     /// Returns an error message if any step fails.
     pub fn verify(&self) -> Result<(), String> {
+        use fcp_crypto::ed25519::Ed25519SigningKey;
         use fcp_prelude::HolderProof;
         use fcp_prelude::OperationId;
         use fcp_prelude::RequestId;
-        use fcp_crypto::ed25519::Ed25519SigningKey;
 
         // 1. Parse signing key
         let sk_bytes: [u8; 32] = hex::decode(&self.holder_signing_key)

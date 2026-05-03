@@ -32,12 +32,12 @@
 //!    surfaces to triage.
 
 use chrono::{Duration, Utc};
+use fcp_crypto::Ed25519SigningKey;
+use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };
-use fcp_crypto::Ed25519SigningKey;
-use fcp_crypto::cose::CapabilityTokenBuilder;
 
 fn constraints_cbor(constraints: &CapabilityConstraints) -> Vec<u8> {
     let mut buf = Vec::new();

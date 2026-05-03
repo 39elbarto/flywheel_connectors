@@ -31,10 +31,10 @@
 //! 10. **`IbltError::CellCountMismatch` Display** contains both
 //!     left and right cell counts.
 
-use fcp_prelude::ObjectId;
 use fcp_mesh::iblt::{
     IBLT_HASH_COUNT, Iblt, IbltCell, IbltDecodeResult, IbltError, MIN_RECOMMENDED_IBLT_CELLS,
 };
+use fcp_prelude::ObjectId;
 
 // ─── Constants ─────────────────────────────────────────────────────
 

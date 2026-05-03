@@ -19,12 +19,12 @@
 //! ACCEPT semantics and the out-of-window REJECT semantics.
 
 use chrono::{Duration, Utc};
+use fcp_crypto::cose::CapabilityTokenBuilder;
+use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{
     CAPABILITY_TOKEN_CLOCK_SKEW_SECS, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError,
     OperationId, ZoneId,
 };
-use fcp_crypto::cose::CapabilityTokenBuilder;
-use fcp_crypto::ed25519::Ed25519SigningKey;
 
 const TEST_CAPABILITY: &str = "cap.test";
 const TEST_OPERATION: &str = "op.test";

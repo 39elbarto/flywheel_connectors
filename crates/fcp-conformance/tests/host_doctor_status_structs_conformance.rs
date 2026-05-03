@@ -25,11 +25,11 @@
 //!      default-when-absent)
 //! 6. **Each struct round-trips through serde without data loss.**
 
-use fcp_prelude::ZoneId;
 use fcp_host::{
     AuditStatus, CheckResult, CheckSeverity, CheckStatus, CheckpointStatus, DegradedModeStatus,
     FreshnessLevel, RevocationStatus, StoreCoverageStatus, TransportPolicyStatus,
 };
+use fcp_prelude::ZoneId;
 use serde_json::json;
 
 // ─── CheckpointStatus ─────────────────────────────────────────────

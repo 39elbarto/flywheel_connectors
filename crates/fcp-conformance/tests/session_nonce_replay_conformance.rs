@@ -3,8 +3,8 @@
 //! These tests exercise the production responder-side hello replay helper so a
 //! regression in handshake nonce tracking fails conformance directly.
 
-use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
+use fcp_prelude::TailscaleNodeId;
 use fcp_protocol::session::{
     HelloReplayWindow, MeshSessionHello, SessionCryptoSuite, SessionError, SessionNonce,
     TimePolicy, current_timestamp, verify_hello_attested_with_replay,

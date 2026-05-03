@@ -23,9 +23,9 @@
 //! `from`/`timestamp` from `signing_bytes` (breaking forwarder
 //! attribution) fails conformance directly.
 
-use fcp_prelude::{NodeId, NodeSignature as CoreNodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_mesh::gossip::RevocationPushMessage;
+use fcp_prelude::{NodeId, NodeSignature as CoreNodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 
 fn obj(label: &[u8]) -> ObjectId {
     ObjectId::from_unscoped_bytes(label)

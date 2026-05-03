@@ -13,9 +13,9 @@ use fcp_conformance::reqcheck::{
     RequirementEntry, RequirementsIndexParser, ValidationError, ValidationReport, ValidationWarning,
 };
 use fcp_conformance::schemas::{self, ForensicsRuleDiagnostic, ForensicsValidationError};
-use fcp_prelude::{ObjectIdKey, ZoneId};
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_manifest::{Base64Bytes, ConnectorManifest};
+use fcp_prelude::{ObjectIdKey, ZoneId};
 use fcp_raptorq::RaptorQConfig;
 use fcp_registry::{
     ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBundle, ConnectorManifestObject,

@@ -37,11 +37,11 @@
 //!    appear in audit indexes and rate-limit keys.
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
 use fcp_mesh::{
     AuthorityReasonCode, AuthorityRecord, AuthorityStatus, AuthorityTimelineEvent, AuthorityView,
     HeldLease, LeasePurpose, ObservedLeaseAuthority,
 };
+use fcp_prelude::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
 use semver::Version;
 
 fn fake_object_id(tag: &[u8]) -> ObjectId {

@@ -24,11 +24,11 @@
 //! 8. Each outcome enum rejects unknown tag values.
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
 use fcp_mesh::{
     AcquireOutcome, ConflictSeverity, ConflictingHolder, LeaseConflict, LeaseCoordinatorConfig,
     LeasePurpose, ReleaseOutcome, RenewOutcome,
 };
+use fcp_prelude::{ObjectId, ObjectIdKey, TailscaleNodeId, ZoneId};
 use semver::Version;
 use serde_json::json;
 

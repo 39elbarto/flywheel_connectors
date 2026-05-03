@@ -23,8 +23,8 @@
 //!   nonce; replaying the same ack against a different hello that shares the
 //!   responder's identity MUST fail signature verification.
 
-use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
+use fcp_prelude::TailscaleNodeId;
 use fcp_protocol::session::{
     MeshSessionAck, MeshSessionHello, MeshSessionId, SessionCryptoSuite, SessionError,
     SessionNonce, TimePolicy, current_timestamp, verify_ack_attested,

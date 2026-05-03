@@ -14,8 +14,8 @@
 //! the per-record status tagging (Active / Superseded / Expired) so a
 //! regression in any branch fails conformance immediately.
 
-use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::{AuthorityStatus, AuthorityView, HeldLease, LeasePurpose, ObservedLeaseAuthority};
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId};
 
 fn obj() -> ObjectId {
     ObjectId::from_unscoped_bytes(b"subject-under-authority")

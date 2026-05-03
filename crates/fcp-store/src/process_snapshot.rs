@@ -6,11 +6,11 @@
 //! the snapshot chunks remain regular content-addressed mesh objects.
 
 use fcp_cbor::{CanonicalSerializer, SchemaId, SerializationError};
+use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_prelude::{
     ObjectHeader, ObjectId, ObjectIdKey, Provenance, RetentionClass, StorageMeta, StoredObject,
     ZoneId,
 };
-use fcp_crypto::{Ed25519Signature, Ed25519SigningKey, Ed25519VerifyingKey};
 use fcp_raptorq::ChunkedObjectManifest;
 use semver::Version;
 use serde::{Deserialize, Serialize};

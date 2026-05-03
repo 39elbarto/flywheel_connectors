@@ -19,8 +19,8 @@
 //! forged `Complete`).
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_crypto::Ed25519SigningKey;
+use fcp_prelude::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_protocol::{SymbolAck, SymbolAckReason};
 use semver::Version;
 

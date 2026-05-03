@@ -13,9 +13,9 @@
 //! via MeshNode::verify_summary_signature; forged-signature regression
 //! tests already land in crates/fcp-mesh/src/node.rs.
 
-use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::admission::ObjectAdmissionClass;
 use fcp_mesh::gossip::{GossipSummary, MeshGossip};
+use fcp_prelude::{EpochId, ObjectId, TailscaleNodeId, ZoneId};
 
 fn obj(label: &str) -> ObjectId {
     ObjectId::from_unscoped_bytes(label.as_bytes())

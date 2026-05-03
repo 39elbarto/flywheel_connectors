@@ -23,8 +23,8 @@
 //!   initiator_node_id, responder_node_id, hello_nonce, ack_nonce
 //! - role asymmetry (initiator/responder swap produces different keys)
 
-use fcp_prelude::TailscaleNodeId;
 use fcp_crypto::{X25519SecretKey, X25519SharedSecret};
+use fcp_prelude::TailscaleNodeId;
 use fcp_protocol::session::{MeshSessionId, SessionKeys, SessionNonce, derive_session_keys};
 
 const ALICE_SK: [u8; 32] = [0xA1; 32];

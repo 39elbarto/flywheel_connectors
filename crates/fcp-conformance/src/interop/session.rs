@@ -417,8 +417,8 @@ fn test_session_id_binding() -> Result<(), String> {
 /// This rewrite asserts that production behavior, not the local
 /// over-strict approximation.
 fn test_nonce_freshness() -> Result<(), String> {
-    use fcp_prelude::TailscaleNodeId;
     use fcp_crypto::{Ed25519SigningKey, X25519SecretKey};
+    use fcp_prelude::TailscaleNodeId;
     use fcp_protocol::session::{
         HelloReplayWindow, MeshSessionHello, SessionCryptoSuite, SessionNonce, current_timestamp,
     };

@@ -27,8 +27,8 @@
 //! input. This file pins the ABOVE invariants with explicit oracles.
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectHeader, ObjectId, Provenance, ZoneId, ZoneKeyId};
 use fcp_crypto::Ed25519SigningKey;
+use fcp_prelude::{ObjectHeader, ObjectId, Provenance, ZoneId, ZoneKeyId};
 use fcp_protocol::{MAX_MISSING_HINT_ENTRIES, MAX_SYMBOLS_HARD_CAP, SymbolRequest};
 use semver::Version;
 

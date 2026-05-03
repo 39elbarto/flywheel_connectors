@@ -26,11 +26,11 @@
 //! 6. **Release by holder succeeds**; release by non-holder returns
 //!    `NotHeld`.
 
-use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId};
 use fcp_mesh::{
     AcquireOutcome, HeldLease, LeaseCoordinator, LeasePurpose, ObservedLeaseAuthority,
     ReleaseOutcome, RenewOutcome,
 };
+use fcp_prelude::{ObjectId, TailscaleNodeId, ZoneId};
 
 fn coordinator() -> LeaseCoordinator {
     LeaseCoordinator::with_defaults()

@@ -25,8 +25,8 @@
 //!    fuzz target that already protects against panics.
 
 use fcp_cbor::SchemaId;
-use fcp_prelude::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_crypto::{Ed25519Signature, Ed25519SigningKey};
+use fcp_prelude::{ObjectHeader, ObjectId, Provenance, TailscaleNodeId, ZoneId, ZoneKeyId};
 use fcp_protocol::{DecodeStatus, MAX_MISSING_HINT_ENTRIES};
 use semver::Version;
 

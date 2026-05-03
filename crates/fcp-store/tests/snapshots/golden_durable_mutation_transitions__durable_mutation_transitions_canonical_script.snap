@@ -1,0 +1,48 @@
+---
+source: crates/fcp-store/tests/golden_durable_mutation_transitions.rs
+expression: actual
+---
+# DurableSymbolStore canonical mutation script golden
+# br-38cd93962: read-validate / write-publish split
+# Each step emits one probe line of observable state.
+# 'used' = storage_used (bytes); 'zone_objects' = list_zone(work).len();
+# count(a1) = symbol_count for object 0xA1...; count(b2) = ditto for 0xB2...
+#
+# Load-bearing invariants visible in the diff:
+#   1. each symbol contributes 192 bytes to used (128 data +
+#      64 metadata overhead per Self::symbol_size). A drift in
+#      this constant becomes visible as a per-row delta change.
+#   2. idempotent duplicate put leaves used unchanged (zero double-count)
+#      — visible as steps 02/03 producing identical lines.
+#   3. delete_symbol releases the symbol's bytes; delete_object releases
+#      the sum of its remaining symbols.
+#   4. failed validate (conflicting bytes) leaves state byte-identical
+#      to pre-attempt — visible as steps 03/04 producing identical lines.
+#   5. reopen-from-disk recovers the full applied state — step 10's
+#      line MUST match step 09's line. Pre-fix the read-validate /
+#      write-publish split could (under refactor) advance next_seq
+#      on validate failure and corrupt the WAL — the reopen-floor
+#      check is the only structural proof of 'no WAL gap'.
+
+step 00 open                              
+  used=     0  zone_objects=0  count(a1)=0  count(b2)=0
+step 01 put_object_meta(a1, K=4)          
+  used=     0  zone_objects=1  count(a1)=0  count(b2)=0
+step 02 put_symbol(a1, esi=0, fill=AA)    
+  used=   192  zone_objects=1  count(a1)=1  count(b2)=0
+step 03 put_symbol(a1, esi=0, fill=AA) (dup)
+  used=   192  zone_objects=1  count(a1)=1  count(b2)=0
+step 04 put_symbol(a1, esi=0, fill=BB) (forged)
+  used=   192  zone_objects=1  count(a1)=1  count(b2)=0
+step 05 put_symbol(a1, esi=1, fill=CC)    
+  used=   384  zone_objects=1  count(a1)=2  count(b2)=0
+step 06 put_object_meta(b2, K=2)          
+  used=   384  zone_objects=2  count(a1)=2  count(b2)=0
+step 07 put_symbol(b2, esi=0, fill=DD)    
+  used=   576  zone_objects=2  count(a1)=2  count(b2)=1
+step 08 delete_symbol(a1, esi=1)          
+  used=   384  zone_objects=2  count(a1)=1  count(b2)=1
+step 09 delete_object(a1)                 
+  used=   192  zone_objects=1  count(a1)=0  count(b2)=1
+step 10 reopen + probe (recovery floor)   
+  used=   192  zone_objects=1  count(a1)=0  count(b2)=1

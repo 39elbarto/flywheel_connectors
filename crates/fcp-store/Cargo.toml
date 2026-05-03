@@ -43,6 +43,7 @@ rand.workspace = true
 proptest.workspace = true
 criterion = { version = "0.8", features = ["html_reports"] }
 tempfile = "3"
+insta.workspace = true
 
 [features]
 # Opt-in runtime deadlock detection via parking_lot's built-in cycle

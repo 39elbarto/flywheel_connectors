@@ -2446,6 +2446,7 @@ name = "fcp-audit"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "criterion",
  "fcp-cbor",
  "fcp-crypto",
  "hex",
@@ -3220,6 +3221,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "chrono",
  "ciborium",
  "fcp-airtable",
@@ -3283,6 +3285,7 @@ dependencies = [
  "fcp-mongodb",
  "fcp-n8n",
  "fcp-notion",
+ "fcp-oauth",
  "fcp-onepassword",
  "fcp-openai",
  "fcp-pandadoc",
@@ -3333,7 +3336,9 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
@@ -5940,6 +5945,7 @@ dependencies = [
  "fcp-prelude",
  "fcp-raptorq",
  "fcp-telemetry",
+ "insta",
  "jsonschema",
  "parking_lot",
  "proptest",

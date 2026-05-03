@@ -1,0 +1,30 @@
+---
+source: crates/fcp-protocol/tests/golden_session_handshake_negotiation_matrix.rs
+assertion_line: 174
+expression: actual
+---
+# Golden vector — session_handshake responder-picks decision matrix
+# Extends br-89c34bb4f (CrimsonWolf adversarial-initiator fuzz) with frozen
+# happy-path examples for the canonical pref-list combinations operators
+# see in production. Catches a value regression in suite_rank or in the
+# responder-picks tie-break that the property fuzz cannot reach (the fuzz
+# shares its reference rank with the implementation).
+#
+# Format:
+#   <cell-label>  | initiator=[<suite-ids>] responder=[<suite-ids>] -> <result>
+#
+# MINIMUM_SUITE floor:
+  MINIMUM_SUITE = id=1 label=suite1-hmacsha256
+
+## Cells (initiator pref × responder pref)
+both_prefer_suite2                               | initiator=[2,1] responder=[2,1] -> id=2 label=suite2-blake3
+both_prefer_suite1                               | initiator=[1,2] responder=[1,2] -> id=1 label=suite1-hmacsha256
+responder_prefers_suite2_initiator_suite1        | initiator=[1,2] responder=[2,1] -> id=2 label=suite2-blake3
+adversarial_worst_first_initiator                | initiator=[1,2] responder=[2,1] -> id=2 label=suite2-blake3
+single_overlap_suite2                            | initiator=[2] responder=[1,2] -> id=2 label=suite2-blake3
+single_overlap_suite1_at_floor                   | initiator=[1,2] responder=[1] -> id=1 label=suite1-hmacsha256
+empty_intersection_disjoint                      | initiator=[1] responder=[2] -> <none>
+initiator_stuffed_with_suite1_dups               | initiator=[1,1,1,1,2,1] responder=[2,1] -> id=2 label=suite2-blake3
+both_empty                                       | initiator=[] responder=[] -> <none>
+initiator_empty                                  | initiator=[] responder=[1,2] -> <none>
+responder_empty                                  | initiator=[1,2] responder=[] -> <none>

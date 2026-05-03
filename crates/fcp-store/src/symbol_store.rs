@@ -37,6 +37,12 @@ const MAX_SOURCE_SYMBOLS: u32 = 56_403;
 /// lock.
 const MAX_EAGER_SYMBOL_MAP_CAPACITY: usize = 1_024;
 
+/// Validate that object metadata declares a source-symbol count supported by
+/// the paired `RaptorQ` codec.
+///
+/// # Errors
+/// Returns [`SymbolStoreError::InvalidSymbol`] when the source-symbol count is
+/// zero or exceeds the RFC 6330 `K_MAX` bound.
 pub fn validate_source_symbols(meta: &ObjectSymbolMeta) -> Result<(), SymbolStoreError> {
     if meta.source_symbols == 0 || meta.source_symbols > MAX_SOURCE_SYMBOLS {
         return Err(SymbolStoreError::InvalidSymbol {

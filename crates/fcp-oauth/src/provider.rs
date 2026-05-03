@@ -2,7 +2,7 @@
 //!
 //! Ready-to-use configurations for common OAuth providers.
 
-use crate::{OAuth1Config, OAuth2Config, PkceMethod};
+use crate::{OAuth1Config, OAuth2Config, OAuthResult, PkceMethod, validate_oauth_endpoint_url};
 
 /// Known OAuth provider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -254,21 +254,59 @@ impl ProviderEndpoints {
         self
     }
 
+    /// Validate every configured endpoint against the shared OAuth URL policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any custom endpoint is not HTTPS or loopback
+    /// HTTP, is not an absolute network URL, embeds credentials, or includes a
+    /// fragment.
+    pub fn validate(&self) -> OAuthResult<()> {
+        validate_oauth_endpoint_url(&self.authorization_url, "authorization_url")?;
+        validate_oauth_endpoint_url(&self.token_url, "token_url")?;
+        if let Some(url) = self.revocation_url.as_deref() {
+            validate_oauth_endpoint_url(url, "revocation_url")?;
+        }
+        if let Some(url) = self.userinfo_url.as_deref() {
+            validate_oauth_endpoint_url(url, "userinfo_url")?;
+        }
+        Ok(())
+    }
+
     /// Build `OAuth2Config` from these endpoints.
-    #[must_use]
-    pub fn to_oauth2_config(&self, client_id: &str, client_secret: &str) -> OAuth2Config {
-        OAuth2Config::new(
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any custom provider endpoint violates the shared
+    /// HTTPS-or-loopback URL policy.
+    pub fn to_oauth2_config(
+        &self,
+        client_id: &str,
+        client_secret: &str,
+    ) -> OAuthResult<OAuth2Config> {
+        let authorization_url =
+            validate_oauth_endpoint_url(&self.authorization_url, "authorization_url")?;
+        let token_url = validate_oauth_endpoint_url(&self.token_url, "token_url")?;
+        if let Some(url) = self.revocation_url.as_deref() {
+            validate_oauth_endpoint_url(url, "revocation_url")?;
+        }
+        if let Some(url) = self.userinfo_url.as_deref() {
+            validate_oauth_endpoint_url(url, "userinfo_url")?;
+        }
+
+        Ok(OAuth2Config::new(
             client_id,
             client_secret,
-            &self.authorization_url,
-            &self.token_url,
-        )
+            authorization_url,
+            token_url,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn test_google_config() {
@@ -322,7 +360,9 @@ mod tests {
         .with_revocation_url("https://custom.auth.com/revoke")
         .with_userinfo_url("https://custom.auth.com/userinfo");
 
-        let config = endpoints.to_oauth2_config("client_id", "client_secret");
+        let config = endpoints
+            .to_oauth2_config("client_id", "client_secret")
+            .unwrap();
 
         assert_eq!(
             config.authorization_url,
@@ -560,7 +600,7 @@ mod tests {
     #[test]
     fn test_provider_endpoints_to_oauth2_config_propagates_client_info() {
         let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token");
-        let config = endpoints.to_oauth2_config("my_id", "my_secret");
+        let config = endpoints.to_oauth2_config("my_id", "my_secret").unwrap();
         assert_eq!(config.client_id, "my_id");
         assert_eq!(config.client_secret, Some("my_secret".to_string()));
     }
@@ -641,12 +681,101 @@ mod tests {
             "https://custom.example.com/authorize",
             "https://custom.example.com/token",
         );
-        let config = endpoints.to_oauth2_config("cid", "csec");
+        let config = endpoints.to_oauth2_config("cid", "csec").unwrap();
         assert_eq!(
             config.authorization_url,
             "https://custom.example.com/authorize"
         );
         assert_eq!(config.token_url, "https://custom.example.com/token");
+    }
+
+    #[test]
+    fn test_provider_endpoints_accept_loopback_http_endpoints() {
+        let endpoints = ProviderEndpoints::new(
+            "http://localhost:3000/authorize",
+            "http://127.0.0.1:3000/token",
+        )
+        .with_revocation_url("http://[::1]:3000/revoke")
+        .with_userinfo_url("https://custom.example.com/userinfo");
+
+        let config = endpoints
+            .to_oauth2_config("cid", "csec")
+            .expect("loopback http endpoints should be accepted");
+
+        assert_eq!(config.authorization_url, "http://localhost:3000/authorize");
+        assert_eq!(config.token_url, "http://127.0.0.1:3000/token");
+    }
+
+    #[test]
+    fn test_provider_endpoints_reject_non_loopback_http_optional_endpoint() {
+        let endpoints = ProviderEndpoints::new(
+            "https://custom.example.com/authorize",
+            "https://custom.example.com/token",
+        )
+        .with_revocation_url("http://attacker.example/revoke");
+
+        let err = endpoints.to_oauth2_config("cid", "csec").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("revocation_url"));
+        assert!(message.contains("https or loopback http"));
+    }
+
+    #[test]
+    fn test_provider_endpoints_reject_link_local_metadata_http_endpoint() {
+        let endpoints = ProviderEndpoints::new(
+            "http://169.254.169.254/latest/meta-data",
+            "https://custom.example.com/token",
+        );
+
+        let err = endpoints.to_oauth2_config("cid", "csec").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("authorization_url"));
+        assert!(message.contains("https or loopback http"));
+    }
+
+    proptest! {
+        #[test]
+        fn provider_endpoints_reject_non_loopback_http_for_every_endpoint(
+            host in "[a-z]{1,12}\\.example\\.com",
+            path in "[a-z]{1,16}",
+        ) {
+            let plain_http = format!("http://{host}/{path}");
+            let cases = [
+                (
+                    "authorization_url",
+                    ProviderEndpoints::new(&plain_http, "https://custom.example.com/token"),
+                ),
+                (
+                    "token_url",
+                    ProviderEndpoints::new("https://custom.example.com/authorize", &plain_http),
+                ),
+                (
+                    "revocation_url",
+                    ProviderEndpoints::new(
+                        "https://custom.example.com/authorize",
+                        "https://custom.example.com/token",
+                    )
+                    .with_revocation_url(&plain_http),
+                ),
+                (
+                    "userinfo_url",
+                    ProviderEndpoints::new(
+                        "https://custom.example.com/authorize",
+                        "https://custom.example.com/token",
+                    )
+                    .with_userinfo_url(&plain_http),
+                ),
+            ];
+
+            for (field, endpoints) in cases {
+                let message = endpoints
+                    .to_oauth2_config("cid", "csec")
+                    .unwrap_err()
+                    .to_string();
+                prop_assert!(message.contains(field), "{message}");
+                prop_assert!(message.contains("https or loopback http"), "{message}");
+            }
+        }
     }
 
     // ── Expanded tests: provider PKCE settings ──
@@ -894,7 +1023,7 @@ mod tests {
     #[test]
     fn test_provider_endpoints_to_oauth2_config_has_defaults() {
         let endpoints = ProviderEndpoints::new("https://a.com/auth", "https://a.com/token");
-        let config = endpoints.to_oauth2_config("cid", "csec");
+        let config = endpoints.to_oauth2_config("cid", "csec").unwrap();
         // Should have all default values for non-URL fields
         assert!(config.use_pkce);
         assert_eq!(config.pkce_method, PkceMethod::S256);

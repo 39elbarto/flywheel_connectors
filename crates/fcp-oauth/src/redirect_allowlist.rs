@@ -20,6 +20,9 @@
 //! - [`is_secure_or_loopback_redirect`] — the scheme/host predicate
 //!   underlying the secure-scheme check, exposed so callers building
 //!   their own validators reuse the same definition.
+//! - [`validate_oauth_endpoint_url`] — parse-and-validate for provider
+//!   endpoints such as authorization, token, revocation, and userinfo
+//!   URLs.
 //! - [`normalize_registered_redirect_uri`] — parse-and-validate for
 //!   URIs the operator pre-registers (no query allowed).
 //! - [`normalize_callback_redirect_uri`] — parse-and-validate for the
@@ -124,6 +127,26 @@ pub fn validate_redirect_uri_shape(url: &Url, field: &str, allow_query: bool) ->
         )));
     }
     Ok(())
+}
+
+/// Parse and validate a provider-owned OAuth endpoint URL.
+///
+/// Applies the same transport policy used by redirect validation: endpoint
+/// URLs must be absolute network URLs, must not embed credentials or
+/// fragments, and must use `https` unless they are loopback `http` URLs for
+/// local development. Query strings remain allowed because some providers use
+/// endpoint-level parameters in their published metadata.
+///
+/// # Errors
+///
+/// Returns [`OAuthError::InvalidConfig`] if `raw` is unparseable or violates
+/// the shared OAuth URL policy.
+pub fn validate_oauth_endpoint_url(raw: &str, field: &str) -> OAuthResult<String> {
+    let url = Url::parse(raw).map_err(|e| {
+        OAuthError::InvalidConfig(format!("{field} must be a valid absolute URL: {e}"))
+    })?;
+    validate_redirect_uri_shape(&url, field, true)?;
+    Ok(url.into())
 }
 
 /// Parse and validate a redirect URI that an operator pre-registered.

@@ -1,6 +1,6 @@
 //! Golden artifact snapshots for fcp-oauth.
 //!
-//! Freezes three observable surfaces so a silent change in serialization,
+//! Freezes four observable surfaces so a silent change in serialization,
 //! deserialization, or redirect-allowlist semantics will fail the next
 //! CI run with a diff of the old vs. new output:
 //!
@@ -21,13 +21,16 @@
 //!    scheme, reject for host, reject for path, reject for missing
 //!    membership). Snapshotting the error messages means any change in
 //!    the operator-facing failure surface is detected immediately.
+//! 4. **Custom provider endpoint policy** — the authorization, token,
+//!    revocation, and userinfo endpoint decisions produced by
+//!    [`ProviderEndpoints`].
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use fcp_oauth::{
     OAuth1Client, OAuth1Config, OAuth2Client, OAuth2Config, OAuthError, OAuthTokens, PkceMethod,
-    RequestToken, TokenResponse, ensure_allowlisted_redirect_uri,
+    ProviderEndpoints, RequestToken, TokenResponse, ensure_allowlisted_redirect_uri,
     ensure_callback_redirect_is_allowlisted, parse_registered_redirect_allowlist,
 };
 use serde_json::json;
@@ -210,6 +213,19 @@ fn format_decision(label: &str, outcome: Result<url::Url, OAuthError>) -> String
     }
 }
 
+fn format_provider_endpoint_decision(
+    label: &str,
+    outcome: Result<OAuth2Config, OAuthError>,
+) -> String {
+    match outcome {
+        Ok(config) => format!(
+            "{label}: OK (authorization_url={}, token_url={})\n",
+            config.authorization_url, config.token_url
+        ),
+        Err(err) => format!("{label}: ERR {err}\n"),
+    }
+}
+
 #[test]
 fn snapshot_redirect_allowlist_enforcement() {
     let allowlist = parse_registered_redirect_allowlist(&[
@@ -350,6 +366,88 @@ fn snapshot_redirect_allowlist_parse_failures() {
     }
 
     insta::assert_snapshot!("redirect_allowlist_parse_failures", report);
+}
+
+#[test]
+fn snapshot_provider_endpoint_url_policy() {
+    let mut report = String::new();
+
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_https_ok",
+        ProviderEndpoints::new(
+            "https://custom.example.com/authorize",
+            "https://custom.example.com/token",
+        )
+        .with_revocation_url("https://custom.example.com/revoke")
+        .with_userinfo_url("https://custom.example.com/userinfo")
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_loopback_http_ok",
+        ProviderEndpoints::new("http://localhost:3000/authorize", "http://127.0.0.1/token")
+            .with_revocation_url("http://[::1]/revoke")
+            .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_authorization_plain_http_rejected",
+        ProviderEndpoints::new(
+            "http://provider.example.com/authorize",
+            "https://provider.example.com/token",
+        )
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_link_local_metadata_http_rejected",
+        ProviderEndpoints::new(
+            "http://169.254.169.254/latest/meta-data",
+            "https://provider.example.com/token",
+        )
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_token_plain_http_rejected",
+        ProviderEndpoints::new(
+            "https://provider.example.com/authorize",
+            "http://provider.example.com/token",
+        )
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_revocation_plain_http_rejected",
+        ProviderEndpoints::new(
+            "https://provider.example.com/authorize",
+            "https://provider.example.com/token",
+        )
+        .with_revocation_url("http://provider.example.com/revoke")
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_userinfo_plain_http_rejected",
+        ProviderEndpoints::new(
+            "https://provider.example.com/authorize",
+            "https://provider.example.com/token",
+        )
+        .with_userinfo_url("http://provider.example.com/userinfo")
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_embedded_credentials_rejected",
+        ProviderEndpoints::new(
+            "https://user:pw@provider.example.com/authorize",
+            "https://provider.example.com/token",
+        )
+        .to_oauth2_config("cid", "csec"),
+    ));
+    report.push_str(&format_provider_endpoint_decision(
+        "custom_provider_fragment_rejected",
+        ProviderEndpoints::new(
+            "https://provider.example.com/authorize#fragment",
+            "https://provider.example.com/token",
+        )
+        .to_oauth2_config("cid", "csec"),
+    ));
+
+    insta::assert_snapshot!("provider_endpoint_url_policy", report);
 }
 
 #[test]

@@ -1,0 +1,13 @@
+---
+source: crates/fcp-oauth/tests/golden_snapshots.rs
+expression: report
+---
+custom_provider_https_ok: OK (authorization_url=https://custom.example.com/authorize, token_url=https://custom.example.com/token)
+custom_provider_loopback_http_ok: OK (authorization_url=http://localhost:3000/authorize, token_url=http://127.0.0.1/token)
+custom_provider_authorization_plain_http_rejected: ERR Invalid OAuth configuration: authorization_url must use https or loopback http
+custom_provider_link_local_metadata_http_rejected: ERR Invalid OAuth configuration: authorization_url must use https or loopback http
+custom_provider_token_plain_http_rejected: ERR Invalid OAuth configuration: token_url must use https or loopback http
+custom_provider_revocation_plain_http_rejected: ERR Invalid OAuth configuration: revocation_url must use https or loopback http
+custom_provider_userinfo_plain_http_rejected: ERR Invalid OAuth configuration: userinfo_url must use https or loopback http
+custom_provider_embedded_credentials_rejected: ERR Invalid OAuth configuration: authorization_url must not include embedded credentials
+custom_provider_fragment_rejected: ERR Invalid OAuth configuration: authorization_url must not include a fragment

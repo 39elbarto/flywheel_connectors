@@ -47,6 +47,7 @@ parking_lot = "0.12"
 [dev-dependencies]
 criterion.workspace = true
 insta = { workspace = true, features = ["filters"] }
+proptest.workspace = true
 wiremock.workspace = true
 
 [[bench]]

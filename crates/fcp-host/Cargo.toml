@@ -101,3 +101,7 @@ harness = false
 [[bench]]
 name = "batch_scheduler"
 harness = false
+
+[[bench]]
+name = "supply_chain_cache"
+harness = false

@@ -8,7 +8,7 @@
 //! - Deterministic evidence bundles with stable hashing.
 //! - Structured audit events for every verification decision.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use blake3::hash;
@@ -100,6 +100,205 @@ struct CacheEntry {
     verified_at: DateTime<Utc>,
 }
 
+const S3_FIFO_MAX_FREQUENCY: u8 = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum S3FifoQueue {
+    Small,
+    Main,
+}
+
+#[derive(Debug, Clone)]
+struct S3FifoEntry<V> {
+    value: V,
+    queue: S3FifoQueue,
+    frequency: u8,
+}
+
+/// Bounded S3-FIFO cache used by hot host metadata paths.
+///
+/// Hits update a tiny saturating frequency counter but do not reorder queue
+/// nodes. Admissions and evictions remain FIFO-like, so the hot path avoids the
+/// full-map scan used by the legacy oldest-entry cache while protecting entries
+/// that prove hot before their first eviction pass.
+#[doc(hidden)]
+#[derive(Debug, Clone)]
+pub struct S3FifoCache<V> {
+    capacity: usize,
+    main_capacity: usize,
+    entries: HashMap<String, S3FifoEntry<V>>,
+    small: VecDeque<String>,
+    main: VecDeque<String>,
+    ghost: VecDeque<String>,
+    ghost_set: HashSet<String>,
+}
+
+impl<V: Clone> S3FifoCache<V> {
+    /// Create a cache with at least one effective slot.
+    #[must_use]
+    pub fn new(capacity: usize) -> Self {
+        let capacity = capacity.max(1);
+        let main_capacity = capacity.saturating_sub((capacity / 10).max(1).min(capacity));
+        Self {
+            capacity,
+            main_capacity,
+            entries: HashMap::new(),
+            small: VecDeque::new(),
+            main: VecDeque::new(),
+            ghost: VecDeque::new(),
+            ghost_set: HashSet::new(),
+        }
+    }
+
+    /// Return the current number of resident entries.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    /// Return whether the cache has no resident entries.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    /// Remove all resident and ghost entries.
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.small.clear();
+        self.main.clear();
+        self.ghost.clear();
+        self.ghost_set.clear();
+    }
+
+    /// Get a cached value and record a bounded frequency hit.
+    pub fn get(&mut self, key: &str) -> Option<V> {
+        let entry = self.entries.get_mut(key)?;
+        entry.frequency = entry.frequency.saturating_add(1).min(S3_FIFO_MAX_FREQUENCY);
+        Some(entry.value.clone())
+    }
+
+    /// Insert or replace a value.
+    pub fn insert(&mut self, key: String, value: V) {
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.value = value;
+            entry.frequency = entry.frequency.saturating_add(1).min(S3_FIFO_MAX_FREQUENCY);
+            return;
+        }
+
+        let was_ghost = self.ghost_set.remove(&key);
+        let queue = if was_ghost && self.main_capacity > 0 {
+            S3FifoQueue::Main
+        } else {
+            S3FifoQueue::Small
+        };
+
+        while self.entries.len() >= self.capacity {
+            self.evict_one();
+        }
+
+        self.entries.insert(
+            key.clone(),
+            S3FifoEntry {
+                value,
+                queue,
+                frequency: 0,
+            },
+        );
+        match queue {
+            S3FifoQueue::Small => self.small.push_back(key),
+            S3FifoQueue::Main => self.main.push_back(key),
+        }
+    }
+
+    fn evict_one(&mut self) {
+        let budget = self.capacity.saturating_mul(2).saturating_add(2);
+        for _ in 0..budget {
+            let small_len_before = self.small.len();
+            if self.evict_from_small() {
+                return;
+            }
+            if self.small.len() != small_len_before {
+                continue;
+            }
+            if self.evict_from_main() {
+                return;
+            }
+        }
+
+        if let Some(key) = self.entries.keys().next().cloned() {
+            self.entries.remove(&key);
+            self.remember_ghost(key);
+        }
+    }
+
+    fn evict_from_small(&mut self) -> bool {
+        while let Some(key) = self.small.pop_front() {
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            if entry.queue != S3FifoQueue::Small {
+                continue;
+            }
+
+            if entry.frequency > 0 && self.main_capacity > 0 {
+                let entry = self
+                    .entries
+                    .get_mut(&key)
+                    .expect("entry checked above must still exist");
+                entry.frequency = entry.frequency.saturating_sub(1);
+                entry.queue = S3FifoQueue::Main;
+                self.main.push_back(key);
+                return false;
+            }
+
+            self.entries.remove(&key);
+            self.remember_ghost(key);
+            return true;
+        }
+        false
+    }
+
+    fn evict_from_main(&mut self) -> bool {
+        while let Some(key) = self.main.pop_front() {
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            if entry.queue != S3FifoQueue::Main {
+                continue;
+            }
+
+            if entry.frequency > 0 {
+                let entry = self
+                    .entries
+                    .get_mut(&key)
+                    .expect("entry checked above must still exist");
+                entry.frequency = entry.frequency.saturating_sub(1);
+                self.main.push_back(key);
+                return false;
+            }
+
+            self.entries.remove(&key);
+            self.remember_ghost(key);
+            return true;
+        }
+        false
+    }
+
+    fn remember_ghost(&mut self, key: String) {
+        if self.ghost_set.insert(key.clone()) {
+            self.ghost.push_back(key);
+        }
+
+        let limit = self.capacity.saturating_mul(2).max(1);
+        while self.ghost.len() > limit {
+            if let Some(oldest) = self.ghost.pop_front() {
+                self.ghost_set.remove(&oldest);
+            }
+        }
+    }
+}
+
 // ── Supply Chain Gate ────────────────────────────────────────────
 
 /// Host-side gate that enforces supply chain verification before
@@ -111,7 +310,7 @@ struct CacheEntry {
 /// - Policy override support for dev zones (when enabled).
 pub struct SupplyChainGate {
     config: SupplyChainGateConfig,
-    cache: Mutex<HashMap<String, CacheEntry>>,
+    cache: Mutex<S3FifoCache<CacheEntry>>,
 }
 
 impl SupplyChainGate {
@@ -125,8 +324,8 @@ impl SupplyChainGate {
     #[must_use]
     pub fn with_config(config: SupplyChainGateConfig) -> Self {
         Self {
+            cache: Mutex::new(S3FifoCache::new(config.cache_capacity)),
             config,
-            cache: Mutex::new(HashMap::new()),
         }
     }
 
@@ -268,26 +467,14 @@ impl SupplyChainGate {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(cache_key)
-            .cloned()
     }
 
-    /// Store a result in cache, evicting the oldest entry if at capacity.
+    /// Store a result in cache, evicting through S3-FIFO when at capacity.
     fn store_cache(&self, cache_key: &str, entry: CacheEntry) {
-        let mut cache = self
-            .cache
+        self.cache
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if cache.len() >= self.config.cache_capacity && !cache.contains_key(cache_key) {
-            // Simple eviction: remove oldest entry by verification time.
-            if let Some(oldest_key) = cache
-                .iter()
-                .min_by_key(|(_, v)| v.verified_at)
-                .map(|(k, _)| k.clone())
-            {
-                cache.remove(&oldest_key);
-            }
-        }
-        cache.insert(cache_key.to_string(), entry);
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(cache_key.to_string(), entry);
     }
 
     /// Compute the effective policy, applying dev overrides when allowed.
@@ -379,13 +566,13 @@ pub fn outcome_digest(outcome: &GateOutcome) -> String {
 mod tests {
     use super::*;
     use chrono::TimeZone;
-    use fcp_prelude::{
-        AttestationMaterial, AttestationMetadata, AttestationPredicateType, SBOM_SIGNED_FIELDS,
-        SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
-    };
     use fcp_evidence::{
         ConnectorId, SbomFormat, SoftwareBillOfMaterials, SupplyChainAttestation,
         SupplyChainSignature, TrustRootBinding, VerificationDecision, VerificationReasonCode,
+    };
+    use fcp_prelude::{
+        AttestationMaterial, AttestationMetadata, AttestationPredicateType, SBOM_SIGNED_FIELDS,
+        SUPPLY_CHAIN_ATTESTATION_SIGNED_FIELDS, SbomComponent, SbomDependency,
     };
 
     // ── Test Helpers ─────────────────────────────────────────────
@@ -912,6 +1099,54 @@ mod tests {
     }
 
     // ── Cache Behaviour ──────────────────────────────────────────
+
+    #[test]
+    fn s3_fifo_cache_preserves_hot_probation_entry_on_admission() {
+        let mut cache = S3FifoCache::new(2);
+
+        cache.insert("a".to_string(), 1_u64);
+        cache.insert("b".to_string(), 2_u64);
+        assert_eq!(cache.get("a"), Some(1));
+
+        cache.insert("c".to_string(), 3_u64);
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("a"), Some(1));
+        assert_eq!(cache.get("b"), None);
+        assert_eq!(cache.get("c"), Some(3));
+    }
+
+    #[test]
+    fn s3_fifo_cache_readmits_ghost_entry_as_protected() {
+        let mut cache = S3FifoCache::new(2);
+
+        cache.insert("a".to_string(), 1_u64);
+        cache.insert("b".to_string(), 2_u64);
+        cache.insert("c".to_string(), 3_u64);
+        assert_eq!(cache.get("a"), None);
+
+        cache.insert("a".to_string(), 10_u64);
+        cache.insert("d".to_string(), 4_u64);
+
+        assert_eq!(cache.len(), 2);
+        assert_eq!(cache.get("a"), Some(10));
+        assert_eq!(cache.get("c"), None);
+        assert_eq!(cache.get("d"), Some(4));
+    }
+
+    #[test]
+    fn s3_fifo_cache_capacity_one_keeps_single_latest_resident() {
+        let mut cache = S3FifoCache::new(1);
+
+        cache.insert("a".to_string(), 1_u64);
+        assert_eq!(cache.get("a"), Some(1));
+
+        cache.insert("b".to_string(), 2_u64);
+
+        assert_eq!(cache.len(), 1);
+        assert_eq!(cache.get("a"), None);
+        assert_eq!(cache.get("b"), Some(2));
+    }
 
     #[test]
     fn second_verification_uses_cache() {

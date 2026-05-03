@@ -1,0 +1,34 @@
+---
+source: crates/fcp-webhook/tests/golden_webhook_signature_matrix.rs
+assertion_line: 422
+expression: actual
+---
+# Golden vector — webhook signature verification matrix
+# br-87544f4d5 (CrimsonWolf streaming) +
+# br-54776a265 (CrimsonWolf webhook delivery retry)
+# Format:
+#   <cell-label>  | provider=<p> verdict=<v>
+# Verdicts:
+#   - Accepted: signature OK, timestamp in window, no replay
+#   - InvalidSignature: HMAC mismatch (or signature header missing)
+#   - TimestampOutOfWindow: signature OK but timestamp ±tolerance
+#   - Replay: signature/timestamp OK but event id seen before
+# Determinism notes:
+#   - HMAC-SHA256 is deterministic from secret + body
+#   - Stale (-600s) and Future (+600s) are both well outside the
+#     300s default tolerance, so their bucket is stable across runs
+#   - GitHub has no timestamp window (uses delivery id only)
+#   - Each cell gets a fresh replay cache so isolation holds
+
+github_valid_first                               | provider=github verdict=Accepted
+github_valid_replayed                            | provider=github verdict=Replay
+github_wrong_signature                           | provider=github verdict=InvalidSignature
+stripe_valid_current                             | provider=stripe verdict=Accepted
+stripe_valid_stale_minus_600s                    | provider=stripe verdict=TimestampOutOfWindow
+stripe_valid_future_plus_600s                    | provider=stripe verdict=TimestampOutOfWindow
+stripe_valid_replayed                            | provider=stripe verdict=Replay
+stripe_wrong_signature                           | provider=stripe verdict=InvalidSignature
+slack_valid_current                              | provider=slack verdict=Accepted
+slack_valid_stale_minus_600s                     | provider=slack verdict=TimestampOutOfWindow
+slack_valid_replayed                             | provider=slack verdict=Replay
+slack_wrong_signature                            | provider=slack verdict=InvalidSignature

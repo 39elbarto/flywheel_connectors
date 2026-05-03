@@ -38193,6 +38193,77 @@ require_attestation_types = ["in-toto"]"#,
         );
     }
 
+    /// Direct unit-level pinning of [`validate_registry_binary_name`] across
+    /// every shape that should be rejected. The full install integration
+    /// test below covers the canonical `"../escaped-binary"` traversal end
+    /// to end; these cases pin the rest of the validator's contract so a
+    /// future refactor that loosens any one branch fails immediately
+    /// without requiring a registry-mock spin-up per case.
+    #[test]
+    fn validate_registry_binary_name_rejects_attack_shapes_and_accepts_safe_names() {
+        // Empty / whitespace-only inputs.
+        for raw in ["", "   ", "\t\n"] {
+            let err = validate_registry_binary_name(raw)
+                .expect_err(&format!("empty/whitespace `{raw:?}` must be rejected"));
+            assert!(
+                err.to_string().contains("must not be empty"),
+                "empty input must surface the empty-binary-name message; got: {err}"
+            );
+        }
+
+        // Path-traversal and non-relative-cache-internal shapes. Every one
+        // of these must produce the "must be a relative path inside the
+        // registry cache" message regardless of WHERE the offending
+        // component sits.
+        let traversal_cases = [
+            "../escaped-binary",       // ParentDir at start
+            "foo/../bar",              // ParentDir in middle
+            "../../etc/passwd",        // multiple ParentDir
+            "foo/bar/..",              // ParentDir at end
+            "/absolute/path",          // unix absolute
+            "/etc/passwd",             // unix absolute system path
+        ];
+        for raw in traversal_cases {
+            let err = validate_registry_binary_name(raw)
+                .expect_err(&format!("traversal-shape `{raw}` must be rejected"));
+            assert!(
+                err.to_string().contains("registry cache"),
+                "traversal `{raw}` must surface the registry-cache message; got: {err}"
+            );
+        }
+
+        // Windows shapes: on non-Windows, `Path` does not parse `\` as a
+        // separator, so backslash-bearing names fail the validator only
+        // through their other components (or pass through as filenames).
+        // Drive-letter / UNC prefixes ARE rejected on Windows via the
+        // `Component::Prefix(_)` arm; non-Windows hosts do not see them.
+        if cfg!(windows) {
+            for raw in [r"C:\Windows\System32", r"\\server\share\bin"] {
+                let err = validate_registry_binary_name(raw)
+                    .expect_err(&format!("windows-prefix `{raw}` must be rejected"));
+                assert!(
+                    err.to_string().contains("registry cache"),
+                    "windows prefix `{raw}` must surface the registry-cache message; got: {err}"
+                );
+            }
+        }
+
+        // Safe names: simple files and nested relative paths inside the
+        // cache. These must all pass — the cache layout is allowed to
+        // contain target-specific subdirectories.
+        for raw in [
+            "fcp-github",
+            "fcp-github.exe",
+            "bin/fcp-github",
+            "linux-amd64/bin/fcp-github",
+            "release/x86_64-unknown-linux-gnu/fcp-github",
+        ] {
+            validate_registry_binary_name(raw).unwrap_or_else(|err| {
+                panic!("safe binary name `{raw}` was rejected: {err}");
+            });
+        }
+    }
+
     #[test]
     fn install_registry_verify_only_rejects_binary_name_path_traversal() {
         let (_context_dir, _context_path, _guard) = temp_context_config();

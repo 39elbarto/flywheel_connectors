@@ -261,7 +261,7 @@ fn bench_resource_pool_placement(c: &mut Criterion) {
                 black_box(
                     candidates
                         .first()
-                        .map(|candidate| candidate.node_id.as_str()),
+                        .map(|candidate| candidate.node_id.clone()),
                 )
             });
         });
@@ -280,7 +280,7 @@ fn bench_resource_pool_placement(c: &mut Criterion) {
                     None,
                 );
                 black_box((
-                    plan.selected.as_ref().map(|node| node.node_id.as_str()),
+                    plan.selected.as_ref().map(|node| node.node_id.clone()),
                     evidence.resource_pool_decisions.len(),
                 ))
             });

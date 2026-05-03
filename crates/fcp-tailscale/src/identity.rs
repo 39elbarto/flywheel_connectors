@@ -228,12 +228,10 @@ impl MeshIdentity {
         )
     }
 
-    /// Check if the attestation is still valid (not expired).
+    /// Check if the attached attestation fully verifies for this identity.
     #[must_use]
     pub fn is_attestation_valid(&self) -> bool {
-        self.attestation
-            .as_ref()
-            .is_some_and(|a| a.expires_at > Utc::now())
+        self.verify_attestation().is_ok()
     }
 
     /// Get the FCP tags (zone memberships) for this node.
@@ -282,6 +280,9 @@ impl AttestationPayload<'_> {
     const SCHEMA: &'static str = "fcp.attestation.v1";
 }
 
+const MAX_NODE_ATTESTATION_VALIDITY_HOURS: u32 = 24;
+const NODE_ATTESTATION_CLOCK_SKEW_SECS: i64 = 300;
+
 fn canonical_tag_strings(tags: &[TailscaleTag]) -> Vec<&str> {
     let mut tags = tags.iter().map(TailscaleTag::as_str).collect::<Vec<_>>();
     tags.sort_unstable();
@@ -326,7 +327,7 @@ impl NodeKeyAttestation {
         validity_hours: u32,
     ) -> TailscaleResult<Self> {
         let now = Utc::now();
-        let safe_hours = validity_hours.min(24 * 365 * 100); // 100 years max
+        let safe_hours = validity_hours.min(MAX_NODE_ATTESTATION_VALIDITY_HOURS);
         let expires_at = now + chrono::Duration::hours(i64::from(safe_hours));
 
         let payload = AttestationPayload {
@@ -371,9 +372,23 @@ impl NodeKeyAttestation {
         node_keys: &NodeKeys,
         tags: &[TailscaleTag],
     ) -> TailscaleResult<()> {
-        // Check expiration
-        if self.expires_at <= Utc::now() {
+        let now = Utc::now();
+        if self.expires_at <= now {
             return Err(TailscaleError::AttestationExpired);
+        }
+
+        if self.issued_at > now + chrono::Duration::seconds(NODE_ATTESTATION_CLOCK_SKEW_SECS) {
+            return Err(TailscaleError::InvalidAttestation);
+        }
+
+        if self.expires_at <= self.issued_at {
+            return Err(TailscaleError::InvalidAttestation);
+        }
+
+        let validity_window = self.expires_at - self.issued_at;
+        if validity_window > chrono::Duration::hours(i64::from(MAX_NODE_ATTESTATION_VALIDITY_HOURS))
+        {
+            return Err(TailscaleError::InvalidAttestation);
         }
 
         // Verify signer matches
@@ -436,6 +451,37 @@ mod tests {
         );
 
         (owner_key, node_keys)
+    }
+
+    fn sign_test_attestation_with_window(
+        owner_key: &Ed25519SigningKey,
+        node_id: &NodeId,
+        node_keys: &NodeKeys,
+        tags: &[TailscaleTag],
+        issued_at: DateTime<Utc>,
+        expires_at: DateTime<Utc>,
+    ) -> NodeKeyAttestation {
+        let payload = AttestationPayload {
+            schema: AttestationPayload::SCHEMA,
+            node_id: node_id.as_str(),
+            signing_kid: node_keys.signing_kid().to_hex(),
+            encryption_kid: node_keys.encryption_kid().to_hex(),
+            issuance_kid: node_keys.issuance_kid().to_hex(),
+            tags: canonical_tag_strings(tags),
+            issued_at: issued_at.timestamp(),
+            expires_at: expires_at.timestamp(),
+        };
+        let signing_bytes = fcp_crypto::canonical_signing_bytes(
+            AttestationPayload::SCHEMA,
+            &fcp_crypto::canonicalize::to_deterministic_cbor(&payload).unwrap(),
+        );
+
+        NodeKeyAttestation {
+            issued_at,
+            expires_at,
+            signature: owner_key.sign(&signing_bytes),
+            signer_kid: owner_key.key_id(),
+        }
     }
 
     #[test]
@@ -932,21 +978,75 @@ mod tests {
     // --- Attestation with very large validity_hours ---
 
     #[test]
-    fn test_attestation_large_validity() {
+    fn test_attestation_large_validity_is_capped() {
         let (owner_key, node_keys) = create_test_keys();
         let node_id = NodeId::new("long-lived");
         let tags = vec![TailscaleTag::fcp_tag("community")];
-        // 10 years in hours
         let attestation =
             NodeKeyAttestation::sign(&owner_key, &node_id, &node_keys, &tags, 87_600).unwrap();
 
+        assert_eq!(
+            attestation.expires_at - attestation.issued_at,
+            chrono::Duration::hours(i64::from(MAX_NODE_ATTESTATION_VALIDITY_HOURS))
+        );
         assert!(!attestation.is_expired());
         let remaining = attestation.remaining_validity();
-        // Should be at least 87_000 hours remaining (allowing for test execution time)
-        assert!(remaining.num_hours() >= 87_000);
+        assert!(remaining.num_hours() <= i64::from(MAX_NODE_ATTESTATION_VALIDITY_HOURS));
         attestation
             .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
             .unwrap();
+    }
+
+    #[test]
+    fn test_attestation_verify_rejects_overlong_signed_window() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("overlong");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let issued_at = Utc::now() - chrono::Duration::hours(1);
+        let expires_at =
+            issued_at + chrono::Duration::hours(i64::from(MAX_NODE_ATTESTATION_VALIDITY_HOURS) + 1);
+        let attestation = sign_test_attestation_with_window(
+            &owner_key, &node_id, &node_keys, &tags, issued_at, expires_at,
+        );
+
+        let err = attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap_err();
+        assert!(matches!(err, TailscaleError::InvalidAttestation));
+    }
+
+    #[test]
+    fn test_attestation_verify_rejects_future_issued_signed_window() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("future-issued");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let issued_at =
+            Utc::now() + chrono::Duration::seconds(NODE_ATTESTATION_CLOCK_SKEW_SECS + 1);
+        let expires_at = issued_at + chrono::Duration::hours(1);
+        let attestation = sign_test_attestation_with_window(
+            &owner_key, &node_id, &node_keys, &tags, issued_at, expires_at,
+        );
+
+        let err = attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap_err();
+        assert!(matches!(err, TailscaleError::InvalidAttestation));
+    }
+
+    #[test]
+    fn test_attestation_verify_rejects_non_positive_validity_window() {
+        let (owner_key, node_keys) = create_test_keys();
+        let node_id = NodeId::new("zero-window-future");
+        let tags = vec![TailscaleTag::fcp_tag("work")];
+        let issued_at = Utc::now() + chrono::Duration::seconds(60);
+        let attestation = sign_test_attestation_with_window(
+            &owner_key, &node_id, &node_keys, &tags, issued_at, issued_at,
+        );
+
+        let err = attestation
+            .verify(&owner_key.verifying_key(), &node_id, &node_keys, &tags)
+            .unwrap_err();
+        assert!(matches!(err, TailscaleError::InvalidAttestation));
     }
 
     // --- MeshIdentity serde roundtrip ---
@@ -1469,8 +1569,8 @@ mod tests {
     #[test]
     fn test_mesh_identity_many_tags() {
         // `fcp_tags()` was tightened in commit 8a0d49596 to surface
-        // tags ONLY when `is_attestation_valid()` holds — without an
-        // attestation it returns the empty Vec. The legacy form of
+        // tags ONLY when the attached attestation verifies — without
+        // an attestation it returns the empty Vec. The legacy form of
         // this test built `MeshIdentity::new(...)` without an
         // attestation and asserted `fcp_tags().len() == 10`, which
         // post-tightening is unconditionally 0. Real production
@@ -2329,7 +2429,7 @@ mod tests {
         )
         .with_attestation(attestation);
 
-        assert!(identity.is_attestation_valid());
+        assert!(!identity.is_attestation_valid());
         assert!(identity.verify_attestation().is_err());
         assert!(
             identity.fcp_tags().is_empty(),

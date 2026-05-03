@@ -733,6 +733,25 @@ fn batch_operation_json(
     })
 }
 
+fn scheduled_batch_operation_json(
+    id: &str,
+    request: InvokeRequest,
+    estimated_duration_ms: u64,
+) -> serde_json::Value {
+    let mut operation = batch_operation_json(id, request, &[]);
+    operation
+        .as_object_mut()
+        .expect("batch operation json object")
+        .insert(
+            "scheduler".to_string(),
+            json!({
+                "estimated_duration_ms": estimated_duration_ms,
+                "fairness_key": "z:work",
+            }),
+        );
+    operation
+}
+
 #[fcp_async_core::runtime::test]
 async fn host_discovery_with_subprocess_connectors() -> Result<(), Box<dyn std::error::Error>> {
     let connector_a_id = ConnectorId::from_static("fcp.test.echo:utility:1.0.0");
@@ -1892,31 +1911,30 @@ impl MatrixFixtureHealthState {
         }
     }
 
-    fn assert_matches(self, actual: &ConnectorHealth, connector_id: &ConnectorId) {
+    fn assert_matches(
+        self,
+        actual: &ConnectorHealth,
+        connector_id: &ConnectorId,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         match (self, actual) {
-            (Self::Ready, ConnectorHealth::Healthy) => {}
-            (Self::Degraded, ConnectorHealth::Degraded { reason }) => {
-                assert_eq!(
-                    reason,
-                    "fixture degraded",
-                    "connector {} should report degraded reason",
-                    connector_id.as_str()
-                );
+            (Self::Ready, ConnectorHealth::Healthy) => Ok(()),
+            (Self::Degraded, ConnectorHealth::Degraded { reason })
+                if reason == "fixture degraded" =>
+            {
+                Ok(())
             }
-            (Self::Error, ConnectorHealth::Unavailable { reason, .. }) => {
-                assert_eq!(
-                    reason,
-                    "fixture unavailable",
-                    "connector {} should report unavailable reason",
-                    connector_id.as_str()
-                );
+            (Self::Error, ConnectorHealth::Unavailable { reason, .. })
+                if reason == "fixture unavailable" =>
+            {
+                Ok(())
             }
-            (expected, actual) => panic!(
+            (expected, actual) => Err(format!(
                 "connector {} health mismatch: expected {:?}, got {:?}",
                 connector_id.as_str(),
                 expected,
                 actual
-            ),
+            )
+            .into()),
         }
     }
 }
@@ -2275,14 +2293,16 @@ async fn fcp_host_binary_fixture_matrix_surfaces_discovery_and_introspection_met
 
     for fixture in HOST_INTEGRATION_FIXTURES {
         let connector_id = fixture.connector_id();
-        let connector = discovery
+        let Some(connector) = discovery
             .connectors
             .iter()
             .find(|connector| connector.id == connector_id)
-            .unwrap_or_else(|| panic!("missing fixture {}", connector_id.as_str()));
+        else {
+            return Err(format!("missing fixture {}", connector_id.as_str()).into());
+        };
         fixture
             .health_state
-            .assert_matches(&connector.health, &connector_id);
+            .assert_matches(&connector.health, &connector_id)?;
 
         for tag in fixture.categories() {
             assert!(
@@ -2787,7 +2807,7 @@ async fn fcp_host_binary_preflight_route_matches_capability_verification_vectors
 
     let now = Utc::now();
     for case in cases {
-        let capability_token = match case.token_mode {
+        let capability = match case.token_mode {
             CapabilityPreflightVectorTokenMode::Missing => None,
             CapabilityPreflightVectorTokenMode::Signed => {
                 let signing_key = signing_key_from_hex(
@@ -2825,7 +2845,7 @@ async fn fcp_host_binary_preflight_route_matches_capability_verification_vectors
             build_vector_preflight_request(
                 connector_id.clone(),
                 &case.principal_override,
-                capability_token,
+                capability,
             ),
         )
         .await?;
@@ -3281,6 +3301,103 @@ async fn fcp_host_binary_batch_route_executes_multiple_invokes()
             .and_then(Value::as_str),
         Some("second")
     );
+
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test(flavor = "multi_thread")]
+async fn fcp_host_binary_batch_route_returns_adaptive_scheduler_replay_summary()
+-> Result<(), Box<dyn std::error::Error>> {
+    let connector_id = ConnectorId::from_static("fcp.test.batch-adaptive-http:utility:1.0.0");
+    let capability_signing_key = Ed25519SigningKey::generate();
+    let capability_public_key = capability_public_key_hex(&capability_signing_key);
+    let host = HttpHostProcess::spawn_with_env(
+        vec![test_connector_config(
+            &connector_id,
+            "Batch Adaptive Echo",
+            &["test", "batch"],
+        )],
+        &[(
+            "FCP_HOST_CAPABILITY_PUBLIC_KEY",
+            capability_public_key.as_str(),
+        )],
+    )
+    .await?;
+    let url = |path: &str| format!("{}{path}", host.base_url);
+
+    let (mut long_request, _) = build_invoke_request(connector_id.clone(), &capability_signing_key);
+    long_request.input = json!({ "message": "long" });
+    let (mut short_a_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    short_a_request.input = json!({ "message": "short-a" });
+    let (mut short_b_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    short_b_request.input = json!({ "message": "short-b" });
+    let (mut short_c_request, _) =
+        build_invoke_request(connector_id.clone(), &capability_signing_key);
+    short_c_request.input = json!({ "message": "short-c" });
+
+    let response: BatchInvokeResponse = http_post_json(
+        host.client.clone(),
+        url("/rpc/batch"),
+        json!({
+            "operations": [
+                scheduled_batch_operation_json("long", long_request, 1_000),
+                scheduled_batch_operation_json("short-a", short_a_request, 1),
+                scheduled_batch_operation_json("short-b", short_b_request, 1),
+                scheduled_batch_operation_json("short-c", short_c_request, 1),
+            ],
+            "options": {
+                "max_parallelism": 1,
+                "stop_on_first_error": false,
+                "timeout_ms": 30_000,
+                "scheduler": {
+                    "mode": "adaptive",
+                    "max_consecutive_per_fairness_key": 8,
+                },
+            }
+        }),
+    )
+    .await?;
+
+    assert_eq!(response.status, BatchStatus::Success);
+    assert_eq!(response.completed, 4);
+    assert_eq!(response.failed, 0);
+    assert_eq!(response.skipped, 0);
+
+    let report = response
+        .schedule_report
+        .expect("adaptive batch response should include schedule report");
+    assert!(!report.fallback);
+    assert_eq!(report.total_operations, 4);
+    assert_eq!(
+        report.original_tiers,
+        vec![vec![
+            "long".to_string(),
+            "short-a".to_string(),
+            "short-b".to_string(),
+            "short-c".to_string(),
+        ]]
+    );
+    assert_eq!(
+        report.scheduled_tiers,
+        vec![vec![
+            "short-a".to_string(),
+            "short-b".to_string(),
+            "short-c".to_string(),
+            "long".to_string(),
+        ]]
+    );
+    let summary = report
+        .queueing_summary
+        .expect("adaptive schedule report should include queueing summary");
+    assert_eq!(summary.sample_count, 4);
+    assert!(summary.p99_wait_improvement_ms >= 999);
+    assert!(summary.p999_wait_improvement_ms >= 999);
+    assert_eq!(summary.max_wait_increase_ms, 3);
+    assert_eq!(summary.promoted_operations, 3);
+    assert_eq!(summary.delayed_operations, 1);
+    assert_eq!(report.decisions.len(), 4);
 
     Ok(())
 }

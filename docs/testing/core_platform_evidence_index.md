@@ -219,10 +219,18 @@ the original tiers, scheduled tiers, per-operation actions, and FIFO-vs-schedule
 wait counterfactuals so test harnesses can replay the plan without trusting log
 text.
 
+The replay report also carries a compact queueing summary with p50/p95/p99/p999
+FIFO waits, scheduled waits, p99/p999 wait improvement, promoted/delayed counts,
+and the maximum per-operation wait increase. The 1k-operation deterministic
+replay test intentionally uses a skewed long-then-short workload to prove p99
+and p999 queueing gains while bounding long-operation delay.
+
 Targeted verification:
 
 ```bash
 rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler cargo test -p fcp-host batch_scheduler --lib
+
+rch exec -- env CARGO_TARGET_DIR=/tmp/fcp-swarm-batch-scheduler-bench cargo bench -p fcp-host --bench batch_scheduler -- --sample-size 10 --warm-up-time 1 --measurement-time 2
 ```
 
 ## Known Flakes and Workarounds

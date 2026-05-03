@@ -5,8 +5,9 @@
 //! aggregate status strings, and result/error optional-field behavior.
 
 use fcp_host::{
-    BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError, BatchOptions,
-    BatchScheduleHint, BatchSchedulerMode, BatchStatus, OperationResult, OperationResultStatus,
+    BatchExecutor, BatchInvokeRequest, BatchInvokeResponse, BatchOperation, BatchOperationError,
+    BatchOperationPriority, BatchOptions, BatchScheduleHint, BatchSchedulerMode,
+    BatchSchedulerOptions, BatchStatus, OperationResult, OperationResultStatus,
 };
 use serde_json::json;
 
@@ -19,6 +20,16 @@ fn operation(id: &str) -> BatchOperation {
         zone: None,
         scheduler: BatchScheduleHint::default(),
     }
+}
+
+fn scheduled_operation(id: &str, estimated_duration_ms: u64) -> BatchOperation {
+    let mut operation = operation(id);
+    operation.scheduler = BatchScheduleHint {
+        priority: BatchOperationPriority::Normal,
+        estimated_duration_ms: Some(estimated_duration_ms),
+        fairness_key: None,
+    };
+    operation
 }
 
 #[test]
@@ -211,4 +222,53 @@ fn batch_response_preserves_submission_order_and_counts() {
     let parsed: BatchInvokeResponse = serde_json::from_value(value).expect("response parse");
     assert_eq!(parsed.status, BatchStatus::PartialSuccess);
     assert_eq!(parsed.results[2].status, OperationResultStatus::Skipped);
+}
+
+#[test]
+fn adaptive_batch_response_wire_carries_queueing_summary() {
+    let request = BatchInvokeRequest {
+        operations: vec![
+            scheduled_operation("long", 1_000),
+            scheduled_operation("short", 1),
+        ],
+        options: BatchOptions {
+            scheduler: BatchSchedulerOptions {
+                mode: BatchSchedulerMode::Adaptive,
+                max_consecutive_per_fairness_key: 2,
+            },
+            ..Default::default()
+        },
+    };
+    let response = BatchExecutor::new()
+        .execute_sync(&request, |_operation| Ok(json!({ "ok": true })))
+        .expect("adaptive execute");
+
+    let value = serde_json::to_value(&response).expect("response serialize");
+    assert_eq!(
+        value["schedule_report"]["queueing_summary"]["sample_count"],
+        json!(2)
+    );
+    assert_eq!(
+        value["schedule_report"]["queueing_summary"]["promoted_operations"],
+        json!(1)
+    );
+    assert_eq!(
+        value["schedule_report"]["queueing_summary"]["delayed_operations"],
+        json!(1)
+    );
+    assert!(
+        value["schedule_report"]["queueing_summary"]["scheduled_wait"]
+            .get("p99_ms")
+            .is_some(),
+        "queueing summary MUST expose p99 wait for replay consumers"
+    );
+
+    let parsed: BatchInvokeResponse = serde_json::from_value(value).expect("response parse");
+    let summary = parsed
+        .schedule_report
+        .expect("schedule report present")
+        .queueing_summary
+        .expect("queueing summary present");
+    assert_eq!(summary.sample_count, 2);
+    assert_eq!(summary.promoted_operations, 1);
 }

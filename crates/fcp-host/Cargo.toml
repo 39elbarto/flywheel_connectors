@@ -97,3 +97,7 @@ harness = false
 [[bench]]
 name = "invoke_audit_throughput"
 harness = false
+
+[[bench]]
+name = "batch_scheduler"
+harness = false

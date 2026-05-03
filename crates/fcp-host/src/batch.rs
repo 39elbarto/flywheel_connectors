@@ -372,8 +372,80 @@ pub struct BatchScheduleReport {
     /// Human-readable fallback reason when `fallback` is true.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+    /// Compact FIFO-vs-scheduled queue-wait replay summary.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queueing_summary: Option<BatchScheduleQueueingSummary>,
     /// Per-operation decisions.
     pub decisions: Vec<BatchScheduleDecision>,
+}
+
+/// Nearest-rank queue-wait percentiles in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct BatchScheduleWaitPercentiles {
+    /// 50th percentile wait.
+    pub p50_ms: u64,
+    /// 95th percentile wait.
+    pub p95_ms: u64,
+    /// 99th percentile wait.
+    pub p99_ms: u64,
+    /// 99.9th percentile wait.
+    pub p999_ms: u64,
+    /// Maximum observed wait.
+    pub max_ms: u64,
+    /// Integer mean wait.
+    pub mean_ms: u64,
+}
+
+impl BatchScheduleWaitPercentiles {
+    /// Compute nearest-rank percentiles from millisecond wait samples.
+    #[must_use]
+    pub fn from_millis<I>(samples: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = u64>,
+    {
+        let mut sorted: Vec<u64> = samples.into_iter().collect();
+        if sorted.is_empty() {
+            return None;
+        }
+        sorted.sort_unstable();
+        let sum = sorted
+            .iter()
+            .fold(0_u128, |acc, value| acc.saturating_add(u128::from(*value)));
+        let sample_count = u64::try_from(sorted.len()).unwrap_or(u64::MAX);
+        let mean = sum / u128::from(sample_count.max(1));
+        let mean_ms = u64::try_from(mean).unwrap_or(u64::MAX);
+
+        Some(Self {
+            p50_ms: nearest_rank_millis(&sorted, 500),
+            p95_ms: nearest_rank_millis(&sorted, 950),
+            p99_ms: nearest_rank_millis(&sorted, 990),
+            p999_ms: nearest_rank_millis(&sorted, 999),
+            max_ms: sorted[sorted.len() - 1],
+            mean_ms,
+        })
+    }
+}
+
+/// Compact replay summary for FIFO-vs-scheduled queue waits.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchScheduleQueueingSummary {
+    /// Number of decisions included in the queue-wait replay.
+    pub sample_count: usize,
+    /// FIFO queue-wait percentiles.
+    pub fifo_wait: BatchScheduleWaitPercentiles,
+    /// Scheduled queue-wait percentiles.
+    pub scheduled_wait: BatchScheduleWaitPercentiles,
+    /// FIFO p99 minus scheduled p99. Positive means adaptive scheduling improved p99.
+    pub p99_wait_improvement_ms: i64,
+    /// FIFO p99.9 minus scheduled p99.9. Positive means adaptive scheduling improved p99.9.
+    pub p999_wait_improvement_ms: i64,
+    /// Largest per-operation wait increase versus FIFO.
+    pub max_wait_increase_ms: i64,
+    /// Number of operations moved earlier by priority or short-job ordering.
+    pub promoted_operations: usize,
+    /// Number of operations moved later than FIFO.
+    pub delayed_operations: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -670,7 +742,10 @@ impl BatchExecutor {
     where
         F: Fn(&BatchOperation) -> Result<serde_json::Value, BatchOperationError>,
     {
-        let plan = self.plan(request)?;
+        let (plan, schedule_report) = self.plan_with_schedule_report(request)?;
+        let schedule_report =
+            matches!(request.options.scheduler.mode, BatchSchedulerMode::Adaptive)
+                .then_some(schedule_report);
         let start = Instant::now();
         let timeout = Duration::from_millis(request.options.timeout_ms);
         let op_map: HashMap<&str, &BatchOperation> = request
@@ -709,7 +784,13 @@ impl BatchExecutor {
             );
         }
 
-        Ok(build_response(request, results_map, aborted, start))
+        Ok(build_response(
+            request,
+            results_map,
+            aborted,
+            start,
+            schedule_report,
+        ))
     }
 }
 
@@ -943,6 +1024,7 @@ fn schedule_tiers_with_report(
             scheduled_tiers: scheduled_tier_ids,
             fallback,
             fallback_reason: fallback.then(|| "scheduler mode is fifo".to_owned()),
+            queueing_summary: queueing_summary_from_decisions(&decisions),
             decisions,
         },
     )
@@ -1098,6 +1180,57 @@ fn wait_before_by_operation<'a>(
     waits
 }
 
+fn nearest_rank_millis(sorted: &[u64], per_mille: usize) -> u64 {
+    let len = sorted.len();
+    let rank = len.saturating_mul(per_mille).saturating_add(999) / 1_000;
+    let index = rank.saturating_sub(1).min(len - 1);
+    sorted[index]
+}
+
+fn queueing_summary_from_decisions(
+    decisions: &[BatchScheduleDecision],
+) -> Option<BatchScheduleQueueingSummary> {
+    let fifo_wait = BatchScheduleWaitPercentiles::from_millis(
+        decisions
+            .iter()
+            .map(|decision| decision.counterfactual.fifo_wait_before_ms),
+    )?;
+    let scheduled_wait = BatchScheduleWaitPercentiles::from_millis(
+        decisions
+            .iter()
+            .map(|decision| decision.counterfactual.scheduled_wait_before_ms),
+    )?;
+    let max_wait_increase_ms = decisions
+        .iter()
+        .map(|decision| decision.counterfactual.wait_delta_ms.max(0))
+        .max()
+        .unwrap_or(0);
+    let promoted_operations = decisions
+        .iter()
+        .filter(|decision| {
+            matches!(
+                decision.action,
+                BatchScheduleAction::PriorityPromote | BatchScheduleAction::ShortJobPromote
+            )
+        })
+        .count();
+    let delayed_operations = decisions
+        .iter()
+        .filter(|decision| decision.counterfactual.wait_delta_ms > 0)
+        .count();
+
+    Some(BatchScheduleQueueingSummary {
+        sample_count: decisions.len(),
+        fifo_wait,
+        scheduled_wait,
+        p99_wait_improvement_ms: signed_millis_delta(fifo_wait.p99_ms, scheduled_wait.p99_ms),
+        p999_wait_improvement_ms: signed_millis_delta(fifo_wait.p999_ms, scheduled_wait.p999_ms),
+        max_wait_increase_ms,
+        promoted_operations,
+        delayed_operations,
+    })
+}
+
 const fn schedule_action(
     mode: BatchSchedulerMode,
     fifo_position: usize,
@@ -1124,7 +1257,11 @@ const fn schedule_action(
 }
 
 fn wait_delta_ms(scheduled_wait: u64, fifo_wait: u64) -> i64 {
-    let delta = i128::from(scheduled_wait) - i128::from(fifo_wait);
+    signed_millis_delta(scheduled_wait, fifo_wait)
+}
+
+fn signed_millis_delta(left: u64, right: u64) -> i64 {
+    let delta = i128::from(left) - i128::from(right);
     let clamped = delta.clamp(i128::from(i64::MIN), i128::from(i64::MAX));
     i64::try_from(clamped).unwrap_or_else(|_| unreachable!("clamped wait delta must fit in i64"))
 }
@@ -1248,6 +1385,7 @@ fn build_response(
     mut results_map: HashMap<String, OperationResult>,
     aborted: bool,
     started_at: Instant,
+    schedule_report: Option<BatchScheduleReport>,
 ) -> BatchInvokeResponse {
     let results: Vec<OperationResult> = request
         .operations
@@ -1279,7 +1417,7 @@ fn build_response(
         skipped,
         results,
         total_duration_ms: elapsed_millis(started_at),
-        schedule_report: None,
+        schedule_report,
     }
 }
 
@@ -1355,6 +1493,29 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    fn skewed_swarm_scheduler_ops() -> Vec<BatchOperation> {
+        let mut operations = Vec::with_capacity(1_000);
+        for index in 0..10 {
+            operations.push(scheduled_op(
+                &format!("long_{index:02}"),
+                BatchOperationPriority::Normal,
+                10_000,
+                Some("tenant-long"),
+                &[],
+            ));
+        }
+        for index in 0..990 {
+            operations.push(scheduled_op(
+                &format!("short_{index:03}"),
+                BatchOperationPriority::Normal,
+                1,
+                Some(&format!("tenant-short-{}", index % 64)),
+                &[],
+            ));
+        }
+        operations
     }
 
     fn ok_output(_op: &BatchOperation) -> serde_json::Value {
@@ -1652,6 +1813,42 @@ mod tests {
     }
 
     #[test]
+    fn batch_scheduler_replay_summary_proves_tail_queueing_gain_without_starvation() {
+        let executor = BatchExecutor::new();
+        let req = adaptive_request(skewed_swarm_scheduler_ops());
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+        let summary = report
+            .queueing_summary
+            .as_ref()
+            .expect("adaptive report should include queueing summary");
+
+        assert_eq!(summary.sample_count, 1_000);
+        assert_eq!(summary.promoted_operations, 990);
+        assert_eq!(summary.delayed_operations, 10);
+        assert!(
+            summary.p99_wait_improvement_ms > 90_000,
+            "expected p99 queueing gain from short-job promotion; got {summary:?}"
+        );
+        assert!(
+            summary.p999_wait_improvement_ms > 10_000,
+            "expected p99.9 queueing gain from short-job promotion; got {summary:?}"
+        );
+        assert!(
+            summary.max_wait_increase_ms <= 990,
+            "long jobs may wait behind the short burst but must not starve; got {summary:?}"
+        );
+        assert_eq!(summary.scheduled_wait.p99_ms, 989);
+        assert_eq!(summary.fifo_wait.p99_ms, 100_979);
+        assert_eq!(
+            plan.tiers[0]
+                .operation_ids
+                .first()
+                .expect("scheduled tier has operations"),
+            "short_000"
+        );
+    }
+
+    #[test]
     fn batch_scheduler_adaptive_interleaves_fairness_buckets() {
         let executor = BatchExecutor::new();
         let req = adaptive_request(vec![
@@ -1726,6 +1923,32 @@ mod tests {
                 vec!["dependent_critical".to_string()]
             ]
         );
+    }
+
+    #[test]
+    fn execute_sync_adaptive_response_includes_replay_summary() {
+        let executor = BatchExecutor::new();
+        let req = adaptive_request(vec![
+            scheduled_op("long", BatchOperationPriority::Normal, 1_000, None, &[]),
+            scheduled_op("short", BatchOperationPriority::Normal, 1, None, &[]),
+        ]);
+
+        let response = executor
+            .execute_sync(&req, |operation| {
+                Ok(serde_json::json!({ "id": operation.id }))
+            })
+            .unwrap();
+        let report = response
+            .schedule_report
+            .expect("adaptive execute_sync response should carry replay report");
+        let summary = report
+            .queueing_summary
+            .expect("adaptive replay report should carry queueing summary");
+
+        assert_eq!(summary.sample_count, 2);
+        assert_eq!(summary.promoted_operations, 1);
+        assert_eq!(summary.delayed_operations, 1);
+        assert_eq!(summary.max_wait_increase_ms, 1);
     }
 
     // ── Execution Tests ──

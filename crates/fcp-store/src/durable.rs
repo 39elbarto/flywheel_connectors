@@ -689,14 +689,20 @@ impl DurableSymbolState {
             .objects
             .get_mut(object_id)
             .ok_or(SymbolStoreError::ObjectNotFound(*object_id))?;
-        let symbol = object
-            .symbols
-            .remove(&esi)
-            .ok_or(SymbolStoreError::NotFound {
-                object_id: *object_id,
-                esi,
-            })?;
-        self.used_bytes = self.used_bytes.saturating_sub(Self::symbol_size(&symbol));
+        // Tolerate "symbol already absent": after `record_mutation`'s
+        // read-locked validate, a concurrent reader can take the write
+        // lock and run `scrub_object_if_present`, which removes any
+        // size-mismatched (corrupt) symbol. If `esi` was that symbol,
+        // the WAL entry is already on disk and apply must converge on
+        // the requested post-condition (esi absent) instead of
+        // returning NotFound. Public delete_symbol still surfaces
+        // NotFound for symbols that never existed because validate
+        // runs before WAL append. The same tolerance keeps WAL replay
+        // robust against snapshots that already had the corrupt
+        // symbol scrubbed at load time.
+        if let Some(symbol) = object.symbols.remove(&esi) {
+            self.used_bytes = self.used_bytes.saturating_sub(Self::symbol_size(&symbol));
+        }
         Ok(())
     }
 }
@@ -2543,6 +2549,92 @@ mod tests {
                 .len(),
             1,
             "corrupt symbol should be removed"
+        );
+    }
+
+    /// `record_mutation` validates under a read lock, releases the lock for
+    /// the WAL append, then reacquires the write lock to call
+    /// `apply_loaded_mutation`. A concurrent reader can take the write lock
+    /// in that gap and run `scrub_object_if_present`, which removes any
+    /// corrupt (size-mismatched) symbol. If the in-flight WAL op is
+    /// `DeleteSymbol{esi}` for that exact corrupt symbol, the WAL entry is
+    /// already on disk; `apply_delete_symbol` MUST converge on the
+    /// requested post-condition (esi absent) instead of returning NotFound,
+    /// otherwise the WAL replay path also fails on every restart.
+    #[test]
+    fn apply_delete_symbol_tolerates_already_scrubbed_target() {
+        let meta = test_symbol_meta(13);
+        let valid = test_symbol(13, 0, 9);
+        let valid_size = DurableSymbolState::symbol_size(&valid);
+
+        let mut state = DurableSymbolState::default();
+        state
+            .apply_put_object_meta(meta.clone())
+            .expect("object meta should load");
+        state
+            .apply_put_symbol(PersistentStoredSymbol {
+                meta: valid.meta.clone(),
+                data: valid.data.to_vec(),
+            })
+            .expect("valid symbol should load");
+
+        // Inject a corrupt symbol that scrub will remove on the next read.
+        let corrupt_esi = 77;
+        let corrupt = StoredSymbol {
+            meta: SymbolMeta {
+                object_id: meta.object_id,
+                esi: corrupt_esi,
+                zone_id: meta.zone_id.clone(),
+                source_node: Some(77),
+                stored_at: 77,
+            },
+            data: Bytes::from(vec![0xCD; usize::from(meta.oti.symbol_size) - 1]),
+        };
+        let corrupt_size = DurableSymbolState::symbol_size(&corrupt);
+        state.used_bytes = state.used_bytes.saturating_add(corrupt_size);
+        state
+            .objects
+            .get_mut(&meta.object_id)
+            .expect("object must exist")
+            .symbols
+            .insert(corrupt.meta.esi, corrupt);
+
+        // Simulate the validate→scrub→apply race: the read-locked validate
+        // saw the corrupt symbol present, then a concurrent reader scrubbed
+        // it, and now apply runs against the scrubbed state.
+        assert!(state.scrub_object_if_present(&meta.object_id));
+        assert!(
+            !state
+                .objects
+                .get(&meta.object_id)
+                .expect("object should remain")
+                .symbols
+                .contains_key(&corrupt_esi),
+            "scrub must have removed the corrupt symbol before apply runs"
+        );
+
+        // Apply MUST succeed even though the symbol is no longer present.
+        state
+            .apply_loaded_mutation(SymbolWalOp::DeleteSymbol {
+                object_id: meta.object_id,
+                esi: corrupt_esi,
+            })
+            .expect("apply_delete_symbol must tolerate scrub-removed targets");
+
+        // The valid symbol is unchanged and quota accounting is consistent.
+        assert_eq!(
+            state.used_bytes, valid_size,
+            "used_bytes must reflect only the valid symbol after the tolerated apply"
+        );
+        assert_eq!(
+            state
+                .objects
+                .get(&meta.object_id)
+                .expect("object should remain")
+                .symbols
+                .len(),
+            1,
+            "valid symbol must remain after the tolerated apply"
         );
     }
 

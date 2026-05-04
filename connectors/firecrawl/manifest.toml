@@ -5,20 +5,20 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:firecrawl-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:firecrawl-search-scrape-crawl"
 
 [connector]
 id = "fcp.firecrawl"
 name = "Firecrawl"
 version = "0.1.0"
-description = "Firecrawl connector for scrape and crawl orchestration"
+description = "Firecrawl connector for search, scrape, and crawl orchestration"
 archetypes = ["request-response"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: scrape, crawl.start, and crawl.status. Search and extract are deferred."
+migration_hint = "Current slice: search, scrape, crawl.start, and crawl.status. Extract, map, browser sessions, and private self-hosted endpoints are deferred."
 
 [zones]
 home = "z:work"

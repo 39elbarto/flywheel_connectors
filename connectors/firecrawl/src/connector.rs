@@ -12,17 +12,21 @@ use tracing::info;
 use url::Url;
 
 use crate::client::FirecrawlClient;
-use crate::types::{CrawlRequest, ScrapeRequest};
+use crate::types::{CrawlRequest, ScrapeRequest, SearchRequest, SearchScrapeOptions};
 
 const CONNECTOR_ID: &str = "fcp.firecrawl";
 const CONNECTOR_VERSION: &str = "0.1.0";
 
 const OP_SCRAPE: &str = "firecrawl.scrape";
+const OP_SEARCH: &str = "firecrawl.search";
 const OP_CRAWL_START: &str = "firecrawl.crawl.start";
 const OP_CRAWL_STATUS: &str = "firecrawl.crawl.status";
 
 const FIRECRAWL_ALLOWED_HOSTS: &[&str] = &["api.firecrawl.dev"];
 const FIRECRAWL_PROXY_MODES: &[&str] = &["auto", "basic", "stealth"];
+const FIRECRAWL_SEARCH_SOURCES: &[&str] = &["web", "images", "news"];
+const FIRECRAWL_SEARCH_CATEGORIES: &[&str] = &["github", "research", "pdf"];
+const FIRECRAWL_ENTERPRISE_OPTIONS: &[&str] = &["anon", "zdr"];
 
 #[derive(Clone, serde::Deserialize)]
 pub struct FirecrawlConfig {
@@ -242,7 +246,7 @@ impl FirecrawlConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["firecrawl.scrape", "firecrawl.crawl"],
+            "capabilities": ["firecrawl.search", "firecrawl.scrape", "firecrawl.crawl"],
             "surface_status": "live"
         }))
     }
@@ -306,6 +310,7 @@ impl FirecrawlConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
+                { "id": OP_SEARCH, "summary": "Search the web with Firecrawl", "capability": "firecrawl.search", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live },
                 { "id": OP_SCRAPE, "summary": "Scrape a single URL with Firecrawl", "capability": "firecrawl.scrape", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live },
                 { "id": OP_CRAWL_START, "summary": "Start a Firecrawl crawl job", "capability": "firecrawl.crawl", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": live },
                 { "id": OP_CRAWL_STATUS, "summary": "Check Firecrawl crawl status", "capability": "firecrawl.crawl", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live }
@@ -339,6 +344,63 @@ impl FirecrawlConnector {
         })?;
 
         let output = match operation {
+            OP_SEARCH => {
+                let mut req = SearchRequest::new(validated_search_query(&input)?);
+                if let Some(v) = validated_search_limit(&input, "limit")? {
+                    req.limit = Some(v);
+                }
+                if let Some(sources) =
+                    validated_enum_array(&input, "sources", FIRECRAWL_SEARCH_SOURCES)?
+                {
+                    req.sources = sources;
+                }
+                if let Some(categories) =
+                    validated_enum_array(&input, "categories", FIRECRAWL_SEARCH_CATEGORIES)?
+                {
+                    req.categories = categories;
+                }
+                if let Some(v) = validated_bool(&input, "scrape_results")? {
+                    if v {
+                        req.scrape_options = Some(SearchScrapeOptions::markdown());
+                    }
+                }
+                if let Some(v) = validated_positive_u32(&input, "timeout")? {
+                    req.timeout = Some(v);
+                }
+                if let Some(v) = validated_country(&input, "country")? {
+                    req.country = Some(v);
+                }
+                if let Some(v) = validated_trimmed_string(&input, "location")? {
+                    req.location = Some(v);
+                }
+                if let Some(v) = validated_bool(&input, "ignore_invalid_urls")? {
+                    req.ignore_invalid_urls = Some(v);
+                }
+                if let Some(enterprise) =
+                    validated_enum_array(&input, "enterprise", FIRECRAWL_ENTERPRISE_OPTIONS)?
+                {
+                    req.enterprise = enterprise;
+                }
+
+                let resp = client
+                    .search(runtime, &req)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+
+                if !resp.success {
+                    return Err(FcpError::External {
+                        service: "firecrawl".into(),
+                        message: resp.error.unwrap_or_else(|| "search failed".into()),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    });
+                }
+
+                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
+                    message: e.to_string(),
+                })?
+            }
             OP_SCRAPE => {
                 let url = validate_provider_target_url(require_str(&input, "url")?, "url")?;
                 let mut req = ScrapeRequest::new(url);
@@ -470,7 +532,10 @@ impl FirecrawlConnector {
             })
             .unwrap_or("");
 
-        let known = matches!(operation, OP_SCRAPE | OP_CRAWL_START | OP_CRAWL_STATUS);
+        let known = matches!(
+            operation,
+            OP_SEARCH | OP_SCRAPE | OP_CRAWL_START | OP_CRAWL_STATUS
+        );
         let response = if known {
             SimulateResponse::denied(
                 id,
@@ -527,6 +592,27 @@ fn invalid_option(key: &str, message: impl Into<String>) -> FcpError {
     }
 }
 
+fn validated_search_query(input: &Value) -> FcpResult<String> {
+    let query = require_str(input, "query")?.trim();
+    if query.chars().count() > 500 {
+        return Err(invalid_option("query", "must be 500 characters or fewer"));
+    }
+    Ok(query.to_owned())
+}
+
+fn validated_trimmed_string(input: &Value, key: &str) -> FcpResult<Option<String>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(text) = value.as_str().map(str::trim) else {
+        return Err(invalid_option(key, "must be a string"));
+    };
+    if text.is_empty() {
+        return Err(invalid_option(key, "must not be empty"));
+    }
+    Ok(Some(text.to_owned()))
+}
+
 fn validated_string_array(input: &Value, key: &str) -> FcpResult<Option<Vec<String>>> {
     let Some(value) = input.get(key) else {
         return Ok(None);
@@ -543,6 +629,27 @@ fn validated_string_array(input: &Value, key: &str) -> FcpResult<Option<Vec<Stri
         if !trimmed.is_empty() {
             out.push(trimmed.to_owned());
         }
+    }
+    Ok(Some(out))
+}
+
+fn validated_enum_array(
+    input: &Value,
+    key: &str,
+    allowed: &[&str],
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(values) = validated_string_array(input, key)? else {
+        return Ok(None);
+    };
+    let mut out = Vec::new();
+    for value in values {
+        if !allowed.contains(&value.as_str()) {
+            return Err(invalid_option(
+                key,
+                format!("must contain only {allowed:?}"),
+            ));
+        }
+        out.push(value);
     }
     Ok(Some(out))
 }
@@ -569,6 +676,22 @@ fn validated_positive_u32(input: &Value, key: &str) -> FcpResult<Option<u32>> {
     }
     let converted = u32::try_from(raw)
         .map_err(|_| invalid_option(key, "must fit in an unsigned 32-bit integer"))?;
+    Ok(Some(converted))
+}
+
+fn validated_search_limit(input: &Value, key: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_u64() else {
+        return Err(invalid_option(key, "must be a positive integer"));
+    };
+    if raw == 0 {
+        return Err(invalid_option(key, "must be greater than zero"));
+    }
+    let capped = raw.min(100);
+    let converted =
+        u32::try_from(capped).map_err(|_| invalid_option(key, "must fit in a 32-bit integer"))?;
     Ok(Some(converted))
 }
 
@@ -608,6 +731,17 @@ fn validated_proxy(input: &Value, key: &str) -> FcpResult<Option<String>> {
             key,
             format!("must be one of {FIRECRAWL_PROXY_MODES:?}"),
         ))
+    }
+}
+
+fn validated_country(input: &Value, key: &str) -> FcpResult<Option<String>> {
+    let Some(country) = validated_trimmed_string(input, key)? else {
+        return Ok(None);
+    };
+    if country.len() == 2 && country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
+        Ok(Some(country.to_ascii_uppercase()))
+    } else {
+        Err(invalid_option(key, "must be a two-letter ISO country code"))
     }
 }
 
@@ -674,16 +808,14 @@ mod tests {
     }
 
     #[test]
-    fn manifest_matches_scrape_and_crawl_first_slice() {
-        assert!(
-            MANIFEST_TOML.contains(
-                "description = \"Firecrawl connector for scrape and crawl orchestration\""
-            )
-        );
+    fn manifest_matches_search_scrape_and_crawl_slice() {
         assert!(MANIFEST_TOML.contains(
-            "migration_hint = \"First slice: scrape, crawl.start, and crawl.status. Search and extract are deferred.\""
+            "description = \"Firecrawl connector for search, scrape, and crawl orchestration\""
         ));
-        assert!(!MANIFEST_TOML.contains("First slice: search, scrape, extract"));
+        assert!(MANIFEST_TOML.contains(
+            "migration_hint = \"Current slice: search, scrape, crawl.start, and crawl.status. Extract, map, browser sessions, and private self-hosted endpoints are deferred.\""
+        ));
+        assert!(!MANIFEST_TOML.contains("Search and extract are deferred"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -700,6 +832,7 @@ mod tests {
             .expect("handshake should succeed");
         assert_eq!(hs["surface_status"], "live");
         assert_eq!(hs["connector_version"], CONNECTOR_VERSION);
+        assert_eq!(hs["capabilities"][0], "firecrawl.search");
     }
 
     #[fcp_async_core::runtime::test]
@@ -756,7 +889,8 @@ mod tests {
         let intro = connector.handle_introspect().await.unwrap();
         assert_eq!(intro["surface_status"], "live");
         let ops = intro["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 3);
+        assert_eq!(ops.len(), 4);
+        assert!(ops.iter().any(|op| op["id"] == OP_SEARCH));
         assert!(ops.iter().all(|op| op["implemented"] == true));
     }
 
@@ -801,6 +935,22 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn invoke_search_missing_query_returns_error() {
+        let mut connector = FirecrawlConnector::new();
+        connector.handle_configure(test_config()).await.unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "firecrawl.search",
+                "input": {}
+            }))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("query"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn invoke_crawl_start_missing_url_returns_error() {
         let mut connector = FirecrawlConnector::new();
         connector.handle_configure(test_config()).await.unwrap();
@@ -834,7 +984,7 @@ mod tests {
     async fn simulate_known_operation_refuses() {
         let connector = FirecrawlConnector::new();
         let sim = connector
-            .handle_simulate(json!({"operation_id": "firecrawl.scrape"}))
+            .handle_simulate(json!({"operation_id": "firecrawl.search"}))
             .await
             .unwrap();
         let response: SimulateResponse = serde_json::from_value(sim).unwrap();
@@ -1104,6 +1254,14 @@ mod tests {
     #[test]
     fn option_helpers_validate_firecrawl_v2_fields() {
         let input = json!({
+            "query": " firecrawl docs ",
+            "sources": [" web ", "", "news"],
+            "categories": ["github", "research"],
+            "scrape_results": true,
+            "country": "us",
+            "location": " San Francisco ",
+            "ignore_invalid_urls": true,
+            "enterprise": ["anon"],
             "formats": [" markdown ", "", "html"],
             "include_tags": [" main "],
             "only_main_content": false,
@@ -1112,10 +1270,45 @@ mod tests {
             "max_age_ms": 172_800_000,
             "proxy": "stealth",
             "store_in_cache": false,
-            "limit": 2,
+            "limit": 250,
             "max_depth": 3
         });
 
+        assert_eq!(validated_search_query(&input).unwrap(), "firecrawl docs");
+        assert_eq!(
+            validated_enum_array(&input, "sources", FIRECRAWL_SEARCH_SOURCES)
+                .unwrap()
+                .unwrap(),
+            vec!["web".to_string(), "news".to_string()]
+        );
+        assert_eq!(
+            validated_enum_array(&input, "categories", FIRECRAWL_SEARCH_CATEGORIES)
+                .unwrap()
+                .unwrap(),
+            vec!["github".to_string(), "research".to_string()]
+        );
+        assert_eq!(
+            validated_bool(&input, "scrape_results").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            validated_country(&input, "country").unwrap(),
+            Some("US".to_string())
+        );
+        assert_eq!(
+            validated_trimmed_string(&input, "location").unwrap(),
+            Some("San Francisco".to_string())
+        );
+        assert_eq!(
+            validated_bool(&input, "ignore_invalid_urls").unwrap(),
+            Some(true)
+        );
+        assert_eq!(
+            validated_enum_array(&input, "enterprise", FIRECRAWL_ENTERPRISE_OPTIONS)
+                .unwrap()
+                .unwrap(),
+            vec!["anon".to_string()]
+        );
         assert_eq!(
             validated_string_array(&input, "formats").unwrap().unwrap(),
             vec!["markdown".to_string(), "html".to_string()]
@@ -1150,7 +1343,7 @@ mod tests {
             validated_bool(&input, "store_in_cache").unwrap(),
             Some(false)
         );
-        assert_eq!(validated_positive_u32(&input, "limit").unwrap(), Some(2));
+        assert_eq!(validated_search_limit(&input, "limit").unwrap(), Some(100));
         assert_eq!(
             validated_positive_u32(&input, "max_depth").unwrap(),
             Some(3)
@@ -1159,6 +1352,35 @@ mod tests {
 
     #[test]
     fn option_helpers_reject_malformed_fields() {
+        assert!(validated_search_query(&json!({"query": ""})).is_err());
+        assert!(validated_search_query(&json!({"query": "x".repeat(501)})).is_err());
+        assert!(
+            validated_enum_array(
+                &json!({"sources": ["web", "video"]}),
+                "sources",
+                FIRECRAWL_SEARCH_SOURCES
+            )
+            .is_err()
+        );
+        assert!(
+            validated_enum_array(
+                &json!({"categories": ["blog"]}),
+                "categories",
+                FIRECRAWL_SEARCH_CATEGORIES
+            )
+            .is_err()
+        );
+        assert!(
+            validated_enum_array(
+                &json!({"enterprise": ["private"]}),
+                "enterprise",
+                FIRECRAWL_ENTERPRISE_OPTIONS
+            )
+            .is_err()
+        );
+        assert!(validated_search_limit(&json!({"limit": 0}), "limit").is_err());
+        assert!(validated_country(&json!({"country": "usa"}), "country").is_err());
+        assert!(validated_trimmed_string(&json!({"location": ""}), "location").is_err());
         assert!(validated_string_array(&json!({"formats": ["markdown", 1]}), "formats").is_err());
         assert!(
             validated_bool(&json!({"only_main_content": "false"}), "only_main_content").is_err()

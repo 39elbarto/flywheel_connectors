@@ -1,5 +1,77 @@
 use serde::{Deserialize, Serialize};
 
+// ── Search ──
+
+/// Request body for POST /v2/search.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchRequest {
+    pub query: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub sources: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub categories: Vec<String>,
+    #[serde(rename = "scrapeOptions", skip_serializing_if = "Option::is_none")]
+    pub scrape_options: Option<SearchScrapeOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location: Option<String>,
+    #[serde(rename = "ignoreInvalidURLs", skip_serializing_if = "Option::is_none")]
+    pub ignore_invalid_urls: Option<bool>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub enterprise: Vec<String>,
+}
+
+impl SearchRequest {
+    pub fn new(query: impl Into<String>) -> Self {
+        Self {
+            query: query.into(),
+            limit: None,
+            sources: Vec::new(),
+            categories: Vec::new(),
+            scrape_options: None,
+            timeout: None,
+            country: None,
+            location: None,
+            ignore_invalid_urls: None,
+            enterprise: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchScrapeOptions {
+    pub formats: Vec<String>,
+}
+
+impl SearchScrapeOptions {
+    pub fn markdown() -> Self {
+        Self {
+            formats: vec!["markdown".into()],
+        }
+    }
+}
+
+/// Response from POST /v2/search.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SearchResponse {
+    pub success: bool,
+    #[serde(default)]
+    pub data: Option<serde_json::Value>,
+    #[serde(default)]
+    pub warning: Option<String>,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default, rename = "creditsUsed")]
+    pub credits_used: Option<u32>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
 // ── Scrape ──
 
 /// Request body for POST /v2/scrape.
@@ -160,6 +232,77 @@ pub struct CrawlPageData {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn search_request_serializes_minimal() {
+        let req = SearchRequest::new("firecrawl docs");
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["query"], "firecrawl docs");
+        assert!(json.get("limit").is_none());
+        assert!(json.get("sources").is_none());
+        assert!(json.get("scrapeOptions").is_none());
+    }
+
+    #[test]
+    fn search_request_serializes_v2_options() {
+        let mut req = SearchRequest::new("firecrawl docs");
+        req.limit = Some(25);
+        req.sources = vec!["web".into(), "news".into()];
+        req.categories = vec!["github".into()];
+        req.scrape_options = Some(SearchScrapeOptions::markdown());
+        req.timeout = Some(30_000);
+        req.country = Some("US".into());
+        req.location = Some("San Francisco,California,United States".into());
+        req.ignore_invalid_urls = Some(true);
+        req.enterprise = vec!["anon".into()];
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["limit"], 25);
+        assert_eq!(json["sources"][0], "web");
+        assert_eq!(json["sources"][1], "news");
+        assert_eq!(json["categories"][0], "github");
+        assert_eq!(json["scrapeOptions"]["formats"][0], "markdown");
+        assert_eq!(json["timeout"], 30_000);
+        assert_eq!(json["country"], "US");
+        assert_eq!(json["location"], "San Francisco,California,United States");
+        assert_eq!(json["ignoreInvalidURLs"], true);
+        assert_eq!(json["enterprise"][0], "anon");
+        assert!(json.get("scrape_options").is_none());
+        assert!(json.get("ignore_invalid_urls").is_none());
+    }
+
+    #[test]
+    fn search_response_deserializes_source_arrays() {
+        let json = serde_json::json!({
+            "success": true,
+            "data": {
+                "web": [
+                    {
+                        "url": "https://firecrawl.dev",
+                        "title": "Firecrawl",
+                        "description": "Web scraping API"
+                    }
+                ],
+                "images": [
+                    {
+                        "url": "https://firecrawl.dev/logo.png",
+                        "title": "Logo"
+                    }
+                ]
+            },
+            "warning": "partial",
+            "id": "search-123",
+            "creditsUsed": 2
+        });
+        let resp: SearchResponse = serde_json::from_value(json).unwrap();
+        assert!(resp.success);
+        assert_eq!(resp.warning.as_deref(), Some("partial"));
+        assert_eq!(resp.id.as_deref(), Some("search-123"));
+        assert_eq!(resp.credits_used, Some(2));
+        let data = resp.data.unwrap();
+        assert_eq!(data["web"][0]["url"], "https://firecrawl.dev");
+        assert_eq!(data["images"][0]["title"], "Logo");
+    }
 
     #[test]
     fn scrape_request_defaults() {

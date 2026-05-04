@@ -16,7 +16,9 @@ use wiremock::{
 };
 
 const CONNECTOR_ID: &str = "fcp.firecrawl";
+const OP_SEARCH: &str = "firecrawl.search";
 const OP_SCRAPE: &str = "firecrawl.scrape";
+const CAP_SEARCH: &str = "firecrawl.search";
 const CAP_SCRAPE: &str = "firecrawl.scrape";
 
 struct FirecrawlSuiteAdapter {
@@ -87,41 +89,79 @@ impl FcpConnector for FirecrawlSuiteAdapter {
 
     fn introspect(&self) -> Introspection {
         Introspection {
-            operations: vec![OperationInfo {
-                id: OperationId::from_static(OP_SCRAPE),
-                summary: "Scrape a single URL with Firecrawl".to_string(),
-                description: None,
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["url"],
-                    "properties": {
-                        "url": { "type": "string", "format": "uri" },
-                        "formats": {
-                            "type": "array",
-                            "items": { "type": "string" }
+            operations: vec![
+                OperationInfo {
+                    id: OperationId::from_static(OP_SEARCH),
+                    summary: "Search the web with Firecrawl".to_string(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["query"],
+                        "properties": {
+                            "query": { "type": "string" },
+                            "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
+                            "sources": {
+                                "type": "array",
+                                "items": { "enum": ["web", "images", "news"] }
+                            }
                         }
-                    }
-                }),
-                output_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "success": { "type": "boolean" },
-                        "data": { "type": "object" }
-                    }
-                }),
-                capability: CapabilityId::from_static(CAP_SCRAPE),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Scrape a web page through Firecrawl.".to_string(),
-                    common_mistakes: Vec::new(),
-                    examples: vec![r#"{"url":"https://example.com"}"#.to_string()],
-                    related: Vec::new(),
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "success": { "type": "boolean" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static(CAP_SEARCH),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Search the web through Firecrawl.".to_string(),
+                        common_mistakes: Vec::new(),
+                        examples: vec![r#"{"query":"firecrawl docs"}"#.to_string()],
+                        related: Vec::new(),
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
                 },
-                rate_limit: None,
-                requires_approval: None,
-            }],
+                OperationInfo {
+                    id: OperationId::from_static(OP_SCRAPE),
+                    summary: "Scrape a single URL with Firecrawl".to_string(),
+                    description: None,
+                    input_schema: json!({
+                        "type": "object",
+                        "required": ["url"],
+                        "properties": {
+                            "url": { "type": "string", "format": "uri" },
+                            "formats": {
+                                "type": "array",
+                                "items": { "type": "string" }
+                            }
+                        }
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "success": { "type": "boolean" },
+                            "data": { "type": "object" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static(CAP_SCRAPE),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use: "Scrape a web page through Firecrawl.".to_string(),
+                        common_mistakes: Vec::new(),
+                        examples: vec![r#"{"url":"https://example.com"}"#.to_string()],
+                        related: Vec::new(),
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
+            ],
             events: Vec::new(),
             resource_types: Vec::new(),
             auth_caps: None,
@@ -159,21 +199,25 @@ impl FcpConnector for FirecrawlSuiteAdapter {
     }
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], capability: &'static str) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0".to_string(),
         zone: ZoneId::work(),
         zone_dir: None,
         host_public_key,
         nonce: [13u8; 32],
-        capabilities_requested: vec![CapabilityId::from_static(CAP_SCRAPE)],
+        capabilities_requested: vec![CapabilityId::from_static(capability)],
         host: None,
         transport_caps: None,
         requested_instance_id: Some(InstanceId::new()),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(
+    signing_key: &Ed25519SigningKey,
+    capability: &'static str,
+    operation: &'static str,
+) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -183,10 +227,10 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
 
     let raw = CapabilityTokenBuilder::new()
-        .capability_id(CAP_SCRAPE)
+        .capability_id(capability)
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[OP_SCRAPE])
+        .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -194,6 +238,107 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .sign(signing_key)
         .expect("capability token");
     CapabilityToken::from_raw(raw)
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_search_uses_v2_path_and_body() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v2/search"))
+        .and(header("authorization", "Bearer fc-test-key"))
+        .and(body_partial_json(json!({
+            "query": "firecrawl docs",
+            "limit": 100,
+            "sources": ["web", "news"],
+            "categories": ["github"],
+            "scrapeOptions": {
+                "formats": ["markdown"]
+            },
+            "timeout": 30000,
+            "country": "US",
+            "location": "San Francisco,California,United States",
+            "ignoreInvalidURLs": true,
+            "enterprise": ["anon"]
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "data": {
+                "web": [
+                    {
+                        "url": "https://docs.firecrawl.dev",
+                        "title": "Firecrawl Docs",
+                        "description": "Firecrawl documentation"
+                    }
+                ],
+                "news": []
+            },
+            "warning": null,
+            "id": "search-abc-123",
+            "creditsUsed": 2
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let signing_key = Ed25519SigningKey::generate();
+    let invoke = InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::new("firecrawl-search-suite"),
+        connector_id: ConnectorId::from_static(CONNECTOR_ID),
+        operation: OperationId::from_static(OP_SEARCH),
+        zone_id: ZoneId::work(),
+        input: json!({
+            "query": " firecrawl docs ",
+            "limit": 250,
+            "sources": ["web", "", "news"],
+            "categories": ["github"],
+            "scrape_results": true,
+            "timeout": 30000,
+            "country": "us",
+            "location": "San Francisco,California,United States",
+            "ignore_invalid_urls": true,
+            "enterprise": ["anon"]
+        }),
+        capability_token: build_token(&signing_key, CAP_SEARCH, OP_SEARCH),
+        holder_proof: None,
+        context: None,
+        idempotency_key: None,
+        lease_seq: None,
+        deadline_ms: None,
+        correlation_id: None,
+        provenance: None,
+        approval_tokens: Vec::new(),
+    };
+
+    let suite = ConnectorSuite {
+        test_name: "firecrawl_search_happy_path".to_string(),
+        config: json!({
+            "api_key": "fc-test-key",
+            "base_url": format!("{}/v2", server.uri()),
+            "request_timeout_ms": 5_000
+        }),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), CAP_SEARCH),
+        invoke: Some(invoke),
+        invoke_expectations: InvokeExpectations::default(),
+    };
+
+    let mut connector = FirecrawlSuiteAdapter::new();
+    let mut runner = E2eRunner::new("fcp-firecrawl");
+    let report = runner
+        .run_connector_suite(&mut connector, suite)
+        .await
+        .expect("connector suite run");
+
+    for entry in &report.logs {
+        println!(
+            "{}",
+            serde_json::to_string(entry).expect("serialize report log")
+        );
+    }
+
+    assert!(report.passed, "connector suite should pass");
+    assert!(!report.logs.is_empty(), "structured logs should be present");
 }
 
 #[fcp_async_core::runtime::test]
@@ -249,7 +394,7 @@ async fn connector_suite_happy_path_scrapes_page() {
             "proxy": "auto",
             "store_in_cache": false
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, CAP_SCRAPE, OP_SCRAPE),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -267,7 +412,7 @@ async fn connector_suite_happy_path_scrapes_page() {
             "base_url": format!("{}/v2", server.uri()),
             "request_timeout_ms": 5_000
         }),
-        handshake: handshake_request(signing_key.verifying_key().to_bytes()),
+        handshake: handshake_request(signing_key.verifying_key().to_bytes(), CAP_SCRAPE),
         invoke: Some(invoke),
         invoke_expectations: InvokeExpectations::default(),
     };

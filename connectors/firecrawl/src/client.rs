@@ -8,6 +8,7 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{FirecrawlError, FirecrawlResult};
 use crate::types::{
     CrawlRequest, CrawlStartResponse, CrawlStatusResponse, ScrapeRequest, ScrapeResponse,
+    SearchRequest, SearchResponse,
 };
 
 /// Firecrawl API client with retry support.
@@ -61,6 +62,32 @@ impl FirecrawlClient {
     #[must_use]
     pub fn is_secretless(&self) -> bool {
         self.credential.trim().is_empty()
+    }
+
+    // ── Search ──
+
+    pub async fn search(
+        &self,
+        runtime: &ConnectorRuntime,
+        request: &SearchRequest,
+    ) -> FirecrawlResult<SearchResponse> {
+        let url = format!("{}/v2/search", self.base_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let body = serde_json::to_value(request).map_err(FirecrawlError::Json)?;
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let credential = self.credential.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, "Searching via Firecrawl");
+                let req = authenticate_request(client.post(&url), &credential).json(&body);
+                handle_response::<SearchResponse>(req, attempt).await
+            }
+        })
+        .await
     }
 
     // ── Scrape ──

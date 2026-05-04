@@ -3,7 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
-use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use url::Url;
@@ -12,6 +12,11 @@ const CONNECTOR_ID: &str = "fcp.tavily";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.tavily.com";
 const BOUNDARY: &str = "This first slice is read-only and covers Tavily search. Extraction/crawl workflows are deferred until the connector surface is broader.";
+const TAVILY_CLIENT_SOURCE: &str = "fcp";
+const TAVILY_MAX_SEARCH_RESULTS: u64 = 20;
+const TAVILY_SEARCH_DEPTHS: &[&str] = &["basic", "advanced"];
+const TAVILY_TOPICS: &[&str] = &["general", "news", "finance"];
+const TAVILY_TIME_RANGES: &[&str] = &["day", "week", "month", "year"];
 
 #[derive(Clone)]
 enum Auth {
@@ -47,6 +52,10 @@ impl Auth {
             Self::ApiKey(value) => {
                 let mut headers = HeaderMap::new();
                 headers.insert(AUTHORIZATION, value.clone());
+                headers.insert(
+                    HeaderName::from_static("x-client-source"),
+                    HeaderValue::from_static(TAVILY_CLIENT_SOURCE),
+                );
                 request.headers(headers)
             }
             Self::CredentialId { .. } => request,
@@ -392,19 +401,41 @@ impl TavilyConnector {
             })?;
 
         let mut body = json!({ "query": query });
-        for field in [
-            "topic",
-            "search_depth",
-            "max_results",
-            "include_answer",
-            "include_raw_content",
-            "include_images",
-            "include_domains",
-            "exclude_domains",
-            "days",
-            "time_range",
-        ] {
-            copy_if_present(&mut body, &input, field);
+        if let Some(value) = input.get("max_results") {
+            body["max_results"] = json!(validated_max_results(value)?);
+        }
+        if let Some(value) = input.get("search_depth") {
+            body["search_depth"] = json!(validated_string_enum(
+                "search_depth",
+                value,
+                TAVILY_SEARCH_DEPTHS,
+            )?);
+        }
+        if let Some(value) = input.get("topic") {
+            body["topic"] = json!(validated_string_enum("topic", value, TAVILY_TOPICS)?);
+        }
+        if let Some(value) = input.get("time_range") {
+            body["time_range"] = json!(validated_string_enum(
+                "time_range",
+                value,
+                TAVILY_TIME_RANGES
+            )?);
+        }
+        for field in ["include_answer", "include_raw_content", "include_images"] {
+            if let Some(value) = input.get(field) {
+                body[field] = json!(validated_bool(field, value)?);
+            }
+        }
+        for field in ["include_domains", "exclude_domains"] {
+            if let Some(value) = input.get(field) {
+                let domains = validated_domain_filter(field, value)?;
+                if !domains.is_empty() {
+                    body[field] = json!(domains);
+                }
+            }
+        }
+        if let Some(value) = input.get("days") {
+            body["days"] = json!(validated_positive_integer("days", value)?);
         }
 
         self.request_count.fetch_add(1, Ordering::Relaxed);
@@ -470,9 +501,81 @@ const fn health_status(
     }
 }
 
-fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
-    if let Some(value) = source.get(field) {
-        target[field] = value.clone();
+fn validated_max_results(value: &Value) -> FcpResult<u64> {
+    let Some(raw) = value.as_f64() else {
+        return Err(invalid_search_option("max_results must be numeric"));
+    };
+    if !raw.is_finite() {
+        return Err(invalid_search_option("max_results must be finite"));
+    }
+    Ok(raw.floor().clamp(1.0, TAVILY_MAX_SEARCH_RESULTS as f64) as u64)
+}
+
+fn validated_string_enum<'a>(
+    field: &str,
+    value: &'a Value,
+    allowed: &[&str],
+) -> FcpResult<&'a str> {
+    let Some(candidate) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(invalid_search_option(format!(
+            "{field} must be a non-empty string"
+        )));
+    };
+    if allowed.contains(&candidate) {
+        Ok(candidate)
+    } else {
+        Err(invalid_search_option(format!(
+            "{field} must be one of {}",
+            allowed.join(", ")
+        )))
+    }
+}
+
+fn validated_bool(field: &str, value: &Value) -> FcpResult<bool> {
+    value
+        .as_bool()
+        .ok_or_else(|| invalid_search_option(format!("{field} must be a boolean when provided")))
+}
+
+fn validated_domain_filter(field: &str, value: &Value) -> FcpResult<Vec<String>> {
+    let Some(values) = value.as_array() else {
+        return Err(invalid_search_option(format!(
+            "{field} must be an array of strings"
+        )));
+    };
+    let mut domains = Vec::new();
+    for item in values {
+        let Some(domain) = item.as_str() else {
+            return Err(invalid_search_option(format!(
+                "{field} must contain only strings"
+            )));
+        };
+        let trimmed = domain.trim();
+        if !trimmed.is_empty() {
+            domains.push(trimmed.to_owned());
+        }
+    }
+    Ok(domains)
+}
+
+fn validated_positive_integer(field: &str, value: &Value) -> FcpResult<u64> {
+    if let Some(value) = value.as_u64().filter(|value| *value > 0) {
+        Ok(value)
+    } else {
+        Err(invalid_search_option(format!(
+            "{field} must be a positive integer"
+        )))
+    }
+}
+
+fn invalid_search_option(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
     }
 }
 
@@ -519,7 +622,12 @@ fn normalize_base_url(
             message: format!("base_url host {host} is not allowed"),
         });
     }
-    Ok(parsed.to_string().trim_end_matches('/').to_string())
+    let mut normalized = parsed;
+    let path = normalized.path().trim_end_matches('/').to_string();
+    if let Some(prefix) = path.strip_suffix("/search") {
+        normalized.set_path(prefix);
+    }
+    Ok(normalized.to_string().trim_end_matches('/').to_string())
 }
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -623,6 +731,109 @@ mod tests {
             error
                 .to_string()
                 .contains("valid HTTP Authorization header value")
+        );
+    }
+
+    #[test]
+    fn max_results_clamps_to_tavily_bounds() {
+        assert_eq!(validated_max_results(&json!(0)).unwrap(), 1);
+        assert_eq!(validated_max_results(&json!(-8)).unwrap(), 1);
+        assert_eq!(validated_max_results(&json!(9.9)).unwrap(), 9);
+        assert_eq!(validated_max_results(&json!(30)).unwrap(), 20);
+    }
+
+    #[test]
+    fn max_results_rejects_non_numeric_values() {
+        let error = validated_max_results(&json!("12")).expect_err("expected invalid max_results");
+        assert!(error.to_string().contains("numeric"));
+    }
+
+    #[test]
+    fn search_option_enums_match_tavily_contract() {
+        assert_eq!(
+            validated_string_enum("search_depth", &json!("advanced"), TAVILY_SEARCH_DEPTHS)
+                .unwrap(),
+            "advanced"
+        );
+        assert_eq!(
+            validated_string_enum("topic", &json!("finance"), TAVILY_TOPICS).unwrap(),
+            "finance"
+        );
+        assert_eq!(
+            validated_string_enum("time_range", &json!("week"), TAVILY_TIME_RANGES).unwrap(),
+            "week"
+        );
+    }
+
+    #[test]
+    fn search_option_enums_reject_unknown_values() {
+        let error = validated_string_enum("search_depth", &json!("deep"), TAVILY_SEARCH_DEPTHS)
+            .expect_err("expected invalid search depth");
+        assert!(error.to_string().contains("basic, advanced"));
+    }
+
+    #[test]
+    fn boolean_search_options_must_be_booleans() {
+        assert!(validated_bool("include_answer", &json!(false)).is_ok());
+        let error = validated_bool("include_answer", &json!("yes"))
+            .expect_err("expected invalid boolean option");
+        assert!(error.to_string().contains("boolean"));
+    }
+
+    #[test]
+    fn domain_filters_trim_and_drop_empty_entries() {
+        assert_eq!(
+            validated_domain_filter(
+                "include_domains",
+                &json!([" docs.openclaw.ai ", "", "openclaw.ai"])
+            )
+            .unwrap(),
+            vec!["docs.openclaw.ai".to_string(), "openclaw.ai".to_string()]
+        );
+        assert!(
+            validated_domain_filter("exclude_domains", &json!(["", " "]))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn domain_filters_reject_non_string_entries() {
+        let error = validated_domain_filter("include_domains", &json!(["example.com", 7]))
+            .expect_err("expected invalid domain filter");
+        assert!(error.to_string().contains("only strings"));
+    }
+
+    #[test]
+    fn days_must_be_positive_integer() {
+        assert_eq!(validated_positive_integer("days", &json!(3)).unwrap(), 3);
+        let zero =
+            validated_positive_integer("days", &json!(0)).expect_err("expected invalid zero days");
+        assert!(zero.to_string().contains("positive integer"));
+        let fraction = validated_positive_integer("days", &json!(1.5))
+            .expect_err("expected invalid fractional days");
+        assert!(fraction.to_string().contains("positive integer"));
+    }
+
+    #[test]
+    fn base_url_normalization_avoids_double_search_path() {
+        assert_eq!(
+            normalize_base_url(
+                Some("http://localhost:48123/search/"),
+                DEFAULT_BASE_URL,
+                &["tavily.com"]
+            )
+            .unwrap(),
+            "http://localhost:48123"
+        );
+        assert_eq!(
+            normalize_base_url(
+                Some("http://localhost:48123/api/tavily/search/"),
+                DEFAULT_BASE_URL,
+                &["tavily.com"]
+            )
+            .unwrap(),
+            "http://localhost:48123/api/tavily"
         );
     }
 

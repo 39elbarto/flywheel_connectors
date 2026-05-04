@@ -256,11 +256,11 @@ impl GoogleMeetClient {
         let mut url = Url::parse(&base).map_err(|error| GoogleMeetError::InvalidConfig {
             message: format!("invalid Google Meet base_url `{}`: {error}", self.base_url),
         })?;
-        url = url
-            .join(path.trim_start_matches('/'))
-            .map_err(|error| GoogleMeetError::InvalidConfig {
+        url = url.join(path.trim_start_matches('/')).map_err(|error| {
+            GoogleMeetError::InvalidConfig {
                 message: format!("invalid Google Meet request path `{path}`: {error}"),
-            })?;
+            }
+        })?;
         {
             let mut pairs = url.query_pairs_mut();
             for (key, value) in query {
@@ -436,7 +436,10 @@ pub fn normalize_meet_space_name(input: &str) -> GoogleMeetResult<String> {
         });
     }
     if let Some(suffix) = trimmed.strip_prefix("spaces/") {
-        validate_resource_suffix(suffix, "spaces/ input must include a meeting code or space id")?;
+        validate_resource_suffix(
+            suffix,
+            "spaces/ input must include a meeting code or space id",
+        )?;
         return Ok(format!("spaces/{}", suffix.trim()));
     }
     if trimmed.contains("://") {
@@ -453,9 +456,11 @@ pub fn normalize_meet_space_name(input: &str) -> GoogleMeetResult<String> {
                 message: "Google Meet URL must not include userinfo".to_string(),
             });
         }
-        let host = url.host_str().ok_or_else(|| GoogleMeetError::InvalidConfig {
-            message: "Google Meet URL must include a host".to_string(),
-        })?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| GoogleMeetError::InvalidConfig {
+                message: "Google Meet URL must include a host".to_string(),
+            })?;
         if !host.eq_ignore_ascii_case("meet.google.com") {
             return Err(GoogleMeetError::InvalidConfig {
                 message: format!("Expected a meet.google.com URL, received {host}"),

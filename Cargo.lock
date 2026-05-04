@@ -3882,6 +3882,7 @@ dependencies = [
  "fcp-google-discovery",
  "fcp-manifest",
  "fcp-prelude",
+ "percent-encoding",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

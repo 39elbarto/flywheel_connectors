@@ -1,8 +1,9 @@
 //! FCP Google Meet connector foundation.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use fcp_google_discovery::{
     ServiceAliasRegistry,
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
@@ -20,7 +21,9 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::client::{
-    DEFAULT_BASE_URL, GoogleMeetClient, google_auth_is_secretless, google_auth_redacted_label,
+    DEFAULT_BASE_URL, GoogleMeetAttendanceRow, GoogleMeetClient, GoogleMeetConferenceRecord,
+    GoogleMeetParticipant, GoogleMeetParticipantSession, google_auth_is_secretless,
+    google_auth_redacted_label,
 };
 
 const CONNECTOR_ID: &str = "google-meet";
@@ -28,6 +31,17 @@ const SERVICE_SELECTOR: &str = "meet";
 const SERVICE_IDENTITY: &str = "meet:v2";
 const NORMALIZE_SPACE_OP: &str = "gmeet.normalize_space_name";
 const MEET_SPACE_READ_CAP: &str = "meet.space.read";
+const MEET_CONFERENCE_READ_CAP: &str = "meet.conference.read";
+const CONFERENCE_RECORD_GET_OP: &str = "gmeet.conference_record.get";
+const CONFERENCE_RECORDS_LIST_OP: &str = "gmeet.conference_records.list";
+const CONFERENCE_RECORD_LATEST_OP: &str = "gmeet.conference_record.latest";
+const PARTICIPANTS_LIST_OP: &str = "gmeet.participants.list";
+const PARTICIPANT_SESSIONS_LIST_OP: &str = "gmeet.participant_sessions.list";
+const ATTENDANCE_LIST_OP: &str = "gmeet.attendance.list";
+const DEFAULT_PAGE_SIZE: u32 = 100;
+const MAX_PAGE_SIZE: u32 = 250;
+const DEFAULT_MAX_ITEMS: usize = 100;
+const MAX_ITEMS_CAP: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -378,7 +392,8 @@ impl GoogleMeetConnector {
                 "required_scopes": config.required_scopes,
                 "auth_mode": google_auth_redacted_label(&config.auth),
                 "base_url": config.base_url,
-                "foundation_only": true,
+                "foundation_only": false,
+                "api_read_operations": true,
                 "live_session_operations": false,
             }
         }))
@@ -438,7 +453,8 @@ impl GoogleMeetConnector {
         let metrics = self.base.metrics();
         let mut health = json!({
             "status": if configured { "healthy" } else { "not_configured" },
-            "foundation_only": true,
+            "foundation_only": false,
+            "api_read_operations": true,
             "live_session_operations": false,
             "metrics": {
                 "requests_total": metrics.requests_total,
@@ -571,7 +587,7 @@ impl GoogleMeetConnector {
         let report = match client.foundation_probe() {
             Ok(()) => SelfCheckReport::degraded(
                 "api_probe_deferred",
-                "Foundation connector is configured; external Meet API probes are added by operation implementation beads",
+                "Google Meet read API operations are configured; invoke a read operation or loopback e2e for API proof",
             ),
             Err(error) => SelfCheckReport::failed("foundation_probe_failed", error.to_string()),
         };
@@ -584,47 +600,7 @@ impl GoogleMeetConnector {
     /// Handle introspection.
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            operations: vec![op_info(
-                NORMALIZE_SPACE_OP,
-                "Normalize a Google Meet URL, meeting code, or spaces/* name",
-                json!({
-                    "type": "object",
-                    "required": ["input"],
-                    "properties": {
-                        "input": {
-                            "type": "string",
-                            "description": "Google Meet URL, meeting code, or spaces/* resource name"
-                        }
-                    }
-                }),
-                json!({
-                    "type": "object",
-                    "required": ["space_name", "input_kind", "live_session"],
-                    "properties": {
-                        "space_name": { "type": "string" },
-                        "meeting_code": { "type": "string" },
-                        "meeting_uri": { "type": "string" },
-                        "input_kind": { "type": "string" },
-                        "live_session": { "type": "boolean" }
-                    }
-                }),
-                MEET_SPACE_READ_CAP,
-                RiskLevel::Low,
-                SafetyTier::Safe,
-                IdempotencyClass::Strict,
-                AgentHint {
-                    when_to_use: "Validate and normalize a Google Meet identifier before Meet API calls.".into(),
-                    common_mistakes: vec![
-                        "This operation does not join or control a live meeting.".into(),
-                        "Calendar event URLs are not Meet URLs; pass a meet.google.com URL or code.".into(),
-                    ],
-                    examples: vec![
-                        r#"{"input":"https://meet.google.com/abc-defg-hij"}"#.into(),
-                        r#"{"input":"spaces/abc-defg-hij"}"#.into(),
-                    ],
-                    related: vec![],
-                },
-            )],
+            operations: meet_operation_catalog(),
             events: vec![],
             resource_types: vec![],
             auth_caps: None,
@@ -688,10 +664,190 @@ impl GoogleMeetConnector {
 
         match operation {
             NORMALIZE_SPACE_OP => invoke_normalize_space_name(&input),
+            CONFERENCE_RECORD_GET_OP => self.invoke_get_conference_record(&input).await,
+            CONFERENCE_RECORDS_LIST_OP => self.invoke_list_conference_records(&input).await,
+            CONFERENCE_RECORD_LATEST_OP => self.invoke_latest_conference_record(&input).await,
+            PARTICIPANTS_LIST_OP => self.invoke_list_participants(&input).await,
+            PARTICIPANT_SESSIONS_LIST_OP => self.invoke_list_participant_sessions(&input).await,
+            ATTENDANCE_LIST_OP => self.invoke_list_attendance(&input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
         }
+    }
+
+    async fn invoke_get_conference_record(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let record = client
+            .get_conference_record(require_str(input, "conference_record")?)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({ "conference_record": record }))
+    }
+
+    async fn invoke_list_conference_records(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let meeting = optional_str(input, "meeting")?;
+        let records = client
+            .list_conference_records(meeting, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "meeting": meeting,
+            "conference_records": records,
+            "count": records.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_latest_conference_record(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let meeting = require_str(input, "meeting")?;
+        let space = normalize_meet_space_name(meeting)?;
+        let records = client
+            .list_conference_records(Some(&space.space_name), Some(1), Some(1))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let record = records.into_iter().next();
+        Ok(json!({
+            "input": meeting,
+            "space_name": space.space_name,
+            "conference_record": record,
+        }))
+    }
+
+    async fn invoke_list_participants(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let participants = client
+            .list_participants(
+                require_str(input, "conference_record")?,
+                page_size,
+                Some(max_items),
+            )
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "participants": participants,
+            "count": participants.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_participant_sessions(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let sessions = client
+            .list_participant_sessions(
+                require_str(input, "participant")?,
+                page_size,
+                Some(max_items),
+            )
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "participant_sessions": sessions,
+            "count": sessions.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_attendance(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let merge = parse_optional_bool(input, "merge_duplicate_participants")?.unwrap_or(true);
+        let late_after_minutes =
+            parse_optional_u64(input, "late_after_minutes", 0, 24 * 60)?.unwrap_or(5);
+        let early_before_minutes =
+            parse_optional_u64(input, "early_before_minutes", 0, 24 * 60)?.unwrap_or(5);
+        let all_records = parse_optional_bool(input, "all_conference_records")?.unwrap_or(false);
+
+        let (input_label, space_name, records) =
+            if let Some(record) = optional_str(input, "conference_record")? {
+                let record = client
+                    .get_conference_record(record)
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                (Some(record.name.clone()), None, vec![record])
+            } else {
+                let meeting = require_str(input, "meeting")?;
+                let space = normalize_meet_space_name(meeting)?;
+                let limit = if all_records { max_items } else { 1 };
+                let records = client
+                    .list_conference_records(Some(&space.space_name), page_size, Some(limit))
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                (Some(meeting.to_string()), Some(space.space_name), records)
+            };
+
+        let mut rows = Vec::new();
+        let mut participant_evidence = Vec::new();
+        for record in &records {
+            let participants = client
+                .list_participants(&record.name, page_size, Some(max_items))
+                .await
+                .map_err(|error| error.to_fcp_error())?;
+            let mut unmerged = Vec::new();
+            for participant in &participants {
+                let sessions = client
+                    .list_participant_sessions(&participant.name, page_size, Some(max_items))
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                unmerged.push(attendance_row_for_participant(
+                    record,
+                    participant,
+                    sessions,
+                ));
+            }
+            let merged = merge_attendance_rows(
+                unmerged,
+                record,
+                AttendanceOptions {
+                    merge_duplicate_participants: merge,
+                    late_after_minutes,
+                    early_before_minutes,
+                },
+            );
+            rows.extend(merged);
+            participant_evidence.push(json!({
+                "conference_record": record.name,
+                "participants": participants,
+            }));
+        }
+
+        Ok(json!({
+            "input": input_label,
+            "space_name": space_name,
+            "conference_records": records,
+            "attendance": rows,
+            "participant_evidence": participant_evidence,
+            "merge_duplicate_participants": merge,
+            "late_after_minutes": late_after_minutes,
+            "early_before_minutes": early_before_minutes,
+        }))
     }
 
     /// Handle shutdown.
@@ -713,6 +869,156 @@ impl Default for GoogleMeetConnector {
     }
 }
 
+fn meet_operation_catalog() -> Vec<OperationInfo> {
+    vec![
+        op_info(
+            NORMALIZE_SPACE_OP,
+            "Normalize a Google Meet URL, meeting code, or spaces/* name",
+            json!({
+                "type": "object",
+                "required": ["input"],
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Google Meet URL, meeting code, or spaces/* resource name"
+                    }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["space_name", "input_kind", "live_session"],
+                "properties": {
+                    "space_name": { "type": "string" },
+                    "meeting_code": { "type": "string" },
+                    "meeting_uri": { "type": "string" },
+                    "input_kind": { "type": "string" },
+                    "live_session": { "type": "boolean" }
+                }
+            }),
+            MEET_SPACE_READ_CAP,
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use:
+                    "Validate and normalize a Google Meet identifier before Meet API calls.".into(),
+                common_mistakes: vec![
+                    "This operation does not join or control a live meeting.".into(),
+                    "Calendar event URLs are not Meet URLs; pass a meet.google.com URL or code."
+                        .into(),
+                ],
+                examples: vec![
+                    r#"{"input":"https://meet.google.com/abc-defg-hij"}"#.into(),
+                    r#"{"input":"spaces/abc-defg-hij"}"#.into(),
+                ],
+                related: vec![],
+            },
+        ),
+        read_api_op_info(
+            CONFERENCE_RECORD_GET_OP,
+            "Fetch one Google Meet conference record by resource name or id",
+            json!({
+                "type": "object",
+                "required": ["conference_record"],
+                "properties": {
+                    "conference_record": { "type": "string" }
+                }
+            }),
+        ),
+        read_api_op_info(
+            CONFERENCE_RECORDS_LIST_OP,
+            "List Google Meet conference records, optionally filtered by meeting space",
+            paged_input_schema(json!({
+                "meeting": { "type": "string" }
+            })),
+        ),
+        read_api_op_info(
+            CONFERENCE_RECORD_LATEST_OP,
+            "Fetch the latest Google Meet conference record for a meeting space",
+            json!({
+                "type": "object",
+                "required": ["meeting"],
+                "properties": {
+                    "meeting": { "type": "string" }
+                }
+            }),
+        ),
+        read_api_op_info(
+            PARTICIPANTS_LIST_OP,
+            "List participants for a Google Meet conference record",
+            paged_input_schema(json!({
+                "conference_record": { "type": "string" }
+            })),
+        ),
+        read_api_op_info(
+            PARTICIPANT_SESSIONS_LIST_OP,
+            "List participant sessions for a Google Meet participant resource",
+            paged_input_schema(json!({
+                "participant": { "type": "string" }
+            })),
+        ),
+        read_api_op_info(
+            ATTENDANCE_LIST_OP,
+            "Build attendance rows from Google Meet participants and participant sessions",
+            paged_input_schema(json!({
+                "meeting": { "type": "string" },
+                "conference_record": { "type": "string" },
+                "all_conference_records": { "type": "boolean" },
+                "merge_duplicate_participants": { "type": "boolean" },
+                "late_after_minutes": { "type": "integer" },
+                "early_before_minutes": { "type": "integer" }
+            })),
+        ),
+    ]
+}
+
+fn paged_input_schema(extra_properties: serde_json::Value) -> serde_json::Value {
+    let mut properties = serde_json::Map::new();
+    if let Some(extra) = extra_properties.as_object() {
+        for (key, value) in extra {
+            properties.insert(key.clone(), value.clone());
+        }
+    }
+    properties.insert("page_size".to_string(), json!({ "type": "integer" }));
+    properties.insert("max_items".to_string(), json!({ "type": "integer" }));
+    json!({
+        "type": "object",
+        "properties": properties
+    })
+}
+
+fn read_api_op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+) -> OperationInfo {
+    op_info(
+        id,
+        summary,
+        input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+        MEET_CONFERENCE_READ_CAP,
+        RiskLevel::Low,
+        SafetyTier::Safe,
+        IdempotencyClass::Strict,
+        AgentHint {
+            when_to_use: "Read Google Meet API conference metadata and attendance evidence.".into(),
+            common_mistakes: vec![
+                "These operations do not create, end, join, or control a live meeting.".into(),
+                "Use recording/transcript sibling operations for media artifacts.".into(),
+            ],
+            examples: vec![
+                r#"{"conference_record":"conferenceRecords/abc"}"#.into(),
+                r#"{"meeting":"https://meet.google.com/abc-defg-hij","max_items":10}"#.into(),
+            ],
+            related: vec![],
+        },
+    )
+}
+
 fn invoke_normalize_space_name(input: &serde_json::Value) -> FcpResult<serde_json::Value> {
     let raw = require_str(input, "input")?;
     serde_json::to_value(normalize_meet_space_name(raw)?).map_err(|error| FcpError::Internal {
@@ -720,9 +1026,245 @@ fn invoke_normalize_space_name(input: &serde_json::Value) -> FcpResult<serde_jso
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct AttendanceOptions {
+    merge_duplicate_participants: bool,
+    late_after_minutes: u64,
+    early_before_minutes: u64,
+}
+
+fn attendance_row_for_participant(
+    conference_record: &GoogleMeetConferenceRecord,
+    participant: &GoogleMeetParticipant,
+    sessions: Vec<GoogleMeetParticipantSession>,
+) -> GoogleMeetAttendanceRow {
+    GoogleMeetAttendanceRow {
+        conference_record: conference_record.name.clone(),
+        participant: participant.name.clone(),
+        participants: vec![participant.name.clone()],
+        display_name: participant_display_name(participant),
+        user: participant_user(participant),
+        earliest_start_time: participant.earliest_start_time.clone(),
+        latest_end_time: participant.latest_end_time.clone(),
+        first_join_time: None,
+        last_leave_time: None,
+        duration_ms: None,
+        late: None,
+        late_by_ms: None,
+        early_leave: None,
+        early_leave_by_ms: None,
+        sessions,
+    }
+}
+
+fn merge_attendance_rows(
+    rows: Vec<GoogleMeetAttendanceRow>,
+    conference_record: &GoogleMeetConferenceRecord,
+    options: AttendanceOptions,
+) -> Vec<GoogleMeetAttendanceRow> {
+    if !options.merge_duplicate_participants {
+        return rows
+            .into_iter()
+            .map(|row| decorate_attendance_row(row, conference_record, options))
+            .collect();
+    }
+
+    let mut grouped = BTreeMap::<String, GoogleMeetAttendanceRow>::new();
+    for mut row in rows {
+        let key = attendance_merge_key(&row);
+        if let Some(existing) = grouped.get_mut(&key) {
+            if !existing.participants.contains(&row.participant) {
+                existing.participants.push(row.participant.clone());
+            }
+            existing.sessions.append(&mut row.sessions);
+            if existing.display_name.is_none() {
+                existing.display_name = row.display_name;
+            }
+            if existing.user.is_none() {
+                existing.user = row.user;
+            }
+            existing.earliest_start_time = min_timestamp([
+                existing.earliest_start_time.as_deref(),
+                row.earliest_start_time.as_deref(),
+            ]);
+            existing.latest_end_time = max_timestamp([
+                existing.latest_end_time.as_deref(),
+                row.latest_end_time.as_deref(),
+            ]);
+        } else {
+            grouped.insert(key, row);
+        }
+    }
+
+    grouped
+        .into_values()
+        .map(|row| decorate_attendance_row(row, conference_record, options))
+        .collect()
+}
+
+fn decorate_attendance_row(
+    mut row: GoogleMeetAttendanceRow,
+    conference_record: &GoogleMeetConferenceRecord,
+    options: AttendanceOptions,
+) -> GoogleMeetAttendanceRow {
+    row.sessions.sort_by_key(|session| {
+        parse_timestamp_ms(session.start_time.as_deref()).unwrap_or_default()
+    });
+    let first_join = min_timestamp(
+        row.earliest_start_time
+            .as_deref()
+            .into_iter()
+            .map(Some)
+            .chain(
+                row.sessions
+                    .iter()
+                    .map(|session| session.start_time.as_deref()),
+            ),
+    );
+    let last_leave = max_timestamp(
+        row.latest_end_time.as_deref().into_iter().map(Some).chain(
+            row.sessions
+                .iter()
+                .map(|session| session.end_time.as_deref()),
+        ),
+    );
+    let duration_ms =
+        sum_session_duration_ms(&row.sessions, first_join.as_deref(), last_leave.as_deref());
+    let late_by_ms = diff_ms(
+        conference_record.start_time.as_deref(),
+        first_join.as_deref(),
+    );
+    let early_by_ms = diff_ms(last_leave.as_deref(), conference_record.end_time.as_deref());
+    let late_grace_ms = options.late_after_minutes.saturating_mul(60_000);
+    let early_grace_ms = options.early_before_minutes.saturating_mul(60_000);
+
+    row.earliest_start_time = first_join.clone().or(row.earliest_start_time);
+    row.latest_end_time = last_leave.clone().or(row.latest_end_time);
+    row.first_join_time = first_join;
+    row.last_leave_time = last_leave;
+    row.duration_ms = duration_ms;
+    if let Some(value) = late_by_ms {
+        row.late = Some(value > late_grace_ms);
+        if value > late_grace_ms {
+            row.late_by_ms = Some(value);
+        }
+    }
+    if let Some(value) = early_by_ms {
+        row.early_leave = Some(value > early_grace_ms);
+        if value > early_grace_ms {
+            row.early_leave_by_ms = Some(value);
+        }
+    }
+    row
+}
+
+fn participant_display_name(participant: &GoogleMeetParticipant) -> Option<String> {
+    participant
+        .signedin_user
+        .as_ref()
+        .and_then(|identity| identity.display_name.clone())
+        .or_else(|| {
+            participant
+                .anonymous_user
+                .as_ref()
+                .and_then(|identity| identity.display_name.clone())
+        })
+        .or_else(|| {
+            participant
+                .phone_user
+                .as_ref()
+                .and_then(|identity| identity.display_name.clone())
+        })
+}
+
+fn participant_user(participant: &GoogleMeetParticipant) -> Option<String> {
+    participant
+        .signedin_user
+        .as_ref()
+        .and_then(|identity| identity.user.clone())
+}
+
+fn attendance_merge_key(row: &GoogleMeetAttendanceRow) -> String {
+    row.user
+        .as_deref()
+        .or(row.display_name.as_deref())
+        .unwrap_or(&row.participant)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn parse_timestamp_ms(value: Option<&str>) -> Option<i64> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.timestamp_millis())
+}
+
+fn iso_from_ms(value: i64) -> Option<String> {
+    DateTime::<Utc>::from_timestamp_millis(value)
+        .map(|timestamp| timestamp.to_rfc3339_opts(SecondsFormat::Millis, true))
+}
+
+fn min_timestamp<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values
+        .into_iter()
+        .filter_map(parse_timestamp_ms)
+        .min()
+        .and_then(iso_from_ms)
+}
+
+fn max_timestamp<'a>(values: impl IntoIterator<Item = Option<&'a str>>) -> Option<String> {
+    values
+        .into_iter()
+        .filter_map(parse_timestamp_ms)
+        .max()
+        .and_then(iso_from_ms)
+}
+
+fn sum_session_duration_ms(
+    sessions: &[GoogleMeetParticipantSession],
+    fallback_start: Option<&str>,
+    fallback_end: Option<&str>,
+) -> Option<u64> {
+    let total = sessions.iter().fold(0_u64, |total, session| {
+        match (
+            parse_timestamp_ms(session.start_time.as_deref()),
+            parse_timestamp_ms(session.end_time.as_deref()),
+        ) {
+            (Some(start), Some(end)) if end > start => {
+                total.saturating_add(u64::try_from(end - start).unwrap_or(u64::MAX))
+            }
+            _ => total,
+        }
+    });
+    if total > 0 {
+        return Some(total);
+    }
+    diff_ms(fallback_start, fallback_end)
+}
+
+fn diff_ms(start: Option<&str>, end: Option<&str>) -> Option<u64> {
+    let start = parse_timestamp_ms(start)?;
+    let end = parse_timestamp_ms(end)?;
+    if end > start {
+        u64::try_from(end - start).ok()
+    } else {
+        Some(0)
+    }
+}
+
 fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
         NORMALIZE_SPACE_OP => Ok(CapabilityId::from_static(MEET_SPACE_READ_CAP)),
+        CONFERENCE_RECORD_GET_OP
+        | CONFERENCE_RECORDS_LIST_OP
+        | CONFERENCE_RECORD_LATEST_OP
+        | PARTICIPANTS_LIST_OP
+        | PARTICIPANT_SESSIONS_LIST_OP
+        | ATTENDANCE_LIST_OP => Ok(CapabilityId::from_static(MEET_CONFERENCE_READ_CAP)),
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -734,6 +1276,76 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_request(format!("Missing required field: {field}")))
+}
+
+fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<Option<&'a str>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_str()
+        .ok_or_else(|| invalid_request(format!("`{field}` must be a string")))?;
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(value))
+}
+
+fn parse_max_items(input: &serde_json::Value) -> FcpResult<usize> {
+    parse_optional_u64(
+        input,
+        "max_items",
+        1,
+        u64::try_from(MAX_ITEMS_CAP).unwrap_or(u64::MAX),
+    )?
+    .map(usize::try_from)
+    .transpose()
+    .map_err(|_| invalid_request("`max_items` is too large"))?
+    .map_or(Ok(DEFAULT_MAX_ITEMS), Ok)
+}
+
+fn parse_optional_u32(
+    input: &serde_json::Value,
+    field: &str,
+    min: u32,
+    max: u32,
+) -> FcpResult<Option<u32>> {
+    parse_optional_u64(input, field, u64::from(min), u64::from(max))?
+        .map(u32::try_from)
+        .transpose()
+        .map_err(|_| invalid_request(format!("`{field}` is too large")))
+}
+
+fn parse_optional_u64(
+    input: &serde_json::Value,
+    field: &str,
+    min: u64,
+    max: u64,
+) -> FcpResult<Option<u64>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let value = value
+        .as_u64()
+        .ok_or_else(|| invalid_request(format!("`{field}` must be an unsigned integer")))?;
+    if value < min || value > max {
+        return Err(invalid_request(format!(
+            "`{field}` must be between {min} and {max}"
+        )));
+    }
+    Ok(Some(value))
+}
+
+fn parse_optional_bool(input: &serde_json::Value, field: &str) -> FcpResult<Option<bool>> {
+    input
+        .get(field)
+        .map(|value| {
+            value
+                .as_bool()
+                .ok_or_else(|| invalid_request(format!("`{field}` must be a boolean")))
+        })
+        .transpose()
 }
 
 #[allow(clippy::too_many_arguments)]

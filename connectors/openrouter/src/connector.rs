@@ -65,7 +65,7 @@ struct OpenRouterConfig {
 
 impl OpenRouterConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let provided_secret = params
+        let provided_auth = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -78,10 +78,10 @@ impl OpenRouterConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (provided_secret, credential_id) {
-            (Some(secret), None) => {
+        let auth = match (provided_auth, credential_id) {
+            (Some(auth_material), None) => {
                 let mut authorization =
-                    validated_header_value("authorization", &format!("Bearer {secret}"))?;
+                    validated_header_value("authorization", &format!("Bearer {auth_material}"))?;
                 authorization.set_sensitive(true);
                 Auth::ApiKey { authorization }
             }
@@ -840,7 +840,7 @@ fn build_video_image_inputs(images: &[VideoSourceImage]) -> (Vec<Value>, Vec<Val
         let role = image.role.as_deref();
         let image_part = json!({
             "type": "image_url",
-            "image_url": { "url": image.url.clone() },
+            "image_url": { "url": &image.url },
         });
         if role == Some("reference_image") {
             input_references.push(image_part);
@@ -857,12 +857,16 @@ fn build_video_image_inputs(images: &[VideoSourceImage]) -> (Vec<Value>, Vec<Val
 
         if frame_type == "first_frame" && !has_first_frame {
             let mut frame = image_part;
-            frame["frame_type"] = json!("first_frame");
+            if let Some(frame_object) = frame.as_object_mut() {
+                frame_object.insert("frame_type".into(), json!("first_frame"));
+            }
             frame_images.push(frame);
             has_first_frame = true;
         } else if frame_type == "last_frame" && !has_last_frame {
             let mut frame = image_part;
-            frame["frame_type"] = json!("last_frame");
+            if let Some(frame_object) = frame.as_object_mut() {
+                frame_object.insert("frame_type".into(), json!("last_frame"));
+            }
             frame_images.push(frame);
             has_last_frame = true;
         } else {
@@ -998,7 +1002,9 @@ const fn health_status(
 
 fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     if let Some(value) = source.get(field) {
-        target[field] = value.clone();
+        if let Some(target_object) = target.as_object_mut() {
+            target_object.insert(field.into(), value.clone());
+        }
     }
 }
 

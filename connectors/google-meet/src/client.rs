@@ -575,7 +575,8 @@ fn auth_header_pairs(auth: &GoogleMaterializedAuth) -> GoogleMeetResult<Vec<(Str
 async fn decode_response<T: DeserializeOwned>(response: reqwest::Response) -> GoogleMeetResult<T> {
     let status = response.status();
     if status.is_success() {
-        return response.json::<T>().await.map_err(GoogleMeetError::Http);
+        let body = response.bytes().await.map_err(GoogleMeetError::Http)?;
+        return serde_json::from_slice(&body).map_err(GoogleMeetError::Json);
     }
     let retry_after_secs = response
         .headers()

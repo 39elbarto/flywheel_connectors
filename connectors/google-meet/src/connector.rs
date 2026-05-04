@@ -693,7 +693,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let page_size = parse_page_size(input)?;
         let max_items = parse_max_items(input)?;
         let meeting = optional_str(input, "meeting")?;
         let records = client
@@ -732,7 +732,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let page_size = parse_page_size(input)?;
         let max_items = parse_max_items(input)?;
         let participants = client
             .list_participants(
@@ -754,7 +754,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let page_size = parse_page_size(input)?;
         let max_items = parse_max_items(input)?;
         let sessions = client
             .list_participant_sessions(
@@ -776,7 +776,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?;
+        let page_size = parse_page_size(input)?;
         let max_items = parse_max_items(input)?;
         let merge = parse_optional_bool(input, "merge_duplicate_participants")?.unwrap_or(true);
         let late_after_minutes =
@@ -1303,6 +1303,12 @@ fn parse_max_items(input: &serde_json::Value) -> FcpResult<usize> {
     .transpose()
     .map_err(|_| invalid_request("`max_items` is too large"))?
     .map_or(Ok(DEFAULT_MAX_ITEMS), Ok)
+}
+
+fn parse_page_size(input: &serde_json::Value) -> FcpResult<Option<u32>> {
+    Ok(Some(
+        parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?.unwrap_or(DEFAULT_PAGE_SIZE),
+    ))
 }
 
 fn parse_optional_u32(

@@ -10,7 +10,7 @@ use fcp_prelude::{
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_partial_json, header, method, path},
 };
 
 const OP_SEARCH: &str = "exa.search";
@@ -183,17 +183,14 @@ fn handshake_request() -> HandshakeRequest {
     }
 }
 
-fn search_invoke(id: &'static str) -> InvokeRequest {
+fn search_invoke_with_input(id: &'static str, input: serde_json::Value) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new(id),
         connector_id: ConnectorId::from_static("fcp.exa"),
         operation: OperationId::from_static(OP_SEARCH),
         zone_id: ZoneId::work(),
-        input: json!({
-            "query": "secure connector protocol",
-            "numResults": 2
-        }),
+        input,
         capability_token: CapabilityToken::test_token(),
         holder_proof: None,
         context: None,
@@ -206,20 +203,44 @@ fn search_invoke(id: &'static str) -> InvokeRequest {
     }
 }
 
-fn suite(server: &MockServer, test_name: &'static str, expect_error: bool) -> ConnectorSuite {
+fn search_invoke(id: &'static str) -> InvokeRequest {
+    search_invoke_with_input(
+        id,
+        json!({
+            "query": "secure connector protocol",
+            "numResults": 2
+        }),
+    )
+}
+
+fn suite_with_base_url(
+    base_url: String,
+    test_name: &'static str,
+    expect_error: bool,
+    invoke: InvokeRequest,
+) -> ConnectorSuite {
     ConnectorSuite {
         test_name: test_name.into(),
         config: json!({
             "api_key": "exa_test_key",
-            "base_url": server.uri()
+            "base_url": base_url
         }),
         handshake: handshake_request(),
-        invoke: Some(search_invoke(test_name)),
+        invoke: Some(invoke),
         invoke_expectations: InvokeExpectations {
             expect_error,
             ..InvokeExpectations::default()
         },
     }
+}
+
+fn suite(server: &MockServer, test_name: &'static str, expect_error: bool) -> ConnectorSuite {
+    suite_with_base_url(
+        server.uri(),
+        test_name,
+        expect_error,
+        search_invoke(test_name),
+    )
 }
 
 #[fcp_async_core::runtime::test]
@@ -228,6 +249,11 @@ async fn connector_suite_search_happy_path_uses_mock_server() {
     Mock::given(method("POST"))
         .and(path("/search"))
         .and(header("x-api-key", "exa_test_key"))
+        .and(header("x-exa-integration", "fcp"))
+        .and(body_partial_json(json!({
+            "query": "secure connector protocol",
+            "numResults": 2
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
                 {"id": "r1", "title": "FCP", "url": "https://example.test/fcp"}
@@ -252,11 +278,67 @@ async fn connector_suite_search_happy_path_uses_mock_server() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn connector_suite_search_suffix_base_url_uses_single_search_path_and_clamps() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/search"))
+        .and(header("x-api-key", "exa_test_key"))
+        .and(header("x-exa-integration", "fcp"))
+        .and(body_partial_json(json!({
+            "query": "secure connector protocol",
+            "numResults": 100,
+            "type": "deep-reasoning",
+            "contents": {
+                "highlights": {"numSentences": 2},
+                "summary": true
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "results": [
+                {"id": "r1", "title": "FCP", "url": "https://example.test/fcp"}
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = ExaSuiteAdapter::new();
+    let mut runner = E2eRunner::new("fcp-exa");
+    let report = runner
+        .run_connector_suite(
+            &mut connector,
+            suite_with_base_url(
+                format!("{}/search/", server.uri()),
+                "exa_search_connector_suite_base_url_suffix",
+                false,
+                search_invoke_with_input(
+                    "exa_search_connector_suite_base_url_suffix",
+                    json!({
+                        "query": "secure connector protocol",
+                        "numResults": 125,
+                        "type": "deep-reasoning",
+                        "contents": {
+                            "highlights": {"numSentences": 2},
+                            "summary": true
+                        }
+                    }),
+                ),
+            ),
+        )
+        .await
+        .expect("connector suite run");
+
+    assert!(report.passed, "connector suite should pass");
+    assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
 async fn connector_suite_search_error_path_is_expected() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/search"))
         .and(header("x-api-key", "exa_test_key"))
+        .and(header("x-exa-integration", "fcp"))
         .respond_with(ResponseTemplate::new(503).set_body_json(json!({
             "error": "upstream unavailable"
         })))

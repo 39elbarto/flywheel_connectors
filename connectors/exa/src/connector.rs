@@ -12,6 +12,16 @@ const CONNECTOR_ID: &str = "fcp.exa";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
 const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Content expansion and crawling stay out of scope for now.";
+const EXA_INTEGRATION: &str = "fcp";
+const EXA_MAX_SEARCH_RESULTS: u64 = 100;
+const EXA_SEARCH_TYPES: &[&str] = &[
+    "auto",
+    "neural",
+    "fast",
+    "deep",
+    "deep-reasoning",
+    "instant",
+];
 
 #[derive(Clone)]
 enum Auth {
@@ -47,6 +57,10 @@ impl Auth {
             Self::ApiKey(key) => {
                 let mut headers = HeaderMap::new();
                 headers.insert(HeaderName::from_static("x-api-key"), key.clone());
+                headers.insert(
+                    HeaderName::from_static("x-exa-integration"),
+                    HeaderValue::from_static(EXA_INTEGRATION),
+                );
                 request.headers(headers)
             }
             Self::CredentialId { .. } => request,
@@ -385,14 +399,20 @@ impl ExaConnector {
                 message: "query is required".into(),
             })?;
         let mut body = json!({ "query": query });
+        if let Some(value) = input.get("numResults") {
+            body["numResults"] = json!(validated_num_results(value)?);
+        }
+        if let Some(value) = input.get("type") {
+            body["type"] = json!(validated_search_type(value)?);
+        }
+        if let Some(value) = input.get("contents") {
+            body["contents"] = validated_contents(value)?;
+        }
         for field in [
-            "numResults",
-            "type",
             "useAutoprompt",
             "category",
             "includeDomains",
             "excludeDomains",
-            "contents",
         ] {
             copy_if_present(&mut body, &input, field);
         }
@@ -465,6 +485,138 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     }
 }
 
+fn validated_num_results(value: &Value) -> FcpResult<u64> {
+    let Some(raw) = value.as_f64() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "numResults must be numeric".into(),
+        });
+    };
+    if !raw.is_finite() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "numResults must be finite".into(),
+        });
+    }
+    Ok(raw.floor().clamp(1.0, EXA_MAX_SEARCH_RESULTS as f64) as u64)
+}
+
+fn validated_search_type(value: &Value) -> FcpResult<&str> {
+    let Some(search_type) = value
+        .as_str()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "type must be a non-empty string".into(),
+        });
+    };
+    if EXA_SEARCH_TYPES.contains(&search_type) {
+        Ok(search_type)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("type must be one of {}", EXA_SEARCH_TYPES.join(", ")),
+        })
+    }
+}
+
+fn validated_contents(value: &Value) -> FcpResult<Value> {
+    let Some(contents) = value.as_object() else {
+        return Err(invalid_contents(
+            "contents must be an object with optional text, highlights, and summary fields",
+        ));
+    };
+
+    for key in contents.keys() {
+        if !matches!(key.as_str(), "text" | "highlights" | "summary") {
+            return Err(invalid_contents(format!(
+                "contents has unknown field {key:?}; allowed fields are text, highlights, and summary"
+            )));
+        }
+    }
+    if let Some(field) = contents.get("text") {
+        validate_contents_option(
+            "contents.text",
+            field,
+            &["maxCharacters"],
+            &["maxCharacters"],
+            &[],
+        )?;
+    }
+    if let Some(field) = contents.get("highlights") {
+        validate_contents_option(
+            "contents.highlights",
+            field,
+            &["maxCharacters", "query", "numSentences", "highlightsPerUrl"],
+            &["maxCharacters", "numSentences", "highlightsPerUrl"],
+            &["query"],
+        )?;
+    }
+    if let Some(field) = contents.get("summary") {
+        validate_contents_option("contents.summary", field, &["query"], &[], &["query"])?;
+    }
+
+    Ok(value.clone())
+}
+
+fn validate_contents_option(
+    field_name: &str,
+    value: &Value,
+    allowed_fields: &[&str],
+    positive_integer_fields: &[&str],
+    string_fields: &[&str],
+) -> FcpResult<()> {
+    if value.is_boolean() {
+        return Ok(());
+    }
+    let Some(object) = value.as_object() else {
+        return Err(invalid_contents(format!(
+            "{field_name} must be a boolean or object"
+        )));
+    };
+    for key in object.keys() {
+        if !allowed_fields.contains(&key.as_str()) {
+            return Err(invalid_contents(format!(
+                "{field_name} has unknown field {key:?}"
+            )));
+        }
+    }
+    for key in positive_integer_fields {
+        if let Some(value) = object.get(*key) {
+            validate_positive_integer(&format!("{field_name}.{key}"), value)?;
+        }
+    }
+    for key in string_fields {
+        if let Some(value) = object.get(*key) {
+            if !value.is_string() {
+                return Err(invalid_contents(format!(
+                    "{field_name}.{key} must be a string"
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_positive_integer(field_name: &str, value: &Value) -> FcpResult<()> {
+    if value.as_u64().is_some_and(|number| number > 0) {
+        Ok(())
+    } else {
+        Err(invalid_contents(format!(
+            "{field_name} must be a positive integer"
+        )))
+    }
+}
+
+fn invalid_contents(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
 fn validated_header_value(field: &str, value: &str) -> FcpResult<HeaderValue> {
     HeaderValue::from_str(value).map_err(|error| FcpError::InvalidRequest {
         code: 1003,
@@ -507,7 +659,12 @@ fn normalize_base_url(
             message: format!("base_url host {host} is not allowed"),
         });
     }
-    Ok(parsed.to_string().trim_end_matches('/').to_string())
+    let mut normalized = parsed;
+    let path = normalized.path().trim_end_matches('/').to_string();
+    if let Some(prefix) = path.strip_suffix("/search") {
+        normalized.set_path(prefix);
+    }
+    Ok(normalized.to_string().trim_end_matches('/').to_string())
 }
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -608,6 +765,89 @@ mod tests {
         }))
         .expect_err("expected invalid api key");
         assert!(error.to_string().contains("valid HTTP header value"));
+    }
+
+    #[test]
+    fn num_results_clamps_to_exa_bounds() {
+        assert_eq!(validated_num_results(&json!(0)).unwrap(), 1);
+        assert_eq!(validated_num_results(&json!(-5)).unwrap(), 1);
+        assert_eq!(validated_num_results(&json!(12.8)).unwrap(), 12);
+        assert_eq!(validated_num_results(&json!(150)).unwrap(), 100);
+    }
+
+    #[test]
+    fn num_results_rejects_non_numeric_values() {
+        let error = validated_num_results(&json!("12")).expect_err("expected invalid numResults");
+        assert!(error.to_string().contains("numeric"));
+    }
+
+    #[test]
+    fn search_type_must_match_current_exa_modes() {
+        assert_eq!(
+            validated_search_type(&json!("deep-reasoning")).unwrap(),
+            "deep-reasoning"
+        );
+        let error = validated_search_type(&json!("semantic")).expect_err("expected invalid type");
+        assert!(error.to_string().contains("auto, neural, fast"));
+    }
+
+    #[test]
+    fn contents_accepts_documented_options() {
+        let contents = json!({
+            "text": { "maxCharacters": 1200 },
+            "highlights": {
+                "maxCharacters": 4000,
+                "query": "latest model launches",
+                "numSentences": 4,
+                "highlightsPerUrl": 2
+            },
+            "summary": { "query": "launch details" }
+        });
+        assert_eq!(validated_contents(&contents).unwrap(), contents);
+    }
+
+    #[test]
+    fn contents_rejects_unknown_or_invalid_options() {
+        let unknown = validated_contents(&json!({
+            "text": true,
+            "markdown": true
+        }))
+        .expect_err("expected unknown field error");
+        assert!(unknown.to_string().contains("unknown field"));
+
+        let invalid_number = validated_contents(&json!({
+            "highlights": { "numSentences": 0 }
+        }))
+        .expect_err("expected invalid numSentences");
+        assert!(invalid_number.to_string().contains("positive integer"));
+
+        let invalid_query = validated_contents(&json!({
+            "summary": { "query": 42 }
+        }))
+        .expect_err("expected invalid summary query");
+        assert!(invalid_query.to_string().contains("must be a string"));
+    }
+
+    #[test]
+    fn base_url_normalization_avoids_double_search_path() {
+        assert_eq!(
+            normalize_base_url(
+                Some("http://localhost:8080/exa/search/"),
+                DEFAULT_BASE_URL,
+                &["exa.ai"]
+            )
+            .unwrap(),
+            "http://localhost:8080/exa"
+        );
+        assert_eq!(
+            normalize_base_url(
+                Some("http://localhost:8080/search"),
+                DEFAULT_BASE_URL,
+                &["exa.ai"]
+            )
+            .unwrap(),
+            "http://localhost:8080"
+        );
     }
 
     #[fcp_async_core::runtime::test]

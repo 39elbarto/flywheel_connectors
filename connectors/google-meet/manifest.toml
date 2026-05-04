@@ -1,0 +1,114 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:87c887543a2f0532c3206f080853b42515587eb262a3558b6e1ce3ff4660091a"
+
+[connector]
+id = "fcp.google-meet"
+name = "Google Meet Connector"
+version = "0.1.0"
+description = "FCP connector foundation for Google Meet spaces and conference artifacts"
+archetypes = ["operational", "knowledge"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = [
+    "meet.space.read",
+    "meet.space.create",
+    "meet.space.end",
+    "meet.conference.read",
+    "meet.artifact.read",
+    "meet.drive_artifact.read",
+]
+forbidden = ["system.exec", "network.listen", "browser.control", "meeting.live_join", "meeting.live_speak"]
+
+[provides.operations."gmeet.normalize_space_name"]
+description = "Normalize a Google Meet URL, meeting code, or spaces/* name into a Meet API spaces/* resource name"
+capability = "meet.space.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.normalize_space_name".input_schema]
+required = ["input"]
+type = "object"
+[provides.operations."gmeet.normalize_space_name".input_schema.properties.input]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource name"
+
+[provides.operations."gmeet.normalize_space_name".output_schema]
+required = ["space_name", "input_kind", "live_session"]
+type = "object"
+[provides.operations."gmeet.normalize_space_name".output_schema.properties.space_name]
+type = "string"
+[provides.operations."gmeet.normalize_space_name".output_schema.properties.meeting_code]
+type = "string"
+[provides.operations."gmeet.normalize_space_name".output_schema.properties.meeting_uri]
+type = "string"
+[provides.operations."gmeet.normalize_space_name".output_schema.properties.input_kind]
+type = "string"
+[provides.operations."gmeet.normalize_space_name".output_schema.properties.live_session]
+type = "boolean"
+
+[provides.operations."gmeet.normalize_space_name".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.normalize_space_name".ai_hints]
+when_to_use = "Validate and normalize a Google Meet identifier before calling Meet API operations."
+common_mistakes = ["Passing a Calendar event link instead of a meet.google.com link", "Assuming this joins or controls a live meeting; it only normalizes the API space name"]
+examples = ['{"input":"https://meet.google.com/abc-defg-hij"}', '{"input":"spaces/abc-defg-hij"}']
+related = []
+
+[event_caps]
+streaming = false
+replay = false
+min_buffer_events = 0
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
+[[rate_limits.pools]]
+id = "meet.space.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[rate_limits.operation_pools]
+"gmeet.normalize_space_name" = ["meet.space.read"]

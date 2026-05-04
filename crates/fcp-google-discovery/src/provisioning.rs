@@ -1197,6 +1197,7 @@ mod tests {
         for surface_id in &[
             "gmail",
             "calendar",
+            "meet",
             "admin_reports",
             "people",
             "workspace_events",
@@ -1275,6 +1276,7 @@ mod tests {
         for surface_id in &[
             "gmail",
             "calendar",
+            "meet",
             "admin_reports",
             "people",
             "workspace_events",
@@ -1573,6 +1575,29 @@ mod tests {
                 .iter()
                 .any(|s| s.contains("calendar")),
             "calendar should have calendar-related scopes"
+        );
+    }
+
+    #[test]
+    fn meet_bundle_has_space_read_default_and_explicit_escalations() {
+        let bundle =
+            load_default_google_provisioning_bundle("meet").expect("meet bundle should load");
+        assert_eq!(bundle.surface.surface_id, "meet");
+        assert_eq!(
+            bundle.surface.default_scopes,
+            vec!["https://www.googleapis.com/auth/meetings.space.readonly".to_string()]
+        );
+        let scopes = bundle
+            .scopes_for_triggers([
+                "User enables Google Meet space creation workflows.",
+                "User enables Google Meet Drive-backed transcript or smart-note text export.",
+            ])
+            .expect("meet escalations should resolve");
+        assert!(
+            scopes.contains(&"https://www.googleapis.com/auth/meetings.space.created".to_string())
+        );
+        assert!(
+            scopes.contains(&"https://www.googleapis.com/auth/drive.meet.readonly".to_string())
         );
     }
 

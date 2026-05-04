@@ -271,6 +271,14 @@ impl Default for ServiceAliasRegistry {
             DiscoveryServiceId::new("calendar", "v3").expect("static alias must be valid"),
         );
         aliases.insert(
+            "meet".to_string(),
+            DiscoveryServiceId::new("meet", "v2").expect("static alias must be valid"),
+        );
+        aliases.insert(
+            "google-meet".to_string(),
+            DiscoveryServiceId::new("meet", "v2").expect("static alias must be valid"),
+        );
+        aliases.insert(
             "youtube".to_string(),
             DiscoveryServiceId::new("youtube", "v3").expect("static alias must be valid"),
         );
@@ -1328,6 +1336,9 @@ mod tests {
         let resolved = registry.resolve("gcal").expect("resolve alias");
         assert_eq!(resolved.api_name, "calendar");
         assert_eq!(resolved.api_version, "v3");
+        let meet = registry.resolve("google-meet").expect("resolve meet alias");
+        assert_eq!(meet.api_name, "meet");
+        assert_eq!(meet.api_version, "v2");
         assert!(registry.aliases().contains_key("gmail"));
     }
 

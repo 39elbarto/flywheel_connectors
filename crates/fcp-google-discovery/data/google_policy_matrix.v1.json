@@ -165,6 +165,87 @@
         ]
       },
       {
+        "surface_id": "meet",
+        "display_name": "Google Meet connector provisioning",
+        "default_scopes": [
+          "https://www.googleapis.com/auth/meetings.space.readonly"
+        ],
+        "required_api_enablement": [
+          "Google Meet API"
+        ],
+        "project_prerequisites": [
+          "OAuth consent screen configured for the selected project.",
+          "OAuth client created for the interactive Google Meet user-auth flow.",
+          "The selected account is allowed to use the requested Google Meet API preview or restricted surfaces."
+        ],
+        "escalation_paths": [
+          {
+            "trigger": "User enables Google Meet space creation workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/meetings.space.created"
+            ],
+            "notes": [
+              "Space creation is a write path and must stay separate from read-only space and conference artifact access."
+            ]
+          },
+          {
+            "trigger": "User enables Google Meet active-conference termination workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/meetings.space.created"
+            ],
+            "notes": [
+              "Ending an active conference is operationally disruptive and should be policy-gated by the connector operation."
+            ]
+          },
+          {
+            "trigger": "User enables Google Meet space settings read or patch workflows.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/meetings.space.settings"
+            ],
+            "notes": [
+              "Space settings expose or mutate meeting policy and should not be bundled into default artifact reads."
+            ]
+          },
+          {
+            "trigger": "User enables Google Meet conference media artifact reads.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/meetings.conference.media.readonly"
+            ],
+            "notes": [
+              "Conference media reads are privacy-sensitive and should be explicit above ordinary space metadata reads."
+            ]
+          },
+          {
+            "trigger": "User enables Google Meet Drive-backed transcript or smart-note text export.",
+            "add_scopes": [
+              "https://www.googleapis.com/auth/drive.meet.readonly"
+            ],
+            "notes": [
+              "Drive-backed Meet artifacts require a distinct Drive scope and must be surfaced as a separate escalation."
+            ]
+          }
+        ],
+        "gcloud_assisted_steps": [
+          "Confirm Google Meet API enablement before launching user consent.",
+          "Preflight whether the selected workflow can stay on meetings.space.readonly before requesting creation, settings, media, or Drive-backed artifact scopes.",
+          "Use gcloud-authenticated setup only for project/bootstrap checks; final runtime output must still be a credential_id or in-memory token path."
+        ],
+        "fallback_steps": [
+          "Provide manual console steps for Google Meet API enablement and OAuth client selection when gcloud cannot manage the project.",
+          "Keep space creation, conference termination, settings, media, and Drive-backed artifact scopes as explicit opt-ins in the manual fallback path.",
+          "Do not mark runtime readiness until the host has materialized a runtime-safe credential reference or ephemeral access token."
+        ],
+        "runtime_materialization": [
+          "Runtime should use credential_id handles or ephemeral access tokens from the shared Google auth chain, never raw local credentials files.",
+          "Provisioning-only auth sources such as ADC may assist setup diagnostics but must not define steady-state connector auth.",
+          "Developer-preview or restricted-scope denial should be surfaced as structured doctor/self_check guidance instead of silently widening scopes."
+        ],
+        "notes": [
+          "Google Meet is intentionally separate from Google Calendar hangoutLink preservation and Workspace Events delivery because its API owns spaces, conference records, participants, transcripts, recordings, smart notes, and active-conference lifecycle.",
+          "Live meeting participation, speech, and browser-control behavior is not part of the default API-artifact foundation and requires separate higher-risk capabilities."
+        ]
+      },
+      {
         "surface_id": "people",
         "display_name": "Google People/Contacts connector provisioning",
         "default_scopes": [

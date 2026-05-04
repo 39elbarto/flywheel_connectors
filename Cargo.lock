@@ -3870,6 +3870,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-google-meet"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-manifest",
+ "fcp-prelude",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "fcp-google-people"
 version = "0.1.0"
 dependencies = [

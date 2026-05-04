@@ -50,6 +50,7 @@ members = [
     "connectors/slack",
     "connectors/gmail",
     "connectors/google-calendar",
+    "connectors/google-meet",
     "connectors/google-admin-reports",
     "connectors/google-chat",
     "connectors/google-docs",

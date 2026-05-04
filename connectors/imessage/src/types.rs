@@ -292,8 +292,14 @@ pub struct SendMessageRequest {
     pub method: String,
 }
 
+/// `BlueBubbles` `AppleScript` send mode.
+pub const SEND_METHOD_APPLE_SCRIPT: &str = "apple-script";
+
+/// `BlueBubbles` Private API send mode.
+pub const SEND_METHOD_PRIVATE_API: &str = "private-api";
+
 fn default_send_method() -> String {
-    "apple-script".to_string()
+    SEND_METHOD_APPLE_SCRIPT.to_string()
 }
 
 /// Response from sending a message.
@@ -556,6 +562,7 @@ mod tests {
         assert_eq!(json["chatGuid"], "iMessage;-;+15551234567");
         assert_eq!(json["message"], "Hello!");
         assert_eq!(json["tempGuid"], "tmp-001");
+        assert_eq!(json["method"], SEND_METHOD_APPLE_SCRIPT);
     }
 
     #[test]

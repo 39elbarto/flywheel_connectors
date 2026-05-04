@@ -35,8 +35,8 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&
 }
 
 use crate::types::{
-    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SendMessageRequest,
-    SendMessageResponse, ServerInfo,
+    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SEND_METHOD_APPLE_SCRIPT,
+    SEND_METHOD_PRIVATE_API, SendMessageRequest, SendMessageResponse, ServerInfo,
 };
 
 fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -55,6 +55,101 @@ async fn decode_json<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, BlueBubblesError> {
     resp.json::<T>().await.map_err(BlueBubblesError::Http)
+}
+
+async fn decode_server_info(resp: reqwest::Response) -> Result<ServerInfo, BlueBubblesError> {
+    let value = resp
+        .json::<serde_json::Value>()
+        .await
+        .map_err(BlueBubblesError::Http)?;
+    let info = value
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(&value);
+    serde_json::from_value(info.clone()).map_err(BlueBubblesError::Json)
+}
+
+fn parse_macos_major_version(version: Option<&str>) -> Option<u64> {
+    let version = version?.trim();
+    let digits: String = version.chars().take_while(char::is_ascii_digit).collect();
+    if digits.is_empty() {
+        None
+    } else {
+        digits.parse().ok()
+    }
+}
+
+/// Send-method decision used for `BlueBubbles` text sends.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct SendMethodDecision {
+    /// Explicit `BlueBubbles` request method.
+    pub method: String,
+    /// Stable reason code for logs/tests/operator diagnostics.
+    pub reason: &'static str,
+    /// Whether `/server/info` was available before sending.
+    pub server_info_available: bool,
+    /// Reported Private API state when known.
+    pub private_api: Option<bool>,
+    /// Reported macOS version when known.
+    pub os_version: Option<String>,
+    /// Optional warning for degraded-but-preserved fallback sends.
+    pub warning: Option<String>,
+}
+
+impl SendMethodDecision {
+    fn from_server_info(info: &ServerInfo) -> Self {
+        let major = parse_macos_major_version(info.os_version.as_deref());
+        if info.private_api && major.is_some_and(|major| major >= 26) {
+            return Self {
+                method: SEND_METHOD_PRIVATE_API.to_string(),
+                reason: "macos26_private_api_available",
+                server_info_available: true,
+                private_api: Some(true),
+                os_version: info.os_version.clone(),
+                warning: None,
+            };
+        }
+
+        let reason = match (info.private_api, major) {
+            (true, Some(_)) => "plain_text_apple_script_supported",
+            (true, None) => "private_api_available_macos_unknown",
+            (false, Some(major)) if major >= 26 => {
+                "macos26_private_api_disabled_apple_script_fallback"
+            }
+            (false, _) => "private_api_disabled_apple_script_fallback",
+        };
+
+        Self {
+            method: SEND_METHOD_APPLE_SCRIPT.to_string(),
+            reason,
+            server_info_available: true,
+            private_api: Some(info.private_api),
+            os_version: info.os_version.clone(),
+            warning: None,
+        }
+    }
+
+    fn unavailable(error: &BlueBubblesError) -> Self {
+        Self {
+            method: SEND_METHOD_APPLE_SCRIPT.to_string(),
+            reason: "server_info_unavailable_apple_script_fallback",
+            server_info_available: false,
+            private_api: None,
+            os_version: None,
+            warning: Some(format!(
+                "BlueBubbles server info unavailable; using explicit apple-script fallback: {error}"
+            )),
+        }
+    }
+}
+
+/// Result of a `BlueBubbles` send plus the method decision that shaped the request.
+#[derive(Debug, Clone)]
+pub struct SendMessageOutcome {
+    /// Raw `BlueBubbles` send response.
+    pub response: SendMessageResponse,
+    /// Send method decision used for the request body.
+    pub decision: SendMethodDecision,
 }
 
 /// `BlueBubbles` API client.
@@ -214,7 +309,7 @@ impl BlueBubblesClient {
                     return AttemptOutcome::Terminal(err);
                 }
 
-                match decode_json::<ServerInfo>(resp).await {
+                match decode_server_info(resp).await {
                     Ok(value) => AttemptOutcome::Success(value),
                     Err(error) => AttemptOutcome::Terminal(error),
                 }
@@ -233,17 +328,21 @@ impl BlueBubblesClient {
         runtime: &ConnectorRuntime,
         chat_guid: &str,
         text: &str,
-    ) -> BlueBubblesResult<SendMessageResponse> {
+    ) -> BlueBubblesResult<SendMessageOutcome> {
         let url = format!("{}/api/v1/message/text", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let server_passcode = self.server_passcode.clone();
+        let decision = match self.server_info(runtime).await {
+            Ok(info) => SendMethodDecision::from_server_info(&info),
+            Err(error) => SendMethodDecision::unavailable(&error),
+        };
 
         let body = SendMessageRequest {
             chat_guid: chat_guid.to_string(),
             message: text.to_string(),
             temp_guid: Some(uuid::Uuid::new_v4().to_string()),
-            method: "apple-script".to_string(),
+            method: decision.method.clone(),
         };
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
@@ -251,8 +350,14 @@ impl BlueBubblesClient {
             let client = self.client.clone();
             let server_passcode = server_passcode.clone();
             let body = body.clone();
+            let decision = decision.clone();
             async move {
-                debug!(attempt, "Sending iMessage via BlueBubbles");
+                debug!(
+                    attempt,
+                    send_method = %decision.method,
+                    decision = decision.reason,
+                    "Sending iMessage via BlueBubbles"
+                );
                 let resp = match client
                     .post(&url)
                     .query(&[("password", &server_passcode)])
@@ -302,7 +407,9 @@ impl BlueBubblesClient {
                 }
 
                 match decode_json::<SendMessageResponse>(resp).await {
-                    Ok(value) => AttemptOutcome::Success(value),
+                    Ok(response) => {
+                        AttemptOutcome::Success(SendMessageOutcome { response, decision })
+                    }
                     Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
@@ -760,5 +867,66 @@ impl BlueBubblesClient {
             let text = resp.text().await.unwrap_or_default();
             Err(BlueBubblesError::from_api_response(status, &text))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn server_info(private_api: bool, os_version: Option<&str>) -> ServerInfo {
+        ServerInfo {
+            os_version: os_version.map(str::to_string),
+            server_version: Some("1.9.0".into()),
+            private_api,
+            proxy_service: None,
+        }
+    }
+
+    #[test]
+    fn send_method_uses_private_api_for_macos26_when_available() {
+        let decision = SendMethodDecision::from_server_info(&server_info(true, Some("26.0.1")));
+        assert_eq!(decision.method, SEND_METHOD_PRIVATE_API);
+        assert_eq!(decision.reason, "macos26_private_api_available");
+        assert_eq!(decision.private_api, Some(true));
+    }
+
+    #[test]
+    fn send_method_keeps_apple_script_for_older_macos_plain_text() {
+        let decision = SendMethodDecision::from_server_info(&server_info(true, Some("15.5")));
+        assert_eq!(decision.method, SEND_METHOD_APPLE_SCRIPT);
+        assert_eq!(decision.reason, "plain_text_apple_script_supported");
+    }
+
+    #[test]
+    fn send_method_falls_back_when_private_api_disabled_on_macos26() {
+        let decision = SendMethodDecision::from_server_info(&server_info(false, Some("26.0")));
+        assert_eq!(decision.method, SEND_METHOD_APPLE_SCRIPT);
+        assert_eq!(
+            decision.reason,
+            "macos26_private_api_disabled_apple_script_fallback"
+        );
+        assert_eq!(decision.private_api, Some(false));
+    }
+
+    #[test]
+    fn send_method_falls_back_when_server_info_is_unavailable() {
+        let error = BlueBubblesError::ServerUnreachable;
+        let decision = SendMethodDecision::unavailable(&error);
+        assert_eq!(decision.method, SEND_METHOD_APPLE_SCRIPT);
+        assert_eq!(
+            decision.reason,
+            "server_info_unavailable_apple_script_fallback"
+        );
+        assert!(!decision.server_info_available);
+        assert!(decision.warning.is_some());
+    }
+
+    #[test]
+    fn macos_major_version_parser_handles_known_shapes() {
+        assert_eq!(parse_macos_major_version(Some("26.0.1")), Some(26));
+        assert_eq!(parse_macos_major_version(Some(" 15.7 ")), Some(15));
+        assert_eq!(parse_macos_major_version(Some("Tahoe")), None);
+        assert_eq!(parse_macos_major_version(None), None);
     }
 }

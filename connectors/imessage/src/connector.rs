@@ -13,7 +13,7 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
@@ -252,7 +252,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SEND_MESSAGE),
             summary: "Send an iMessage".into(),
             description: Some(
-                "Sends a text message to a chat via BlueBubbles iMessage bridge".into(),
+                "Sends a text message to a chat via BlueBubbles, choosing an explicit AppleScript or Private API send method from server capabilities".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -273,7 +273,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "properties": {
                     "status": { "type": "integer" },
                     "message": { "type": "string" },
-                    "data": { "type": "object" }
+                    "data": { "type": "object" },
+                    "send_method": { "type": "string", "enum": ["apple-script", "private-api"] },
+                    "send_method_decision": { "type": "object" }
                 }
             }),
             capability: CapabilityId::from_static(CAP_SEND),
@@ -285,6 +287,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Chat GUID format is 'iMessage;-;+15551234567' for DMs or 'iMessage;+;chatXXX' for groups".into(),
                     "The BlueBubbles server must be running on a Mac with iMessage signed in".into(),
+                    "Plain text sends refresh server info and prefer Private API on macOS 26+ when the bridge reports Private API support".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_GET_CHATS)],
@@ -833,14 +836,30 @@ impl BlueBubblesConnector {
                         message: "Missing 'message' field".into(),
                     })?;
 
-                let resp = client
+                let outcome = client
                     .send_message(runtime, chat_guid, message)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
 
-                serde_json::to_value(&resp).map_err(|e| FcpError::Internal {
-                    message: format!("Failed to serialize response: {e}"),
-                })?
+                let mut output =
+                    serde_json::to_value(&outcome.response).map_err(|e| FcpError::Internal {
+                        message: format!("Failed to serialize response: {e}"),
+                    })?;
+                if let Value::Object(ref mut object) = output {
+                    object.insert(
+                        "send_method".into(),
+                        Value::String(outcome.decision.method.clone()),
+                    );
+                    object.insert(
+                        "send_method_decision".into(),
+                        serde_json::to_value(&outcome.decision).map_err(|e| {
+                            FcpError::Internal {
+                                message: format!("Failed to serialize send decision: {e}"),
+                            }
+                        })?,
+                    );
+                }
+                output
             }
             OP_GET_CHATS => {
                 let offset = req.input.get("offset").and_then(serde_json::Value::as_u64);
@@ -1056,6 +1075,11 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::CapabilityConstraints;
+    use std::collections::HashMap;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1141,6 +1165,231 @@ mod tests {
         let mut handshake = base_handshake();
         handshake.host_public_key = signing_key.verifying_key().to_bytes();
         handshake
+    }
+
+    #[derive(Clone, Debug)]
+    struct LoopbackRequest {
+        target: String,
+        body: Vec<u8>,
+    }
+
+    impl LoopbackRequest {
+        fn json_body(&self) -> Value {
+            serde_json::from_slice(&self.body).expect("loopback request body should be valid JSON")
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct LoopbackResponse {
+        status: u16,
+        body: Vec<u8>,
+        delay: Duration,
+    }
+
+    impl LoopbackResponse {
+        fn json(status: u16, body: &Value) -> Self {
+            Self {
+                status,
+                body: body.to_string().into_bytes(),
+                delay: Duration::ZERO,
+            }
+        }
+
+        fn raw_json(status: u16, body: &'static str) -> Self {
+            Self {
+                status,
+                body: body.as_bytes().to_vec(),
+                delay: Duration::ZERO,
+            }
+        }
+    }
+
+    struct BlueBubblesLoopback {
+        base_url: String,
+        requests: Arc<Mutex<Vec<LoopbackRequest>>>,
+        logs: Arc<Mutex<Vec<Value>>>,
+        join: Option<thread::JoinHandle<()>>,
+    }
+
+    impl BlueBubblesLoopback {
+        fn spawn(name: &'static str, responses: Vec<LoopbackResponse>) -> Self {
+            let listener = StdTcpListener::bind("127.0.0.1:0").expect("bind loopback server");
+            let addr = listener.local_addr().expect("loopback server addr");
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let logs = Arc::new(Mutex::new(Vec::new()));
+            let requests_for_thread = Arc::clone(&requests);
+            let logs_for_thread = Arc::clone(&logs);
+
+            let join = thread::spawn(move || {
+                for (sequence, response) in responses.into_iter().enumerate() {
+                    let (mut stream, _) = listener.accept().expect("accept loopback connection");
+                    let request = read_loopback_request(&mut stream);
+                    logs_for_thread
+                        .lock()
+                        .expect("lock loopback logs")
+                        .push(json!({
+                            "event": "bluebubbles-send-mode-loopback",
+                            "server": name,
+                            "sequence": sequence,
+                            "target": redacted_target(&request.target),
+                            "password_redacted": true,
+                            "request_body_len": request.body.len(),
+                            "response_status": response.status,
+                            "response_body_len": response.body.len(),
+                        }));
+                    requests_for_thread
+                        .lock()
+                        .expect("lock loopback requests")
+                        .push(request);
+                    if !response.delay.is_zero() {
+                        thread::sleep(response.delay);
+                    }
+                    let _ = write_loopback_response(&mut stream, &response);
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                requests,
+                logs,
+                join: Some(join),
+            }
+        }
+
+        fn uri(&self) -> &str {
+            &self.base_url
+        }
+
+        fn finish(mut self) -> (Vec<LoopbackRequest>, Vec<Value>) {
+            if let Some(join) = self.join.take() {
+                join.join().expect("loopback thread should exit");
+            }
+            let requests = self
+                .requests
+                .lock()
+                .expect("lock loopback requests")
+                .clone();
+            let logs = self.logs.lock().expect("lock loopback logs").clone();
+            (requests, logs)
+        }
+    }
+
+    fn redacted_target(target: &str) -> String {
+        target.replace("test-password-123", "[REDACTED]")
+    }
+
+    fn target_has_query_key(target: &str, key: &str) -> bool {
+        target.split_once('?').is_some_and(|(_, query)| {
+            query
+                .split('&')
+                .filter_map(|param| param.split_once('='))
+                .any(|(name, _)| name == key)
+        })
+    }
+
+    const fn status_reason(status: u16) -> &'static str {
+        match status {
+            401 => "Unauthorized",
+            429 => "Too Many Requests",
+            500 => "Internal Server Error",
+            _ => "OK",
+        }
+    }
+
+    fn read_loopback_request(stream: &mut TcpStream) -> LoopbackRequest {
+        let mut buffer = Vec::new();
+        let mut scratch = [0_u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut scratch).expect("read loopback request");
+            assert!(read > 0, "unexpected EOF before HTTP headers");
+            buffer.extend_from_slice(&scratch[..read]);
+            if let Some(index) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+
+        let header_text =
+            std::str::from_utf8(&buffer[..header_end]).expect("HTTP headers are UTF-8");
+        let mut lines = header_text.split("\r\n");
+        let request_line = lines.next().expect("request line");
+        let mut parts = request_line.split_whitespace();
+        let _method = parts.next().expect("method");
+        let target = parts.next().expect("target").to_string();
+        let mut headers = HashMap::new();
+        for line in lines.filter(|line| !line.is_empty()) {
+            let (name, value) = line.split_once(':').expect("header separator");
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_string());
+        }
+        let content_length = headers
+            .get("content-length")
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let mut body = buffer[header_end..].to_vec();
+        while body.len() < content_length {
+            let read = stream.read(&mut scratch).expect("read loopback body");
+            assert!(read > 0, "unexpected EOF before HTTP body");
+            body.extend_from_slice(&scratch[..read]);
+        }
+        body.truncate(content_length);
+
+        LoopbackRequest { target, body }
+    }
+
+    fn write_loopback_response(
+        stream: &mut TcpStream,
+        response: &LoopbackResponse,
+    ) -> std::io::Result<()> {
+        let head = format!(
+            "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            response.status,
+            status_reason(response.status),
+            response.body.len()
+        );
+        stream.write_all(head.as_bytes())?;
+        stream.write_all(&response.body)?;
+        stream.flush()
+    }
+
+    fn loopback_config(server_url: &str) -> Value {
+        json!({
+            "server_url": server_url,
+            "password": "test-password-123",
+            "retry": {
+                "max_retries": 0,
+                "initial_delay_ms": 0,
+                "max_delay_ms": 0,
+                "jitter_enabled": false
+            }
+        })
+    }
+
+    async fn invoke_send_against_loopback(
+        server_url: &str,
+        request_timeout_ms: Option<u64>,
+    ) -> FcpResult<Value> {
+        let mut config = loopback_config(server_url);
+        if let Some(timeout) = request_timeout_ms {
+            config["request_timeout_ms"] = json!(timeout);
+        }
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await?;
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await?;
+        let req = InvokeRequest {
+            input: json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "hello from fcp"
+            }),
+            capability_token: generate_valid_token(&signing_key, OP_SEND_MESSAGE),
+            ..base_invoke(connector.id(), OP_SEND_MESSAGE)
+        };
+        let response = connector.invoke(req).await?;
+        response.result.ok_or_else(|| FcpError::Internal {
+            message: "send response should include a result".into(),
+        })
     }
 
     #[fcp_async_core::runtime::test]
@@ -1406,6 +1655,214 @@ mod tests {
         req.input = json!({ "chat_guid": "iMessage;-;+15551234567" }); // missing message
         let result = connector.invoke(req).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_loopback_uses_private_api_for_macos26_when_available() {
+        let server = BlueBubblesLoopback::spawn(
+            "macos26-private-api",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "26.0.1",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "status": 200,
+                        "message": "Message sent!",
+                        "data": {
+                            "guid": "msg-private-api",
+                            "text": "hello from fcp",
+                            "is_from_me": true,
+                            "attachments": []
+                        }
+                    }),
+                ),
+            ],
+        );
+
+        let result = invoke_send_against_loopback(server.uri(), None)
+            .await
+            .expect("send should succeed");
+        assert_eq!(result["send_method"], "private-api");
+        assert_eq!(
+            result["send_method_decision"]["reason"],
+            "macos26_private_api_available"
+        );
+        assert_eq!(result["data"]["guid"], "msg-private-api");
+
+        let (requests, logs) = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].target.starts_with("/api/v1/server/info?"));
+        assert!(target_has_query_key(&requests[0].target, "password"));
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/text")
+        );
+        assert!(target_has_query_key(&requests[1].target, "password"));
+        let send_body = requests[1].json_body();
+        assert_eq!(send_body["method"], "private-api");
+        assert_eq!(send_body["chatGuid"], "iMessage;-;+15551234567");
+        assert_eq!(send_body["message"], "hello from fcp");
+        assert!(
+            send_body["tempGuid"]
+                .as_str()
+                .is_some_and(|guid| !guid.is_empty())
+        );
+        assert!(
+            logs.iter().all(|entry| entry["target"]
+                .as_str()
+                .is_some_and(|target| !target.contains("test-password-123"))),
+            "loopback transcript must redact the passcode"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_loopback_falls_back_to_apple_script_when_private_api_disabled() {
+        let server = BlueBubblesLoopback::spawn(
+            "macos26-private-api-disabled",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "26.0",
+                            "server_version": "1.9.0",
+                            "private_api": false
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "status": 200,
+                        "message": "Message sent!",
+                        "data": {
+                            "guid": "msg-apple-script",
+                            "text": "hello from fcp",
+                            "is_from_me": true,
+                            "attachments": []
+                        }
+                    }),
+                ),
+            ],
+        );
+
+        let result = invoke_send_against_loopback(server.uri(), None)
+            .await
+            .expect("send should succeed");
+        assert_eq!(result["send_method"], "apple-script");
+        assert_eq!(
+            result["send_method_decision"]["reason"],
+            "macos26_private_api_disabled_apple_script_fallback"
+        );
+
+        let (requests, logs) = server.finish();
+        assert_eq!(requests[1].json_body()["method"], "apple-script");
+        assert!(
+            logs.iter()
+                .any(|entry| entry["event"] == "bluebubbles-send-mode-loopback")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_loopback_error_modes_are_deterministic() {
+        let auth_failure = BlueBubblesLoopback::spawn(
+            "auth-failure",
+            vec![
+                LoopbackResponse::json(401, &json!({"error": "bad password"})),
+                LoopbackResponse::json(401, &json!({"error": "bad password"})),
+            ],
+        );
+        let auth_error = invoke_send_against_loopback(auth_failure.uri(), None)
+            .await
+            .expect_err("auth failure should be denied");
+        assert!(matches!(auth_error, FcpError::Unauthorized { .. }));
+        let (_, auth_logs) = auth_failure.finish();
+        assert_eq!(auth_logs[0]["response_status"], 401);
+
+        let rate_limit = BlueBubblesLoopback::spawn(
+            "rate-limit",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "26.0",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(429, &json!({"error": "slow down"})),
+            ],
+        );
+        let rate_error = invoke_send_against_loopback(rate_limit.uri(), None)
+            .await
+            .expect_err("rate limit should fail after bounded retry budget");
+        assert!(matches!(rate_error, FcpError::RateLimited { .. }));
+        let (_, rate_logs) = rate_limit.finish();
+        assert_eq!(rate_logs[1]["response_status"], 429);
+
+        let malformed = BlueBubblesLoopback::spawn(
+            "malformed-send-response",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "26.0",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::raw_json(200, "{not-json"),
+            ],
+        );
+        let malformed_error = invoke_send_against_loopback(malformed.uri(), None)
+            .await
+            .expect_err("malformed send response should fail closed");
+        assert!(malformed_error.to_string().contains("error"));
+        let (_, malformed_logs) = malformed.finish();
+        assert_eq!(malformed_logs[1]["response_status"], 200);
+
+        let server_info_unavailable = BlueBubblesLoopback::spawn(
+            "server-info-unavailable",
+            vec![
+                LoopbackResponse::json(503, &json!({"error": "server info temporarily down"})),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "status": 200,
+                        "message": "Message sent!",
+                        "data": {
+                            "guid": "msg-timeout-fallback",
+                            "text": "hello from fcp",
+                            "is_from_me": true,
+                            "attachments": []
+                        }
+                    }),
+                ),
+            ],
+        );
+        let unavailable_result = invoke_send_against_loopback(server_info_unavailable.uri(), None)
+            .await
+            .expect("send should preserve apple-script fallback when server info is unavailable");
+        assert_eq!(unavailable_result["send_method"], "apple-script");
+        assert_eq!(
+            unavailable_result["send_method_decision"]["reason"],
+            "server_info_unavailable_apple_script_fallback"
+        );
+        let (_, unavailable_logs) = server_info_unavailable.finish();
+        assert_eq!(unavailable_logs.len(), 2);
     }
 
     #[test]

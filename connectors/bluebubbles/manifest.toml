@@ -36,7 +36,7 @@ deny_private_ranges = false
 max_redirects = 0
 
 [provides.operations.send_message.ai_hints]
-when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge"
+when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge. The shared implementation refreshes server info and explicitly selects private-api for macOS 26+ hosts when Private API is enabled; otherwise it uses an observable apple-script fallback."
 
 [provides.operations.get_chats]
 summary = "List BlueBubbles chats"
@@ -164,4 +164,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

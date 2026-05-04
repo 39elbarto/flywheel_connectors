@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use url::Url;
@@ -14,7 +15,7 @@ const BOUNDARY: &str = "This first slice is read-only and covers Tavily search. 
 
 #[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    ApiKey(HeaderValue),
     CredentialId { _id: String },
 }
 
@@ -43,7 +44,11 @@ impl Auth {
 
     fn apply(&self, request: RequestBuilder) -> RequestBuilder {
         match self {
-            Self::ApiKey(key) => request.header("Authorization", format!("Bearer {key}")),
+            Self::ApiKey(value) => {
+                let mut headers = HeaderMap::new();
+                headers.insert(AUTHORIZATION, value.clone());
+                request.headers(headers)
+            }
             Self::CredentialId { .. } => request,
         }
     }
@@ -68,7 +73,7 @@ impl std::fmt::Debug for TavilyConfig {
 
 impl TavilyConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let auth_material = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -81,8 +86,8 @@ impl TavilyConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (auth_material, credential_id) {
+            (Some(key), None) => Auth::ApiKey(validated_bearer_header_value("api_key", &key)?),
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -471,6 +476,14 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     }
 }
 
+fn validated_bearer_header_value(field: &str, value: &str) -> FcpResult<HeaderValue> {
+    let header_value = format!("Bearer {value}");
+    HeaderValue::from_str(&header_value).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a valid HTTP Authorization header value: {error}"),
+    })
+}
+
 fn normalize_base_url(
     override_value: Option<&str>,
     default_value: &str,
@@ -569,6 +582,17 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 mod tests {
     use super::*;
 
+    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+    #[test]
+    fn manifest_matches_search_only_first_slice() {
+        assert!(MANIFEST_TOML.contains("description = \"Tavily connector for web search\""));
+        assert!(MANIFEST_TOML.contains(
+            "migration_hint = \"First slice: search only. Extract, crawl, and map are deferred.\""
+        ));
+        assert!(!MANIFEST_TOML.contains("First slice: search, extract, crawl, and map."));
+    }
+
     #[test]
     fn config_requires_exactly_one_auth_source() {
         let error = TavilyConfig::from_params(&json!({
@@ -587,6 +611,19 @@ mod tests {
         }))
         .expect_err("expected invalid timeout");
         assert!(error.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn api_key_must_be_header_safe() {
+        let error = TavilyConfig::from_params(&json!({
+            "api_key": "tavily\r\nkey"
+        }))
+        .expect_err("expected invalid api key");
+        assert!(
+            error
+                .to_string()
+                .contains("valid HTTP Authorization header value")
+        );
     }
 
     #[fcp_async_core::runtime::test]

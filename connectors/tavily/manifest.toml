@@ -11,14 +11,14 @@ interface_hash = "blake3-256:fcp.interface.v2:tavily-first-slice"
 id = "fcp.tavily"
 name = "Tavily"
 version = "0.1.0"
-description = "Tavily connector for search, extract, crawl, and map"
+description = "Tavily connector for web search"
 archetypes = ["request-response"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: search, extract, crawl, and map."
+migration_hint = "First slice: search only. Extract, crawl, and map are deferred."
 
 [zones]
 home = "z:work"
@@ -37,4 +37,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
-

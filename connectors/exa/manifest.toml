@@ -11,14 +11,14 @@ interface_hash = "blake3-256:fcp.interface.v2:exa-first-slice"
 id = "fcp.exa"
 name = "Exa"
 version = "0.1.0"
-description = "Exa connector for search and content retrieval"
+description = "Exa connector for search"
 archetypes = ["request-response"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: search and content retrieval."
+migration_hint = "First slice: search only. Content retrieval and crawling are deferred."
 
 [zones]
 home = "z:work"
@@ -37,4 +37,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

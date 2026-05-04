@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Value, json};
 use url::Url;
@@ -14,7 +15,7 @@ const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Con
 
 #[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    ApiKey(HeaderValue),
     CredentialId { _id: String },
 }
 
@@ -43,7 +44,11 @@ impl Auth {
 
     fn apply(&self, request: RequestBuilder) -> RequestBuilder {
         match self {
-            Self::ApiKey(key) => request.header("x-api-key", key),
+            Self::ApiKey(key) => {
+                let mut headers = HeaderMap::new();
+                headers.insert(HeaderName::from_static("x-api-key"), key.clone());
+                request.headers(headers)
+            }
             Self::CredentialId { .. } => request,
         }
     }
@@ -68,7 +73,7 @@ impl std::fmt::Debug for ExaConfig {
 
 impl ExaConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let auth_material = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -80,8 +85,8 @@ impl ExaConfig {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (auth_material, credential_id) {
+            (Some(key), None) => Auth::ApiKey(validated_header_value("api_key", &key)?),
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -460,6 +465,13 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     }
 }
 
+fn validated_header_value(field: &str, value: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(value).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a valid HTTP header value: {error}"),
+    })
+}
+
 fn normalize_base_url(
     override_value: Option<&str>,
     default_value: &str,
@@ -558,6 +570,17 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 mod tests {
     use super::*;
 
+    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+    #[test]
+    fn manifest_matches_search_only_first_slice() {
+        assert!(MANIFEST_TOML.contains("description = \"Exa connector for search\""));
+        assert!(MANIFEST_TOML.contains(
+            "migration_hint = \"First slice: search only. Content retrieval and crawling are deferred.\""
+        ));
+        assert!(!MANIFEST_TOML.contains("search and content retrieval"));
+    }
+
     #[test]
     fn config_requires_exactly_one_auth_source() {
         let error = ExaConfig::from_params(&json!({
@@ -576,6 +599,15 @@ mod tests {
         }))
         .expect_err("expected invalid timeout");
         assert!(error.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn api_key_must_be_header_safe() {
+        let error = ExaConfig::from_params(&json!({
+            "api_key": "exa\r\nkey"
+        }))
+        .expect_err("expected invalid api key");
+        assert!(error.to_string().contains("valid HTTP header value"));
     }
 
     #[fcp_async_core::runtime::test]

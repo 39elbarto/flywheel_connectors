@@ -11,14 +11,14 @@ interface_hash = "blake3-256:fcp.interface.v2:firecrawl-first-slice"
 id = "fcp.firecrawl"
 name = "Firecrawl"
 version = "0.1.0"
-description = "Firecrawl connector for search, scrape, extract, and crawl orchestration"
+description = "Firecrawl connector for scrape and crawl orchestration"
 archetypes = ["request-response"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: search, scrape, extract, crawl.start, and crawl.status."
+migration_hint = "First slice: scrape, crawl.start, and crawl.status. Search and extract are deferred."
 
 [zones]
 home = "z:work"
@@ -37,4 +37,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
-

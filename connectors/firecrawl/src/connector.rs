@@ -491,11 +491,26 @@ fn require_str<'a>(input: &'a Value, key: &str) -> FcpResult<&'a str> {
 mod tests {
     use super::*;
 
+    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
     fn test_config() -> Value {
         json!({
             "api_key": "fc-test-key-123",
             "base_url": "http://localhost:9999/v1"
         })
+    }
+
+    #[test]
+    fn manifest_matches_scrape_and_crawl_first_slice() {
+        assert!(
+            MANIFEST_TOML.contains(
+                "description = \"Firecrawl connector for scrape and crawl orchestration\""
+            )
+        );
+        assert!(MANIFEST_TOML.contains(
+            "migration_hint = \"First slice: scrape, crawl.start, and crawl.status. Search and extract are deferred.\""
+        ));
+        assert!(!MANIFEST_TOML.contains("First slice: search, scrape, extract"));
     }
 
     #[fcp_async_core::runtime::test]

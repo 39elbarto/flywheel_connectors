@@ -540,16 +540,16 @@ impl OpenRouterConnector {
     ) -> FcpResult<Value> {
         let request = VideoGenerateRequest::from_input(input)?;
         let submitted = client
-            .post_json("/videos", request.to_openrouter_body()?)
+            .post_json("/videos", request.to_openrouter_body())
             .await?;
         let job_id = required_non_empty_string(&submitted, "id", "video generation job id")?;
-        let mut completed = submitted.clone();
-
-        if normalized_status(&submitted) != Some("completed") {
+        let completed = if normalized_status(&submitted) == Some("completed") {
+            submitted.clone()
+        } else {
             let polling_url =
                 required_non_empty_string(&submitted, "polling_url", "video polling_url")?;
-            completed = poll_video_job(client, &polling_url, &request).await?;
-        }
+            poll_video_job(client, &polling_url, &request).await?
+        };
 
         let completed_job_id =
             optional_non_empty_string(&completed, "id").unwrap_or_else(|| job_id.clone());
@@ -559,13 +559,15 @@ impl OpenRouterConnector {
             .and_then(|urls| urls.iter().find_map(Value::as_str))
             .map(str::trim)
             .filter(|url| !url.is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| {
-                format!(
-                    "videos/{}/content?index=0",
-                    url_encode_component(&completed_job_id)
-                )
-            });
+            .map_or_else(
+                || {
+                    format!(
+                        "videos/{}/content?index=0",
+                        url_encode_component(&completed_job_id)
+                    )
+                },
+                ToOwned::to_owned,
+            );
 
         let video = client
             .get_bytes_url(&video_url, request.max_download_bytes)
@@ -671,7 +673,7 @@ impl VideoGenerateRequest {
         })
     }
 
-    fn to_openrouter_body(&self) -> FcpResult<Value> {
+    fn to_openrouter_body(&self) -> Value {
         let mut body = Map::new();
         body.insert("model".into(), json!(self.model));
         body.insert("prompt".into(), json!(self.prompt));
@@ -707,7 +709,7 @@ impl VideoGenerateRequest {
             body.insert("input_references".into(), Value::Array(input_references));
         }
 
-        Ok(Value::Object(body))
+        Value::Object(body)
     }
 }
 
@@ -1096,11 +1098,7 @@ fn normalize_base_url(
         });
     }
 
-    if !is_localhost
-        && !allowed_suffixes
-            .iter()
-            .any(|allowed_host| host == *allowed_host)
-    {
+    if !is_localhost && !allowed_suffixes.contains(&host) {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: format!("base_url host {host} is not allowed"),
@@ -1507,7 +1505,7 @@ mod tests {
         }))
         .expect("valid video request");
 
-        let body = request.to_openrouter_body().expect("body should encode");
+        let body = request.to_openrouter_body();
         assert_eq!(body["duration"], 6);
         assert_eq!(body["resolution"], "720p");
         assert_eq!(body["generate_audio"], false);

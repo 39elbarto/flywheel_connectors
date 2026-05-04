@@ -2,6 +2,7 @@
 /target/
 **/target/
 **/*.rs.bk
+**/*.rs.bak
 
 # IDE
 .idea/
@@ -61,6 +62,13 @@ docs/fcp_additional_connectors_prioritized.md
 # apr runtime locks
 .apr/.locks/
 fuzz/target/
+
+# libFuzzer-generated corpus dirs (SHA1-named inputs from local cargo-fuzz runs).
+# Curated seed corpora under fuzz/corpus/ are tracked explicitly; these three
+# are auto-generated and not intended for the repo.
+fuzz/corpus/fuzz_cose_envelope_tamper_oracle/
+fuzz/corpus/fuzz_cwt_claims_from_cbor/
+fuzz/corpus/fuzz_fcps_session_handshake_cbor/
 
 # NTM agent coordination
 .ntm/

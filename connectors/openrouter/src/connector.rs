@@ -2,14 +2,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use reqwest::header::HeaderMap;
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use url::Url;
 
 const CONNECTOR_ID: &str = "fcp.openrouter";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const DEFAULT_VIDEO_MODEL: &str = "google/veo-3.1-fast";
+const DEFAULT_VIDEO_POLL_INTERVAL_MS: u64 = 5_000;
+const DEFAULT_VIDEO_MAX_POLL_ATTEMPTS: u64 = 120;
+const MAX_VIDEO_POLL_INTERVAL_MS: u64 = 60_000;
+const MAX_VIDEO_POLL_ATTEMPTS: u64 = 120;
+const MAX_VIDEO_INPUT_IMAGES: usize = 4;
+const DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 enum Auth {
@@ -162,6 +171,54 @@ impl OpenRouterClient {
     async fn post_json(&self, path: &str, body: Value) -> FcpResult<Value> {
         send_json(self.request(Method::POST, path).json(&body), "openrouter").await
     }
+
+    async fn get_json_url(&self, raw_url: &str) -> FcpResult<Value> {
+        let resolved = resolve_openrouter_response_url(raw_url, &self.base_url)?;
+        let include_provider_headers = same_origin(&resolved, &self.base_url)?;
+        send_json(
+            self.request_resolved_url(Method::GET, resolved, include_provider_headers)?,
+            "openrouter",
+        )
+        .await
+    }
+
+    async fn get_bytes_url(&self, raw_url: &str, max_bytes: u64) -> FcpResult<DownloadedVideo> {
+        let resolved = resolve_openrouter_response_url(raw_url, &self.base_url)?;
+        let include_provider_headers = same_origin(&resolved, &self.base_url)?;
+        send_bytes(
+            self.request_resolved_url(Method::GET, resolved, include_provider_headers)?,
+            "openrouter",
+            max_bytes,
+        )
+        .await
+    }
+
+    fn request_resolved_url(
+        &self,
+        method: Method,
+        url: Url,
+        include_provider_headers: bool,
+    ) -> FcpResult<RequestBuilder> {
+        validate_response_url(&url, &self.base_url)?;
+        let mut request = self.http.request(method, url);
+        if include_provider_headers {
+            request = self.auth.apply(request);
+            if let Some(app_name) = &self.app_name {
+                request = request.header("X-Title", app_name);
+            }
+            if let Some(app_url) = &self.app_url {
+                request = request.header("HTTP-Referer", app_url);
+            }
+        }
+        Ok(request)
+    }
+}
+
+#[derive(Debug)]
+struct DownloadedVideo {
+    mime_type: String,
+    base64: String,
+    byte_len: usize,
 }
 
 pub struct OpenRouterConnector {
@@ -217,7 +274,7 @@ impl OpenRouterConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["openrouter.chat", "openrouter.models"],
+            "capabilities": ["openrouter.chat", "openrouter.models", "openrouter.video"],
             "streaming_supported": false,
         }))
     }
@@ -286,7 +343,7 @@ impl OpenRouterConnector {
                     "name": "surface_boundary",
                     "passed": true,
                     "critical": false,
-                    "message": "This first slice exposes non-streaming chat completions and model discovery only."
+                    "message": "This slice exposes non-streaming chat completions, model discovery, and bounded video generation job polling/download."
                 }
             ]
         }))
@@ -317,7 +374,7 @@ impl OpenRouterConnector {
             Ok(_) => Ok(json!({
                 "status": "ok",
                 "base_url": client.base_url,
-                "surface_boundary": "models.list + non-streaming chat.completions",
+                "surface_boundary": "models.list + non-streaming chat.completions + videos.generate",
             })),
             Err(error) => Ok(json!({
                 "status": "failed",
@@ -368,6 +425,7 @@ impl OpenRouterConnector {
         let result = match operation {
             "openrouter.chat.completions" => self.invoke_chat(client, &input).await,
             "openrouter.models.list" => client.get_json("/models").await,
+            "openrouter.videos.generate" => self.invoke_video_generate(client, &input).await,
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
@@ -389,7 +447,7 @@ impl OpenRouterConnector {
         let input = params.get("input").cloned().unwrap_or_else(|| json!({}));
         let supported = matches!(
             operation,
-            "openrouter.chat.completions" | "openrouter.models.list"
+            "openrouter.chat.completions" | "openrouter.models.list" | "openrouter.videos.generate"
         );
         let blocked_by_secretless_auth = supported
             && self
@@ -474,6 +532,342 @@ impl OpenRouterConnector {
             "raw": response,
         }))
     }
+
+    async fn invoke_video_generate(
+        &self,
+        client: &OpenRouterClient,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let request = VideoGenerateRequest::from_input(input)?;
+        let submitted = client
+            .post_json("/videos", request.to_openrouter_body()?)
+            .await?;
+        let job_id = required_non_empty_string(&submitted, "id", "video generation job id")?;
+        let mut completed = submitted.clone();
+
+        if normalized_status(&submitted) != Some("completed") {
+            let polling_url =
+                required_non_empty_string(&submitted, "polling_url", "video polling_url")?;
+            completed = poll_video_job(client, &polling_url, &request).await?;
+        }
+
+        let completed_job_id =
+            optional_non_empty_string(&completed, "id").unwrap_or_else(|| job_id.clone());
+        let video_url = completed
+            .get("unsigned_urls")
+            .and_then(Value::as_array)
+            .and_then(|urls| urls.iter().find_map(Value::as_str))
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "videos/{}/content?index=0",
+                    url_encode_component(&completed_job_id)
+                )
+            });
+
+        let video = client
+            .get_bytes_url(&video_url, request.max_download_bytes)
+            .await?;
+
+        Ok(json!({
+            "job_id": job_id,
+            "status": completed.get("status").cloned().unwrap_or_else(|| json!("completed")),
+            "generation_id": completed.get("generation_id").cloned().unwrap_or(Value::Null),
+            "model": completed.get("model").cloned().unwrap_or_else(|| json!(request.model)),
+            "usage": completed.get("usage").cloned().unwrap_or(Value::Null),
+            "video": {
+                "mime_type": video.mime_type,
+                "base64": video.base64,
+                "byte_len": video.byte_len,
+                "file_name": if video.mime_type.contains("webm") { "video-1.webm" } else { "video-1.mp4" },
+            },
+            "raw": completed,
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct VideoGenerateRequest {
+    model: String,
+    prompt: String,
+    duration_seconds: Option<u64>,
+    resolution: Option<String>,
+    aspect_ratio: Option<String>,
+    size: Option<String>,
+    audio: Option<bool>,
+    input_images: Vec<VideoSourceImage>,
+    callback_url: Option<String>,
+    seed: Option<i64>,
+    poll_interval_ms: u64,
+    max_poll_attempts: u64,
+    max_download_bytes: u64,
+}
+
+#[derive(Clone, Debug)]
+struct VideoSourceImage {
+    role: Option<String>,
+    url: String,
+}
+
+impl VideoGenerateRequest {
+    fn from_input(input: &Value) -> FcpResult<Self> {
+        let prompt = input
+            .get("prompt")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "prompt must be a non-empty string".into(),
+            })?
+            .to_string();
+
+        if input
+            .get("input_videos")
+            .and_then(Value::as_array)
+            .is_some_and(|videos| !videos.is_empty())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "OpenRouter video generation does not support video reference inputs"
+                    .into(),
+            });
+        }
+
+        let poll_interval_ms = optional_u64(input, "poll_interval_ms")
+            .unwrap_or(DEFAULT_VIDEO_POLL_INTERVAL_MS)
+            .min(MAX_VIDEO_POLL_INTERVAL_MS);
+        let max_poll_attempts = optional_u64(input, "max_poll_attempts")
+            .unwrap_or(DEFAULT_VIDEO_MAX_POLL_ATTEMPTS)
+            .clamp(1, MAX_VIDEO_POLL_ATTEMPTS);
+        let max_download_bytes = optional_u64(input, "max_download_bytes")
+            .unwrap_or(DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES)
+            .max(1);
+
+        Ok(Self {
+            model: optional_string(input, "model").unwrap_or_else(|| DEFAULT_VIDEO_MODEL.into()),
+            prompt,
+            duration_seconds: optional_u64(input, "duration_seconds")
+                .map(resolve_video_duration_seconds),
+            resolution: optional_string(input, "resolution").map(|value| value.to_lowercase()),
+            aspect_ratio: optional_string(input, "aspect_ratio"),
+            size: optional_string(input, "size"),
+            audio: input.get("audio").and_then(Value::as_bool),
+            input_images: parse_video_source_images(input.get("input_images"))?,
+            callback_url: input
+                .get("provider_options")
+                .and_then(|options| optional_string(options, "callback_url"))
+                .or_else(|| optional_string(input, "callback_url")),
+            seed: input
+                .get("provider_options")
+                .and_then(|options| options.get("seed"))
+                .and_then(Value::as_i64)
+                .or_else(|| input.get("seed").and_then(Value::as_i64)),
+            poll_interval_ms,
+            max_poll_attempts,
+            max_download_bytes,
+        })
+    }
+
+    fn to_openrouter_body(&self) -> FcpResult<Value> {
+        let mut body = Map::new();
+        body.insert("model".into(), json!(self.model));
+        body.insert("prompt".into(), json!(self.prompt));
+        insert_optional(
+            &mut body,
+            "duration",
+            self.duration_seconds.map(Value::from),
+        );
+        insert_optional(
+            &mut body,
+            "resolution",
+            self.resolution.clone().map(Value::from),
+        );
+        insert_optional(
+            &mut body,
+            "aspect_ratio",
+            self.aspect_ratio.clone().map(Value::from),
+        );
+        insert_optional(&mut body, "size", self.size.clone().map(Value::from));
+        insert_optional(&mut body, "generate_audio", self.audio.map(Value::from));
+        insert_optional(
+            &mut body,
+            "callback_url",
+            self.callback_url.clone().map(Value::from),
+        );
+        insert_optional(&mut body, "seed", self.seed.map(Value::from));
+
+        let (frame_images, input_references) = build_video_image_inputs(&self.input_images);
+        if !frame_images.is_empty() {
+            body.insert("frame_images".into(), Value::Array(frame_images));
+        }
+        if !input_references.is_empty() {
+            body.insert("input_references".into(), Value::Array(input_references));
+        }
+
+        Ok(Value::Object(body))
+    }
+}
+
+async fn poll_video_job(
+    client: &OpenRouterClient,
+    polling_url: &str,
+    request: &VideoGenerateRequest,
+) -> FcpResult<Value> {
+    let mut last_payload = Value::Null;
+    for attempt in 0..request.max_poll_attempts {
+        let payload = client.get_json_url(polling_url).await?;
+        match normalized_status(&payload) {
+            Some("completed") => return Ok(payload),
+            Some("failed" | "cancelled" | "expired") => {
+                let message = payload.get("error").and_then(Value::as_str).map_or_else(
+                    || "OpenRouter video generation reached a terminal failure".to_string(),
+                    ToOwned::to_owned,
+                );
+                return Err(FcpError::External {
+                    service: "openrouter".into(),
+                    message,
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                });
+            }
+            _ => {
+                last_payload = payload;
+                if attempt + 1 < request.max_poll_attempts && request.poll_interval_ms > 0 {
+                    fcp_async_core::time::sleep(Duration::from_millis(request.poll_interval_ms))
+                        .await;
+                }
+            }
+        }
+    }
+
+    Err(FcpError::External {
+        service: "openrouter".into(),
+        message: format!(
+            "OpenRouter video generation did not finish after {} poll attempts; last_status={}",
+            request.max_poll_attempts,
+            last_payload
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("missing")
+        ),
+        status_code: None,
+        retryable: true,
+        retry_after: Some(Duration::from_millis(request.poll_interval_ms)),
+    })
+}
+
+fn parse_video_source_images(value: Option<&Value>) -> FcpResult<Vec<VideoSourceImage>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let images = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "input_images must be an array".into(),
+    })?;
+    if images.len() > MAX_VIDEO_INPUT_IMAGES {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("input_images must contain at most {MAX_VIDEO_INPUT_IMAGES} items"),
+        });
+    }
+
+    images
+        .iter()
+        .map(|image| {
+            let object = image.as_object().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "input_images entries must be objects".into(),
+            })?;
+            let role = object
+                .get("role")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let url = object
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .or_else(|| {
+                    object
+                        .get("data_url")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                })
+                .or_else(|| {
+                    object
+                        .get("base64")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|encoded| {
+                            let mime_type = object
+                                .get("mime_type")
+                                .and_then(Value::as_str)
+                                .map(str::trim)
+                                .filter(|value| !value.is_empty())
+                                .unwrap_or("image/png");
+                            format!("data:{mime_type};base64,{encoded}")
+                        })
+                })
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "input_images entries require url, data_url, or base64".into(),
+                })?;
+            Ok(VideoSourceImage { role, url })
+        })
+        .collect()
+}
+
+fn build_video_image_inputs(images: &[VideoSourceImage]) -> (Vec<Value>, Vec<Value>) {
+    let mut frame_images = Vec::new();
+    let mut input_references = Vec::new();
+    let mut has_first_frame = false;
+    let mut has_last_frame = false;
+
+    for image in images {
+        let role = image.role.as_deref();
+        let image_part = json!({
+            "type": "image_url",
+            "image_url": { "url": image.url.clone() },
+        });
+        if role == Some("reference_image") {
+            input_references.push(image_part);
+            continue;
+        }
+
+        let frame_type = if role == Some("last_frame") {
+            "last_frame"
+        } else if role == Some("first_frame") || !has_first_frame {
+            "first_frame"
+        } else {
+            "last_frame"
+        };
+
+        if frame_type == "first_frame" && !has_first_frame {
+            let mut frame = image_part;
+            frame["frame_type"] = json!("first_frame");
+            frame_images.push(frame);
+            has_first_frame = true;
+        } else if frame_type == "last_frame" && !has_last_frame {
+            let mut frame = image_part;
+            frame["frame_type"] = json!("last_frame");
+            frame_images.push(frame);
+            has_last_frame = true;
+        } else {
+            input_references.push(image_part);
+        }
+    }
+
+    (frame_images, input_references)
 }
 
 impl Default for OpenRouterConnector {
@@ -536,6 +930,52 @@ fn operations_info() -> Vec<Value> {
                 "related": ["openrouter.chat.completions"]
             }
         }),
+        json!({
+            "id": "openrouter.videos.generate",
+            "summary": "Generate one video through OpenRouter",
+            "description": "Submits POST /videos, polls the returned job URL until completion, and downloads the generated video without forwarding provider credentials to cross-origin polling or unsigned download URLs.",
+            "capability": "openrouter.video",
+            "risk_level": "medium",
+            "safety_tier": "safe",
+            "idempotency": "none",
+            "input_schema": {
+                "type": "object",
+                "required": ["prompt"],
+                "properties": {
+                    "model": {"type": "string", "default": DEFAULT_VIDEO_MODEL},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "duration_seconds": {"type": "integer", "minimum": 1},
+                    "resolution": {"type": "string", "enum": ["720P", "1080P", "720p", "1080p"]},
+                    "aspect_ratio": {"type": "string", "enum": ["16:9", "9:16"]},
+                    "size": {"type": "string"},
+                    "audio": {"type": "boolean"},
+                    "input_images": {"type": "array", "maxItems": MAX_VIDEO_INPUT_IMAGES},
+                    "input_videos": {"type": "array", "maxItems": 0},
+                    "provider_options": {
+                        "type": "object",
+                        "properties": {
+                            "callback_url": {"type": "string"},
+                            "seed": {"type": "integer"}
+                        }
+                    },
+                    "poll_interval_ms": {"type": "integer", "minimum": 0, "maximum": MAX_VIDEO_POLL_INTERVAL_MS},
+                    "max_poll_attempts": {"type": "integer", "minimum": 1, "maximum": MAX_VIDEO_POLL_ATTEMPTS},
+                    "max_download_bytes": {"type": "integer", "minimum": 1}
+                }
+            },
+            "output_schema": {"type": "object"},
+            "ai_hints": {
+                "when_to_use": "Use for a bounded OpenRouter image-to-video or text-to-video job when the caller can accept a base64-encoded returned asset.",
+                "common_mistakes": [
+                    "Do not pass video references; OpenRouter video-to-video is not exposed.",
+                    "Cross-origin polling and unsigned download URLs are fetched without bearer credentials."
+                ],
+                "examples": [
+                    "{\"prompt\":\"A chrome sphere glides across a quiet moonlit beach\",\"model\":\"google/veo-3.1-fast\",\"duration_seconds\":6,\"aspect_ratio\":\"16:9\",\"resolution\":\"720P\",\"poll_interval_ms\":0,\"max_poll_attempts\":3}"
+                ],
+                "related": ["openrouter.models.list"]
+            }
+        }),
     ]
 }
 
@@ -557,6 +997,64 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     if let Some(value) = source.get(field) {
         target[field] = value.clone();
     }
+}
+
+fn insert_optional(target: &mut Map<String, Value>, field: &str, value: Option<Value>) {
+    if let Some(value) = value {
+        target.insert(field.into(), value);
+    }
+}
+
+fn optional_string(source: &Value, field: &str) -> Option<String> {
+    source
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn optional_u64(source: &Value, field: &str) -> Option<u64> {
+    source.get(field).and_then(Value::as_u64)
+}
+
+fn optional_non_empty_string(source: &Value, field: &str) -> Option<String> {
+    source
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn required_non_empty_string(source: &Value, field: &str, label: &str) -> FcpResult<String> {
+    optional_non_empty_string(source, field).ok_or_else(|| FcpError::External {
+        service: "openrouter".into(),
+        message: format!("OpenRouter response missing {label}"),
+        status_code: None,
+        retryable: false,
+        retry_after: None,
+    })
+}
+
+fn normalized_status(source: &Value) -> Option<&str> {
+    source
+        .get("status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+const fn resolve_video_duration_seconds(duration_seconds: u64) -> u64 {
+    match duration_seconds {
+        0..=4 => 4,
+        5..=7 => 6,
+        _ => 8,
+    }
+}
+
+fn url_encode_component(value: &str) -> String {
+    url::form_urlencoded::byte_serialize(value.as_bytes()).collect()
 }
 
 fn normalize_base_url(
@@ -612,7 +1110,68 @@ fn normalize_base_url(
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
-fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
+fn resolve_openrouter_response_url(raw_url: &str, base_url: &str) -> FcpResult<Url> {
+    let base = Url::parse(&format!("{}/", base_url.trim_end_matches('/'))).map_err(|error| {
+        FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid base_url: {error}"),
+        }
+    })?;
+    base.join(raw_url)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid OpenRouter response URL: {error}"),
+        })
+}
+
+fn validate_response_url(url: &Url, base_url: &str) -> FcpResult<()> {
+    let base = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {error}"),
+    })?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "OpenRouter response URLs must not include userinfo".into(),
+        });
+    }
+
+    let host = url.host_str().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "OpenRouter response URL must include a host".into(),
+    })?;
+    let base_host_is_local = base
+        .host_str()
+        .is_some_and(|base_host| matches!(base_host, "127.0.0.1" | "localhost"));
+    let host_is_local = matches!(host, "127.0.0.1" | "localhost");
+    let valid_scheme = url.scheme() == "https" || (url.scheme() == "http" && host_is_local);
+    if !valid_scheme {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "OpenRouter response URLs must use https, except localhost test URLs".into(),
+        });
+    }
+    if host_is_local && !base_host_is_local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "OpenRouter response URL cannot target localhost unless base_url is localhost"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+fn same_origin(url: &Url, base_url: &str) -> FcpResult<bool> {
+    let base = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {error}"),
+    })?;
+    Ok(url.scheme() == base.scheme()
+        && url.host_str() == base.host_str()
+        && url.port_or_known_default() == base.port_or_known_default())
+}
+
+fn parse_retry_after(headers: &HeaderMap) -> Option<Duration> {
     headers
         .get(reqwest::header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
@@ -660,6 +1219,82 @@ async fn send_json(request: RequestBuilder, service: &'static str) -> FcpResult<
         })
 }
 
+async fn send_bytes(
+    request: RequestBuilder,
+    service: &'static str,
+    max_bytes: u64,
+) -> FcpResult<DownloadedVideo> {
+    let response = request
+        .send()
+        .await
+        .map_err(|error| map_reqwest_error(service, &error))?;
+    let status = response.status();
+    if !status.is_success() {
+        let retry_after = parse_retry_after(response.headers());
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "<unreadable response body>".into());
+        if status == StatusCode::TOO_MANY_REQUESTS {
+            let retry_after_ms =
+                retry_after.map_or(30_000, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+            return Err(FcpError::RateLimited {
+                retry_after_ms,
+                violation: None,
+            });
+        }
+        return Err(FcpError::External {
+            service: service.into(),
+            message: format!("HTTP {status}: {body}"),
+            status_code: Some(status.as_u16()),
+            retryable: status.is_server_error(),
+            retry_after,
+        });
+    }
+
+    if let Some(content_length) = response.content_length() {
+        if content_length > max_bytes {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "OpenRouter generated video exceeds max_download_bytes ({content_length} > {max_bytes})"
+                ),
+            });
+        }
+    }
+
+    let mime_type = response
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("video/mp4")
+        .to_string();
+    let bytes = response.bytes().await.map_err(|error| FcpError::External {
+        service: service.into(),
+        message: format!("Failed to read video response body: {error}"),
+        status_code: None,
+        retryable: false,
+        retry_after: None,
+    })?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "OpenRouter generated video exceeds max_download_bytes ({} > {max_bytes})",
+                bytes.len()
+            ),
+        });
+    }
+
+    Ok(DownloadedVideo {
+        mime_type,
+        base64: BASE64_STANDARD.encode(&bytes),
+        byte_len: bytes.len(),
+    })
+}
+
 fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError {
     if error.is_timeout() {
         FcpError::UpstreamTimeout {
@@ -679,6 +1314,10 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{header, method, path},
+    };
 
     #[test]
     fn config_requires_exactly_one_auth_source() {
@@ -832,5 +1471,151 @@ mod tests {
                 .expect("reason should be a string")
                 .contains("stream=true")
         );
+    }
+
+    #[test]
+    fn video_request_rejects_video_reference_inputs() {
+        let error = VideoGenerateRequest::from_input(&json!({
+            "prompt": "remix this clip",
+            "input_videos": [{"url": "https://example.com/source.mp4"}]
+        }))
+        .expect_err("video references must be rejected");
+        assert!(
+            error
+                .to_string()
+                .contains("does not support video reference inputs")
+        );
+    }
+
+    #[test]
+    fn video_request_maps_image_roles_and_rounds_duration() {
+        let request = VideoGenerateRequest::from_input(&json!({
+            "prompt": "A tiny robot watering a bonsai",
+            "duration_seconds": 5,
+            "resolution": "720P",
+            "aspect_ratio": "16:9",
+            "audio": false,
+            "input_images": [
+                {"base64": "Zmlyc3Q=", "mime_type": "image/png"},
+                {"url": "https://example.test/last.png", "role": "last_frame"},
+                {"data_url": "data:image/webp;base64,cmVm", "role": "reference_image"}
+            ],
+            "provider_options": {
+                "callback_url": "https://example.com/openrouter-video-hook",
+                "seed": 42
+            }
+        }))
+        .expect("valid video request");
+
+        let body = request.to_openrouter_body().expect("body should encode");
+        assert_eq!(body["duration"], 6);
+        assert_eq!(body["resolution"], "720p");
+        assert_eq!(body["generate_audio"], false);
+        assert_eq!(body["seed"], 42);
+        assert_eq!(body["frame_images"][0]["frame_type"], "first_frame");
+        assert_eq!(body["frame_images"][1]["frame_type"], "last_frame");
+        assert_eq!(body["input_references"][0]["type"], "image_url");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_advertises_video_operation() {
+        let connector = OpenRouterConnector::new();
+        let introspection = connector.handle_introspect().await.expect("introspection");
+        let operations = introspection["operations"]
+            .as_array()
+            .expect("operations array");
+        assert!(operations.iter().any(|operation| {
+            operation["id"] == "openrouter.videos.generate"
+                && operation["capability"] == "openrouter.video"
+        }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn video_generate_polls_and_strips_auth_from_cross_origin_urls() {
+        let openrouter = MockServer::start().await;
+        let status_server = MockServer::start().await;
+        let cdn_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/videos"))
+            .and(header("Authorization", "Bearer openrouter_test_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "job-123",
+                "polling_url": format!("{}/videos/job-123", status_server.uri()),
+                "status": "pending"
+            })))
+            .expect(1)
+            .mount(&openrouter)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/videos/job-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "job-123",
+                "generation_id": "gen-123",
+                "status": "completed",
+                "model": "google/veo-3.1",
+                "unsigned_urls": [format!("{}/video.mp4", cdn_server.uri())],
+                "usage": {"cost": 0.25, "is_byok": false}
+            })))
+            .expect(1)
+            .mount(&status_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/video.mp4"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(b"mp4-bytes".to_vec()),
+            )
+            .expect(1)
+            .mount(&cdn_server)
+            .await;
+
+        let mut connector = OpenRouterConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "openrouter_test_key",
+                "base_url": openrouter.uri()
+            }))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake");
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation_id": "openrouter.videos.generate",
+                "input": {
+                    "prompt": "A chrome sphere glides across a quiet moonlit beach",
+                    "model": "google/veo-3.1",
+                    "duration_seconds": 6,
+                    "aspect_ratio": "16:9",
+                    "resolution": "720P",
+                    "poll_interval_ms": 0,
+                    "max_poll_attempts": 3
+                }
+            }))
+            .await
+            .expect("video generate");
+
+        assert_eq!(result["job_id"], "job-123");
+        assert_eq!(result["generation_id"], "gen-123");
+        assert_eq!(result["video"]["mime_type"], "video/mp4");
+        assert_eq!(
+            result["video"]["base64"],
+            BASE64_STANDARD.encode("mp4-bytes")
+        );
+
+        let status_requests = status_server.received_requests().await.unwrap_or_default();
+        assert_eq!(status_requests.len(), 1);
+        assert!(status_requests[0].headers.get("authorization").is_none());
+
+        let download_requests = cdn_server.received_requests().await.unwrap_or_default();
+        assert_eq!(download_requests.len(), 1);
+        assert!(download_requests[0].headers.get("authorization").is_none());
     }
 }

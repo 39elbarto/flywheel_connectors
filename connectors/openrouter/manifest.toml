@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:openrouter-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:openrouter-video-slice"
 
 [connector]
 id = "fcp.openrouter"
 name = "OpenRouter"
 version = "0.1.0"
-description = "OpenRouter request-response connector for non-streaming chat completions and model discovery"
+description = "OpenRouter request-response connector for non-streaming chat completions, model discovery, and bounded video generation"
 archetypes = ["request-response"]
 format = "native"
 
@@ -72,3 +72,20 @@ when_to_use = "Use to discover provider-qualified model IDs before sending a rou
 common_mistakes = ["Assuming OpenRouter model IDs are the same as first-party provider IDs without the provider prefix."]
 examples = ["{}"]
 related = ["openrouter.chat.completions"]
+
+[provides.operations."openrouter.videos.generate"]
+description = "Submit an OpenRouter video generation job, poll it to completion, and download the generated video asset."
+capability = "openrouter.video"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["prompt"], properties = { model = { type = "string", default = "google/veo-3.1-fast" }, prompt = { type = "string", minLength = 1 }, duration_seconds = { type = "integer", minimum = 1 }, resolution = { type = "string" }, aspect_ratio = { type = "string" }, size = { type = "string" }, audio = { type = "boolean" }, input_images = { type = "array", maxItems = 4 }, input_videos = { type = "array", maxItems = 0 }, provider_options = { type = "object" }, poll_interval_ms = { type = "integer", minimum = 0, maximum = 60000 }, max_poll_attempts = { type = "integer", minimum = 1, maximum = 120 }, max_download_bytes = { type = "integer", minimum = 1 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["openrouter.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 134217728 }
+
+[provides.operations."openrouter.videos.generate".ai_hints]
+when_to_use = "Use for bounded OpenRouter text-to-video or image-to-video jobs when a base64 returned asset is acceptable."
+common_mistakes = ["Passing video reference inputs; OpenRouter video-to-video is intentionally rejected.", "Assuming provider credentials are sent to cross-origin polling or unsigned download URLs. They are stripped."]
+examples = ['{"prompt":"A chrome sphere glides across a quiet moonlit beach","model":"google/veo-3.1-fast","duration_seconds":6,"aspect_ratio":"16:9","resolution":"720P"}']
+related = ["openrouter.models.list"]

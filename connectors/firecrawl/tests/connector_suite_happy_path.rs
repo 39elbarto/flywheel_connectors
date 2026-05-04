@@ -201,11 +201,19 @@ async fn connector_suite_happy_path_scrapes_page() {
     let server = MockServer::start().await;
 
     Mock::given(method("POST"))
-        .and(path("/v1/scrape"))
+        .and(path("/v2/scrape"))
         .and(header("authorization", "Bearer fc-test-key"))
         .and(body_partial_json(json!({
             "url": "https://example.com",
-            "formats": ["markdown"]
+            "formats": ["markdown"],
+            "onlyMainContent": false,
+            "includeTags": ["main"],
+            "excludeTags": ["nav"],
+            "waitFor": 50,
+            "timeout": 5000,
+            "maxAge": 172800000,
+            "proxy": "auto",
+            "storeInCache": false
         })))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "success": true,
@@ -231,7 +239,15 @@ async fn connector_suite_happy_path_scrapes_page() {
         zone_id: ZoneId::work(),
         input: json!({
             "url": "https://example.com",
-            "formats": ["markdown"]
+            "formats": ["markdown"],
+            "only_main_content": false,
+            "include_tags": ["main"],
+            "exclude_tags": ["nav"],
+            "wait_for": 50,
+            "timeout": 5000,
+            "max_age_ms": 172800000,
+            "proxy": "auto",
+            "store_in_cache": false
         }),
         capability_token: build_token(&signing_key),
         holder_proof: None,
@@ -248,7 +264,7 @@ async fn connector_suite_happy_path_scrapes_page() {
         test_name: "firecrawl_scrape_happy_path".to_string(),
         config: json!({
             "api_key": "fc-test-key",
-            "base_url": format!("{}/v1", server.uri()),
+            "base_url": format!("{}/v2", server.uri()),
             "request_timeout_ms": 5_000
         }),
         handshake: handshake_request(signing_key.verifying_key().to_bytes()),
@@ -272,4 +288,97 @@ async fn connector_suite_happy_path_scrapes_page() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_crawl_start_uses_v2_path_and_body() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v2/crawl"))
+        .and(header("authorization", "Bearer fc-test-key"))
+        .and(body_partial_json(json!({
+            "url": "https://example.com",
+            "limit": 7,
+            "maxDiscoveryDepth": 2,
+            "includePaths": ["/docs"],
+            "excludePaths": ["/admin"],
+            "allowExternalLinks": false
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true,
+            "id": "crawl-abc-123",
+            "url": "https://api.firecrawl.dev/v2/crawl/crawl-abc-123"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = FirecrawlConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "fc-test-key",
+            "base_url": server.uri(),
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("handshake");
+
+    let response = connector
+        .handle_invoke(json!({
+            "operation_id": "firecrawl.crawl.start",
+            "input": {
+                "url": "https://example.com",
+                "limit": 7,
+                "max_depth": 2,
+                "include_paths": [" /docs "],
+                "exclude_paths": ["/admin"],
+                "allow_external_links": false
+            }
+        }))
+        .await
+        .expect("crawl start");
+
+    assert_eq!(response["output"]["id"], "crawl-abc-123");
+}
+
+#[fcp_async_core::runtime::test]
+async fn connector_suite_blocks_private_targets_before_network() {
+    let server = MockServer::start().await;
+    let mut connector = FirecrawlConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "fc-test-key",
+            "base_url": server.uri(),
+            "request_timeout_ms": 5_000
+        }))
+        .await
+        .expect("configure");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("handshake");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "firecrawl.scrape",
+            "input": {
+                "url": "http://169.254.169.254/latest/meta-data/?opaque=redacted"
+            }
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("private") || message.contains("internal"));
+    assert!(!message.contains("opaque=redacted"));
+    let requests = server.received_requests().await.unwrap_or_default();
+    assert!(
+        requests.is_empty(),
+        "blocked target must not call Firecrawl"
+    );
 }

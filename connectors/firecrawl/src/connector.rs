@@ -1,3 +1,4 @@
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -5,8 +6,10 @@ use fcp_prelude::{
     BaseConnector, ConnectorId, FcpError, FcpResult, RequestId, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use reqwest::header::HeaderValue;
 use serde_json::{Value, json};
 use tracing::info;
+use url::Url;
 
 use crate::client::FirecrawlClient;
 use crate::types::{CrawlRequest, ScrapeRequest};
@@ -19,6 +22,7 @@ const OP_CRAWL_START: &str = "firecrawl.crawl.start";
 const OP_CRAWL_STATUS: &str = "firecrawl.crawl.status";
 
 const FIRECRAWL_ALLOWED_HOSTS: &[&str] = &["api.firecrawl.dev"];
+const FIRECRAWL_PROXY_MODES: &[&str] = &["auto", "basic", "stealth"];
 
 #[derive(Clone, serde::Deserialize)]
 pub struct FirecrawlConfig {
@@ -32,7 +36,7 @@ pub struct FirecrawlConfig {
 }
 
 fn default_base_url() -> String {
-    "https://api.firecrawl.dev/v1".into()
+    "https://api.firecrawl.dev".into()
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -59,6 +63,7 @@ impl FirecrawlConfig {
         if self.api_key.trim().is_empty() {
             return Err("api_key is required".into());
         }
+        validate_api_key_header(&self.api_key)?;
         if self.base_url.is_empty() {
             return Err("base_url cannot be empty".into());
         }
@@ -80,6 +85,11 @@ impl FirecrawlConfig {
             })?;
         trim_config_string(&mut config.base_url);
         trim_config_string(&mut config.api_key);
+        config.base_url =
+            normalize_base_url(&config.base_url).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: e,
+            })?;
         config.validate().map_err(|e| FcpError::InvalidRequest {
             code: 1001,
             message: e,
@@ -93,7 +103,7 @@ fn is_local_test_host(host: &str) -> bool {
 }
 
 fn base_url_policy(base_url: &str) -> (bool, String) {
-    let parsed = match url::Url::parse(base_url) {
+    let parsed = match Url::parse(base_url) {
         Ok(url) => url,
         Err(error) => return (false, format!("base_url must be an absolute URL: {error}")),
     };
@@ -109,6 +119,15 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
         return (
             false,
             "base_url must not include a query string or fragment".into(),
+        );
+    }
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return (
+            false,
+            format!(
+                "base_url scheme must be http or https, got {}",
+                parsed.scheme()
+            ),
         );
     }
 
@@ -134,6 +153,33 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
     } else {
         (false, problems.join("; "))
     }
+}
+
+fn normalize_base_url(base_url: &str) -> Result<String, String> {
+    let candidate = base_url.trim();
+    if candidate.is_empty() {
+        return Err("base_url cannot be empty".into());
+    }
+    let (network_ok, network_message) = base_url_policy(candidate);
+    if !network_ok {
+        return Err(network_message);
+    }
+    let mut parsed = Url::parse(candidate)
+        .map_err(|error| format!("base_url must be an absolute URL: {error}"))?;
+    let path = parsed.path().trim_end_matches('/').to_owned();
+    if path == "/v1" || path.ends_with("/v1") {
+        return Err("base_url must not include legacy Firecrawl /v1 path".into());
+    }
+    let normalized_path = path.strip_suffix("/v2").unwrap_or(&path);
+    parsed.set_path(normalized_path);
+    Ok(parsed.as_str().trim_end_matches('/').to_owned())
+}
+
+fn validate_api_key_header(api_key: &str) -> Result<(), String> {
+    let header = format!("Bearer {api_key}");
+    HeaderValue::from_str(&header)
+        .map(|_| ())
+        .map_err(|_| "api_key contains characters that are not valid in an HTTP header".into())
 }
 
 pub struct FirecrawlConnector {
@@ -294,39 +340,34 @@ impl FirecrawlConnector {
 
         let output = match operation {
             OP_SCRAPE => {
-                let url = require_str(&input, "url")?;
+                let url = validate_provider_target_url(require_str(&input, "url")?, "url")?;
                 let mut req = ScrapeRequest::new(url);
-                if let Some(formats) = input.get("formats").and_then(Value::as_array) {
-                    req.formats = formats
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect();
+                if let Some(formats) = validated_string_array(&input, "formats")? {
+                    req.formats = formats;
                 }
-                if let Some(v) = input.get("only_main_content").and_then(Value::as_bool) {
+                if let Some(v) = validated_bool(&input, "only_main_content")? {
                     req.only_main_content = Some(v);
                 }
-                if let Some(tags) = input.get("include_tags").and_then(Value::as_array) {
-                    req.include_tags = Some(
-                        tags.iter()
-                            .filter_map(Value::as_str)
-                            .map(String::from)
-                            .collect(),
-                    );
+                if let Some(tags) = validated_string_array(&input, "include_tags")? {
+                    req.include_tags = Some(tags);
                 }
-                if let Some(tags) = input.get("exclude_tags").and_then(Value::as_array) {
-                    req.exclude_tags = Some(
-                        tags.iter()
-                            .filter_map(Value::as_str)
-                            .map(String::from)
-                            .collect(),
-                    );
+                if let Some(tags) = validated_string_array(&input, "exclude_tags")? {
+                    req.exclude_tags = Some(tags);
                 }
-                if let Some(v) = input.get("wait_for").and_then(Value::as_u64) {
-                    req.wait_for = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                if let Some(v) = validated_nonnegative_u32(&input, "wait_for")? {
+                    req.wait_for = Some(v);
                 }
-                if let Some(v) = input.get("timeout").and_then(Value::as_u64) {
-                    req.timeout = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                if let Some(v) = validated_positive_u32(&input, "timeout")? {
+                    req.timeout = Some(v);
+                }
+                if let Some(v) = validated_nonnegative_u64(&input, "max_age_ms")? {
+                    req.max_age = Some(v);
+                }
+                if let Some(v) = validated_proxy(&input, "proxy")? {
+                    req.proxy = Some(v);
+                }
+                if let Some(v) = validated_bool(&input, "store_in_cache")? {
+                    req.store_in_cache = Some(v);
                 }
 
                 let resp = client
@@ -349,29 +390,21 @@ impl FirecrawlConnector {
                 })?
             }
             OP_CRAWL_START => {
-                let url = require_str(&input, "url")?;
+                let url = validate_provider_target_url(require_str(&input, "url")?, "url")?;
                 let mut req = CrawlRequest::new(url);
-                if let Some(v) = input.get("limit").and_then(Value::as_u64) {
-                    req.limit = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                if let Some(v) = validated_positive_u32(&input, "limit")? {
+                    req.limit = Some(v);
                 }
-                if let Some(v) = input.get("max_depth").and_then(Value::as_u64) {
-                    req.max_depth = Some(u32::try_from(v).unwrap_or(u32::MAX));
+                if let Some(v) = validated_positive_u32(&input, "max_depth")? {
+                    req.max_depth = Some(v);
                 }
-                if let Some(paths) = input.get("exclude_paths").and_then(Value::as_array) {
-                    req.exclude_paths = paths
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect();
+                if let Some(paths) = validated_string_array(&input, "exclude_paths")? {
+                    req.exclude_paths = paths;
                 }
-                if let Some(paths) = input.get("include_paths").and_then(Value::as_array) {
-                    req.include_paths = paths
-                        .iter()
-                        .filter_map(Value::as_str)
-                        .map(String::from)
-                        .collect();
+                if let Some(paths) = validated_string_array(&input, "include_paths")? {
+                    req.include_paths = paths;
                 }
-                if let Some(v) = input.get("allow_external_links").and_then(Value::as_bool) {
+                if let Some(v) = validated_bool(&input, "allow_external_links")? {
                     req.allow_external_links = Some(v);
                 }
 
@@ -487,6 +520,146 @@ fn require_str<'a>(input: &'a Value, key: &str) -> FcpResult<&'a str> {
     Ok(value)
 }
 
+fn invalid_option(key: &str, message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1006,
+        message: format!("Invalid field '{key}': {}", message.into()),
+    }
+}
+
+fn validated_string_array(input: &Value, key: &str) -> FcpResult<Option<Vec<String>>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(items) = value.as_array() else {
+        return Err(invalid_option(key, "must be an array of strings"));
+    };
+    let mut out = Vec::new();
+    for item in items {
+        let Some(text) = item.as_str() else {
+            return Err(invalid_option(key, "must contain only strings"));
+        };
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_owned());
+        }
+    }
+    Ok(Some(out))
+}
+
+fn validated_bool(input: &Value, key: &str) -> FcpResult<Option<bool>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_bool()
+        .map(Some)
+        .ok_or_else(|| invalid_option(key, "must be a boolean"))
+}
+
+fn validated_positive_u32(input: &Value, key: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_u64() else {
+        return Err(invalid_option(key, "must be a positive integer"));
+    };
+    if raw == 0 {
+        return Err(invalid_option(key, "must be greater than zero"));
+    }
+    let converted = u32::try_from(raw)
+        .map_err(|_| invalid_option(key, "must fit in an unsigned 32-bit integer"))?;
+    Ok(Some(converted))
+}
+
+fn validated_nonnegative_u32(input: &Value, key: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(raw) = value.as_u64() else {
+        return Err(invalid_option(key, "must be a non-negative integer"));
+    };
+    let converted = u32::try_from(raw)
+        .map_err(|_| invalid_option(key, "must fit in an unsigned 32-bit integer"))?;
+    Ok(Some(converted))
+}
+
+fn validated_nonnegative_u64(input: &Value, key: &str) -> FcpResult<Option<u64>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    value
+        .as_u64()
+        .map(Some)
+        .ok_or_else(|| invalid_option(key, "must be a non-negative integer"))
+}
+
+fn validated_proxy(input: &Value, key: &str) -> FcpResult<Option<String>> {
+    let Some(value) = input.get(key) else {
+        return Ok(None);
+    };
+    let Some(proxy) = value.as_str().map(str::trim) else {
+        return Err(invalid_option(key, "must be a string"));
+    };
+    if FIRECRAWL_PROXY_MODES.contains(&proxy) {
+        Ok(Some(proxy.to_owned()))
+    } else {
+        Err(invalid_option(
+            key,
+            format!("must be one of {FIRECRAWL_PROXY_MODES:?}"),
+        ))
+    }
+}
+
+fn validate_provider_target_url(raw: &str, key: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    let parsed = Url::parse(trimmed)
+        .map_err(|_| invalid_option(key, "must be an absolute HTTP(S) URL with a public host"))?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(invalid_option(key, "scheme must be http or https"));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid_option(key, "must not include userinfo"));
+    }
+    let Some(host) = parsed.host_str() else {
+        return Err(invalid_option(key, "must include a host"));
+    };
+    if is_blocked_target_host(host) {
+        return Err(invalid_option(
+            key,
+            format!("targets blocked private or internal host '{host}'"),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn is_blocked_target_host(host: &str) -> bool {
+    let lower = host.trim_matches(['[', ']']).to_ascii_lowercase();
+    if lower == "localhost"
+        || lower.ends_with(".localhost")
+        || lower == "metadata"
+        || lower == "metadata.google.internal"
+    {
+        return true;
+    }
+    match lower.parse::<IpAddr>() {
+        Ok(IpAddr::V4(addr)) => {
+            addr.is_private()
+                || addr.is_loopback()
+                || addr.is_link_local()
+                || addr.is_unspecified()
+                || addr.is_broadcast()
+        }
+        Ok(IpAddr::V6(addr)) => {
+            addr.is_loopback()
+                || addr.is_unspecified()
+                || addr.is_unique_local()
+                || addr.is_unicast_link_local()
+        }
+        Err(_) => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -496,7 +669,7 @@ mod tests {
     fn test_config() -> Value {
         json!({
             "api_key": "fc-test-key-123",
-            "base_url": "http://localhost:9999/v1"
+            "base_url": "http://localhost:9999"
         })
     }
 
@@ -728,7 +901,7 @@ mod tests {
             connector
                 .handle_configure(json!({
                     "api_key": "",
-                    "base_url": "https://api.firecrawl.dev/v1"
+                    "base_url": "https://api.firecrawl.dev"
                 }))
                 .await
         })
@@ -743,7 +916,7 @@ mod tests {
             connector
                 .handle_configure(json!({
                     "api_key": "fc-key",
-                    "base_url": "http://evil.example.com/v1"
+                    "base_url": "http://evil.example.com"
                 }))
                 .await
         })
@@ -754,10 +927,10 @@ mod tests {
     #[test]
     fn configure_rejects_ambiguous_base_url_components() {
         for base_url in [
-            "https://user:pass@api.firecrawl.dev/v1",
-            "https://api.firecrawl.dev/v1?trace=1",
-            "https://api.firecrawl.dev/v1#frag",
-            "http://localhost:8080/v1?trace=1",
+            "https://user:pass@api.firecrawl.dev",
+            "https://api.firecrawl.dev?trace=1",
+            "https://api.firecrawl.dev#frag",
+            "http://localhost:8080?trace=1",
         ] {
             let result = fcp_async_core::runtime::block_on_sync(async {
                 let mut connector = FirecrawlConnector::new();
@@ -780,7 +953,7 @@ mod tests {
             connector
                 .handle_configure(json!({
                     "api_key": "fc-key",
-                    "base_url": "http://localhost:8080/v1"
+                    "base_url": "http://localhost:8080/v2"
                 }))
                 .await
         })
@@ -795,7 +968,7 @@ mod tests {
             connector
                 .handle_configure(json!({
                     "api_key": "fc-key",
-                    "base_url": "https://api.firecrawl.dev/v1"
+                    "base_url": "https://api.firecrawl.dev/v2"
                 }))
                 .await
         })
@@ -823,23 +996,23 @@ mod tests {
 
     #[test]
     fn base_url_policy_rejects_http_production() {
-        let (ok, _) = base_url_policy("http://api.firecrawl.dev/v1");
+        let (ok, _) = base_url_policy("http://api.firecrawl.dev");
         assert!(!ok);
     }
 
     #[test]
     fn base_url_policy_rejects_unknown_host() {
-        let (ok, _) = base_url_policy("https://not-firecrawl.example.com/v1");
+        let (ok, _) = base_url_policy("https://not-firecrawl.example.com");
         assert!(!ok);
     }
 
     #[test]
     fn base_url_policy_rejects_ambiguous_components() {
         for base_url in [
-            "https://user:pass@api.firecrawl.dev/v1",
-            "https://api.firecrawl.dev/v1?trace=1",
-            "https://api.firecrawl.dev/v1#frag",
-            "http://localhost:9999/v1?trace=1",
+            "https://user:pass@api.firecrawl.dev",
+            "https://api.firecrawl.dev?trace=1",
+            "https://api.firecrawl.dev#frag",
+            "http://localhost:9999?trace=1",
         ] {
             let (ok, message) = base_url_policy(base_url);
             assert!(!ok, "{base_url} should be rejected");
@@ -854,14 +1027,145 @@ mod tests {
 
     #[test]
     fn base_url_policy_accepts_production() {
-        let (ok, _) = base_url_policy("https://api.firecrawl.dev/v1");
+        let (ok, _) = base_url_policy("https://api.firecrawl.dev");
         assert!(ok);
     }
 
     #[test]
     fn base_url_policy_accepts_localhost() {
-        let (ok, _) = base_url_policy("http://127.0.0.1:9999/v1");
+        let (ok, _) = base_url_policy("http://127.0.0.1:9999/v2");
         assert!(ok);
+    }
+
+    #[test]
+    fn normalize_base_url_appends_v2_exactly_once() {
+        assert_eq!(
+            normalize_base_url("https://api.firecrawl.dev").unwrap(),
+            "https://api.firecrawl.dev"
+        );
+        assert_eq!(
+            normalize_base_url("https://api.firecrawl.dev/v2/").unwrap(),
+            "https://api.firecrawl.dev"
+        );
+        assert_eq!(
+            normalize_base_url("http://localhost:8080/firecrawl/v2").unwrap(),
+            "http://localhost:8080/firecrawl"
+        );
+    }
+
+    #[test]
+    fn normalize_base_url_rejects_legacy_v1_path() {
+        let err = normalize_base_url("https://api.firecrawl.dev/v1").unwrap_err();
+        assert!(err.contains("legacy Firecrawl /v1"));
+    }
+
+    #[test]
+    fn configure_rejects_header_unsafe_api_key() {
+        let result = fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = FirecrawlConnector::new();
+            connector
+                .handle_configure(json!({
+                    "api_key": "fc-test\r\nkey",
+                    "base_url": "https://api.firecrawl.dev"
+                }))
+                .await
+        })
+        .unwrap();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn target_url_rejects_private_internal_and_non_http_hosts() {
+        for url in [
+            "http://localhost/admin",
+            "http://127.0.0.1/private",
+            "http://10.0.0.5/private",
+            "http://172.16.0.8/private",
+            "http://192.168.1.7/private",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+            "file:///etc/passwd",
+            "https://user:pass@example.com/private",
+        ] {
+            assert!(
+                validate_provider_target_url(url, "url").is_err(),
+                "{url} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn target_url_error_avoids_attacker_query_string() {
+        let err = validate_provider_target_url("not-a-url?opaque=redacted", "url").unwrap_err();
+        let message = err.to_string();
+        assert!(!message.contains("opaque=redacted"));
+    }
+
+    #[test]
+    fn option_helpers_validate_firecrawl_v2_fields() {
+        let input = json!({
+            "formats": [" markdown ", "", "html"],
+            "include_tags": [" main "],
+            "only_main_content": false,
+            "wait_for": 0,
+            "timeout": 10_000,
+            "max_age_ms": 172_800_000,
+            "proxy": "stealth",
+            "store_in_cache": false,
+            "limit": 2,
+            "max_depth": 3
+        });
+
+        assert_eq!(
+            validated_string_array(&input, "formats").unwrap().unwrap(),
+            vec!["markdown".to_string(), "html".to_string()]
+        );
+        assert_eq!(
+            validated_string_array(&input, "include_tags")
+                .unwrap()
+                .unwrap(),
+            vec!["main".to_string()]
+        );
+        assert_eq!(
+            validated_bool(&input, "only_main_content").unwrap(),
+            Some(false)
+        );
+        assert_eq!(
+            validated_nonnegative_u32(&input, "wait_for").unwrap(),
+            Some(0)
+        );
+        assert_eq!(
+            validated_positive_u32(&input, "timeout").unwrap(),
+            Some(10_000)
+        );
+        assert_eq!(
+            validated_nonnegative_u64(&input, "max_age_ms").unwrap(),
+            Some(172_800_000)
+        );
+        assert_eq!(
+            validated_proxy(&input, "proxy").unwrap(),
+            Some("stealth".into())
+        );
+        assert_eq!(
+            validated_bool(&input, "store_in_cache").unwrap(),
+            Some(false)
+        );
+        assert_eq!(validated_positive_u32(&input, "limit").unwrap(), Some(2));
+        assert_eq!(
+            validated_positive_u32(&input, "max_depth").unwrap(),
+            Some(3)
+        );
+    }
+
+    #[test]
+    fn option_helpers_reject_malformed_fields() {
+        assert!(validated_string_array(&json!({"formats": ["markdown", 1]}), "formats").is_err());
+        assert!(
+            validated_bool(&json!({"only_main_content": "false"}), "only_main_content").is_err()
+        );
+        assert!(validated_positive_u32(&json!({"timeout": 0}), "timeout").is_err());
+        assert!(validated_positive_u32(&json!({"limit": u64::MAX}), "limit").is_err());
+        assert!(validated_proxy(&json!({"proxy": "tor"}), "proxy").is_err());
     }
 
     #[fcp_async_core::runtime::test]
@@ -879,7 +1183,7 @@ mod tests {
         let result = connector
             .handle_configure(json!({
                 "api_key": "fc-key",
-                "base_url": "http://localhost:8080/v1",
+                "base_url": "http://localhost:8080",
                 "request_timeout_ms": 0
             }))
             .await;

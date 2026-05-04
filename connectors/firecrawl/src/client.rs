@@ -14,7 +14,7 @@ use crate::types::{
 pub struct FirecrawlClient {
     client: Client,
     base_url: String,
-    api_key: String,
+    credential: String,
     retry_config: HttpRetryConfig,
     pub(crate) timeout: Duration,
 }
@@ -47,7 +47,7 @@ impl FirecrawlClient {
         Ok(Self {
             client,
             base_url: base_url.trim_end_matches('/').to_string(),
-            api_key: api_key.to_string(),
+            credential: api_key.to_string(),
             retry_config,
             timeout,
         })
@@ -60,7 +60,7 @@ impl FirecrawlClient {
 
     #[must_use]
     pub fn is_secretless(&self) -> bool {
-        self.api_key.trim().is_empty()
+        self.credential.trim().is_empty()
     }
 
     // ── Scrape ──
@@ -70,7 +70,7 @@ impl FirecrawlClient {
         runtime: &ConnectorRuntime,
         request: &ScrapeRequest,
     ) -> FirecrawlResult<ScrapeResponse> {
-        let url = format!("{}/scrape", self.base_url);
+        let url = format!("{}/v2/scrape", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = serde_json::to_value(request).map_err(FirecrawlError::Json)?;
@@ -78,11 +78,11 @@ impl FirecrawlClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let api_key = self.api_key.clone();
+            let credential = self.credential.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, "Scraping URL via Firecrawl");
-                let req = authenticate_request(client.post(&url), &api_key).json(&body);
+                let req = authenticate_request(client.post(&url), &credential).json(&body);
                 handle_response::<ScrapeResponse>(req, attempt).await
             }
         })
@@ -96,7 +96,7 @@ impl FirecrawlClient {
         runtime: &ConnectorRuntime,
         request: &CrawlRequest,
     ) -> FirecrawlResult<CrawlStartResponse> {
-        let url = format!("{}/crawl", self.base_url);
+        let url = format!("{}/v2/crawl", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let body = serde_json::to_value(request).map_err(FirecrawlError::Json)?;
@@ -104,11 +104,11 @@ impl FirecrawlClient {
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let api_key = self.api_key.clone();
+            let credential = self.credential.clone();
             let body = body.clone();
             async move {
                 debug!(attempt, "Starting crawl via Firecrawl");
-                let req = authenticate_request(client.post(&url), &api_key).json(&body);
+                let req = authenticate_request(client.post(&url), &credential).json(&body);
                 handle_response::<CrawlStartResponse>(req, attempt).await
             }
         })
@@ -121,17 +121,17 @@ impl FirecrawlClient {
         crawl_id: &str,
     ) -> FirecrawlResult<CrawlStatusResponse> {
         validate_crawl_id(crawl_id)?;
-        let url = format!("{}/crawl/{crawl_id}", self.base_url);
+        let url = format!("{}/v2/crawl/{crawl_id}", self.base_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
             let url = url.clone();
             let client = self.client.clone();
-            let api_key = self.api_key.clone();
+            let credential = self.credential.clone();
             async move {
                 debug!(attempt, crawl_id, "Checking crawl status");
-                let req = authenticate_request(client.get(&url), &api_key);
+                let req = authenticate_request(client.get(&url), &credential);
                 handle_response::<CrawlStatusResponse>(req, attempt).await
             }
         })
@@ -162,11 +162,11 @@ fn validate_crawl_id(id: &str) -> FirecrawlResult<()> {
     Ok(())
 }
 
-fn authenticate_request(req: RequestBuilder, api_key: &str) -> RequestBuilder {
-    if api_key.is_empty() {
+fn authenticate_request(req: RequestBuilder, credential: &str) -> RequestBuilder {
+    if credential.is_empty() {
         req
     } else {
-        req.bearer_auth(api_key)
+        req.bearer_auth(credential)
     }
 }
 
@@ -254,8 +254,8 @@ mod tests {
     fn client_debug_redacts_api_key() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             FirecrawlClient::new(
-                "https://api.firecrawl.dev/v1",
-                "fc-secret-key-123",
+                "https://api.firecrawl.dev",
+                "fc-redacted-example",
                 HttpRetryConfig::default(),
                 Duration::from_secs(30),
             )
@@ -266,14 +266,14 @@ mod tests {
 
         let debug = format!("{rt:?}");
         assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains("fc-secret-key-123"));
+        assert!(!debug.contains("fc-redacted-example"));
     }
 
     #[test]
     fn secretless_detection() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             FirecrawlClient::new(
-                "https://api.firecrawl.dev/v1",
+                "https://api.firecrawl.dev",
                 "",
                 HttpRetryConfig::default(),
                 Duration::from_secs(30),
@@ -286,7 +286,7 @@ mod tests {
 
         let rt2 = fcp_async_core::runtime::block_on_sync(async {
             FirecrawlClient::new(
-                "https://api.firecrawl.dev/v1",
+                "https://api.firecrawl.dev",
                 "fc-key",
                 HttpRetryConfig::default(),
                 Duration::from_secs(30),
@@ -302,7 +302,7 @@ mod tests {
     fn base_url_trailing_slash_trimmed() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             FirecrawlClient::new(
-                "https://api.firecrawl.dev/v1/",
+                "https://api.firecrawl.dev/",
                 "key",
                 HttpRetryConfig::default(),
                 Duration::from_secs(30),
@@ -335,7 +335,7 @@ mod tests {
     fn client_uses_configured_timeout() {
         let rt = fcp_async_core::runtime::block_on_sync(async {
             FirecrawlClient::new(
-                "https://api.firecrawl.dev/v1",
+                "https://api.firecrawl.dev",
                 "key",
                 HttpRetryConfig::default(),
                 Duration::from_millis(1_234),

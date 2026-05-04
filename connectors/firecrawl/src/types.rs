@@ -2,22 +2,28 @@ use serde::{Deserialize, Serialize};
 
 // ── Scrape ──
 
-/// Request body for POST /v1/scrape.
+/// Request body for POST /v2/scrape.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScrapeRequest {
     pub url: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub formats: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "onlyMainContent", skip_serializing_if = "Option::is_none")]
     pub only_main_content: Option<bool>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "includeTags", skip_serializing_if = "Option::is_none")]
     pub include_tags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "excludeTags", skip_serializing_if = "Option::is_none")]
     pub exclude_tags: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "waitFor", skip_serializing_if = "Option::is_none")]
     pub wait_for: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout: Option<u32>,
+    #[serde(rename = "maxAge", skip_serializing_if = "Option::is_none")]
+    pub max_age: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<String>,
+    #[serde(rename = "storeInCache", skip_serializing_if = "Option::is_none")]
+    pub store_in_cache: Option<bool>,
 }
 
 impl ScrapeRequest {
@@ -30,11 +36,14 @@ impl ScrapeRequest {
             exclude_tags: None,
             wait_for: None,
             timeout: None,
+            max_age: None,
+            proxy: None,
+            store_in_cache: None,
         }
     }
 }
 
-/// Response from POST /v1/scrape.
+/// Response from POST /v2/scrape.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScrapeResponse {
     pub success: bool,
@@ -76,19 +85,19 @@ pub struct ScrapeMetadata {
 
 // ── Crawl ──
 
-/// Request body for POST /v1/crawl.
+/// Request body for POST /v2/crawl.
 #[derive(Debug, Clone, Serialize)]
 pub struct CrawlRequest {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "maxDiscoveryDepth", skip_serializing_if = "Option::is_none")]
     pub max_depth: Option<u32>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "excludePaths", skip_serializing_if = "Vec::is_empty")]
     pub exclude_paths: Vec<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(rename = "includePaths", skip_serializing_if = "Vec::is_empty")]
     pub include_paths: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "allowExternalLinks", skip_serializing_if = "Option::is_none")]
     pub allow_external_links: Option<bool>,
 }
 
@@ -105,7 +114,7 @@ impl CrawlRequest {
     }
 }
 
-/// Response from POST /v1/crawl (async job start).
+/// Response from POST /v2/crawl (async job start).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CrawlStartResponse {
     pub success: bool,
@@ -117,7 +126,7 @@ pub struct CrawlStartResponse {
     pub error: Option<String>,
 }
 
-/// Response from GET /v1/crawl/{id} (crawl status).
+/// Response from GET /v2/crawl/{id} (crawl status).
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CrawlStatusResponse {
     pub status: String,
@@ -167,7 +176,36 @@ mod tests {
         assert_eq!(json["url"], "https://example.com");
         assert_eq!(json["formats"][0], "markdown");
         // optional fields should be absent
+        assert!(json.get("onlyMainContent").is_none());
         assert!(json.get("only_main_content").is_none());
+    }
+
+    #[test]
+    fn scrape_request_serializes_v2_options() {
+        let mut req = ScrapeRequest::new("https://example.com");
+        req.only_main_content = Some(false);
+        req.include_tags = Some(vec!["main".into()]);
+        req.exclude_tags = Some(vec!["nav".into()]);
+        req.wait_for = Some(250);
+        req.timeout = Some(10_000);
+        req.max_age = Some(172_800_000);
+        req.proxy = Some("auto".into());
+        req.store_in_cache = Some(false);
+
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["onlyMainContent"], false);
+        assert_eq!(json["includeTags"][0], "main");
+        assert_eq!(json["excludeTags"][0], "nav");
+        assert_eq!(json["waitFor"], 250);
+        assert_eq!(json["timeout"], 10_000);
+        assert_eq!(json["maxAge"], 172_800_000);
+        assert_eq!(json["proxy"], "auto");
+        assert_eq!(json["storeInCache"], false);
+        assert!(json.get("only_main_content").is_none());
+        assert!(json.get("include_tags").is_none());
+        assert!(json.get("exclude_tags").is_none());
+        assert!(json.get("wait_for").is_none());
+        assert!(json.get("store_in_cache").is_none());
     }
 
     #[test]
@@ -216,6 +254,8 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["url"], "https://example.com");
         // empty vecs should not be present
+        assert!(json.get("excludePaths").is_none());
+        assert!(json.get("includePaths").is_none());
         assert!(json.get("exclude_paths").is_none());
         assert!(json.get("include_paths").is_none());
     }
@@ -225,7 +265,7 @@ mod tests {
         let json = serde_json::json!({
             "success": true,
             "id": "crawl-abc-123",
-            "url": "https://api.firecrawl.dev/v1/crawl/crawl-abc-123"
+            "url": "https://api.firecrawl.dev/v2/crawl/crawl-abc-123"
         });
         let resp: CrawlStartResponse = serde_json::from_value(json).unwrap();
         assert!(resp.success);
@@ -280,9 +320,13 @@ mod tests {
 
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["limit"], 50);
-        assert_eq!(json["max_depth"], 3);
-        assert_eq!(json["exclude_paths"][0], "/admin/*");
-        assert_eq!(json["include_paths"][0], "/blog/*");
-        assert_eq!(json["allow_external_links"], false);
+        assert_eq!(json["maxDiscoveryDepth"], 3);
+        assert_eq!(json["excludePaths"][0], "/admin/*");
+        assert_eq!(json["includePaths"][0], "/blog/*");
+        assert_eq!(json["allowExternalLinks"], false);
+        assert!(json.get("max_depth").is_none());
+        assert!(json.get("exclude_paths").is_none());
+        assert!(json.get("include_paths").is_none());
+        assert!(json.get("allow_external_links").is_none());
     }
 }

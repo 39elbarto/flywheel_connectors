@@ -9,19 +9,23 @@ use std::error::Error;
 
 use chrono::Utc;
 use fcp_testkit::evidence_helpers::{
-    LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION, SwarmBaselineArtifactDigests,
-    SwarmBaselinePathKind, SwarmBaselinePromotionManifest, SwarmDecisionAction, SwarmDecisionCard,
-    SwarmDecisionCounterfactual, SwarmDecisionDomain, SwarmDecisionEvidencePointer,
-    SwarmDecisionFallback, SwarmDecisionLossTerm, SwarmEvidenceArtifact, SwarmEvidenceArtifactKind,
-    SwarmEvidenceArtifactManifest, SwarmEvidenceExecutionMode, SwarmEvidenceRedactionPolicy,
-    SwarmEvidenceSourceKind, SwarmGauntletCounters, SwarmGauntletEvidenceBundle,
-    SwarmGauntletManifest, SwarmGauntletPhase, SwarmGauntletPhaseEvidence,
-    SwarmLatencyEvidenceBundle, SwarmLatencySample, SwarmLatencyScenario, SwarmPromotionEnvelope,
-    SwarmPromotionQualification, SwarmPromotionSkipArtifact, SwarmPromotionTopology,
-    SwarmRegressionGateThresholds, SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics,
-    SwarmRunEnvironment, SwarmStatisticalGateInput, SwarmStatisticalGateOutcome,
-    SwarmStatisticalGateReasonKind, SwarmStatisticalGateReport, SwarmStatisticalGateTuning,
-    SwarmStatisticalTraceQuality, SwarmWorkloadKind,
+    LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION,
+    SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION, SwarmBaselineArtifactDigests, SwarmBaselinePathKind,
+    SwarmBaselinePromotionManifest, SwarmCalibrationStatus, SwarmControllerInteractionScenario,
+    SwarmControllerMode, SwarmControllerModeEvidence, SwarmControllerModeMetrics,
+    SwarmControllerSafetyOutcome, SwarmControllerSafetyReport, SwarmControllerSafetyThresholds,
+    SwarmDecisionAction, SwarmDecisionCard, SwarmDecisionCounterfactual, SwarmDecisionDomain,
+    SwarmDecisionEvidencePointer, SwarmDecisionFallback, SwarmDecisionLossTerm,
+    SwarmEvidenceArtifact, SwarmEvidenceArtifactKind, SwarmEvidenceArtifactManifest,
+    SwarmEvidenceExecutionMode, SwarmEvidenceRedactionPolicy, SwarmEvidenceSourceKind,
+    SwarmGauntletCounters, SwarmGauntletEvidenceBundle, SwarmGauntletManifest, SwarmGauntletPhase,
+    SwarmGauntletPhaseEvidence, SwarmLatencyEvidenceBundle, SwarmLatencySample,
+    SwarmLatencyScenario, SwarmPromotionEnvelope, SwarmPromotionQualification,
+    SwarmPromotionSkipArtifact, SwarmPromotionTopology, SwarmRegressionGateThresholds,
+    SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics, SwarmRunEnvironment,
+    SwarmStatisticalGateInput, SwarmStatisticalGateOutcome, SwarmStatisticalGateReasonKind,
+    SwarmStatisticalGateReport, SwarmStatisticalGateTuning, SwarmStatisticalTraceQuality,
+    SwarmWorkloadKind,
 };
 use serde_json::{Value, json};
 
@@ -176,6 +180,151 @@ fn decision_cards(scenario_id: &str) -> Vec<SwarmDecisionCard> {
         ]))
     })
     .collect()
+}
+
+fn controller_safety_card(
+    card_id: &str,
+    domain: SwarmDecisionDomain,
+    action: SwarmDecisionAction,
+    scenario: SwarmControllerInteractionScenario,
+) -> SwarmDecisionCard {
+    SwarmDecisionCard::new(
+        card_id,
+        domain,
+        "connector:offline-controller-safety",
+        scenario.as_str(),
+        action,
+        100,
+        SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+    )
+    .with_scenario(scenario.as_str())
+    .with_loss_terms(vec![
+        SwarmDecisionLossTerm::new("p99_queueing", 100, 1_000_000, "ns"),
+        SwarmDecisionLossTerm::new("audit_visibility", 1, 2_000_000, "events"),
+    ])
+    .with_counterfactual(SwarmDecisionCounterfactual::new(
+        SwarmDecisionAction::Fallback,
+        140,
+        "fallback is safe but lower-throughput",
+    ))
+    .with_evidence_pointers(vec![SwarmDecisionEvidencePointer::bundle_artifact(
+        format!("controller_safety.jsonl#{}", scenario.as_str()),
+        "blake3:controller-safety",
+        true,
+    )])
+    .with_replay_inputs(BTreeMap::from([
+        ("scenario".to_string(), json!(scenario.as_str())),
+        ("queue_depth".to_string(), json!(128)),
+        (
+            "zone".to_string(),
+            json!("z:project:offline-controller-safety"),
+        ),
+    ]))
+}
+
+fn controller_safety_cards(scenario: SwarmControllerInteractionScenario) -> Vec<SwarmDecisionCard> {
+    vec![
+        controller_safety_card(
+            "e2e-card:scheduler-safety",
+            SwarmDecisionDomain::Scheduler,
+            SwarmDecisionAction::Dispatch,
+            scenario,
+        ),
+        controller_safety_card(
+            "e2e-card:placement-safety",
+            SwarmDecisionDomain::Placement,
+            SwarmDecisionAction::Place,
+            scenario,
+        ),
+        controller_safety_card(
+            "e2e-card:backpressure-safety",
+            SwarmDecisionDomain::Backpressure,
+            SwarmDecisionAction::Delay,
+            scenario,
+        ),
+        controller_safety_card(
+            "e2e-card:fallback-safety",
+            SwarmDecisionDomain::Backpressure,
+            SwarmDecisionAction::Fallback,
+            scenario,
+        ),
+    ]
+}
+
+fn controller_safety_metrics(
+    submitted_ops: u64,
+    decision_card_count: u64,
+) -> SwarmControllerModeMetrics {
+    SwarmControllerModeMetrics {
+        submitted_ops,
+        accounted_ops: submitted_ops,
+        audit_event_count: submitted_ops,
+        max_starvation_ms: 300,
+        zone_fairness_skew_microunits: 10_000,
+        principal_fairness_skew_microunits: 10_000,
+        counterfactual_count: decision_card_count,
+        decision_card_count,
+        ..SwarmControllerModeMetrics::default()
+    }
+}
+
+fn controller_safety_modes(
+    scenario: SwarmControllerInteractionScenario,
+) -> Vec<SwarmControllerModeEvidence> {
+    let scheduler = controller_safety_metrics(256, 1);
+    let placement = controller_safety_metrics(256, 1);
+    let mut backpressure = controller_safety_metrics(256, 1);
+    backpressure.delayed_ops = 16;
+    let mut audit = controller_safety_metrics(256, 0);
+    audit.counterfactual_count = 0;
+    let mut combined = controller_safety_metrics(256, 3);
+    combined.delayed_ops = 16;
+    combined.shed_ops = 2;
+    let mut fallback = controller_safety_metrics(256, 1);
+    fallback.fallback_invocations = 1;
+
+    vec![
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::SchedulerOnly,
+            scheduler,
+            vec!["e2e-card:scheduler-safety".to_string()],
+        ),
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::PlacementOnly,
+            placement,
+            vec!["e2e-card:placement-safety".to_string()],
+        ),
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::BackpressureOnly,
+            backpressure,
+            vec!["e2e-card:backpressure-safety".to_string()],
+        ),
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::AuditOnly,
+            audit,
+            Vec::new(),
+        ),
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::CombinedController,
+            combined,
+            vec![
+                "e2e-card:scheduler-safety".to_string(),
+                "e2e-card:placement-safety".to_string(),
+                "e2e-card:backpressure-safety".to_string(),
+            ],
+        ),
+        SwarmControllerModeEvidence::new(
+            scenario,
+            SwarmControllerMode::ConservativeFallback,
+            fallback,
+            vec!["e2e-card:fallback-safety".to_string()],
+        ),
+    ]
 }
 
 fn latency_bundle() -> Result<SwarmLatencyEvidenceBundle, Box<dyn Error>> {
@@ -486,6 +635,139 @@ fn swarm_statistical_gate_e2e_emits_pass_fail_and_indeterminate_logs() -> Result
     );
     assert!(jsonl.contains("swarm_baseline_promotion_manifest"));
     assert!(jsonl.contains("blake3:e2e-raw-samples"));
+    for line in jsonl.lines() {
+        serde_json::from_str::<Value>(line)?;
+    }
+    assert!(!jsonl.contains("sk-live-"));
+    assert!(!jsonl.contains("Bearer test-token"));
+    assert!(!jsonl.contains("super-secret-value"));
+    Ok(())
+}
+
+#[test]
+fn swarm_controller_safety_e2e_emits_pass_fail_and_fallback_logs() -> Result<(), Box<dyn Error>> {
+    let pass_scenario = SwarmControllerInteractionScenario::MixedPriority;
+    let pass_report = SwarmControllerSafetyReport::evaluate(
+        pass_scenario,
+        SwarmControllerSafetyThresholds::smoke(),
+        controller_safety_modes(pass_scenario),
+        controller_safety_cards(pass_scenario),
+    );
+
+    let fail_scenario = SwarmControllerInteractionScenario::SameZoneAuditStorm;
+    let mut fail_modes = controller_safety_modes(fail_scenario);
+    let combined = fail_modes
+        .iter_mut()
+        .find(|mode| mode.mode == SwarmControllerMode::CombinedController)
+        .ok_or("combined controller mode should be present")?;
+    combined.metrics.accounted_ops = 252;
+    combined.metrics.hidden_drop_count = 4;
+    combined.metrics.audit_event_count = 240;
+    combined.metrics.max_starvation_ms = 10_000;
+    combined.metrics.zone_fairness_skew_microunits = 300_000;
+    combined.metrics.replay_mismatch_count = 1;
+    let fail_report = SwarmControllerSafetyReport::evaluate(
+        fail_scenario,
+        SwarmControllerSafetyThresholds::smoke(),
+        fail_modes,
+        controller_safety_cards(fail_scenario),
+    );
+
+    let fallback_scenario = SwarmControllerInteractionScenario::DownstreamThrottled;
+    let mut fallback_cards = controller_safety_cards(fallback_scenario);
+    fallback_cards[2] = fallback_cards[2]
+        .clone()
+        .with_calibration(SwarmCalibrationStatus::ReplayMismatch);
+    let mut fallback_modes = controller_safety_modes(fallback_scenario);
+    let backpressure = fallback_modes
+        .iter_mut()
+        .find(|mode| mode.mode == SwarmControllerMode::BackpressureOnly)
+        .ok_or("backpressure mode should be present")?;
+    backpressure.metrics.fallback_invocations = 1;
+    backpressure.fallback_reason = Some("replay_mismatch".to_string());
+    let fallback_report = SwarmControllerSafetyReport::evaluate(
+        fallback_scenario,
+        SwarmControllerSafetyThresholds::smoke(),
+        fallback_modes,
+        fallback_cards,
+    );
+
+    let reports = [
+        ("pass", pass_report),
+        ("fail", fail_report),
+        ("fallback_required", fallback_report),
+    ];
+    let outcomes: BTreeMap<_, _> = reports
+        .iter()
+        .map(|(name, report)| (*name, report.outcome))
+        .collect();
+    let mut records = Vec::new();
+    for (_, report) in &reports {
+        records.extend(report.to_jsonl_values()?);
+    }
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    let report_records = records
+        .iter()
+        .filter(|record| record["record_type"] == "swarm_controller_safety_report")
+        .collect::<Vec<_>>();
+    let failure_records = records
+        .iter()
+        .filter(|record| record["record_type"] == "swarm_controller_safety_failure")
+        .collect::<Vec<_>>();
+    let fallback_record = report_records
+        .iter()
+        .find(|record| record["outcome"] == "fallback_required")
+        .ok_or("fallback-required report should be present")?;
+    let pass_record = report_records
+        .iter()
+        .find(|record| record["outcome"] == "pass")
+        .ok_or("pass report should be present")?;
+
+    assert_eq!(
+        outcomes.get("pass"),
+        Some(&SwarmControllerSafetyOutcome::Pass)
+    );
+    assert_eq!(
+        outcomes.get("fail"),
+        Some(&SwarmControllerSafetyOutcome::Fail)
+    );
+    assert_eq!(
+        outcomes.get("fallback_required"),
+        Some(&SwarmControllerSafetyOutcome::FallbackRequired)
+    );
+    assert_eq!(report_records.len(), 3);
+    assert_eq!(
+        pass_record["schema_version"],
+        SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION
+    );
+    assert!(
+        pass_record["decision_card_ids"]
+            .as_array()
+            .ok_or("decision card ids should be an array")?
+            .iter()
+            .any(|id| id == "e2e-card:backpressure-safety")
+    );
+    assert!(failure_records.iter().any(|record| {
+        record["invariant"] == "work_conservation" && record["reason"] == "hidden_drop"
+    }));
+    assert!(failure_records.iter().any(|record| {
+        record["invariant"] == "no_audit_loss" && record["reason"] == "audit_event_shortfall"
+    }));
+    assert!(
+        fallback_record["fallback_reasons"]
+            .as_array()
+            .ok_or("fallback reasons should be an array")?
+            .iter()
+            .any(|reason| reason
+                .as_str()
+                .is_some_and(|value| value.contains("replay_mismatch")))
+    );
+    assert!(jsonl.contains("swarm_controller_safety_mode_evidence"));
+    assert!(jsonl.contains("swarm_decision_card"));
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

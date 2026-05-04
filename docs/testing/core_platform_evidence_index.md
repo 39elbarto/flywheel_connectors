@@ -284,6 +284,33 @@ Offline smoke coverage for the gate lives in:
 cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_statistical -- --nocapture
 ```
 
+### Cross-Controller Safety Invariants
+
+`swarm-controller-safety/v1` proves that the scheduler, placement controller,
+backpressure controller, audit combiner, combined adaptive mode, and conservative
+fallback mode remain safe when their decisions interact. The report evaluates
+work conservation, bounded starvation, zone/principal fairness, visible
+backpressure actions, audit retention, deterministic replay, safe
+disable/rollback, retained counterfactuals, and complete mode comparison.
+
+The scripted scenario set covers `healthy`, `queue_congested`, `cpu_saturated`,
+`memory_pressure`, `downstream_throttled`, `retry_storm`,
+`same_zone_audit_storm`, and `mixed_priority`. Each mode evidence row records
+submitted/accounted operations, hidden drops, explicit delay/shed counts,
+no-op delays, silent warning admissions, audit events, replay mismatches,
+starvation, fairness skew, fallback invocations, counterfactual counts, and the
+decision-card ids that explain the mode. The summary outcome is `pass`, `fail`,
+or `fallback_required`: missing telemetry, replay mismatch, or calibration drift
+must force fallback instead of adaptive behavior, while hidden drops, audit loss,
+fairness starvation, no-op delay actions, silent warning admissions, replay
+mismatches, or missing counterfactuals fail the run.
+
+Offline smoke coverage for the controller safety contract lives in:
+
+```bash
+cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_controller_safety -- --nocapture
+```
+
 ### Integrated Swarm Gauntlet
 
 `swarm-gauntlet/v1` ties the first-generation swarm evidence surfaces together

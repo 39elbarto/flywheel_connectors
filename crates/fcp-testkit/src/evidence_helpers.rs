@@ -3783,6 +3783,18 @@ pub enum SwarmCalibrationStatus {
 }
 
 impl SwarmCalibrationStatus {
+    /// Stable machine label for this calibration state.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotRequired => "not_required",
+            Self::Valid => "valid",
+            Self::DriftDetected => "drift_detected",
+            Self::MissingTelemetry => "missing_telemetry",
+            Self::ReplayMismatch => "replay_mismatch",
+        }
+    }
+
     /// Whether this calibration state requires conservative fallback.
     #[must_use]
     pub const fn requires_fallback(self) -> bool {
@@ -4109,6 +4121,781 @@ impl SwarmDecisionCard {
             "schema_version": self.schema_version,
             "card": serde_json::to_value(self)?,
         }))
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cross-controller swarm safety reports
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Schema tag for cross-controller swarm safety reports.
+pub const SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION: &str = "swarm-controller-safety/v1";
+
+/// Adaptive controller mode compared by the cross-controller safety report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmControllerMode {
+    /// Scheduler policy enabled by itself.
+    SchedulerOnly,
+    /// Placement/resource-pool policy enabled by itself.
+    PlacementOnly,
+    /// Backpressure controller enabled by itself.
+    BackpressureOnly,
+    /// Audit/event combiner enabled by itself.
+    AuditOnly,
+    /// Scheduler, placement, backpressure, and audit behavior enabled together.
+    CombinedController,
+    /// Deterministic conservative behavior used for disable or rollback.
+    ConservativeFallback,
+}
+
+impl SwarmControllerMode {
+    /// Every controller mode needed by the cross-controller safety contract.
+    pub const REQUIRED: [Self; 6] = [
+        Self::SchedulerOnly,
+        Self::PlacementOnly,
+        Self::BackpressureOnly,
+        Self::AuditOnly,
+        Self::CombinedController,
+        Self::ConservativeFallback,
+    ];
+
+    /// Stable machine label for this controller mode.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SchedulerOnly => "scheduler_only",
+            Self::PlacementOnly => "placement_only",
+            Self::BackpressureOnly => "backpressure_only",
+            Self::AuditOnly => "audit_only",
+            Self::CombinedController => "combined_controller",
+            Self::ConservativeFallback => "conservative_fallback",
+        }
+    }
+}
+
+/// Scripted scenario class for proving controller interactions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmControllerInteractionScenario {
+    /// Nominal load below all controller thresholds.
+    Healthy,
+    /// Queue depth is the dominant pressure source.
+    QueueCongested,
+    /// CPU saturation is the dominant pressure source.
+    CpuSaturated,
+    /// RSS or allocation pressure is the dominant pressure source.
+    MemoryPressure,
+    /// Downstream service throttling is causing retry pressure.
+    DownstreamThrottled,
+    /// Retries are amplifying load across controllers.
+    RetryStorm,
+    /// Audit/event contention is concentrated in one zone.
+    SameZoneAuditStorm,
+    /// Mixed priorities, zones, and principals compete for capacity.
+    MixedPriority,
+}
+
+impl SwarmControllerInteractionScenario {
+    /// Every scripted scenario required by the safety contract.
+    pub const REQUIRED: [Self; 8] = [
+        Self::Healthy,
+        Self::QueueCongested,
+        Self::CpuSaturated,
+        Self::MemoryPressure,
+        Self::DownstreamThrottled,
+        Self::RetryStorm,
+        Self::SameZoneAuditStorm,
+        Self::MixedPriority,
+    ];
+
+    /// Stable machine label for this scenario.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Healthy => "healthy",
+            Self::QueueCongested => "queue_congested",
+            Self::CpuSaturated => "cpu_saturated",
+            Self::MemoryPressure => "memory_pressure",
+            Self::DownstreamThrottled => "downstream_throttled",
+            Self::RetryStorm => "retry_storm",
+            Self::SameZoneAuditStorm => "same_zone_audit_storm",
+            Self::MixedPriority => "mixed_priority",
+        }
+    }
+}
+
+/// Invariant checked by the cross-controller safety report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmControllerSafetyInvariant {
+    /// Every submitted operation is accounted for by an outcome.
+    WorkConservation,
+    /// No zone, principal, or priority class waits beyond the configured bound.
+    BoundedStarvation,
+    /// Zone-level and principal-level fairness remain within skew budgets.
+    ZonePrincipalFairness,
+    /// Delay, shed, throttle, and fallback actions are visible in evidence.
+    BackpressureActionVisible,
+    /// Every accounted operation has audit evidence.
+    NoAuditLoss,
+    /// Replaying the decision record reproduces the same selected action.
+    DeterministicReplay,
+    /// Adaptive behavior can be disabled or rolled back to safe fallback.
+    SafeDisableRollback,
+    /// Combined mode retained next-best safe-action records.
+    CounterfactualRetained,
+    /// All required controller modes were compared for the scenario.
+    ModeComparisonComplete,
+}
+
+impl SwarmControllerSafetyInvariant {
+    /// Stable machine label for this invariant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::WorkConservation => "work_conservation",
+            Self::BoundedStarvation => "bounded_starvation",
+            Self::ZonePrincipalFairness => "zone_principal_fairness",
+            Self::BackpressureActionVisible => "backpressure_action_visible",
+            Self::NoAuditLoss => "no_audit_loss",
+            Self::DeterministicReplay => "deterministic_replay",
+            Self::SafeDisableRollback => "safe_disable_rollback",
+            Self::CounterfactualRetained => "counterfactual_retained",
+            Self::ModeComparisonComplete => "mode_comparison_complete",
+        }
+    }
+}
+
+/// Machine-readable cross-controller safety outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmControllerSafetyOutcome {
+    /// All invariants passed and no fallback-only condition was detected.
+    Pass,
+    /// At least one hard safety invariant failed.
+    Fail,
+    /// Safety invariants held because adaptive behavior entered fallback.
+    FallbackRequired,
+}
+
+impl SwarmControllerSafetyOutcome {
+    /// Stable machine label for this outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::FallbackRequired => "fallback_required",
+        }
+    }
+}
+
+/// Thresholds used by cross-controller safety checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmControllerSafetyThresholds {
+    /// Maximum allowed starvation wait for any zone/principal/priority class.
+    pub max_starvation_ms: u64,
+    /// Maximum zone fairness skew in millionths.
+    pub max_zone_fairness_skew_microunits: u64,
+    /// Maximum principal fairness skew in millionths.
+    pub max_principal_fairness_skew_microunits: u64,
+}
+
+impl SwarmControllerSafetyThresholds {
+    /// Conservative offline smoke thresholds for replayable controller tests.
+    #[must_use]
+    pub const fn smoke() -> Self {
+        Self {
+            max_starvation_ms: 5_000,
+            max_zone_fairness_skew_microunits: 100_000,
+            max_principal_fairness_skew_microunits: 100_000,
+        }
+    }
+}
+
+/// Aggregated metrics for one controller mode under one scenario.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmControllerModeMetrics {
+    /// Operations submitted to the controller set.
+    pub submitted_ops: u64,
+    /// Operations with a terminal or intentionally delayed outcome.
+    pub accounted_ops: u64,
+    /// Operations that disappeared without a visible outcome.
+    pub hidden_drop_count: u64,
+    /// Operations delayed by an explicit controller action.
+    pub delayed_ops: u64,
+    /// Operations shed by an explicit controller action.
+    pub shed_ops: u64,
+    /// Delay actions that did not actually delay or change admission state.
+    pub no_op_delay_count: u64,
+    /// Warning admissions that bypassed visible warning evidence.
+    pub silent_warning_admission_count: u64,
+    /// Audit events retained for accounted operations.
+    pub audit_event_count: u64,
+    /// Decision-card replays that did not reproduce the selected action.
+    pub replay_mismatch_count: u64,
+    /// Maximum observed starvation wait.
+    pub max_starvation_ms: u64,
+    /// Maximum zone fairness skew in millionths.
+    pub zone_fairness_skew_microunits: u64,
+    /// Maximum principal fairness skew in millionths.
+    pub principal_fairness_skew_microunits: u64,
+    /// Conservative fallback invocations.
+    pub fallback_invocations: u64,
+    /// Retained next-best safe-action records.
+    pub counterfactual_count: u64,
+    /// Decision cards expected for this mode evidence.
+    pub decision_card_count: u64,
+}
+
+/// Evidence for one controller mode under one interaction scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmControllerModeEvidence {
+    /// Scenario exercised by this evidence row.
+    pub scenario: SwarmControllerInteractionScenario,
+    /// Controller mode being evaluated.
+    pub mode: SwarmControllerMode,
+    /// Aggregated safety metrics.
+    pub metrics: SwarmControllerModeMetrics,
+    /// Decision cards that explain visible actions for this mode.
+    pub decision_card_ids: Vec<String>,
+    /// Machine-readable fallback reason, when this mode intentionally fell back.
+    pub fallback_reason: Option<String>,
+}
+
+impl SwarmControllerModeEvidence {
+    /// Build one mode evidence row.
+    #[must_use]
+    pub const fn new(
+        scenario: SwarmControllerInteractionScenario,
+        mode: SwarmControllerMode,
+        metrics: SwarmControllerModeMetrics,
+        decision_card_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            scenario,
+            mode,
+            metrics,
+            decision_card_ids,
+            fallback_reason: None,
+        }
+    }
+
+    /// Attach a fallback reason to this row.
+    #[must_use]
+    pub fn with_fallback_reason(mut self, reason: impl Into<String>) -> Self {
+        self.fallback_reason = Some(reason.into());
+        self
+    }
+}
+
+/// One invariant failure emitted by a cross-controller safety report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmControllerSafetyFailure {
+    /// Failed invariant.
+    pub invariant: SwarmControllerSafetyInvariant,
+    /// Controller mode where the failure was observed.
+    pub mode: SwarmControllerMode,
+    /// Scenario where the failure was observed.
+    pub scenario: SwarmControllerInteractionScenario,
+    /// Machine-readable reason.
+    pub reason: String,
+    /// Observed value.
+    pub observed_value: String,
+    /// Allowed value.
+    pub allowed_value: String,
+    /// Decision card ids correlated with the failure.
+    pub decision_card_ids: Vec<String>,
+}
+
+impl SwarmControllerSafetyFailure {
+    fn new(
+        invariant: SwarmControllerSafetyInvariant,
+        mode: SwarmControllerMode,
+        scenario: SwarmControllerInteractionScenario,
+        reason: impl Into<String>,
+        observed_value: impl Into<String>,
+        allowed_value: impl Into<String>,
+        decision_card_ids: Vec<String>,
+    ) -> Self {
+        Self {
+            invariant,
+            mode,
+            scenario,
+            reason: reason.into(),
+            observed_value: observed_value.into(),
+            allowed_value: allowed_value.into(),
+            decision_card_ids,
+        }
+    }
+}
+
+/// Replayable report proving scheduler, placement, backpressure, and audit
+/// controllers remain safe when enabled separately and together.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmControllerSafetyReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario evaluated by this report.
+    pub scenario: SwarmControllerInteractionScenario,
+    /// Safety thresholds applied to all mode evidence rows.
+    pub thresholds: SwarmControllerSafetyThresholds,
+    /// Mode evidence rows compared by the report.
+    pub modes: Vec<SwarmControllerModeEvidence>,
+    /// Final machine-readable outcome.
+    pub outcome: SwarmControllerSafetyOutcome,
+    /// Hard safety invariant failures.
+    pub failures: Vec<SwarmControllerSafetyFailure>,
+    /// Fallback reasons that made adaptive behavior intentionally conservative.
+    pub fallback_reasons: Vec<String>,
+    /// Decision cards correlated with mode evidence and failures.
+    pub decision_cards: Vec<SwarmDecisionCard>,
+    /// Report creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmControllerSafetyReport {
+    /// Evaluate cross-controller invariants for one scenario.
+    #[must_use]
+    pub fn evaluate(
+        scenario: SwarmControllerInteractionScenario,
+        thresholds: SwarmControllerSafetyThresholds,
+        modes: Vec<SwarmControllerModeEvidence>,
+        decision_cards: Vec<SwarmDecisionCard>,
+    ) -> Self {
+        let card_by_id: BTreeMap<_, _> = decision_cards
+            .iter()
+            .map(|card| (card.card_id.as_str(), card))
+            .collect();
+        let mut failures = Self::mode_comparison_failures(scenario, &modes);
+        let mut fallback_reasons = Vec::new();
+        for mode in &modes {
+            failures.extend(Self::mode_shape_failures(scenario, mode, &card_by_id));
+            failures.extend(Self::mode_accounting_failures(scenario, mode));
+            failures.extend(Self::mode_fairness_failures(scenario, &thresholds, mode));
+            failures.extend(Self::mode_visibility_failures(scenario, mode));
+            failures.extend(Self::mode_counterfactual_failures(
+                scenario,
+                mode,
+                &card_by_id,
+            ));
+            fallback_reasons.extend(Self::mode_fallback_reasons(mode));
+        }
+        for card in &decision_cards {
+            failures.extend(Self::card_disable_failures(scenario, card));
+            fallback_reasons.extend(Self::card_fallback_reasons(card));
+        }
+        fallback_reasons.sort();
+        fallback_reasons.dedup();
+        let outcome = if failures.is_empty() {
+            if fallback_reasons.is_empty() {
+                SwarmControllerSafetyOutcome::Pass
+            } else {
+                SwarmControllerSafetyOutcome::FallbackRequired
+            }
+        } else {
+            SwarmControllerSafetyOutcome::Fail
+        };
+
+        Self {
+            schema_version: SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION.to_string(),
+            scenario,
+            thresholds,
+            modes,
+            outcome,
+            failures,
+            fallback_reasons,
+            decision_cards,
+            generated_at: Utc::now(),
+        }
+    }
+
+    fn mode_comparison_failures(
+        scenario: SwarmControllerInteractionScenario,
+        modes: &[SwarmControllerModeEvidence],
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        let mut failures = Vec::new();
+        let observed_modes: BTreeSet<_> = modes.iter().map(|mode| mode.mode).collect();
+        for required_mode in SwarmControllerMode::REQUIRED {
+            if !observed_modes.contains(&required_mode) {
+                failures.push(SwarmControllerSafetyFailure::new(
+                    SwarmControllerSafetyInvariant::ModeComparisonComplete,
+                    required_mode,
+                    scenario,
+                    "required_mode_missing",
+                    "missing",
+                    "present",
+                    Vec::new(),
+                ));
+            }
+        }
+
+        let fallback_mode = modes
+            .iter()
+            .find(|mode| mode.mode == SwarmControllerMode::ConservativeFallback);
+        if fallback_mode.is_none_or(|mode| mode.metrics.fallback_invocations == 0) {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::SafeDisableRollback,
+                SwarmControllerMode::ConservativeFallback,
+                scenario,
+                "fallback_mode_not_exercised",
+                fallback_mode.map_or_else(|| "missing".to_string(), |_| "0".to_string()),
+                ">=1",
+                Vec::new(),
+            ));
+        }
+        failures
+    }
+
+    fn mode_shape_failures(
+        scenario: SwarmControllerInteractionScenario,
+        mode: &SwarmControllerModeEvidence,
+        card_by_id: &BTreeMap<&str, &SwarmDecisionCard>,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        let mut failures = Vec::new();
+        if mode.scenario != scenario {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::DeterministicReplay,
+                mode.mode,
+                scenario,
+                "scenario_mismatch",
+                mode.scenario.as_str(),
+                scenario.as_str(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+
+        let expected_card_count = u64::try_from(mode.decision_card_ids.len()).unwrap_or(u64::MAX);
+        if mode.metrics.decision_card_count != expected_card_count {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::DeterministicReplay,
+                mode.mode,
+                scenario,
+                "decision_card_count_mismatch",
+                mode.metrics.decision_card_count.to_string(),
+                expected_card_count.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+
+        let missing_card_ids = mode
+            .decision_card_ids
+            .iter()
+            .filter(|card_id| !card_by_id.contains_key(card_id.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_card_ids.is_empty() {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::DeterministicReplay,
+                mode.mode,
+                scenario,
+                "decision_card_missing",
+                missing_card_ids.join(","),
+                "all referenced cards present",
+                missing_card_ids,
+            ));
+        }
+        failures
+    }
+
+    fn mode_accounting_failures(
+        scenario: SwarmControllerInteractionScenario,
+        mode: &SwarmControllerModeEvidence,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        let mut failures = Vec::new();
+        if mode.metrics.submitted_ops != mode.metrics.accounted_ops {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::WorkConservation,
+                mode.mode,
+                scenario,
+                "submitted_accounted_mismatch",
+                mode.metrics.accounted_ops.to_string(),
+                mode.metrics.submitted_ops.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.hidden_drop_count > 0 {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::WorkConservation,
+                mode.mode,
+                scenario,
+                "hidden_drop",
+                mode.metrics.hidden_drop_count.to_string(),
+                "0",
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.audit_event_count < mode.metrics.accounted_ops {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::NoAuditLoss,
+                mode.mode,
+                scenario,
+                "audit_event_shortfall",
+                mode.metrics.audit_event_count.to_string(),
+                mode.metrics.accounted_ops.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        failures
+    }
+
+    fn mode_fairness_failures(
+        scenario: SwarmControllerInteractionScenario,
+        thresholds: &SwarmControllerSafetyThresholds,
+        mode: &SwarmControllerModeEvidence,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        let mut failures = Vec::new();
+        if mode.metrics.max_starvation_ms > thresholds.max_starvation_ms {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::BoundedStarvation,
+                mode.mode,
+                scenario,
+                "starvation_bound_exceeded",
+                mode.metrics.max_starvation_ms.to_string(),
+                thresholds.max_starvation_ms.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.zone_fairness_skew_microunits > thresholds.max_zone_fairness_skew_microunits
+        {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::ZonePrincipalFairness,
+                mode.mode,
+                scenario,
+                "zone_fairness_skew_exceeded",
+                mode.metrics.zone_fairness_skew_microunits.to_string(),
+                thresholds.max_zone_fairness_skew_microunits.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.principal_fairness_skew_microunits
+            > thresholds.max_principal_fairness_skew_microunits
+        {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::ZonePrincipalFairness,
+                mode.mode,
+                scenario,
+                "principal_fairness_skew_exceeded",
+                mode.metrics.principal_fairness_skew_microunits.to_string(),
+                thresholds
+                    .max_principal_fairness_skew_microunits
+                    .to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        failures
+    }
+
+    fn mode_visibility_failures(
+        scenario: SwarmControllerInteractionScenario,
+        mode: &SwarmControllerModeEvidence,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        let mut failures = Vec::new();
+        if (mode.metrics.delayed_ops > 0
+            || mode.metrics.shed_ops > 0
+            || mode.metrics.fallback_invocations > 0)
+            && mode.decision_card_ids.is_empty()
+        {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::BackpressureActionVisible,
+                mode.mode,
+                scenario,
+                "controller_action_without_decision_card",
+                "0",
+                ">=1",
+                Vec::new(),
+            ));
+        }
+        if mode.metrics.no_op_delay_count > 0 {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::BackpressureActionVisible,
+                mode.mode,
+                scenario,
+                "no_op_delay",
+                mode.metrics.no_op_delay_count.to_string(),
+                "0",
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.silent_warning_admission_count > 0 {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::BackpressureActionVisible,
+                mode.mode,
+                scenario,
+                "silent_warning_admission",
+                mode.metrics.silent_warning_admission_count.to_string(),
+                "0",
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if mode.metrics.replay_mismatch_count > 0 {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::DeterministicReplay,
+                mode.mode,
+                scenario,
+                "replay_mismatch",
+                mode.metrics.replay_mismatch_count.to_string(),
+                "0",
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        failures
+    }
+
+    fn mode_counterfactual_failures(
+        scenario: SwarmControllerInteractionScenario,
+        mode: &SwarmControllerModeEvidence,
+        card_by_id: &BTreeMap<&str, &SwarmDecisionCard>,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        if mode.mode != SwarmControllerMode::CombinedController {
+            return Vec::new();
+        }
+
+        let mut failures = Vec::new();
+        let missing_counterfactual_ids = mode
+            .decision_card_ids
+            .iter()
+            .filter_map(|card_id| {
+                card_by_id
+                    .get(card_id.as_str())
+                    .and_then(|card| card.counterfactual.is_none().then(|| card_id.clone()))
+            })
+            .collect::<Vec<_>>();
+        if mode.metrics.counterfactual_count < mode.metrics.decision_card_count {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::CounterfactualRetained,
+                mode.mode,
+                scenario,
+                "counterfactual_count_shortfall",
+                mode.metrics.counterfactual_count.to_string(),
+                mode.metrics.decision_card_count.to_string(),
+                mode.decision_card_ids.clone(),
+            ));
+        }
+        if !missing_counterfactual_ids.is_empty() {
+            failures.push(SwarmControllerSafetyFailure::new(
+                SwarmControllerSafetyInvariant::CounterfactualRetained,
+                mode.mode,
+                scenario,
+                "decision_card_counterfactual_missing",
+                missing_counterfactual_ids.join(","),
+                "all combined decision cards include counterfactual",
+                missing_counterfactual_ids,
+            ));
+        }
+        failures
+    }
+
+    fn mode_fallback_reasons(mode: &SwarmControllerModeEvidence) -> Vec<String> {
+        if mode.mode == SwarmControllerMode::ConservativeFallback {
+            return Vec::new();
+        }
+
+        let mut reasons = Vec::new();
+        if mode.metrics.fallback_invocations > 0 {
+            reasons.push(format!(
+                "{}:fallback_invocations={}",
+                mode.mode.as_str(),
+                mode.metrics.fallback_invocations
+            ));
+        }
+        if let Some(reason) = &mode.fallback_reason {
+            reasons.push(format!("{}:{reason}", mode.mode.as_str()));
+        }
+        reasons
+    }
+
+    fn card_disable_failures(
+        scenario: SwarmControllerInteractionScenario,
+        card: &SwarmDecisionCard,
+    ) -> Vec<SwarmControllerSafetyFailure> {
+        if card.safe_to_disable() {
+            return Vec::new();
+        }
+
+        vec![SwarmControllerSafetyFailure::new(
+            SwarmControllerSafetyInvariant::SafeDisableRollback,
+            SwarmControllerMode::CombinedController,
+            scenario,
+            "decision_card_not_safe_to_disable",
+            card.card_id.clone(),
+            "offline replay inputs plus fallback action",
+            vec![card.card_id.clone()],
+        )]
+    }
+
+    fn card_fallback_reasons(card: &SwarmDecisionCard) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if card.calibration.requires_fallback() {
+            reasons.push(format!(
+                "{}:calibration={}",
+                card.card_id,
+                card.calibration.as_str()
+            ));
+        }
+        if card.fallback.active {
+            let reason = card.fallback.reason.as_deref().unwrap_or("fallback_active");
+            reasons.push(format!("{}:{reason}", card.card_id));
+        }
+        reasons
+    }
+
+    /// Render the report as detailed JSONL-ready records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if any record cannot be converted to JSON.
+    pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
+        let mut records = Vec::new();
+        for card in &self.decision_cards {
+            records.push(card.to_jsonl_value()?);
+        }
+        for mode in &self.modes {
+            records.push(json!({
+                "record_type": "swarm_controller_safety_mode_evidence",
+                "schema_version": self.schema_version,
+                "scenario": self.scenario.as_str(),
+                "mode": mode.mode.as_str(),
+                "metrics": serde_json::to_value(&mode.metrics)?,
+                "decision_card_ids": &mode.decision_card_ids,
+                "fallback_reason": &mode.fallback_reason,
+            }));
+        }
+        for failure in &self.failures {
+            records.push(json!({
+                "record_type": "swarm_controller_safety_failure",
+                "schema_version": self.schema_version,
+                "scenario": self.scenario.as_str(),
+                "mode": failure.mode.as_str(),
+                "invariant": failure.invariant.as_str(),
+                "reason": &failure.reason,
+                "observed_value": &failure.observed_value,
+                "allowed_value": &failure.allowed_value,
+                "decision_card_ids": &failure.decision_card_ids,
+            }));
+        }
+        records.push(json!({
+            "record_type": "swarm_controller_safety_report",
+            "schema_version": self.schema_version,
+            "scenario": self.scenario.as_str(),
+            "outcome": self.outcome.as_str(),
+            "thresholds": serde_json::to_value(&self.thresholds)?,
+            "mode_count": self.modes.len(),
+            "failure_codes": self
+                .failures
+                .iter()
+                .map(|failure| failure.invariant.as_str())
+                .collect::<Vec<_>>(),
+            "fallback_reasons": &self.fallback_reasons,
+            "decision_card_ids": self
+                .decision_cards
+                .iter()
+                .map(|card| card.card_id.as_str())
+                .collect::<Vec<_>>(),
+            "generated_at": self.generated_at,
+        }));
+        Ok(records)
     }
 }
 
@@ -5354,6 +6141,365 @@ mod tests {
         assert!(SwarmCalibrationStatus::DriftDetected.requires_fallback());
         assert!(SwarmCalibrationStatus::MissingTelemetry.requires_fallback());
         assert!(SwarmCalibrationStatus::ReplayMismatch.requires_fallback());
+        assert_eq!(
+            SwarmCalibrationStatus::ReplayMismatch.as_str(),
+            "replay_mismatch"
+        );
+    }
+
+    fn controller_decision_card(
+        card_id: &str,
+        domain: SwarmDecisionDomain,
+        action: SwarmDecisionAction,
+        scenario: SwarmControllerInteractionScenario,
+    ) -> SwarmDecisionCard {
+        SwarmDecisionCard::new(
+            card_id,
+            domain,
+            "connector:swarm-safety",
+            scenario.as_str(),
+            action,
+            100,
+            SwarmDecisionFallback::available(SwarmDecisionAction::Fallback),
+        )
+        .with_scenario(scenario.as_str())
+        .with_loss_terms(vec![
+            SwarmDecisionLossTerm::new("p99_queueing", 100, 1_000_000, "ns"),
+            SwarmDecisionLossTerm::new("zone_fairness", 2, 2_000_000, "skew"),
+        ])
+        .with_counterfactual(SwarmDecisionCounterfactual::new(
+            SwarmDecisionAction::Fallback,
+            120,
+            "fallback is safe but lower-throughput",
+        ))
+        .with_evidence_pointers(vec![SwarmDecisionEvidencePointer::bundle_artifact(
+            format!("raw_samples.jsonl#{}", scenario.as_str()),
+            "blake3:controller-safety",
+            true,
+        )])
+        .with_replay_inputs(BTreeMap::from([
+            ("scenario".to_string(), json!(scenario.as_str())),
+            ("queue_depth".to_string(), json!(64)),
+            ("zone".to_string(), json!("z:project:swarm")),
+        ]))
+    }
+
+    fn controller_decision_cards(
+        scenario: SwarmControllerInteractionScenario,
+    ) -> Vec<SwarmDecisionCard> {
+        vec![
+            controller_decision_card(
+                "card:scheduler",
+                SwarmDecisionDomain::Scheduler,
+                SwarmDecisionAction::Dispatch,
+                scenario,
+            ),
+            controller_decision_card(
+                "card:placement",
+                SwarmDecisionDomain::Placement,
+                SwarmDecisionAction::Place,
+                scenario,
+            ),
+            controller_decision_card(
+                "card:backpressure",
+                SwarmDecisionDomain::Backpressure,
+                SwarmDecisionAction::Delay,
+                scenario,
+            ),
+            controller_decision_card(
+                "card:fallback",
+                SwarmDecisionDomain::Backpressure,
+                SwarmDecisionAction::Fallback,
+                scenario,
+            ),
+        ]
+    }
+
+    fn controller_metrics(
+        submitted_ops: u64,
+        decision_card_count: u64,
+    ) -> SwarmControllerModeMetrics {
+        SwarmControllerModeMetrics {
+            submitted_ops,
+            accounted_ops: submitted_ops,
+            audit_event_count: submitted_ops,
+            max_starvation_ms: 250,
+            zone_fairness_skew_microunits: 10_000,
+            principal_fairness_skew_microunits: 10_000,
+            counterfactual_count: decision_card_count,
+            decision_card_count,
+            ..SwarmControllerModeMetrics::default()
+        }
+    }
+
+    fn passing_controller_modes(
+        scenario: SwarmControllerInteractionScenario,
+    ) -> Vec<SwarmControllerModeEvidence> {
+        let scheduler = controller_metrics(128, 1);
+        let placement = controller_metrics(128, 1);
+        let mut backpressure = controller_metrics(128, 1);
+        backpressure.delayed_ops = 8;
+        let mut audit = controller_metrics(128, 0);
+        audit.counterfactual_count = 0;
+        let mut combined = controller_metrics(128, 3);
+        combined.delayed_ops = 8;
+        combined.shed_ops = 1;
+        let mut fallback = controller_metrics(128, 1);
+        fallback.fallback_invocations = 1;
+
+        vec![
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::SchedulerOnly,
+                scheduler,
+                vec!["card:scheduler".to_string()],
+            ),
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::PlacementOnly,
+                placement,
+                vec!["card:placement".to_string()],
+            ),
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::BackpressureOnly,
+                backpressure,
+                vec!["card:backpressure".to_string()],
+            ),
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::AuditOnly,
+                audit,
+                Vec::new(),
+            ),
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::CombinedController,
+                combined,
+                vec![
+                    "card:scheduler".to_string(),
+                    "card:placement".to_string(),
+                    "card:backpressure".to_string(),
+                ],
+            ),
+            SwarmControllerModeEvidence::new(
+                scenario,
+                SwarmControllerMode::ConservativeFallback,
+                fallback,
+                vec!["card:fallback".to_string()],
+            ),
+        ]
+    }
+
+    #[test]
+    fn swarm_controller_safety_report_passes_every_scripted_scenario() {
+        for scenario in SwarmControllerInteractionScenario::REQUIRED {
+            let report = SwarmControllerSafetyReport::evaluate(
+                scenario,
+                SwarmControllerSafetyThresholds::smoke(),
+                passing_controller_modes(scenario),
+                controller_decision_cards(scenario),
+            );
+
+            assert_eq!(report.outcome, SwarmControllerSafetyOutcome::Pass);
+            assert!(
+                report.failures.is_empty(),
+                "{scenario:?}: {:?}",
+                report.failures
+            );
+            assert_eq!(report.modes.len(), SwarmControllerMode::REQUIRED.len());
+            assert_eq!(scenario.as_str(), report.scenario.as_str());
+        }
+    }
+
+    #[test]
+    fn swarm_controller_safety_report_fails_hidden_drop_fairness_audit_and_replay_regressions()
+    -> Result<(), &'static str> {
+        let scenario = SwarmControllerInteractionScenario::SameZoneAuditStorm;
+        let mut modes = passing_controller_modes(scenario);
+        let combined = modes
+            .iter_mut()
+            .find(|mode| mode.mode == SwarmControllerMode::CombinedController)
+            .ok_or("combined mode should be present")?;
+        combined.metrics.accounted_ops = 126;
+        combined.metrics.hidden_drop_count = 2;
+        combined.metrics.no_op_delay_count = 1;
+        combined.metrics.silent_warning_admission_count = 1;
+        combined.metrics.audit_event_count = 120;
+        combined.metrics.replay_mismatch_count = 1;
+        combined.metrics.max_starvation_ms = 10_000;
+        combined.metrics.zone_fairness_skew_microunits = 250_000;
+        combined.metrics.principal_fairness_skew_microunits = 200_000;
+
+        let report = SwarmControllerSafetyReport::evaluate(
+            scenario,
+            SwarmControllerSafetyThresholds::smoke(),
+            modes,
+            controller_decision_cards(scenario),
+        );
+        let invariants: BTreeSet<_> = report
+            .failures
+            .iter()
+            .map(|failure| failure.invariant)
+            .collect();
+
+        assert_eq!(report.outcome, SwarmControllerSafetyOutcome::Fail);
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::WorkConservation));
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::BoundedStarvation));
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::ZonePrincipalFairness));
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::BackpressureActionVisible));
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::NoAuditLoss));
+        assert!(invariants.contains(&SwarmControllerSafetyInvariant::DeterministicReplay));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_controller_safety_report_requires_fallback_for_missing_telemetry_and_drift()
+    -> Result<(), &'static str> {
+        let scenario = SwarmControllerInteractionScenario::DownstreamThrottled;
+        let mut cards = controller_decision_cards(scenario);
+        cards[2] = cards[2]
+            .clone()
+            .with_calibration(SwarmCalibrationStatus::MissingTelemetry);
+        let mut modes = passing_controller_modes(scenario);
+        let backpressure = modes
+            .iter_mut()
+            .find(|mode| mode.mode == SwarmControllerMode::BackpressureOnly)
+            .ok_or("backpressure mode should be present")?;
+        backpressure.metrics.fallback_invocations = 1;
+        backpressure.fallback_reason = Some("missing_telemetry".to_string());
+
+        let missing_telemetry_report = SwarmControllerSafetyReport::evaluate(
+            scenario,
+            SwarmControllerSafetyThresholds::smoke(),
+            modes,
+            cards,
+        );
+
+        assert_eq!(
+            missing_telemetry_report.outcome,
+            SwarmControllerSafetyOutcome::FallbackRequired
+        );
+        assert!(missing_telemetry_report.failures.is_empty());
+        assert!(
+            missing_telemetry_report
+                .fallback_reasons
+                .iter()
+                .any(|reason| reason.contains("missing_telemetry"))
+        );
+
+        let scenario = SwarmControllerInteractionScenario::CpuSaturated;
+        let mut cards = controller_decision_cards(scenario);
+        cards[0] = cards[0]
+            .clone()
+            .with_calibration(SwarmCalibrationStatus::DriftDetected);
+        let mut modes = passing_controller_modes(scenario);
+        let scheduler = modes
+            .iter_mut()
+            .find(|mode| mode.mode == SwarmControllerMode::SchedulerOnly)
+            .ok_or("scheduler mode should be present")?;
+        scheduler.metrics.fallback_invocations = 1;
+        scheduler.fallback_reason = Some("calibration_drift".to_string());
+
+        let drift_report = SwarmControllerSafetyReport::evaluate(
+            scenario,
+            SwarmControllerSafetyThresholds::smoke(),
+            modes,
+            cards,
+        );
+
+        assert_eq!(
+            drift_report.outcome,
+            SwarmControllerSafetyOutcome::FallbackRequired
+        );
+        assert!(drift_report.failures.is_empty());
+        assert!(
+            drift_report
+                .fallback_reasons
+                .iter()
+                .any(|reason| reason.contains("drift_detected"))
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_controller_safety_report_requires_combined_counterfactuals() -> Result<(), &'static str>
+    {
+        let scenario = SwarmControllerInteractionScenario::MixedPriority;
+        let mut cards = controller_decision_cards(scenario);
+        cards[0].counterfactual = None;
+        let mut modes = passing_controller_modes(scenario);
+        let combined = modes
+            .iter_mut()
+            .find(|mode| mode.mode == SwarmControllerMode::CombinedController)
+            .ok_or("combined mode should be present")?;
+        combined.metrics.counterfactual_count = 2;
+
+        let report = SwarmControllerSafetyReport::evaluate(
+            scenario,
+            SwarmControllerSafetyThresholds::smoke(),
+            modes,
+            cards,
+        );
+
+        assert_eq!(report.outcome, SwarmControllerSafetyOutcome::Fail);
+        assert!(report.failures.iter().any(|failure| {
+            failure.invariant == SwarmControllerSafetyInvariant::CounterfactualRetained
+                && failure
+                    .decision_card_ids
+                    .iter()
+                    .any(|id| id == "card:scheduler")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_controller_safety_report_emits_replayable_jsonl_with_decision_card_ids()
+    -> Result<(), Box<dyn Error>> {
+        let scenario = SwarmControllerInteractionScenario::RetryStorm;
+        let report = SwarmControllerSafetyReport::evaluate(
+            scenario,
+            SwarmControllerSafetyThresholds::smoke(),
+            passing_controller_modes(scenario),
+            controller_decision_cards(scenario),
+        );
+        let records = report.to_jsonl_values()?;
+        let record_types: BTreeSet<_> = records
+            .iter()
+            .filter_map(|record| record["record_type"].as_str())
+            .collect();
+        let summary = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_controller_safety_report")
+            .ok_or("controller safety report should be present")?;
+        let jsonl = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        assert!(record_types.contains("swarm_decision_card"));
+        assert!(record_types.contains("swarm_controller_safety_mode_evidence"));
+        assert!(record_types.contains("swarm_controller_safety_report"));
+        assert_eq!(
+            summary["schema_version"],
+            SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION
+        );
+        assert_eq!(summary["scenario"], "retry_storm");
+        assert_eq!(summary["outcome"], "pass");
+        assert!(
+            summary["decision_card_ids"]
+                .as_array()
+                .ok_or("decision card ids should be an array")?
+                .iter()
+                .any(|id| id == "card:backpressure")
+        );
+        for line in jsonl.lines() {
+            serde_json::from_str::<Value>(line)?;
+        }
+        assert!(!jsonl.contains("Bearer test-token"));
+        assert!(!jsonl.contains("super-secret-value"));
+        Ok(())
     }
 
     #[test]

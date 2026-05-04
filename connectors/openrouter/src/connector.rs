@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
-use reqwest::header::HeaderMap;
+use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
 use serde_json::{Map, Value, json};
 use url::Url;
@@ -20,16 +20,25 @@ const MAX_VIDEO_POLL_ATTEMPTS: u64 = 120;
 const MAX_VIDEO_INPUT_IMAGES: usize = 4;
 const DEFAULT_MAX_VIDEO_DOWNLOAD_BYTES: u64 = 128 * 1024 * 1024;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    ApiKey { authorization: HeaderValue },
     CredentialId { _id: String },
+}
+
+impl std::fmt::Debug for Auth {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiKey { .. } => formatter.write_str("ApiKey([redacted])"),
+            Self::CredentialId { .. } => formatter.write_str("CredentialId([redacted])"),
+        }
+    }
 }
 
 impl Auth {
     const fn redacted_label(&self) -> &'static str {
         match self {
-            Self::ApiKey(_) => "api_key",
+            Self::ApiKey { .. } => "api_key",
             Self::CredentialId { .. } => "credential_id",
         }
     }
@@ -38,10 +47,9 @@ impl Auth {
         matches!(self, Self::CredentialId { .. })
     }
 
-    fn apply(&self, request: RequestBuilder) -> RequestBuilder {
-        match self {
-            Self::ApiKey(key) => request.header("Authorization", format!("Bearer {key}")),
-            Self::CredentialId { .. } => request,
+    fn apply_to_headers(&self, headers: &mut HeaderMap) {
+        if let Self::ApiKey { authorization } = self {
+            headers.insert(AUTHORIZATION, authorization.clone());
         }
     }
 }
@@ -51,13 +59,13 @@ struct OpenRouterConfig {
     auth: Auth,
     base_url: String,
     request_timeout_ms: u64,
-    app_name: Option<String>,
-    app_url: Option<String>,
+    app_name: Option<HeaderValue>,
+    app_url: Option<HeaderValue>,
 }
 
 impl OpenRouterConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let provided_secret = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -70,8 +78,13 @@ impl OpenRouterConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (provided_secret, credential_id) {
+            (Some(secret), None) => {
+                let mut authorization =
+                    validated_header_value("authorization", &format!("Bearer {secret}"))?;
+                authorization.set_sensitive(true);
+                Auth::ApiKey { authorization }
+            }
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -106,18 +119,8 @@ impl OpenRouterConfig {
                 Some(timeout_ms) => timeout_ms,
                 None => 60_000,
             },
-            app_name: params
-                .get("app_name")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
-            app_url: params
-                .get("app_url")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned),
+            app_name: optional_header_value(params, "app_name")?,
+            app_url: optional_header_value(params, "app_url")?,
         })
     }
 }
@@ -127,8 +130,8 @@ struct OpenRouterClient {
     http: Client,
     auth: Auth,
     base_url: String,
-    app_name: Option<String>,
-    app_url: Option<String>,
+    app_name: Option<HeaderValue>,
+    app_url: Option<HeaderValue>,
 }
 
 impl OpenRouterClient {
@@ -151,17 +154,21 @@ impl OpenRouterClient {
 
     fn request(&self, method: Method, path: &str) -> RequestBuilder {
         let url = format!("{}{}", self.base_url, path);
-        let request = self.auth.apply(self.http.request(method, url));
-        let request = if let Some(app_name) = &self.app_name {
-            request.header("X-Title", app_name)
-        } else {
-            request
-        };
-        if let Some(app_url) = &self.app_url {
-            request.header("HTTP-Referer", app_url)
-        } else {
-            request
+        self.http
+            .request(method, url)
+            .headers(self.provider_headers())
+    }
+
+    fn provider_headers(&self) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        self.auth.apply_to_headers(&mut headers);
+        if let Some(app_name) = &self.app_name {
+            headers.insert(HeaderName::from_static("x-title"), app_name.clone());
         }
+        if let Some(app_url) = &self.app_url {
+            headers.insert(HeaderName::from_static("http-referer"), app_url.clone());
+        }
+        headers
     }
 
     async fn get_json(&self, path: &str) -> FcpResult<Value> {
@@ -202,13 +209,7 @@ impl OpenRouterClient {
         validate_response_url(&url, &self.base_url)?;
         let mut request = self.http.request(method, url);
         if include_provider_headers {
-            request = self.auth.apply(request);
-            if let Some(app_name) = &self.app_name {
-                request = request.header("X-Title", app_name);
-            }
-            if let Some(app_url) = &self.app_url {
-                request = request.header("HTTP-Referer", app_url);
-            }
+            request = request.headers(self.provider_headers());
         }
         Ok(request)
     }
@@ -1014,6 +1015,20 @@ fn optional_string(source: &Value, field: &str) -> Option<String> {
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
+}
+
+fn optional_header_value(source: &Value, field: &str) -> FcpResult<Option<HeaderValue>> {
+    optional_string(source, field)
+        .as_deref()
+        .map(|value| validated_header_value(field, value))
+        .transpose()
+}
+
+fn validated_header_value(field: &str, value: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(value).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a valid HTTP header value: {error}"),
+    })
 }
 
 fn optional_u64(source: &Value, field: &str) -> Option<u64> {

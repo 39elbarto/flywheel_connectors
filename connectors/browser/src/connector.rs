@@ -1979,6 +1979,10 @@ mod tests {
     use fcp_manifest::ConnectorManifest;
     use fcp_prelude::CapabilityConstraints;
     use std::path::PathBuf;
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
 
     fn test_constraints_cbor() -> Vec<u8> {
         let constraints = CapabilityConstraints {
@@ -2315,6 +2319,63 @@ mod tests {
         let result = connector.handle_self_check().await.unwrap();
         assert_eq!(result["status"], "degraded");
         assert_eq!(result["reason_code"], "credential_injection_required");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_accepts_fcp_browser_control_plane_health() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "control_plane": "fcp-browser-control",
+                "status": "ok",
+                "protocol_version": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "ok");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_self_check_rejects_raw_chrome_cdp_endpoint() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/json/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "Browser": "Chrome/123.0.0.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({ "browser_url": mock_server.uri() }))
+            .await
+            .unwrap();
+
+        let result = connector.handle_self_check().await.unwrap();
+        assert_eq!(result["status"], "failed");
+        assert_eq!(result["reason_code"], "self_check_failed");
+        assert!(
+            result["message"]
+                .as_str()
+                .unwrap()
+                .contains("raw Chrome DevTools endpoint")
+        );
     }
 
     #[test]

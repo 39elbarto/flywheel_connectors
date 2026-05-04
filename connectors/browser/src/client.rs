@@ -1,6 +1,9 @@
 //! Browser automation API client.
 //!
-//! Sends JSON POST commands to a Chrome DevTools Protocol HTTP endpoint.
+//! Talks to the FCP browser-control plane. The control plane may use Chrome
+//! DevTools Protocol internally, but this client does not treat a raw Chrome
+//! `/json/version` endpoint as sufficient proof that FCP browser operations are
+//! available.
 
 use std::time::Duration;
 
@@ -18,7 +21,7 @@ use crate::{
     },
 };
 
-/// Default browser CDP endpoint.
+/// Default browser-control endpoint.
 pub const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
 
 /// Authentication mode for the Browser connector.
@@ -136,11 +139,25 @@ impl BrowserClient {
         self.runtime.shutdown();
     }
 
-    /// Lightweight connectivity probe – check if the browser endpoint is reachable.
+    /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
-        let url = format!("{}/json/version", self.browser_url);
-        self.execute(|| self.http.get(&url)).await?;
-        Ok(())
+        let url = format!("{}/health", self.browser_url);
+        match self.execute(|| self.http.get(&url)).await {
+            Ok(body) if is_fcp_browser_control_health(&body) => Ok(()),
+            Ok(_) => Err(BrowserError::InvalidConfig(
+                "browser control-plane /health response did not advertise fcp-browser-control"
+                    .into(),
+            )),
+            Err(err) => {
+                if self.raw_chrome_cdp_endpoint_detected().await {
+                    Err(BrowserError::InvalidConfig(
+                        "browser_url points at a raw Chrome DevTools endpoint; configure an FCP browser-control endpoint for browser operations".into(),
+                    ))
+                } else {
+                    Err(err)
+                }
+            }
+        }
     }
 
     /// Set a custom browser URL.
@@ -462,6 +479,33 @@ impl BrowserClient {
         })
         .await
     }
+
+    async fn raw_chrome_cdp_endpoint_detected(&self) -> bool {
+        let url = format!("{}/json/version", self.browser_url);
+        match self.execute(|| self.http.get(&url)).await {
+            Ok(body) => looks_like_chrome_cdp_version(&body),
+            Err(_) => false,
+        }
+    }
+}
+
+fn is_fcp_browser_control_health(body: &serde_json::Value) -> bool {
+    body.get("control_plane")
+        .or_else(|| body.get("service"))
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value == "fcp-browser-control" || value == "fcp.browser-control")
+}
+
+fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
+    body.get("webSocketDebuggerUrl")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|value| value.starts_with("ws://") || value.starts_with("wss://"))
+        || body
+            .get("Browser")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|value| {
+                value.starts_with("Chrome/") || value.starts_with("HeadlessChrome/")
+            })
 }
 
 #[cfg(test)]
@@ -471,6 +515,71 @@ mod tests {
         Mock, MockServer, ResponseTemplate,
         matchers::{method, path},
     };
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_check_accepts_fcp_browser_control_plane() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "control_plane": "fcp-browser-control",
+                "status": "ok",
+                "protocol_version": 1
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri());
+
+        client.health_check().await.unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_health_check_rejects_raw_chrome_cdp_endpoint() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/health"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/json/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "Browser": "HeadlessChrome/123.0.0.0",
+                "webSocketDebuggerUrl": "ws://127.0.0.1:9222/devtools/browser/abc"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let err = client.health_check().await.unwrap_err();
+        let message = match err {
+            BrowserError::InvalidConfig(message) => message,
+            _ => String::new(),
+        };
+        assert!(message.contains("raw Chrome DevTools endpoint"));
+    }
+
+    #[test]
+    fn test_chrome_cdp_version_detection_requires_cdp_shape() {
+        assert!(looks_like_chrome_cdp_version(&serde_json::json!({
+            "webSocketDebuggerUrl": "wss://browser.example/devtools/browser/abc"
+        })));
+        assert!(looks_like_chrome_cdp_version(&serde_json::json!({
+            "Browser": "Chrome/123.0.0.0"
+        })));
+        assert!(!looks_like_chrome_cdp_version(&serde_json::json!({
+            "control_plane": "fcp-browser-control"
+        })));
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_navigate() {

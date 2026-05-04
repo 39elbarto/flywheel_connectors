@@ -2007,7 +2007,8 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)

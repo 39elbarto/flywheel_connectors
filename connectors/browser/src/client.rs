@@ -67,6 +67,13 @@ impl BrowserControlImplementation {
             }),
         }
     }
+
+    fn summary(self) -> String {
+        match self {
+            Self::Cdp { methods } => format!("cdp methods [{}]", methods.join(", ")),
+            Self::WorkerPolicy { .. } => "worker_policy".to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -825,25 +832,23 @@ fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), S
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| "missing operations array".to_string())?;
     for required in REQUIRED_BROWSER_CONTROL_OPERATIONS {
-        if !operations
+        let operation = operations
             .iter()
-            .any(|operation| browser_control_operation_matches(operation, required))
-        {
-            return Err(format!(
-                "missing required operation `{}` as {} `{}`",
-                required.id, required.method, required.path
-            ));
-        }
+            .find(|operation| {
+                operation.get("id").and_then(serde_json::Value::as_str) == Some(required.id)
+            })
+            .ok_or_else(|| format!("missing required operation `{}`", required.id))?;
+        validate_browser_control_operation(operation, required)?;
     }
 
     Ok(())
 }
 
-fn browser_control_operation_matches(
+fn validate_browser_control_operation(
     operation: &serde_json::Value,
     required: &BrowserControlOperation,
-) -> bool {
-    operation
+) -> Result<(), String> {
+    if operation
         .get("id")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|id| id == required.id)
@@ -855,6 +860,50 @@ fn browser_control_operation_matches(
             .get("path")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|path| path == required.path)
+        && browser_control_implementation_matches(operation, required)
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "operation `{}` is incompatible; expected {} `{}` with implementation {}",
+            required.id,
+            required.method,
+            required.path,
+            required.implementation.summary()
+        ))
+    }
+}
+
+fn browser_control_implementation_matches(
+    operation: &serde_json::Value,
+    required: &BrowserControlOperation,
+) -> bool {
+    let implementation = &operation["implementation"];
+    match required.implementation {
+        BrowserControlImplementation::Cdp { methods } => {
+            implementation
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind == "cdp")
+                && implementation
+                    .get("methods")
+                    .is_some_and(|advertised| advertised == &serde_json::json!(methods))
+        }
+        BrowserControlImplementation::WorkerPolicy { .. } => {
+            implementation
+                .get("kind")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|kind| kind == "worker_policy")
+                && implementation
+                    .get("methods")
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(Vec::is_empty)
+                && implementation
+                    .get("description")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|description| !description.is_empty())
+        }
+    }
 }
 
 fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
@@ -1089,6 +1138,50 @@ mod tests {
         let err = validate_fcp_browser_control_health(&body).unwrap_err();
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("POST"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_missing_operation_implementation() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("implementation");
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("implementation"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_cdp_command_plan() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["implementation"]["methods"] =
+            serde_json::json!(["Page.enable", "Page.navigate"]);
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("Network.enable"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_policy_operation_without_description() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        let set_proxy = operations
+            .iter_mut()
+            .find(|operation| operation["id"] == "browser.set_proxy")
+            .unwrap();
+        set_proxy["implementation"]
+            .as_object_mut()
+            .unwrap()
+            .remove("description");
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.set_proxy"));
+        assert!(err.contains("worker_policy"));
     }
 
     #[test]

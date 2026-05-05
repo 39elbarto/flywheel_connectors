@@ -12,17 +12,15 @@
 //! 2. Token declares `instance_id` NOT matching `expected` → rejected
 //!    with `FcpError::ZoneViolation` whose message names both the
 //!    expected and actual instance ids.
-//! 3. Token has NO `instance_id` claim → promoted unconditionally.
-//!    Legacy "universally applicable" semantics, intentionally
-//!    aligned with `CapabilityVerifier::new(...).verify_bound()`'s
-//!    behaviour when the claim is absent.
+//! 3. Token has NO `instance_id` claim → rejected with
+//!    `FcpError::MissingField`, because `BoundVerified` requires all
+//!    five checks including explicit instance binding.
 //!
 //! `crates/fcp-host/tests/jkcka_gateway_connector_handoff.rs` covers
-//! (1) and (2) but NOT (3). And the consuming `self` signature on
-//! `promote_with_instance` is a typestate-level replay defense worth
-//! pinning at the conformance layer too: a single `UnboundVerified`
+//! (1) and (2). This file also pins (3), plus the consuming `self`
+//! signature on `promote_with_instance`: a valid `UnboundVerified`
 //! token can only be promoted once, so a captured token cannot be
-//! reused at multiple instances.
+//! reused at multiple instances after a successful handoff.
 //!
 //! Cross-path equivalence (br-jkcka): `verify_bound` directly
 //! produces a `BoundVerified` whose verified claims must match
@@ -157,14 +155,10 @@ fn promote_rejects_mismatched_instance_with_zone_violation() {
 }
 
 #[test]
-fn instance_agnostic_token_promotes_unconditionally() {
-    // NORMATIVE behaviour (capability.rs:1274 case 3): a token with
-    // NO instance_id claim promotes against ANY connector instance.
-    // This is the "legacy universally-applicable" semantics that
-    // mirrors verify_bound's behaviour when the claim is absent.
-    // Pin it explicitly so a future tightening (e.g., requiring
-    // instance_id) is a deliberate breaking change rather than a
-    // silent regression.
+fn instance_agnostic_token_rejects_promotion_with_missing_field() {
+    // NORMATIVE behaviour (flywheel_connectors-01yaq): a token with
+    // NO instance_id claim may verify at gateway vantage, but cannot
+    // satisfy the bound instance predicate.
     let signing_key = Ed25519SigningKey::generate();
     let token = build_agnostic_token(&signing_key);
     let verifier = unbound_verifier(&signing_key);
@@ -173,21 +167,21 @@ fn instance_agnostic_token_promotes_unconditionally() {
         .verify_unbound(token, &cap(), &op(), &[])
         .expect("instance-agnostic token verifies at gateway vantage");
 
-    // Promoting with an arbitrary instance id MUST succeed because
-    // the token did not declare one.
     let arbitrary_instance = InstanceId::new();
-    unbound
+    let err = unbound
         .promote_with_instance(&arbitrary_instance)
-        .expect("instance-agnostic token must promote against any instance");
+        .expect_err("instance-agnostic token must not promote to BoundVerified");
+    assert!(
+        matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+        "expected MissingField(instance_id), got {err:?}"
+    );
 }
 
 #[test]
-fn instance_agnostic_token_promotes_against_two_different_instances_independently() {
-    // Strengthens the prior test: an instance-agnostic token has no
-    // implicit binding to the FIRST instance it is promoted against.
-    // Two independent verify_unbound passes against the same token
-    // must each produce a token that promotes to a different
-    // instance.
+fn instance_agnostic_token_cannot_promote_against_any_instance() {
+    // Strengthens the prior test: two independent verify_unbound passes for
+    // instance-agnostic tokens must both stop before BoundVerified, regardless
+    // of which connector instance requests promotion.
     let signing_key = Ed25519SigningKey::generate();
     let verifier = unbound_verifier(&signing_key);
 
@@ -196,9 +190,13 @@ fn instance_agnostic_token_promotes_against_two_different_instances_independentl
         .verify_unbound(token_a, &cap(), &op(), &[])
         .expect("verify_unbound A");
     let inst_a = InstanceId::new();
-    unbound_a
+    let err = unbound_a
         .promote_with_instance(&inst_a)
-        .expect("promote against instance A");
+        .expect_err("promote against instance A must reject without instance claim");
+    assert!(
+        matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+        "expected MissingField(instance_id) for instance A, got {err:?}"
+    );
 
     let token_b = build_agnostic_token(&signing_key);
     let unbound_b = verifier
@@ -206,9 +204,13 @@ fn instance_agnostic_token_promotes_against_two_different_instances_independentl
         .expect("verify_unbound B");
     let inst_b = InstanceId::new();
     assert_ne!(inst_a.as_str(), inst_b.as_str(), "fixture sanity");
-    unbound_b
+    let err = unbound_b
         .promote_with_instance(&inst_b)
-        .expect("instance-agnostic token must promote independently to a different instance");
+        .expect_err("promote against instance B must reject without instance claim");
+    assert!(
+        matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+        "expected MissingField(instance_id) for instance B, got {err:?}"
+    );
 }
 
 #[test]

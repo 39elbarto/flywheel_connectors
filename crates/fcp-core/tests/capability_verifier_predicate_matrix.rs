@@ -143,6 +143,7 @@ enum ExpectedReject {
     TokenExpired,
     TokenNotYetValid,
     InstanceMismatch,
+    MissingInstance,
     OperationNotGranted,
     EmptyConstraintsDenied,
     ResourceNotAllowed,
@@ -162,6 +163,9 @@ impl ExpectedReject {
             Self::TokenNotYetValid => matches!(err, FcpError::TokenNotYetValid),
             Self::InstanceMismatch => {
                 matches!(err, FcpError::ZoneViolation { message, .. } if message.contains("Token instance mismatch"))
+            }
+            Self::MissingInstance => {
+                matches!(err, FcpError::MissingField { field } if field.contains("instance_id"))
             }
             Self::OperationNotGranted => matches!(err, FcpError::OperationNotGranted { .. }),
             Self::EmptyConstraintsDenied => {
@@ -198,37 +202,47 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
 
     let mut wrong_audience = valid_spec(&key);
     wrong_audience.audience = Some("z:project:other");
+    wrong_audience.target_instance = Some(expected_instance.as_str());
 
     let mut wrong_zone = valid_spec(&key);
     wrong_zone.zone = "z:project:other";
     wrong_zone.audience = Some("*");
+    wrong_zone.target_instance = Some(expected_instance.as_str());
 
     let mut expired = valid_spec(&key);
     expired.not_before = now - Duration::hours(2);
     expired.expires = now - Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + 1);
+    expired.target_instance = Some(expected_instance.as_str());
 
     let mut not_yet_valid = valid_spec(&key);
     not_yet_valid.not_before =
         now + Duration::seconds(CAPABILITY_TOKEN_CLOCK_SKEW_SECS + BEYOND_CLOCK_SKEW_MARGIN_SECS);
     not_yet_valid.expires = now + Duration::hours(2);
+    not_yet_valid.target_instance = Some(expected_instance.as_str());
 
     let mut instance_mismatch = valid_spec(&key);
     instance_mismatch.target_instance = Some(other_instance.as_str());
 
+    let missing_instance = valid_spec(&key);
+
     let mut capability_mismatch = valid_spec(&key);
     capability_mismatch.capability = OTHER_CAPABILITY;
+    capability_mismatch.target_instance = Some(expected_instance.as_str());
 
     let mut operation_mismatch = valid_spec(&key);
     operation_mismatch.operation = OTHER_OPERATION;
+    operation_mismatch.target_instance = Some(expected_instance.as_str());
 
     let mut empty_constraints = valid_spec(&key);
     empty_constraints.constraints = CapabilityConstraints::default();
+    empty_constraints.target_instance = Some(expected_instance.as_str());
 
     let mut resource_mismatch = valid_spec(&key);
     resource_mismatch.constraints = CapabilityConstraints {
         resource_allow: vec!["resource://allowed/*".to_string()],
         ..Default::default()
     };
+    resource_mismatch.target_instance = Some(expected_instance.as_str());
 
     let cases = vec![
         MatrixCase {
@@ -284,6 +298,15 @@ fn capability_verifier_rejects_documented_predicate_matrix() {
             operation: operation.clone(),
             resources: vec![],
             expected: ExpectedReject::InstanceMismatch,
+        },
+        MatrixCase {
+            name: "missing_instance",
+            token: token_from_spec(missing_instance),
+            verifier: CapabilityVerifier::new(pub_key, ZoneId::work(), expected_instance.clone()),
+            capability: capability.clone(),
+            operation: operation.clone(),
+            resources: vec![],
+            expected: ExpectedReject::MissingInstance,
         },
         MatrixCase {
             name: "capability_mismatch",

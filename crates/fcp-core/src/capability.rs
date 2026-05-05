@@ -1358,17 +1358,15 @@ impl CapabilityToken<UnboundVerified> {
     /// - **Token declares `instance_id` claim matching `expected`**: promoted.
     /// - **Token declares `instance_id` claim NOT matching `expected`**:
     ///   rejected with [`FcpError::ZoneViolation`].
-    /// - **Token has NO `instance_id` claim (instance-agnostic)**:
-    ///   promoted unconditionally. This matches the legacy
-    ///   `CapabilityVerifier::new(...).verify()` behavior, which skips
-    ///   the instance check entirely when the claim is absent. A token
-    ///   issued without a target instance is universally applicable to
-    ///   any connector.
+    /// - **Token has NO `instance_id` claim**: rejected with
+    ///   [`FcpError::MissingField`]. `BoundVerified` represents all five
+    ///   checks, so it is never produced from an instance-agnostic token.
     ///
     /// # Errors
-    /// Returns [`FcpError::ZoneViolation`] on instance-id claim
-    /// mismatch. Returns [`FcpError::Internal`] if the token is
-    /// missing claims (invariant: an `UnboundVerified` token always
+    /// Returns [`FcpError::MissingField`] when the `instance_id` claim is
+    /// absent or not CBOR text. Returns [`FcpError::ZoneViolation`] on
+    /// instance-id claim mismatch. Returns [`FcpError::Internal`] if the
+    /// token is missing claims (invariant: an `UnboundVerified` token always
     /// carries claims).
     pub fn promote_with_instance(
         self,
@@ -1381,31 +1379,32 @@ impl CapabilityToken<UnboundVerified> {
                 message: "UnboundVerified token missing claims (invariant violation)".into(),
             })?;
 
-        // Instance-agnostic tokens (no INSTANCE_ID claim) promote
-        // unconditionally — matches verify_bound semantics in
-        // verify_claims_inner which ALSO skips the check when the
-        // claim is absent.
-        if let Some(inst_val) = claims.get(fcp_crypto::cose::fcp2_claims::INSTANCE_ID) {
-            // A token that passed verify_unbound already has INSTANCE_ID
-            // type-checked; defensive pattern match for direct-construction
-            // paths (e.g., tests) that bypass the verifier.
-            let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
-                field: "instance_id (must be CBOR text)".into(),
-            })?;
-            if inst_str != expected.as_str() {
-                // Mirror the existing mismatch error shape from
-                // verify_claims_inner (capability.rs — zone fields
-                // carry the claim's zone, not the verifier's).
-                let zone = claims.get_zone_id().unwrap_or("").to_string();
-                return Err(FcpError::ZoneViolation {
-                    source_zone: zone.clone(),
-                    target_zone: zone,
-                    message: format!(
-                        "Token instance mismatch: expected {}, got {inst_str}",
-                        expected.as_str()
-                    ),
-                });
-            }
+        let inst_val =
+            claims
+                .get(fcp2_claims::INSTANCE_ID)
+                .ok_or_else(|| FcpError::MissingField {
+                    field: "instance_id (required for BoundVerified)".into(),
+                })?;
+
+        // A token that passed verify_unbound already has INSTANCE_ID
+        // type-checked; defensive pattern match for direct-construction
+        // paths (e.g., tests) that bypass the verifier.
+        let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
+            field: "instance_id (must be CBOR text)".into(),
+        })?;
+        if inst_str != expected.as_str() {
+            // Mirror the existing mismatch error shape from
+            // verify_claims_inner (capability.rs — zone fields
+            // carry the claim's zone, not the verifier's).
+            let zone = claims.get_zone_id().unwrap_or("").to_string();
+            return Err(FcpError::ZoneViolation {
+                source_zone: zone.clone(),
+                target_zone: zone,
+                message: format!(
+                    "Token instance mismatch: expected {}, got {inst_str}",
+                    expected.as_str()
+                ),
+            });
         }
 
         Ok(CapabilityToken {
@@ -1418,10 +1417,10 @@ impl CapabilityToken<UnboundVerified> {
     /// Access the verified claims.
     ///
     /// The claims have passed signature, timing, zone, and operation
-    /// verification — but the `instance_id` check (if the claim is
-    /// present) has NOT yet run. Callers that need full-enforcement
-    /// guarantees must first [`promote_with_instance`](Self::promote_with_instance)
-    /// to obtain a `CapabilityToken<BoundVerified>`.
+    /// verification — but the required `instance_id` binding check has
+    /// NOT yet run. Callers that need full-enforcement guarantees must
+    /// first [`promote_with_instance`](Self::promote_with_instance) to
+    /// obtain a `CapabilityToken<BoundVerified>`.
     ///
     /// # Panics
     /// Panics if constructed without verified claims (invariant:
@@ -1965,7 +1964,7 @@ impl CapabilityVerifier {
     {
         let token = token.into();
         let claims =
-            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris, false)?;
 
         Ok(CapabilityToken {
             raw: token.raw,
@@ -2008,7 +2007,7 @@ impl CapabilityVerifier {
             });
         }
         let claims =
-            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris, true)?;
         Ok(CapabilityToken {
             raw: token.raw,
             verified_claims: Some(claims),
@@ -2054,7 +2053,7 @@ impl CapabilityVerifier {
             });
         }
         let claims =
-            self.verify_claims_inner(&token, required_capability, operation, resource_uris)?;
+            self.verify_claims_inner(&token, required_capability, operation, resource_uris, false)?;
         Ok(CapabilityToken {
             raw: token.raw,
             verified_claims: Some(claims),
@@ -2080,7 +2079,7 @@ impl CapabilityVerifier {
         operation: &OperationId,
         resource_uris: &[String],
     ) -> FcpResult<CwtClaims> {
-        self.verify_claims_inner(token, required_capability, operation, resource_uris)
+        self.verify_claims_inner(token, required_capability, operation, resource_uris, false)
     }
 
     fn validate_claim_schema_version(claims: &CwtClaims) -> FcpResult<()> {
@@ -2162,7 +2161,11 @@ impl CapabilityVerifier {
         }
     }
 
-    fn validate_instance_binding(&self, claims: &CwtClaims) -> FcpResult<()> {
+    fn validate_instance_binding(
+        &self,
+        claims: &CwtClaims,
+        require_instance_id: bool,
+    ) -> FcpResult<()> {
         if let Some(inst_val) = claims.get(fcp2_claims::INSTANCE_ID) {
             let inst_str = inst_val.as_text().ok_or_else(|| FcpError::MissingField {
                 field: "instance_id (must be CBOR text)".into(),
@@ -2180,6 +2183,10 @@ impl CapabilityVerifier {
                     ),
                 });
             }
+        } else if require_instance_id {
+            return Err(FcpError::MissingField {
+                field: "instance_id (required for BoundVerified)".into(),
+            });
         }
 
         Ok(())
@@ -2192,6 +2199,7 @@ impl CapabilityVerifier {
         required_capability: &CapabilityId,
         operation: &OperationId,
         resource_uris: &[String],
+        require_instance_id: bool,
     ) -> FcpResult<CwtClaims> {
         let verifying_key =
             Ed25519VerifyingKey::from_bytes(&self.host_public_key).map_err(|_| {
@@ -2222,7 +2230,7 @@ impl CapabilityVerifier {
         // 5. Check zone binding
         self.validate_zone_binding(&claims)?;
 
-        // 5.5. Check instance binding if present.
+        // 5.5. Check instance binding.
         //
         // The previous implementation silently fell through when the
         // INSTANCE_ID claim was present but not a CBOR Text value (e.g. an
@@ -2237,14 +2245,13 @@ impl CapabilityVerifier {
         // `claims.get_zone_id()`, which filters to Text and returns None
         // otherwise — keep instance binding consistent.
         //
-        // When the verifier itself has no instance id
-        // (`without_instance_binding`), the binding check is skipped —
-        // the verifier is declaring "I can't check this, defer to
-        // downstream." Malformed (non-Text) claims are STILL rejected
-        // even in that mode, because a malformed claim is a parser-level
-        // violation independent of whether we're enforcing the match
-        // (br-flywheel_connectors-5qp7o).
-        self.validate_instance_binding(&claims)?;
+        // `verify_bound` requires the claim to be present and matching.
+        // `verify_unbound` and the deprecated `verify`/`verify_claims` entrypoints
+        // allow a missing claim, but still reject malformed non-Text values,
+        // because malformed input is a parser-level violation independent of
+        // whether this verifier is enforcing the match (br-flywheel_connectors-5qp7o,
+        // br-flywheel_connectors-01yaq).
+        self.validate_instance_binding(&claims, require_instance_id)?;
 
         // 6. Check operation grant
         //
@@ -3756,8 +3763,8 @@ mod tests {
     #[test]
     fn without_instance_binding_ignores_tokens_without_instance_claim() {
         // A token that doesn't declare instance_id passes cleanly in
-        // unbound mode — matches the behavior of bound-mode for the
-        // same input, so nothing is lost by opting out of the check.
+        // unbound mode. Bound verification still rejects the same token,
+        // because `BoundVerified` now requires an explicit instance claim.
         let signing_key = Ed25519SigningKey::generate();
         let pub_bytes = signing_key.verifying_key().to_bytes();
 
@@ -3991,18 +3998,44 @@ mod tests {
     }
 
     #[test]
-    fn promote_with_instance_succeeds_for_instance_agnostic_token() {
-        // br-jkcka fresh-eyes fix: `promote_with_instance` must match the
-        // semantics of `CapabilityVerifier::new(instance_id).verify_bound(...)`,
-        // which SKIPS the instance check when the token has no INSTANCE_ID
-        // claim (instance-agnostic token — universally applicable). Earlier
-        // drafts of `promote_with_instance` incorrectly returned
-        // `MissingField` in this case, breaking the two-phase equivalence
-        // that jkcka's E2E tests and the type-level guarantee rely on.
+    fn verify_bound_rejects_token_without_instance_id() {
+        // flywheel_connectors-01yaq: BoundVerified means all five predicates
+        // passed. A token without INSTANCE_ID cannot satisfy the instance
+        // predicate and must not become BoundVerified.
         let signing_key = Ed25519SigningKey::generate();
         let pub_bytes = signing_key.verifying_key().to_bytes();
         let now = Utc::now();
-        // NO .target_instance — the token is instance-agnostic.
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id("cap.test")
+            .zone_id("z:work")
+            .principal("user:test")
+            .operations(&["op.test"])
+            .issuer("node:primary")
+            .validity(now, now + Duration::hours(1))
+            .constraints_cbor(&test_constraints_cbor())
+            .sign(&signing_key)
+            .unwrap();
+        let token = CapabilityToken::from_raw(cose);
+        let cap = CapabilityId::new("cap.test").unwrap();
+        let op = OperationId::new("op.test").unwrap();
+        let instance = InstanceId::new();
+
+        let verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance);
+        let err = verifier.verify_bound(token, &cap, &op, &[]).unwrap_err();
+        assert!(
+            matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+            "expected MissingField(instance_id) for bound token without instance claim, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn promote_with_instance_rejects_instance_agnostic_token() {
+        // flywheel_connectors-01yaq: gateway-vantage verification may accept a
+        // token with no INSTANCE_ID, but the connector handoff cannot promote it
+        // to BoundVerified without an explicit binding.
+        let signing_key = Ed25519SigningKey::generate();
+        let pub_bytes = signing_key.verifying_key().to_bytes();
+        let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -4018,19 +4051,23 @@ mod tests {
         let op = OperationId::new("op.test").unwrap();
 
         let verifier = CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
-        let unbound = verifier.verify_unbound(token, &cap, &op, &[]).unwrap();
+        let unbound = verifier
+            .verify_unbound(token, &cap, &op, &[])
+            .expect("unbound verification may defer missing instance binding");
 
-        // Any instance id must promote successfully since the token carries
-        // no INSTANCE_ID claim — nothing to mismatch against.
         let any_instance = InstanceId::new();
-        let _bound = unbound
+        let err = unbound
             .promote_with_instance(&any_instance)
-            .expect("instance-agnostic token must promote regardless of expected id");
+            .unwrap_err();
+        assert!(
+            matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+            "expected MissingField(instance_id) when promoting token without instance claim, got {err:?}"
+        );
     }
 
     #[test]
     fn promote_with_instance_equivalence_to_direct_bound_verify() {
-        // Property: for instance-agnostic tokens, both paths succeed:
+        // Property: for instance-bound tokens, both paths succeed:
         // - CapabilityVerifier::new(id).verify_bound(token)
         // - CapabilityVerifier::without_instance_binding().verify_unbound(token)
         //     .promote_with_instance(id)
@@ -4041,7 +4078,7 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let pub_bytes = signing_key.verifying_key().to_bytes();
         let now = Utc::now();
-        // Instance-agnostic token (no target_instance)
+        let instance = InstanceId::new();
         let cose = CapabilityTokenBuilder::new()
             .capability_id("cap.test")
             .zone_id("z:work")
@@ -4050,26 +4087,26 @@ mod tests {
             .issuer("node:primary")
             .validity(now, now + Duration::hours(1))
             .constraints_cbor(&test_constraints_cbor())
+            .target_instance(instance.as_str())
             .sign(&signing_key)
             .unwrap();
         let cap = CapabilityId::new("cap.test").unwrap();
         let op = OperationId::new("op.test").unwrap();
-        let instance = InstanceId::new();
 
         // Direct bound verify
         let bound_verifier = CapabilityVerifier::new(pub_bytes, ZoneId::work(), instance.clone());
         let via_bound = bound_verifier
             .verify_bound(CapabilityToken::from_raw(cose.clone()), &cap, &op, &[])
-            .expect("direct verify_bound must accept instance-agnostic token");
+            .expect("direct verify_bound must accept matching instance-bound token");
 
         // Unbound verify + promote
         let unbound_verifier =
             CapabilityVerifier::without_instance_binding(pub_bytes, ZoneId::work());
         let via_promote = unbound_verifier
             .verify_unbound(CapabilityToken::from_raw(cose), &cap, &op, &[])
-            .expect("verify_unbound must accept instance-agnostic token")
+            .expect("verify_unbound must accept instance-bound token")
             .promote_with_instance(&instance)
-            .expect("promote must succeed for instance-agnostic token");
+            .expect("promote must succeed for matching instance-bound token");
 
         // Both paths produce equivalent verified claims.
         assert_eq!(

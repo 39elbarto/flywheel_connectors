@@ -17,17 +17,16 @@
 //!    identical to claims emitted by `verify_bound` for the same
 //!    raw token + instance.
 //! 4. **Instance-agnostic tokens** — a token with NO `INSTANCE_ID`
-//!    claim promotes unconditionally regardless of the InstanceId
-//!    passed to `promote_with_instance` (matches the documented
-//!    invariant that `verify_bound` skips the check when the claim
-//!    is absent).
+//!    claim can verify from gateway vantage, but cannot promote to
+//!    `BoundVerified` because full enforcement requires an explicit
+//!    instance binding.
 //! 5. **Wrong-instance error preservation** — promotion failure on
 //!    instance mismatch surfaces a structured `FcpError`.
 
 use chrono::{Duration, Utc};
 use fcp_core::{
-    BoundVerified, CapabilityId, CapabilityToken, CapabilityVerifier, InstanceId, OperationId,
-    UnboundVerified, ZoneId,
+    BoundVerified, CapabilityId, CapabilityToken, CapabilityVerifier, FcpError, InstanceId,
+    OperationId, UnboundVerified, ZoneId,
 };
 use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder, cose::fcp2_claims};
 
@@ -208,10 +207,9 @@ fn unbound_to_bound_roundtrip_claims_match_direct_bound_verify() {
 }
 
 #[test]
-fn instance_agnostic_token_promotes_unconditionally() {
-    // Documented invariant: a token with NO INSTANCE_ID claim
-    // promotes regardless of the InstanceId passed to
-    // promote_with_instance — matches verify_bound semantics.
+fn instance_agnostic_token_verifies_unbound_but_cannot_promote() {
+    // Gateway-vantage verification can defer the missing instance binding,
+    // but the connector handoff must not create BoundVerified without it.
     let signing_key = Ed25519SigningKey::generate();
     let pub_bytes = signing_key.verifying_key().to_bytes();
     let token = mk_signed_token_no_instance(&signing_key);
@@ -222,19 +220,13 @@ fn instance_agnostic_token_promotes_unconditionally() {
         .verify_unbound(token, &cap, &op, &[])
         .expect("verify unbound");
 
-    // ANY InstanceId MUST succeed because the token doesn't bind to one.
     let arbitrary_instance = InstanceId::new();
-    let bound = unbound
+    let err = unbound
         .promote_with_instance(&arbitrary_instance)
-        .expect("instance-agnostic token MUST promote regardless of supplied InstanceId");
-
-    // The promoted token's claims do NOT carry the supplied instance
-    // (the original token had no INSTANCE_ID claim, so promotion
-    // does not synthesize one).
-    let claims = bound.claims();
+        .expect_err("instance-agnostic token must not become BoundVerified");
     assert!(
-        claims.get(fcp2_claims::INSTANCE_ID).is_none(),
-        "instance-agnostic promotion MUST NOT synthesize an INSTANCE_ID claim"
+        matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
+        "missing INSTANCE_ID must surface as MissingField(instance_id), got {err:?}"
     );
 }
 

@@ -2052,6 +2052,211 @@ async fn socket_mode_monitor_policy_acks_but_drops_unauthorized_message() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn socket_mode_monitor_policy_filters_commands_and_interactions() {
+    let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.monitor_policy_actions");
+    let mock_server = MockServer::start().await;
+    let runtime = fcp_async_core::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build async-core runtime");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let ws_url = format!(
+        "ws://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let (drop_ack_tx, drop_ack_rx) = oneshot::channel::<Option<String>>();
+    let (slash_go_tx, slash_go_rx) = oneshot::channel::<()>();
+    let (slash_ack_tx, slash_ack_rx) = oneshot::channel::<Option<String>>();
+    let (interactive_go_tx, interactive_go_rx) = oneshot::channel::<()>();
+    let (interactive_ack_tx, interactive_ack_rx) = oneshot::channel::<Option<String>>();
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
+
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send hello frame",
+        )
+        .await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-command-drop",
+                "type": "slash_commands",
+                "payload": {
+                    "team_id": "T_TEAM_1",
+                    "channel_id": "C_DENIED",
+                    "user_id": "U_CMD",
+                    "command": "/deploy"
+                }
+            }),
+            "send unauthorized slash command frame",
+        )
+        .await;
+        let drop_ack = recv_text_frame(&mut ws_stream, "command drop ack frame").await;
+        let _ = drop_ack_tx.send(drop_ack);
+
+        let _ = slash_go_rx.await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-command-allowed",
+                "type": "slash_commands",
+                "payload": {
+                    "team_id": "T_TEAM_1",
+                    "channel_id": "C_CMD",
+                    "user_id": "U_CMD",
+                    "command": "/deploy"
+                }
+            }),
+            "send authorized slash command frame",
+        )
+        .await;
+        let slash_ack = recv_text_frame(&mut ws_stream, "command allowed ack frame").await;
+        let _ = slash_ack_tx.send(slash_ack);
+
+        let _ = interactive_go_rx.await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-interactive-allowed",
+                "type": "interactive",
+                "payload": {
+                    "team_id": "T_TEAM_1",
+                    "channel": { "id": "C_CMD" },
+                    "user": { "id": "U_CMD" },
+                    "type": "block_actions"
+                }
+            }),
+            "send authorized interactive frame",
+        )
+        .await;
+        let interactive_ack =
+            recv_text_frame(&mut ws_stream, "interactive allowed ack frame").await;
+        let _ = interactive_ack_tx.send(interactive_ack);
+
+        close_test_websocket(&mut ws_stream).await;
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/apps.connections.open"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "url": ws_url
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let _key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "token": "xoxb-test-token-xyz",
+            "app_token": "xapp-test-token-xyz",
+            "base_url": mock_server.uri(),
+            "monitor_policy": {
+                "require_mention": false,
+                "allowed_channels": ["channel:C_CMD"],
+                "allowed_users": ["user:U_CMD"]
+            }
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let subscribe_result = runtime
+        .block_on(connector.handle_subscribe(json!({
+            "topics": ["slack.command", "slack.interactive"]
+        })))
+        .expect("subscribe should succeed");
+    assert_eq!(subscribe_result["connection_status"], "started");
+
+    let drop_ack_json = fcp_async_core::time::timeout(StdDuration::from_secs(3), drop_ack_rx)
+        .await
+        .expect("timeout waiting for command drop ack")
+        .expect("drop ack channel should complete")
+        .expect("drop ack payload missing");
+    let drop_ack_value: serde_json::Value =
+        serde_json::from_str(&drop_ack_json).expect("drop ack should be valid json");
+    assert_eq!(drop_ack_value["envelope_id"], "envelope-command-drop");
+    assert!(
+        fcp_async_core::time::timeout(StdDuration::from_millis(200), event_rx.recv())
+            .await
+            .is_err(),
+        "monitor policy should suppress unauthorized slash command events"
+    );
+
+    let _ = slash_go_tx.send(());
+    let slash_event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+        .await
+        .expect("timeout waiting for authorized slash command event")
+        .expect("broadcast receive")
+        .expect("event payload");
+    assert_eq!(slash_event.topic, "slack.command");
+    assert_eq!(slash_event.cursor, "envelope-command-allowed");
+    assert_eq!(slash_event.data.principal.id, "U_CMD");
+    assert_eq!(slash_event.data.payload["channel_id"], "C_CMD");
+    assert!(
+        slash_event
+            .data
+            .resource_uris
+            .contains(&"slack:channel:C_CMD".to_string())
+    );
+    let slash_ack_json = fcp_async_core::time::timeout(StdDuration::from_secs(3), slash_ack_rx)
+        .await
+        .expect("timeout waiting for command allowed ack")
+        .expect("slash ack channel should complete")
+        .expect("slash ack payload missing");
+    let slash_ack_value: serde_json::Value =
+        serde_json::from_str(&slash_ack_json).expect("slash ack should be valid json");
+    assert_eq!(slash_ack_value["envelope_id"], "envelope-command-allowed");
+
+    let _ = interactive_go_tx.send(());
+    let interactive_event =
+        fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timeout waiting for authorized interactive event")
+            .expect("broadcast receive")
+            .expect("event payload");
+    assert_eq!(interactive_event.topic, "slack.interactive");
+    assert_eq!(interactive_event.cursor, "envelope-interactive-allowed");
+    assert_eq!(interactive_event.data.principal.id, "U_CMD");
+    assert_eq!(interactive_event.data.payload["channel"]["id"], "C_CMD");
+    assert!(
+        interactive_event
+            .data
+            .resource_uris
+            .contains(&"slack:channel:C_CMD".to_string())
+    );
+    let interactive_ack_json =
+        fcp_async_core::time::timeout(StdDuration::from_secs(3), interactive_ack_rx)
+            .await
+            .expect("timeout waiting for interactive allowed ack")
+            .expect("interactive ack channel should complete")
+            .expect("interactive ack payload missing");
+    let interactive_ack_value: serde_json::Value =
+        serde_json::from_str(&interactive_ack_json).expect("interactive ack should be valid json");
+    assert_eq!(
+        interactive_ack_value["envelope_id"],
+        "envelope-interactive-allowed"
+    );
+
+    runtime
+        .block_on(connector.handle_shutdown(json!({})))
+        .expect("shutdown should succeed");
+
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), ws_task)
+        .await
+        .expect("timeout waiting for ws task")
+        .expect("ws task join");
+}
+
+#[fcp_async_core::runtime::test]
 async fn socket_mode_subscribe_reuses_single_connection() {
     let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.singleton_connection");
     let mock_server = MockServer::start().await;

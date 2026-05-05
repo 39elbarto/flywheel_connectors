@@ -92,8 +92,19 @@ pub struct Session {
     pub ended_at: Option<DateTime<Utc>>,
     /// Count of operations completed in this session.
     pub operations_completed: u64,
+    /// Connector resource bindings that can restore platform-native session lanes.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_bindings: Vec<SessionResourceBinding>,
     /// Arbitrary key-value context that persists across context rotations.
     pub context: BTreeMap<String, Value>,
+}
+
+/// A platform resource bound to an agent session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SessionResourceBinding {
+    pub connector_id: String,
+    pub resource_uri: String,
+    pub bound_at: DateTime<Utc>,
 }
 
 impl Session {
@@ -114,6 +125,7 @@ impl Session {
             updated_at: now,
             ended_at: None,
             operations_completed: 0,
+            resource_bindings: Vec::new(),
             context: BTreeMap::new(),
         }
     }
@@ -148,6 +160,53 @@ impl Session {
     /// Get a context value.
     pub fn get_context(&self, key: &str) -> Option<&Value> {
         self.context.get(key)
+    }
+
+    /// Bind a connector resource to this session, replacing an existing match.
+    pub fn bind_resource(
+        &mut self,
+        connector_id: impl Into<String>,
+        resource_uri: impl Into<String>,
+    ) {
+        let connector_id = connector_id.into();
+        let resource_uri = resource_uri.into();
+        let now = Utc::now();
+        if let Some(binding) = self.resource_bindings.iter_mut().find(|binding| {
+            binding.connector_id == connector_id && binding.resource_uri == resource_uri
+        }) {
+            binding.bound_at = now;
+        } else {
+            self.resource_bindings.push(SessionResourceBinding {
+                connector_id,
+                resource_uri,
+                bound_at: now,
+            });
+        }
+        self.updated_at = now;
+    }
+
+    /// Find the binding for a connector resource.
+    pub fn binding_for(
+        &self,
+        connector_id: &str,
+        resource_uri: &str,
+    ) -> Option<&SessionResourceBinding> {
+        self.resource_bindings.iter().find(|binding| {
+            binding.connector_id == connector_id && binding.resource_uri == resource_uri
+        })
+    }
+
+    /// Remove a connector resource binding.
+    pub fn unbind_resource(&mut self, connector_id: &str, resource_uri: &str) -> bool {
+        let before = self.resource_bindings.len();
+        self.resource_bindings.retain(|binding| {
+            binding.connector_id != connector_id || binding.resource_uri != resource_uri
+        });
+        let removed = self.resource_bindings.len() != before;
+        if removed {
+            self.updated_at = Utc::now();
+        }
+        removed
     }
 
     /// Increment the operations counter.
@@ -367,6 +426,63 @@ mod tests {
     }
 
     #[test]
+    fn session_resource_bindings_keep_telegram_root_and_topic_distinct() {
+        let mut session = Session::new("Agent", "telegram topic goal", Some("z:work".into()));
+        session.bind_resource("telegram", "telegram:chat:208214988");
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+
+        assert_eq!(session.resource_bindings.len(), 2);
+        assert!(
+            session
+                .binding_for("telegram", "telegram:chat:208214988")
+                .is_some()
+        );
+        assert!(
+            session
+                .binding_for("telegram", "telegram:chat:208214988:topic:17585")
+                .is_some()
+        );
+        assert!(
+            session
+                .binding_for("telegram", "telegram:chat:missing")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn session_resource_binding_rebind_updates_existing_entry() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+        let first_bound_at = session.resource_bindings[0].bound_at;
+
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+
+        assert_eq!(session.resource_bindings.len(), 1);
+        assert!(session.resource_bindings[0].bound_at >= first_bound_at);
+    }
+
+    #[test]
+    fn session_resource_binding_unbind_removes_matching_resource_only() {
+        let mut session = Session::new("Agent", "goal", None);
+        session.bind_resource("telegram", "telegram:chat:208214988");
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+
+        assert!(session.unbind_resource("telegram", "telegram:chat:208214988"));
+
+        assert_eq!(session.resource_bindings.len(), 1);
+        assert!(
+            session
+                .binding_for("telegram", "telegram:chat:208214988")
+                .is_none()
+        );
+        assert!(
+            session
+                .binding_for("telegram", "telegram:chat:208214988:topic:17585")
+                .is_some()
+        );
+    }
+
+    #[test]
     fn session_operations_counter() {
         let mut session = Session::new("Agent", "goal", None);
         session.record_operation();
@@ -378,12 +494,18 @@ mod tests {
     fn session_serde_round_trip() {
         let mut session = Session::new("Agent", "goal", Some("z:test".into()));
         session.set_context("key", serde_json::json!(42));
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
         let json = serde_json::to_string(&session).unwrap();
         let restored: Session = serde_json::from_str(&json).unwrap();
         assert_eq!(restored.agent_name, "Agent");
         assert_eq!(restored.goal, "goal");
         assert_eq!(restored.zone, Some("z:test".into()));
         assert_eq!(restored.get_context("key"), Some(&serde_json::json!(42)));
+        assert!(
+            restored
+                .binding_for("telegram", "telegram:chat:208214988:topic:17585")
+                .is_some()
+        );
     }
 
     // ── SessionStore ────────────────────────────────────────────────

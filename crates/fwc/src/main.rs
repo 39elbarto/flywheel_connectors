@@ -1097,6 +1097,10 @@ struct SessionStartArgs {
     /// Initial session context entries as `key=value` pairs.
     #[arg(long = "context", value_name = "KEY=VALUE")]
     context: Vec<String>,
+
+    /// Initial connector resource bindings as `connector=resource_uri` pairs.
+    #[arg(long = "bind-resource", value_name = "CONNECTOR=RESOURCE_URI")]
+    resource_bindings: Vec<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -8907,6 +8911,13 @@ fn session_dispatch(args: &SessionArgs) -> Result<DispatchOutcome> {
                 })?;
                 session.set_context(key, value);
             }
+            for binding in &args.resource_bindings {
+                let (connector_id, resource_uri) = parse_session_resource_binding(binding)
+                    .map_err(|message| {
+                        anyhow::anyhow!("invalid `--bind-resource` binding `{binding}`: {message}")
+                    })?;
+                session.bind_resource(connector_id, resource_uri);
+            }
             store.save(&session)?;
 
             let (active_locks, lock_warning) = session_active_locks(&session.agent_name);
@@ -9104,6 +9115,21 @@ fn parse_session_context_binding(binding: &str) -> std::result::Result<(String, 
         serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_owned()))
     };
     Ok((key.to_owned(), value))
+}
+
+fn parse_session_resource_binding(binding: &str) -> std::result::Result<(String, String), String> {
+    let (connector_id, resource_uri) = binding
+        .split_once('=')
+        .ok_or_else(|| "expected `connector=resource_uri`".to_owned())?;
+    let connector_id = connector_id.trim();
+    let resource_uri = resource_uri.trim();
+    if connector_id.is_empty() {
+        return Err("connector id cannot be empty".to_owned());
+    }
+    if resource_uri.is_empty() {
+        return Err("resource URI cannot be empty".to_owned());
+    }
+    Ok((connector_id.to_owned(), resource_uri.to_owned()))
 }
 
 fn parse_session_status_filter(
@@ -9679,6 +9705,7 @@ fn session_summary_value(session: &session::Session, active_lock_count: usize) -
         "ended_at": session.ended_at,
         "operations_completed": session.operations_completed,
         "context_key_count": session.context.len(),
+        "resource_binding_count": session.resource_bindings.len(),
         "active_lock_count": active_lock_count,
     })
 }
@@ -9687,6 +9714,10 @@ fn session_detail_value(session: &session::Session, active_locks: &[Value]) -> V
     let mut detail = session_summary_value(session, active_locks.len());
     if let Some(object) = detail.as_object_mut() {
         object.insert("context".to_owned(), json!(session.context));
+        object.insert(
+            "resource_bindings".to_owned(),
+            json!(session.resource_bindings),
+        );
         object.insert("active_locks".to_owned(), json!(active_locks));
     }
     detail
@@ -34432,6 +34463,10 @@ depends_on = ["missing"]
             "bead=\"flywheel_connectors-qnchs.13.1\"".to_owned(),
             "--context".to_owned(),
             "attempt=1".to_owned(),
+            "--bind-resource".to_owned(),
+            "telegram=telegram:chat:208214988".to_owned(),
+            "--bind-resource".to_owned(),
+            "telegram=telegram:chat:208214988:topic:17585".to_owned(),
         ])
         .unwrap();
 
@@ -34444,6 +34479,15 @@ depends_on = ["missing"]
                     assert_eq!(args.context.len(), 2);
                     assert_eq!(args.context[0], "bead=\"flywheel_connectors-qnchs.13.1\"");
                     assert_eq!(args.context[1], "attempt=1");
+                    assert_eq!(args.resource_bindings.len(), 2);
+                    assert_eq!(
+                        args.resource_bindings[0],
+                        "telegram=telegram:chat:208214988"
+                    );
+                    assert_eq!(
+                        args.resource_bindings[1],
+                        "telegram=telegram:chat:208214988:topic:17585"
+                    );
                 }
                 command => panic!("expected session start command, got {command:?}"),
             },
@@ -34560,6 +34604,10 @@ depends_on = ["missing"]
             "bead=\"flywheel_connectors-qnchs.13.1\"",
             "--context",
             "attempt=1",
+            "--bind-resource",
+            "telegram=telegram:chat:208214988",
+            "--bind-resource",
+            "telegram=telegram:chat:208214988:topic:17585",
         ]);
 
         assert_eq!(start_exit, CliExitCode::Success.into());
@@ -34574,6 +34622,19 @@ depends_on = ["missing"]
             "flywheel_connectors-qnchs.13.1"
         );
         assert_eq!(start_payload["session"]["context"]["attempt"], 1);
+        assert_eq!(start_payload["session"]["resource_binding_count"], 2);
+        assert_eq!(
+            start_payload["session"]["resource_bindings"][0]["connector_id"],
+            "telegram"
+        );
+        assert_eq!(
+            start_payload["session"]["resource_bindings"][0]["resource_uri"],
+            "telegram:chat:208214988"
+        );
+        assert_eq!(
+            start_payload["session"]["resource_bindings"][1]["resource_uri"],
+            "telegram:chat:208214988:topic:17585"
+        );
         assert_eq!(start_payload["session"]["active_lock_count"], 1);
         assert_eq!(
             start_payload["session"]["active_locks"][0]["resource"],
@@ -34593,6 +34654,7 @@ depends_on = ["missing"]
         assert_eq!(show_payload["subcommand"], "show");
         assert_eq!(show_payload["session"]["id"], session_id);
         assert_eq!(show_payload["session"]["status"], "active");
+        assert_eq!(show_payload["session"]["resource_binding_count"], 2);
         assert_eq!(show_payload["session"]["active_lock_count"], 1);
 
         let (end_exit, end_payload) = execute_json(&["fwc", "--json", "session", "end"]);

@@ -24,6 +24,10 @@ pub struct MatrixConfig {
     /// Request timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+
+    /// Inbound event policy used when projecting sync results for agent delivery.
+    #[serde(default)]
+    pub inbound_policy: MatrixInboundPolicy,
 }
 
 /// Authentication mode for Matrix.
@@ -56,6 +60,66 @@ impl std::fmt::Debug for MatrixAuth {
 
 const fn default_timeout_ms() -> u64 {
     30_000
+}
+
+const fn default_require_mention() -> bool {
+    true
+}
+
+const fn default_process_reactions() -> bool {
+    true
+}
+
+/// Configured Matrix inbound policy for sync/event projection.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct MatrixInboundPolicy {
+    /// Optional sender allowlist. Empty means any sender is eligible.
+    #[serde(default)]
+    pub allowed_users: Vec<String>,
+
+    /// Optional Matrix user ID for the connector/bot account.
+    #[serde(default)]
+    pub bot_user_id: Option<String>,
+
+    /// Require explicit bot mention in room messages unless the room is allowlisted.
+    #[serde(default = "default_require_mention")]
+    pub require_mention: bool,
+
+    /// Rooms where non-mentioned messages may be delivered.
+    #[serde(default)]
+    pub free_response_rooms: Vec<String>,
+
+    /// Whether reaction events are projected for approval/routing consumers.
+    #[serde(default = "default_process_reactions")]
+    pub process_reactions: bool,
+
+    /// How encrypted events are represented while verified E2EE is not implemented.
+    #[serde(default)]
+    pub encrypted_events: MatrixEncryptedEventPolicy,
+}
+
+impl Default for MatrixInboundPolicy {
+    fn default() -> Self {
+        Self {
+            allowed_users: Vec::new(),
+            bot_user_id: None,
+            require_mention: true,
+            free_response_rooms: Vec::new(),
+            process_reactions: true,
+            encrypted_events: MatrixEncryptedEventPolicy::FailClosed,
+        }
+    }
+}
+
+/// Matrix encrypted-event behavior until verified E2EE support is implemented.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum MatrixEncryptedEventPolicy {
+    /// Do not emit encrypted events as agent input.
+    #[default]
+    FailClosed,
+    /// Emit only redacted metadata for encrypted events.
+    MetadataOnly,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -304,6 +368,57 @@ mod tests {
         });
         let config: MatrixConfig = serde_json::from_value(json).unwrap();
         assert_eq!(config.timeout_ms, 60000);
+    }
+
+    #[test]
+    fn deserialize_config_with_inbound_policy() {
+        let json = serde_json::json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "inbound_policy": {
+                "allowed_users": ["@alice:matrix.org"],
+                "bot_user_id": "@bot:matrix.org",
+                "require_mention": true,
+                "free_response_rooms": ["!ops:matrix.org"],
+                "process_reactions": false,
+                "encrypted_events": "metadata_only"
+            }
+        });
+        let config: MatrixConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(
+            config.inbound_policy.allowed_users,
+            vec!["@alice:matrix.org"]
+        );
+        assert_eq!(
+            config.inbound_policy.bot_user_id.as_deref(),
+            Some("@bot:matrix.org")
+        );
+        assert_eq!(
+            config.inbound_policy.free_response_rooms,
+            vec!["!ops:matrix.org"]
+        );
+        assert!(!config.inbound_policy.process_reactions);
+        assert_eq!(
+            config.inbound_policy.encrypted_events,
+            MatrixEncryptedEventPolicy::MetadataOnly
+        );
+    }
+
+    #[test]
+    fn inbound_policy_defaults_fail_closed_for_background_delivery() {
+        let config: MatrixConfig = serde_json::from_value(serde_json::json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" }
+        }))
+        .unwrap();
+
+        assert!(config.inbound_policy.allowed_users.is_empty());
+        assert!(config.inbound_policy.require_mention);
+        assert!(config.inbound_policy.process_reactions);
+        assert_eq!(
+            config.inbound_policy.encrypted_events,
+            MatrixEncryptedEventPolicy::FailClosed
+        );
     }
 
     #[test]

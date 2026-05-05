@@ -18,6 +18,8 @@ It supports room creation and membership mutations, message send, timeline and r
   - `credential_id`, where the host or egress proxy injects the bearer token at runtime
 - The connector maintains an in-memory sync cursor and tracked room summaries only.
 - There is no background receive loop. Operators must call `matrix.sync` explicitly to advance the cursor and inspect deltas.
+- `matrix.sync` preserves raw room deltas and also returns a separate inbound-policy projection for future supervised delivery: authorized messages, dropped-event metadata, reaction events, and encrypted-event metadata.
+- Encrypted Matrix timeline events fail closed by default for agent delivery until verified E2EE/device verification is implemented. Operators may choose metadata-only projection, but ciphertext is not emitted.
 - Secret material stays in memory. Diagnostics should use room IDs, event IDs, status codes, and retry metadata rather than raw tokens or media bytes.
 
 ## Operation Inventory
@@ -45,6 +47,7 @@ The current connector exposes:
 - auth mode and whether credential injection is still required
 - sync delivery model guidance
 - sync telemetry including success/failure counts, last duration, last error, and the last tracked token
+- inbound-policy telemetry for the most recent sync projection, including authorized, dropped, reaction, and encrypted event counts
 
 `health()` is intentionally truthful:
 
@@ -58,6 +61,7 @@ The current connector exposes:
 - Prefer `https://` homeservers for live traffic.
 - `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are acceptable for deterministic verification harnesses.
 - Use a non-production account and disposable rooms when verifying room creation, joins, leaves, sends, and media mutations.
+- Configure `inbound_policy.allowed_users`, `bot_user_id`, `require_mention`, `free_response_rooms`, and `process_reactions` before treating `matrix.sync` policy projections as agent-delivery input.
 - Verify with offloaded Cargo commands only:
 
 ```bash

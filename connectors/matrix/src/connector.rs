@@ -23,7 +23,7 @@ use crate::client::MatrixClient;
 use crate::error::MatrixError;
 use crate::types::{
     CreateRoomRequest, Event, InvitedSyncRoom, JoinedSyncRoom, LeftSyncRoom, MatrixAuth,
-    SyncResponse,
+    MatrixEncryptedEventPolicy, MatrixInboundPolicy, SyncResponse,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -115,6 +115,10 @@ struct SyncProjection {
     message_events: Vec<serde_json::Value>,
     membership_changes: Vec<serde_json::Value>,
     state_changes: Vec<serde_json::Value>,
+    authorized_message_events: Vec<serde_json::Value>,
+    dropped_events: Vec<serde_json::Value>,
+    reaction_events: Vec<serde_json::Value>,
+    encrypted_events: Vec<serde_json::Value>,
     tracked_updates: BTreeMap<String, MatrixRoomSummary>,
 }
 
@@ -132,6 +136,10 @@ struct MatrixSyncTelemetry {
     last_message_event_count: usize,
     last_membership_change_count: usize,
     last_state_change_count: usize,
+    last_authorized_message_count: usize,
+    last_dropped_event_count: usize,
+    last_reaction_event_count: usize,
+    last_encrypted_event_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -249,6 +257,7 @@ impl MatrixConnector {
                 "transport_policy_message": transport_message,
                 "credential_injection_required": matches!(&config.auth, MatrixAuth::CredentialId { .. }),
                 "sync_delivery_model": "manual_sync_only",
+                "inbound_policy": inbound_policy_snapshot(&config.inbound_policy),
                 "retry_config": self.retry_config.clone(),
             })
         })
@@ -277,6 +286,10 @@ impl MatrixConnector {
             "last_message_event_count": telemetry.last_message_event_count,
             "last_membership_change_count": telemetry.last_membership_change_count,
             "last_state_change_count": telemetry.last_state_change_count,
+            "last_authorized_message_count": telemetry.last_authorized_message_count,
+            "last_dropped_event_count": telemetry.last_dropped_event_count,
+            "last_reaction_event_count": telemetry.last_reaction_event_count,
+            "last_encrypted_event_count": telemetry.last_encrypted_event_count,
         })
     }
 
@@ -356,6 +369,10 @@ impl MatrixConnector {
         state.telemetry.last_message_event_count = projection.message_events.len();
         state.telemetry.last_membership_change_count = projection.membership_changes.len();
         state.telemetry.last_state_change_count = projection.state_changes.len();
+        state.telemetry.last_authorized_message_count = projection.authorized_message_events.len();
+        state.telemetry.last_dropped_event_count = projection.dropped_events.len();
+        state.telemetry.last_reaction_event_count = projection.reaction_events.len();
+        state.telemetry.last_encrypted_event_count = projection.encrypted_events.len();
     }
 
     fn record_sync_failure(
@@ -381,6 +398,10 @@ impl MatrixConnector {
         state.telemetry.last_message_event_count = 0;
         state.telemetry.last_membership_change_count = 0;
         state.telemetry.last_state_change_count = 0;
+        state.telemetry.last_authorized_message_count = 0;
+        state.telemetry.last_dropped_event_count = 0;
+        state.telemetry.last_reaction_event_count = 0;
+        state.telemetry.last_encrypted_event_count = 0;
     }
 
     /// Run diagnostics.
@@ -455,6 +476,15 @@ impl MatrixConnector {
                 "sync_delivery_model",
                 true,
                 "No background receive loop is running; use matrix.sync to advance the in-memory cursor explicitly",
+                false,
+            ));
+            checks.push(doctor_check(
+                "e2ee_delivery_policy",
+                true,
+                format!(
+                    "Encrypted Matrix timeline events are projected as '{}' until verified E2EE/device verification is implemented",
+                    encrypted_event_policy_label(config.inbound_policy.encrypted_events)
+                ),
                 false,
             ));
         }
@@ -719,8 +749,13 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "next_batch": { "type": "string" },
                     "rooms": { "type": "array" },
                     "message_events": { "type": "array" },
+                    "authorized_message_events": { "type": "array" },
+                    "dropped_events": { "type": "array" },
+                    "reaction_events": { "type": "array" },
+                    "encrypted_events": { "type": "array" },
                     "membership_changes": { "type": "array" },
                     "state_changes": { "type": "array" },
+                    "inbound_policy": { "type": "object" },
                     "tracked_state": { "type": "object" }
                 }
             }),
@@ -996,7 +1031,6 @@ fn resource_uris_for_operation(
             };
             resource_uris.push(format!("matrix:media:{server_name}/{media_id}"));
         }
-        OP_JOINED_ROOMS | OP_CREATE_ROOM | OP_SYNC | OP_UPLOAD_MEDIA => {}
         _ => {}
     }
 
@@ -1038,6 +1072,198 @@ fn normalize_state_event(room_id: &str, event: &Event) -> serde_json::Value {
         "origin_server_ts": event.origin_server_ts,
         "content": event.content,
     })
+}
+
+const fn encrypted_event_policy_label(policy: MatrixEncryptedEventPolicy) -> &'static str {
+    match policy {
+        MatrixEncryptedEventPolicy::FailClosed => "fail_closed",
+        MatrixEncryptedEventPolicy::MetadataOnly => "metadata_only",
+    }
+}
+
+fn inbound_policy_snapshot(policy: &MatrixInboundPolicy) -> serde_json::Value {
+    json!({
+        "allowed_users": policy.allowed_users.clone(),
+        "bot_user_id": policy.bot_user_id.clone(),
+        "require_mention": policy.require_mention,
+        "free_response_rooms": policy.free_response_rooms.clone(),
+        "process_reactions": policy.process_reactions,
+        "encrypted_events": encrypted_event_policy_label(policy.encrypted_events),
+    })
+}
+
+fn sender_allowed(policy: &MatrixInboundPolicy, sender: Option<&str>) -> bool {
+    policy.allowed_users.is_empty()
+        || sender.is_some_and(|sender| {
+            policy
+                .allowed_users
+                .iter()
+                .any(|allowed_sender| allowed_sender == sender)
+        })
+}
+
+fn room_allows_free_response(policy: &MatrixInboundPolicy, room_id: &str) -> bool {
+    policy
+        .free_response_rooms
+        .iter()
+        .any(|allowed_room| allowed_room == room_id)
+}
+
+fn event_mentions_bot(event: &Event, policy: &MatrixInboundPolicy) -> bool {
+    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+        return false;
+    };
+
+    let mentioned_user_ids = event
+        .content
+        .get("m.mentions")
+        .and_then(|mentions| mentions.get("user_ids"))
+        .and_then(serde_json::Value::as_array);
+    if mentioned_user_ids.is_some_and(|user_ids| {
+        user_ids
+            .iter()
+            .any(|user_id| user_id.as_str() == Some(bot_user_id))
+    }) {
+        return true;
+    }
+
+    event
+        .content
+        .get("body")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|body| body.contains(bot_user_id))
+}
+
+fn inbound_message_drop_reason(
+    room_id: &str,
+    event: &Event,
+    policy: &MatrixInboundPolicy,
+) -> Option<&'static str> {
+    let sender = event.sender.as_deref();
+    if policy
+        .bot_user_id
+        .as_deref()
+        .is_some_and(|bot| sender == Some(bot))
+    {
+        return Some("self_event");
+    }
+
+    if !sender_allowed(policy, sender) {
+        return Some("sender_not_allowed");
+    }
+
+    if policy.require_mention
+        && !room_allows_free_response(policy, room_id)
+        && !event_mentions_bot(event, policy)
+    {
+        return Some("mention_required");
+    }
+
+    None
+}
+
+fn policy_metadata_event(room_id: &str, event: &Event, reason: &str) -> serde_json::Value {
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "event_type": event.r#type,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "reason": reason,
+    })
+}
+
+fn normalize_reaction_event(room_id: &str, event: &Event) -> serde_json::Value {
+    let relation = event.content.get("m.relates_to");
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "target_event_id": relation
+            .and_then(|value| value.get("event_id"))
+            .and_then(serde_json::Value::as_str),
+        "rel_type": relation
+            .and_then(|value| value.get("rel_type"))
+            .and_then(serde_json::Value::as_str),
+        "key": relation
+            .and_then(|value| value.get("key"))
+            .and_then(serde_json::Value::as_str),
+    })
+}
+
+fn normalize_encrypted_event(
+    room_id: &str,
+    event: &Event,
+    policy: MatrixEncryptedEventPolicy,
+) -> serde_json::Value {
+    json!({
+        "room_id": room_id,
+        "event_id": event.event_id,
+        "sender": event.sender,
+        "origin_server_ts": event.origin_server_ts,
+        "algorithm": event
+            .content
+            .get("algorithm")
+            .and_then(serde_json::Value::as_str),
+        "session_id": event
+            .content
+            .get("session_id")
+            .and_then(serde_json::Value::as_str),
+        "delivery_policy": encrypted_event_policy_label(policy),
+    })
+}
+
+fn project_inbound_policy_event(
+    projection: &mut SyncProjection,
+    room_id: &str,
+    event: &Event,
+    policy: &MatrixInboundPolicy,
+) {
+    match event.r#type.as_str() {
+        "m.room.message" => {
+            if let Some(reason) = inbound_message_drop_reason(room_id, event, policy) {
+                projection
+                    .dropped_events
+                    .push(policy_metadata_event(room_id, event, reason));
+            } else {
+                projection
+                    .authorized_message_events
+                    .push(normalize_message_event(room_id, event));
+            }
+        }
+        "m.reaction" => {
+            if policy.process_reactions {
+                projection
+                    .reaction_events
+                    .push(normalize_reaction_event(room_id, event));
+            } else {
+                projection.dropped_events.push(policy_metadata_event(
+                    room_id,
+                    event,
+                    "reactions_disabled",
+                ));
+            }
+        }
+        "m.room.encrypted" => {
+            projection.encrypted_events.push(normalize_encrypted_event(
+                room_id,
+                event,
+                policy.encrypted_events,
+            ));
+            if matches!(
+                policy.encrypted_events,
+                MatrixEncryptedEventPolicy::FailClosed
+            ) {
+                projection.dropped_events.push(policy_metadata_event(
+                    room_id,
+                    event,
+                    "encrypted_event_fail_closed",
+                ));
+            }
+        }
+        _ => {}
+    }
 }
 
 fn summarize_room(room_id: &str, membership: &str, events: &[Event]) -> MatrixRoomSummary {
@@ -1092,11 +1318,13 @@ fn project_timeline_events(
     summary: &mut MatrixRoomSummary,
     room_id: &str,
     events: &[Event],
+    policy: &MatrixInboundPolicy,
 ) -> usize {
     let mut membership_events = 0_usize;
 
     for event in events {
         summary.record_event(event);
+        project_inbound_policy_event(projection, room_id, event, policy);
         match event.r#type.as_str() {
             "m.room.message" => projection
                 .message_events
@@ -1134,12 +1362,23 @@ fn build_room_summary(
     room_summary
 }
 
-fn project_joined_room(projection: &mut SyncProjection, room_id: &str, room: &JoinedSyncRoom) {
+fn project_joined_room(
+    projection: &mut SyncProjection,
+    room_id: &str,
+    room: &JoinedSyncRoom,
+    policy: &MatrixInboundPolicy,
+) {
     let mut summary = summarize_room(room_id, "join", &room.state.events);
     let state_events = room.state.events.len();
     let timeline_events = room.timeline.events.len();
     let membership_events = project_state_events(projection, room_id, &room.state.events)
-        + project_timeline_events(projection, &mut summary, room_id, &room.timeline.events);
+        + project_timeline_events(
+            projection,
+            &mut summary,
+            room_id,
+            &room.timeline.events,
+            policy,
+        );
 
     projection.room_summaries.push(build_room_summary(
         room_id,
@@ -1173,12 +1412,23 @@ fn project_invited_room(projection: &mut SyncProjection, room_id: &str, room: &I
         .insert(room_id.to_string(), summary);
 }
 
-fn project_left_room(projection: &mut SyncProjection, room_id: &str, room: &LeftSyncRoom) {
+fn project_left_room(
+    projection: &mut SyncProjection,
+    room_id: &str,
+    room: &LeftSyncRoom,
+    policy: &MatrixInboundPolicy,
+) {
     let mut summary = summarize_room(room_id, "leave", &room.state.events);
     let state_events = room.state.events.len();
     let timeline_events = room.timeline.events.len();
     let membership_events = project_state_events(projection, room_id, &room.state.events)
-        + project_timeline_events(projection, &mut summary, room_id, &room.timeline.events);
+        + project_timeline_events(
+            projection,
+            &mut summary,
+            room_id,
+            &room.timeline.events,
+            policy,
+        );
 
     projection.room_summaries.push(build_room_summary(
         room_id,
@@ -1194,11 +1444,19 @@ fn project_left_room(projection: &mut SyncProjection, room_id: &str, room: &Left
         .insert(room_id.to_string(), summary);
 }
 
+#[cfg(test)]
 fn project_sync_response(sync: &SyncResponse) -> SyncProjection {
+    project_sync_response_with_policy(sync, &MatrixInboundPolicy::default())
+}
+
+fn project_sync_response_with_policy(
+    sync: &SyncResponse,
+    policy: &MatrixInboundPolicy,
+) -> SyncProjection {
     let mut projection = SyncProjection::default();
 
     for (room_id, room) in &sync.rooms.join {
-        project_joined_room(&mut projection, room_id, room);
+        project_joined_room(&mut projection, room_id, room, policy);
     }
 
     for (room_id, room) in &sync.rooms.invite {
@@ -1206,7 +1464,7 @@ fn project_sync_response(sync: &SyncResponse) -> SyncProjection {
     }
 
     for (room_id, room) in &sync.rooms.leave {
-        project_left_room(&mut projection, room_id, room);
+        project_left_room(&mut projection, room_id, room, policy);
     }
 
     projection
@@ -1521,6 +1779,12 @@ impl MatrixConnector {
                 let explicit_since = optional_str(&req.input, "since")?;
                 let timeout_ms = optional_u32(&req.input, "timeout_ms", 30_000)?;
                 let persist = optional_bool(&req.input, "persist", true)?;
+                let inbound_policy = self
+                    .config
+                    .as_ref()
+                    .map_or_else(MatrixInboundPolicy::default, |config| {
+                        config.inbound_policy.clone()
+                    });
                 let used_since = explicit_since.or_else(|| {
                     self.sync_state
                         .read()
@@ -1542,7 +1806,7 @@ impl MatrixConnector {
                         return Err(error.to_fcp_error());
                     }
                 };
-                let projection = project_sync_response(&response);
+                let projection = project_sync_response_with_policy(&response, &inbound_policy);
                 let tracked_state = if persist {
                     {
                         let mut state = self
@@ -1575,6 +1839,10 @@ impl MatrixConnector {
                     duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
                     room_summaries = projection.room_summaries.len(),
                     message_events = projection.message_events.len(),
+                    authorized_message_events = projection.authorized_message_events.len(),
+                    dropped_events = projection.dropped_events.len(),
+                    reaction_events = projection.reaction_events.len(),
+                    encrypted_events = projection.encrypted_events.len(),
                     membership_changes = projection.membership_changes.len(),
                     state_changes = projection.state_changes.len(),
                     "Matrix sync cycle completed"
@@ -1586,8 +1854,13 @@ impl MatrixConnector {
                     "persisted": persist,
                     "rooms": projection.room_summaries,
                     "message_events": projection.message_events,
+                    "authorized_message_events": projection.authorized_message_events,
+                    "dropped_events": projection.dropped_events,
+                    "reaction_events": projection.reaction_events,
+                    "encrypted_events": projection.encrypted_events,
                     "membership_changes": projection.membership_changes,
                     "state_changes": projection.state_changes,
+                    "inbound_policy": inbound_policy_snapshot(&inbound_policy),
                     "tracked_state": tracked_state,
                 })
             }
@@ -1707,13 +1980,17 @@ mod tests {
     /// Grants `CAP_READ` with all operation names listed so read-path invoke
     /// calls pass verification. For write/manage operations, a separate token
     /// with the matching `capability_id` would be needed.
-    fn test_token_for_key(signing_key: &Ed25519SigningKey) -> CapabilityToken {
-        test_token_for_key_with_resources(signing_key, &["*"])
+    fn test_token_for_key(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &fcp_core::InstanceId,
+    ) -> CapabilityToken {
+        test_token_for_key_with_resources(signing_key, &["*"], instance_id)
     }
 
     fn test_token_for_key_with_resources(
         signing_key: &Ed25519SigningKey,
         resource_allow: &[&str],
+        instance_id: &fcp_core::InstanceId,
     ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
             resource_allow: resource_allow
@@ -1732,6 +2009,7 @@ mod tests {
             .principal("test-principal")
             .issuer("node:test")
             .validity(now, expires)
+            .target_instance(instance_id.as_str())
             .operations(&[
                 OP_JOINED_ROOMS,
                 OP_GET_MESSAGES,
@@ -1745,7 +2023,8 @@ mod tests {
                 OP_JOIN_ROOM,
                 OP_LEAVE_ROOM,
             ])
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("valid test constraints")
             .sign(signing_key)
             .expect("Failed to create test token");
         CapabilityToken::from_raw(cose_token)
@@ -1791,7 +2070,7 @@ mod tests {
             operation: OperationId::from_static(OP_SYNC),
             zone_id: ZoneId::work(),
             input,
-            capability_token: test_token_for_key(signing_key),
+            capability_token: test_token_for_key(signing_key, &connector.base.instance_id),
             holder_proof: None,
             context: None,
             idempotency_key: None,
@@ -2241,6 +2520,138 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
+    fn project_sync_response_applies_inbound_policy() {
+        let sync = SyncResponse {
+            next_batch: "batch_2".into(),
+            rooms: crate::types::SyncRooms {
+                join: BTreeMap::from([(
+                    "!ops:matrix.org".to_string(),
+                    crate::types::JoinedSyncRoom {
+                        state: crate::types::SyncEventList::default(),
+                        timeline: crate::types::SyncTimeline {
+                            events: vec![
+                                Event {
+                                    event_id: Some("$authorized".into()),
+                                    r#type: "m.room.message".into(),
+                                    state_key: None,
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(120),
+                                    content: json!({
+                                        "msgtype": "m.text",
+                                        "body": "hi @bot:matrix.org",
+                                        "m.mentions": {
+                                            "user_ids": ["@bot:matrix.org"]
+                                        }
+                                    }),
+                                    room_id: Some("!ops:matrix.org".into()),
+                                },
+                                Event {
+                                    event_id: Some("$unmentioned".into()),
+                                    r#type: "m.room.message".into(),
+                                    state_key: None,
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(130),
+                                    content: json!({
+                                        "msgtype": "m.text",
+                                        "body": "ambient room chatter"
+                                    }),
+                                    room_id: Some("!ops:matrix.org".into()),
+                                },
+                                Event {
+                                    event_id: Some("$denied_sender".into()),
+                                    r#type: "m.room.message".into(),
+                                    state_key: None,
+                                    sender: Some("@mallory:matrix.org".into()),
+                                    origin_server_ts: Some(140),
+                                    content: json!({
+                                        "msgtype": "m.text",
+                                        "body": "@bot:matrix.org please act"
+                                    }),
+                                    room_id: Some("!ops:matrix.org".into()),
+                                },
+                                Event {
+                                    event_id: Some("$reaction".into()),
+                                    r#type: "m.reaction".into(),
+                                    state_key: None,
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(150),
+                                    content: json!({
+                                        "m.relates_to": {
+                                            "rel_type": "m.annotation",
+                                            "event_id": "$authorized",
+                                            "key": "approve"
+                                        }
+                                    }),
+                                    room_id: Some("!ops:matrix.org".into()),
+                                },
+                                Event {
+                                    event_id: Some("$encrypted".into()),
+                                    r#type: "m.room.encrypted".into(),
+                                    state_key: None,
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(160),
+                                    content: json!({
+                                        "algorithm": "m.megolm.v1.aes-sha2",
+                                        "session_id": "session-1",
+                                        "ciphertext": "redacted in policy projection"
+                                    }),
+                                    room_id: Some("!ops:matrix.org".into()),
+                                },
+                            ],
+                            prev_batch: Some("prev".into()),
+                            limited: false,
+                        },
+                    },
+                )]),
+                ..crate::types::SyncRooms::default()
+            },
+        };
+        let policy = MatrixInboundPolicy {
+            allowed_users: vec!["@alice:matrix.org".into()],
+            bot_user_id: Some("@bot:matrix.org".into()),
+            require_mention: true,
+            free_response_rooms: Vec::new(),
+            process_reactions: true,
+            encrypted_events: MatrixEncryptedEventPolicy::FailClosed,
+        };
+
+        let projection = project_sync_response_with_policy(&sync, &policy);
+
+        assert_eq!(projection.message_events.len(), 3);
+        assert_eq!(projection.authorized_message_events.len(), 1);
+        assert_eq!(
+            projection.authorized_message_events[0]["event_id"].as_str(),
+            Some("$authorized")
+        );
+        assert_eq!(projection.reaction_events.len(), 1);
+        assert_eq!(
+            projection.reaction_events[0]["target_event_id"].as_str(),
+            Some("$authorized")
+        );
+        assert_eq!(projection.encrypted_events.len(), 1);
+        assert_eq!(
+            projection.encrypted_events[0]["delivery_policy"].as_str(),
+            Some("fail_closed")
+        );
+
+        let dropped_reasons = projection
+            .dropped_events
+            .iter()
+            .map(|event| event["reason"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(dropped_reasons.contains(&"mention_required"));
+        assert!(dropped_reasons.contains(&"sender_not_allowed"));
+        assert!(dropped_reasons.contains(&"encrypted_event_fail_closed"));
+        assert!(
+            projection
+                .dropped_events
+                .iter()
+                .all(|event| event.get("content").is_none())
+        );
+    }
+
+    #[test]
     fn summarize_room_keeps_explicit_membership_label() {
         let summary = summarize_room(
             "!room:matrix.org",
@@ -2352,6 +2763,7 @@ mod tests {
             capability_token: test_token_for_key_with_resources(
                 &signing_key,
                 &["matrix:room:!allowed:matrix.org"],
+                &connector.base.instance_id,
             ),
             holder_proof: None,
             context: None,
@@ -2364,12 +2776,11 @@ mod tests {
         };
 
         let err = connector.invoke(req).await.unwrap_err();
-        match err {
-            FcpError::ResourceNotAllowed { resource } => {
-                assert_eq!(resource, "matrix:room:!denied:matrix.org");
-            }
-            other => panic!("expected ResourceNotAllowed, got {other:?}"),
-        }
+        assert!(matches!(
+            err,
+            FcpError::ResourceNotAllowed { resource }
+                if resource == "matrix:room:!denied:matrix.org"
+        ));
     }
 
     #[fcp_async_core::runtime::test]
@@ -2484,6 +2895,24 @@ mod tests {
             .unwrap();
         let result = response.result.unwrap();
         assert_eq!(result["next_batch"].as_str(), Some("batch_2"));
+        assert_eq!(
+            result["authorized_message_events"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(result["dropped_events"].as_array().unwrap().len(), 1);
+        assert_eq!(result["reaction_events"].as_array().unwrap().len(), 0);
+        assert_eq!(result["encrypted_events"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            result["dropped_events"][0]["reason"].as_str(),
+            Some("mention_required")
+        );
+        assert_eq!(
+            result["inbound_policy"]["encrypted_events"].as_str(),
+            Some("fail_closed")
+        );
 
         let doctor = c.doctor();
         assert_eq!(
@@ -2514,6 +2943,22 @@ mod tests {
         assert_eq!(
             doctor["sync_tracking"]["last_state_change_count"].as_u64(),
             Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_authorized_message_count"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_dropped_event_count"].as_u64(),
+            Some(1)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_reaction_event_count"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            doctor["sync_tracking"]["last_encrypted_event_count"].as_u64(),
+            Some(0)
         );
         assert_eq!(
             doctor["sync_tracking"]["last_persisted"].as_bool(),

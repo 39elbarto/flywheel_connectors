@@ -803,6 +803,7 @@ fn compiled_policy_platform_flags() {
         linux_use_landlock: true,
         linux_use_userns: false,
         macos_entitlements: vec!["com.apple.security.network.client".to_string()],
+        windows_appcontainer_capabilities: vec![],
         windows_low_integrity: true,
     };
     let policy = policy.with_platform_flags(flags.clone());
@@ -1568,6 +1569,7 @@ fn platform_flags_default_is_empty() {
         linux_use_landlock: false,
         linux_use_userns: false,
         macos_entitlements: vec![],
+        windows_appcontainer_capabilities: vec![],
         windows_low_integrity: false,
     };
     assert!(flags.is_empty());
@@ -1579,6 +1581,7 @@ fn platform_flags_non_empty_variants() {
         linux_use_landlock: true,
         linux_use_userns: false,
         macos_entitlements: vec![],
+        windows_appcontainer_capabilities: vec![],
         windows_low_integrity: false,
     };
     assert!(!flags1.is_empty());
@@ -1587,6 +1590,7 @@ fn platform_flags_non_empty_variants() {
         linux_use_landlock: false,
         linux_use_userns: false,
         macos_entitlements: vec!["entitlement".to_string()],
+        windows_appcontainer_capabilities: vec![],
         windows_low_integrity: false,
     };
     assert!(!flags2.is_empty());

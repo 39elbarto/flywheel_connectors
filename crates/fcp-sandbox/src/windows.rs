@@ -53,7 +53,7 @@ use std::ptr;
 
 use tracing::{debug, info, warn};
 
-use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError};
+use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError, WindowsAppContainerProfile};
 
 // ============================================================================
 // Windows API Types
@@ -62,12 +62,15 @@ use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError};
 type HANDLE = *mut std::ffi::c_void;
 type BOOL = i32;
 type DWORD = u32;
+type HRESULT = i32;
 type LPCWSTR = *const u16;
 type PSID = *mut std::ffi::c_void;
 
 const INVALID_HANDLE_VALUE: HANDLE = -1isize as HANDLE;
 const FALSE: BOOL = 0;
 const TRUE: BOOL = 1;
+const S_OK: HRESULT = 0;
+const HRESULT_ERROR_ALREADY_EXISTS: HRESULT = 0x8007_00b7u32 as HRESULT;
 
 // Job object limits
 const JOB_OBJECT_LIMIT_PROCESS_MEMORY: DWORD = 0x0100;
@@ -86,10 +89,6 @@ const SECURITY_MANDATORY_HIGH_RID: DWORD = 0x3000;
 
 // Token information class
 const TOKEN_INTEGRITY_LEVEL: DWORD = 25;
-
-// AppContainer capabilities
-const SECURITY_CAPABILITY_INTERNET_CLIENT: &str = "internetClient";
-const SECURITY_CAPABILITY_PRIVATE_NETWORK_CLIENT_SERVER: &str = "privateNetworkClientServer";
 
 // ============================================================================
 // Windows Sandbox
@@ -146,6 +145,35 @@ impl WindowsSandbox {
     #[must_use]
     pub const fn appcontainer_active(&self) -> bool {
         self.appcontainer_available
+    }
+
+    /// Derive the AppContainer profile metadata for this policy.
+    fn appcontainer_profile(
+        policy: &CompiledPolicy,
+    ) -> Result<WindowsAppContainerProfile, SandboxError> {
+        let connector_seed = windows_appcontainer_connector_seed(policy);
+        policy.windows_appcontainer_profile(&connector_seed)
+    }
+
+    /// Create or resolve the AppContainer profile when the operator has enabled the path.
+    fn prepare_appcontainer_profile(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+        let profile = Self::appcontainer_profile(policy)?;
+        if !self.appcontainer_available {
+            debug!(
+                appcontainer_profile = %profile.name,
+                capabilities = ?profile.capabilities,
+                "AppContainer profile resolved but not created because AppContainer is not active"
+            );
+            return Ok(());
+        }
+
+        let _sid = create_or_open_appcontainer_profile(&profile)?;
+        info!(
+            appcontainer_profile = %profile.name,
+            capabilities = ?profile.capabilities,
+            "Prepared Windows AppContainer profile"
+        );
+        Ok(())
     }
 
     /// Create and configure a job object.
@@ -355,16 +383,19 @@ impl Sandbox for WindowsSandbox {
             "Applying Windows sandbox"
         );
 
-        // Step 1: Create and assign job object
+        // Step 1: Resolve/create AppContainer profile metadata when enabled.
+        self.prepare_appcontainer_profile(policy)?;
+
+        // Step 2: Create and assign job object
         let job = self.create_job_object(policy)?;
         self.assign_to_job(job)?;
 
-        // Step 2: Set integrity level
+        // Step 3: Set integrity level
         if let Err(e) = self.set_integrity_level(policy) {
             warn!(error = %e, "Failed to set integrity level");
         }
 
-        // Step 3: Configure firewall (best effort)
+        // Step 4: Configure firewall (best effort)
         if let Err(e) = self.configure_firewall(policy) {
             warn!(error = %e, "Failed to configure firewall");
         }
@@ -540,6 +571,7 @@ struct TOKEN_MANDATORY_LABEL {
 }
 
 const SE_GROUP_INTEGRITY: DWORD = 0x0000_0020;
+const SE_GROUP_ENABLED: DWORD = 0x0000_0004;
 const TOKEN_ADJUST_DEFAULT: DWORD = 0x0080;
 
 // ============================================================================
@@ -594,6 +626,33 @@ unsafe extern "system" {
         TokenInformation: *const std::ffi::c_void,
         TokenInformationLength: DWORD,
     ) -> BOOL;
+
+    fn DeriveCapabilitySidsFromName(
+        CapName: LPCWSTR,
+        CapabilityGroupSids: *mut *mut PSID,
+        CapabilityGroupSidCount: *mut DWORD,
+        CapabilitySids: *mut *mut PSID,
+        CapabilitySidCount: *mut DWORD,
+    ) -> BOOL;
+
+    fn LocalFree(hMem: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+}
+
+#[link(name = "userenv")]
+unsafe extern "system" {
+    fn CreateAppContainerProfile(
+        pszAppContainerName: LPCWSTR,
+        pszDisplayName: LPCWSTR,
+        pszDescription: LPCWSTR,
+        pCapabilities: *mut SID_AND_ATTRIBUTES,
+        dwCapabilityCount: DWORD,
+        ppSidAppContainerSid: *mut PSID,
+    ) -> HRESULT;
+
+    fn DeriveAppContainerSidFromAppContainerName(
+        pszAppContainerName: LPCWSTR,
+        ppsidAppContainerSid: *mut PSID,
+    ) -> HRESULT;
 }
 
 // ============================================================================
@@ -638,6 +697,215 @@ fn check_appcontainer_available() -> bool {
             .ok()
             .as_deref(),
         Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
+fn windows_appcontainer_connector_seed(policy: &CompiledPolicy) -> String {
+    policy
+        .state_dir
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.trim().is_empty())
+        .unwrap_or("connector")
+        .to_owned()
+}
+
+fn create_or_open_appcontainer_profile(
+    profile: &WindowsAppContainerProfile,
+) -> Result<OwnedSid, SandboxError> {
+    let mut capabilities = DerivedCapabilitySids::new(&profile.capabilities)?;
+    let appcontainer_name = to_wide_string(&profile.name);
+    let display_name = to_wide_string(&format!("FCP {}", profile.name));
+    let description = to_wide_string("Flywheel connector AppContainer profile");
+    let capability_count = capabilities.count();
+    let capability_ptr = capabilities.as_mut_ptr();
+
+    let mut sid: PSID = ptr::null_mut();
+    let hr = unsafe {
+        CreateAppContainerProfile(
+            appcontainer_name.as_ptr(),
+            display_name.as_ptr(),
+            description.as_ptr(),
+            capability_ptr,
+            capability_count,
+            &mut sid,
+        )
+    };
+
+    match hr {
+        S_OK => Ok(OwnedSid(sid)),
+        HRESULT_ERROR_ALREADY_EXISTS => derive_appcontainer_sid(&profile.name),
+        _ => Err(SandboxError::SyscallFailed(format_hresult(
+            "CreateAppContainerProfile",
+            hr,
+        ))),
+    }
+}
+
+fn derive_appcontainer_sid(profile_name: &str) -> Result<OwnedSid, SandboxError> {
+    let appcontainer_name = to_wide_string(profile_name);
+    let mut sid: PSID = ptr::null_mut();
+    let hr =
+        unsafe { DeriveAppContainerSidFromAppContainerName(appcontainer_name.as_ptr(), &mut sid) };
+
+    if hr == S_OK {
+        Ok(OwnedSid(sid))
+    } else {
+        Err(SandboxError::SyscallFailed(format_hresult(
+            "DeriveAppContainerSidFromAppContainerName",
+            hr,
+        )))
+    }
+}
+
+struct OwnedSid(PSID);
+
+impl Drop for OwnedSid {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            unsafe {
+                FreeSid(self.0);
+            }
+        }
+    }
+}
+
+struct DerivedCapabilitySids {
+    attributes: Vec<SID_AND_ATTRIBUTES>,
+    sids: Vec<PSID>,
+}
+
+impl DerivedCapabilitySids {
+    fn new(capabilities: &[String]) -> Result<Self, SandboxError> {
+        let mut derived = Self {
+            attributes: Vec::with_capacity(capabilities.len()),
+            sids: Vec::with_capacity(capabilities.len()),
+        };
+
+        for capability in capabilities {
+            let sid = derive_capability_sid(capability)?;
+            derived.attributes.push(SID_AND_ATTRIBUTES {
+                Sid: sid,
+                Attributes: SE_GROUP_ENABLED,
+            });
+            derived.sids.push(sid);
+        }
+
+        Ok(derived)
+    }
+
+    fn as_mut_ptr(&mut self) -> *mut SID_AND_ATTRIBUTES {
+        if self.attributes.is_empty() {
+            ptr::null_mut()
+        } else {
+            self.attributes.as_mut_ptr()
+        }
+    }
+
+    fn count(&self) -> DWORD {
+        DWORD::try_from(self.attributes.len()).unwrap_or(DWORD::MAX)
+    }
+}
+
+impl Drop for DerivedCapabilitySids {
+    fn drop(&mut self) {
+        for sid in self.sids.drain(..) {
+            unsafe {
+                LocalFree(sid);
+            }
+        }
+    }
+}
+
+fn derive_capability_sid(capability: &str) -> Result<PSID, SandboxError> {
+    let capability_name = to_wide_string(capability);
+    let mut group_sids: *mut PSID = ptr::null_mut();
+    let mut group_sid_count: DWORD = 0;
+    let mut capability_sids: *mut PSID = ptr::null_mut();
+    let mut capability_sid_count: DWORD = 0;
+
+    let result = unsafe {
+        DeriveCapabilitySidsFromName(
+            capability_name.as_ptr(),
+            &mut group_sids,
+            &mut group_sid_count,
+            &mut capability_sids,
+            &mut capability_sid_count,
+        )
+    };
+
+    if result == FALSE {
+        return Err(SandboxError::SyscallFailed(format!(
+            "DeriveCapabilitySidsFromName({capability}) failed: {}",
+            get_last_error()
+        )));
+    }
+
+    unsafe {
+        free_local_sid_array(group_sids, group_sid_count);
+    }
+
+    if capability_sids.is_null() || capability_sid_count == 0 {
+        unsafe {
+            LocalFree(capability_sids.cast());
+        }
+        return Err(SandboxError::SyscallFailed(format!(
+            "DeriveCapabilitySidsFromName({capability}) returned no capability SID"
+        )));
+    }
+
+    let capability_sid_count = match usize::try_from(capability_sid_count) {
+        Ok(count) => count,
+        Err(_) => {
+            unsafe {
+                free_local_sid_array(capability_sids, capability_sid_count);
+            }
+            return Err(SandboxError::SyscallFailed(format!(
+                "DeriveCapabilitySidsFromName({capability}) returned too many capability SIDs"
+            )));
+        }
+    };
+    let sid = unsafe { *capability_sids };
+    unsafe {
+        for idx in 1..capability_sid_count {
+            LocalFree(*capability_sids.add(idx));
+        }
+        LocalFree(capability_sids.cast());
+    }
+
+    Ok(sid)
+}
+
+unsafe fn free_local_sid_array(sids: *mut PSID, count: DWORD) {
+    if sids.is_null() {
+        return;
+    }
+
+    let count = match usize::try_from(count) {
+        Ok(count) => count,
+        Err(_) => {
+            unsafe {
+                LocalFree(sids.cast());
+            }
+            return;
+        }
+    };
+
+    for idx in 0..count {
+        unsafe {
+            LocalFree(*sids.add(idx));
+        }
+    }
+    unsafe {
+        LocalFree(sids.cast());
+    }
+}
+
+fn format_hresult(operation: &str, hr: HRESULT) -> String {
+    format!(
+        "{operation} failed: HRESULT 0x{:08x}",
+        u32::from_ne_bytes(hr.to_ne_bytes())
     )
 }
 

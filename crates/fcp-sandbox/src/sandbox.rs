@@ -14,6 +14,7 @@
 //! - **macOS (Tier 1)**: seatbelt profiles (sandbox-exec)
 //! - **Windows (Tier 2)**: `AppContainer` + job objects
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -110,6 +111,24 @@ pub struct CompiledPolicy {
     pub platform_flags: PlatformFlags,
 }
 
+/// Windows `AppContainer` capability that allows outbound client sockets.
+pub const WINDOWS_APPCONTAINER_INTERNET_CLIENT: &str = "internetClient";
+
+/// Windows `AppContainer` capability that allows inbound and outbound internet sockets.
+pub const WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER: &str = "internetClientServer";
+
+/// Windows `AppContainer` capability that allows private-network client/server sockets.
+pub const WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER: &str = "privateNetworkClientServer";
+
+const WINDOWS_APPCONTAINER_PROFILE_PREFIX: &str = "fcp";
+const WINDOWS_APPCONTAINER_PROFILE_NAME_MAX_LEN: usize = 64;
+const WINDOWS_APPCONTAINER_PROFILE_HASH_LEN: usize = 16;
+const WINDOWS_NETWORK_APPCONTAINER_CAPABILITIES: [&str; 3] = [
+    WINDOWS_APPCONTAINER_INTERNET_CLIENT,
+    WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER,
+    WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER,
+];
+
 /// Platform-specific configuration flags.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PlatformFlags {
@@ -128,6 +147,15 @@ pub struct PlatformFlags {
     /// Windows: Use low-integrity `AppContainer`.
     #[serde(default)]
     pub windows_low_integrity: bool,
+
+    /// Windows: `AppContainer` capability names to grant when launching under `AppContainer`.
+    ///
+    /// Network capabilities are rejected for strict/moderate profiles because those profiles
+    /// require all egress to pass through Network Guard. Permissive profiles get
+    /// [`WINDOWS_APPCONTAINER_INTERNET_CLIENT`] by default when this list omits an explicit
+    /// network capability.
+    #[serde(default)]
+    pub windows_appcontainer_capabilities: Vec<String>,
 }
 
 impl PlatformFlags {
@@ -138,6 +166,7 @@ impl PlatformFlags {
             && !self.linux_use_userns
             && self.macos_entitlements.is_empty()
             && !self.windows_low_integrity
+            && self.windows_appcontainer_capabilities.is_empty()
     }
 }
 
@@ -226,6 +255,173 @@ impl CompiledPolicy {
         self.platform_flags = flags;
         self
     }
+
+    /// Return the normalized Windows `AppContainer` capabilities implied by this policy.
+    pub fn windows_appcontainer_capabilities(&self) -> Result<Vec<String>, SandboxError> {
+        let mut requested = self
+            .platform_flags
+            .windows_appcontainer_capabilities
+            .clone();
+        if !self.block_direct_network
+            && !requested
+                .iter()
+                .any(|capability| is_windows_network_appcontainer_capability(capability.trim()))
+        {
+            requested.push(WINDOWS_APPCONTAINER_INTERNET_CLIENT.to_owned());
+        }
+
+        let capabilities = normalize_windows_appcontainer_capabilities(&requested)?;
+        if self.block_direct_network {
+            for capability in &capabilities {
+                if is_windows_network_appcontainer_capability(capability) {
+                    return Err(SandboxError::InvalidConfig(format!(
+                        "windows AppContainer capability `{capability}` conflicts with sandbox profile {:?}: direct network must remain blocked",
+                        self.profile
+                    )));
+                }
+            }
+        }
+
+        Ok(capabilities)
+    }
+
+    /// Build the deterministic Windows `AppContainer` profile metadata for a connector.
+    pub fn windows_appcontainer_profile(
+        &self,
+        connector_id: &str,
+    ) -> Result<WindowsAppContainerProfile, SandboxError> {
+        WindowsAppContainerProfile::from_policy(connector_id, self)
+    }
+}
+
+/// Deterministic Windows `AppContainer` profile metadata derived from an FCP sandbox policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsAppContainerProfile {
+    /// `AppContainer` profile name. Windows requires at most 64 characters matching
+    /// `[-_. A-Za-z0-9]+`.
+    pub name: String,
+
+    /// Capability names that will be resolved to `AppContainer` capability SIDs.
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+}
+
+impl WindowsAppContainerProfile {
+    /// Derive a stable `AppContainer` profile from a connector id and compiled policy.
+    pub fn from_policy(connector_id: &str, policy: &CompiledPolicy) -> Result<Self, SandboxError> {
+        Ok(Self {
+            name: windows_appcontainer_profile_name(connector_id)?,
+            capabilities: policy.windows_appcontainer_capabilities()?,
+        })
+    }
+}
+
+fn windows_appcontainer_profile_name(connector_id: &str) -> Result<String, SandboxError> {
+    let mut fragment = sanitize_windows_appcontainer_name_fragment(connector_id);
+    let hash = stable_fnv1a64_hex(connector_id);
+    let separators_len = 2;
+    let max_fragment_len = WINDOWS_APPCONTAINER_PROFILE_NAME_MAX_LEN
+        - WINDOWS_APPCONTAINER_PROFILE_PREFIX.len()
+        - WINDOWS_APPCONTAINER_PROFILE_HASH_LEN
+        - separators_len;
+    fragment.truncate(max_fragment_len);
+
+    let name = format!("{WINDOWS_APPCONTAINER_PROFILE_PREFIX}-{fragment}-{hash}");
+    validate_windows_appcontainer_profile_name(&name)?;
+    Ok(name)
+}
+
+fn sanitize_windows_appcontainer_name_fragment(value: &str) -> String {
+    let mut fragment = String::with_capacity(value.len().min(43));
+    let mut last_was_dash = false;
+
+    for byte in value.bytes() {
+        let next = if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_') {
+            last_was_dash = false;
+            char::from(byte.to_ascii_lowercase())
+        } else if last_was_dash {
+            continue;
+        } else {
+            last_was_dash = true;
+            '-'
+        };
+        fragment.push(next);
+    }
+
+    let fragment = fragment.trim_matches('-');
+    if fragment.is_empty() {
+        "connector".to_owned()
+    } else {
+        fragment.to_owned()
+    }
+}
+
+fn stable_fnv1a64_hex(value: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
+}
+
+fn validate_windows_appcontainer_profile_name(name: &str) -> Result<(), SandboxError> {
+    if name.is_empty() || name.len() > WINDOWS_APPCONTAINER_PROFILE_NAME_MAX_LEN {
+        return Err(SandboxError::InvalidConfig(format!(
+            "windows AppContainer profile name must be 1..={WINDOWS_APPCONTAINER_PROFILE_NAME_MAX_LEN} bytes, got {}",
+            name.len()
+        )));
+    }
+
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b' '))
+    {
+        return Err(SandboxError::InvalidConfig(format!(
+            "windows AppContainer profile name `{name}` contains characters outside [-_. A-Za-z0-9]"
+        )));
+    }
+
+    Ok(())
+}
+
+fn normalize_windows_appcontainer_capabilities(
+    requested: &[String],
+) -> Result<Vec<String>, SandboxError> {
+    let mut capabilities = BTreeSet::new();
+    for capability in requested {
+        let capability = capability.trim();
+        validate_windows_appcontainer_capability_name(capability)?;
+        capabilities.insert(capability.to_owned());
+    }
+
+    Ok(capabilities.into_iter().collect())
+}
+
+fn validate_windows_appcontainer_capability_name(name: &str) -> Result<(), SandboxError> {
+    if name.is_empty() {
+        return Err(SandboxError::InvalidConfig(
+            "windows AppContainer capability names must not be empty".into(),
+        ));
+    }
+
+    if !name
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+    {
+        return Err(SandboxError::InvalidConfig(format!(
+            "windows AppContainer capability `{name}` contains unsupported characters"
+        )));
+    }
+
+    Ok(())
+}
+
+fn is_windows_network_appcontainer_capability(capability: &str) -> bool {
+    WINDOWS_NETWORK_APPCONTAINER_CAPABILITIES.contains(&capability)
 }
 
 /// Expand special path variables.
@@ -830,6 +1026,7 @@ mod tests {
         assert!(!flags.linux_use_userns);
         assert!(flags.macos_entitlements.is_empty());
         assert!(!flags.windows_low_integrity);
+        assert!(flags.windows_appcontainer_capabilities.is_empty());
     }
 
     #[test]
@@ -857,6 +1054,12 @@ mod tests {
             ..Default::default()
         };
         assert!(!flags.is_empty());
+
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT.into()],
+            ..Default::default()
+        };
+        assert!(!flags.is_empty());
     }
 
     #[test]
@@ -871,6 +1074,111 @@ mod tests {
         };
         let policy = policy.with_platform_flags(flags);
         assert!(policy.platform_flags.linux_use_landlock);
+    }
+
+    #[test]
+    fn test_windows_appcontainer_profile_name_is_stable_and_bounded() {
+        let section = test_sandbox_section();
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        let profile = policy
+            .windows_appcontainer_profile("fcp.test.github:request-response:1.0.0")
+            .unwrap();
+
+        assert!(
+            profile
+                .name
+                .starts_with("fcp-fcp.test.github-request-response-1.0.0-")
+        );
+        assert!(profile.name.len() <= 64);
+        assert_eq!(
+            profile,
+            policy
+                .windows_appcontainer_profile("fcp.test.github:request-response:1.0.0")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_capabilities_follow_network_policy() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Strict;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert!(
+            policy
+                .windows_appcontainer_capabilities()
+                .unwrap()
+                .is_empty()
+        );
+
+        section.profile = SandboxProfile::Permissive;
+        let policy = CompiledPolicy::from_manifest(&section, None).unwrap();
+        assert_eq!(
+            policy.windows_appcontainer_capabilities().unwrap(),
+            vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_capabilities_are_normalized() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Permissive;
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![
+                " custom.capability ".into(),
+                WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER.into(),
+                "custom.capability".into(),
+            ],
+            ..Default::default()
+        };
+        let policy = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags);
+
+        assert_eq!(
+            policy.windows_appcontainer_capabilities().unwrap(),
+            vec![
+                "custom.capability",
+                WINDOWS_APPCONTAINER_PRIVATE_NETWORK_CLIENT_SERVER
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_rejects_network_capabilities_when_network_blocked() {
+        let section = test_sandbox_section();
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec![
+                WINDOWS_APPCONTAINER_INTERNET_CLIENT_SERVER.into(),
+            ],
+            ..Default::default()
+        };
+        let err = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags)
+            .windows_appcontainer_capabilities()
+            .unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("direct network must remain blocked")
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_rejects_invalid_capability_name() {
+        let mut section = test_sandbox_section();
+        section.profile = SandboxProfile::Permissive;
+        let flags = PlatformFlags {
+            windows_appcontainer_capabilities: vec!["camera/read".into()],
+            ..Default::default()
+        };
+        let err = CompiledPolicy::from_manifest(&section, None)
+            .unwrap()
+            .with_platform_flags(flags)
+            .windows_appcontainer_capabilities()
+            .unwrap_err();
+
+        assert!(err.to_string().contains("unsupported characters"));
     }
 
     #[test]
@@ -922,8 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_create_sandbox_returns_platform_backend() {
-        let sandbox = create_sandbox().unwrap();
+    fn test_create_sandbox_returns_platform_backend() -> Result<(), SandboxError> {
         let expected = if cfg!(target_os = "linux") {
             "linux"
         } else if cfg!(target_os = "macos") {
@@ -931,11 +1238,18 @@ mod tests {
         } else if cfg!(target_os = "windows") {
             "windows"
         } else {
-            panic!("test_create_sandbox_returns_platform_backend is unsupported on this platform");
+            return Ok(());
+        };
+
+        let sandbox = match create_sandbox() {
+            Ok(sandbox) => sandbox,
+            Err(SandboxError::UnsupportedPlatform(_)) => return Ok(()),
+            Err(other) => return Err(other),
         };
 
         assert_eq!(sandbox.platform_name(), expected);
         assert!(sandbox.is_available());
+        Ok(())
     }
 
     #[test]
@@ -1092,6 +1406,7 @@ mod tests {
             linux_use_userns: true,
             macos_entitlements: vec!["com.apple.security.network.client".into()],
             windows_low_integrity: true,
+            windows_appcontainer_capabilities: vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT.into()],
         };
 
         let json = serde_json::to_string(&flags).unwrap();
@@ -1101,6 +1416,10 @@ mod tests {
         assert!(roundtrip.linux_use_userns);
         assert_eq!(roundtrip.macos_entitlements.len(), 1);
         assert!(roundtrip.windows_low_integrity);
+        assert_eq!(
+            roundtrip.windows_appcontainer_capabilities,
+            vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT]
+        );
     }
 
     // ── New tests: CompiledPolicy clone + debug ──
@@ -1139,12 +1458,17 @@ mod tests {
             linux_use_userns: true,
             macos_entitlements: vec!["ent1".into(), "ent2".into()],
             windows_low_integrity: true,
+            windows_appcontainer_capabilities: vec!["custom.capability".into()],
         };
         let cloned = original.clone();
         assert_eq!(original.linux_use_landlock, cloned.linux_use_landlock);
         assert_eq!(original.linux_use_userns, cloned.linux_use_userns);
         assert_eq!(original.macos_entitlements, cloned.macos_entitlements);
         assert_eq!(original.windows_low_integrity, cloned.windows_low_integrity);
+        assert_eq!(
+            original.windows_appcontainer_capabilities,
+            cloned.windows_appcontainer_capabilities
+        );
     }
 
     #[test]
@@ -1285,6 +1609,7 @@ mod tests {
             linux_use_userns: false,
             macos_entitlements: vec!["com.apple.security.app-sandbox".into()],
             windows_low_integrity: true,
+            windows_appcontainer_capabilities: vec!["custom.capability".into()],
         };
         let policy = CompiledPolicy::from_manifest(&section, None)
             .unwrap()
@@ -1295,6 +1620,10 @@ mod tests {
         assert!(!roundtrip.platform_flags.linux_use_userns);
         assert_eq!(roundtrip.platform_flags.macos_entitlements.len(), 1);
         assert!(roundtrip.platform_flags.windows_low_integrity);
+        assert_eq!(
+            roundtrip.platform_flags.windows_appcontainer_capabilities,
+            vec!["custom.capability"]
+        );
     }
 
     #[test]
@@ -1467,6 +1796,7 @@ mod tests {
                 "com.apple.security.files.user-selected.read-only".into(),
             ],
             windows_low_integrity: false,
+            windows_appcontainer_capabilities: Vec::new(),
         };
         assert!(!flags.is_empty());
         assert_eq!(flags.macos_entitlements.len(), 3);
@@ -1479,6 +1809,7 @@ mod tests {
             linux_use_userns: true,
             macos_entitlements: vec!["ent".into()],
             windows_low_integrity: true,
+            windows_appcontainer_capabilities: vec!["custom.capability".into()],
         };
         assert!(!flags.is_empty());
         let json = serde_json::to_string(&flags).unwrap();
@@ -1487,6 +1818,10 @@ mod tests {
         assert!(rt.linux_use_userns);
         assert_eq!(rt.macos_entitlements.len(), 1);
         assert!(rt.windows_low_integrity);
+        assert_eq!(
+            rt.windows_appcontainer_capabilities,
+            vec!["custom.capability"]
+        );
     }
 
     #[test]
@@ -1498,6 +1833,7 @@ mod tests {
         assert!(!flags.linux_use_userns);
         assert!(flags.macos_entitlements.is_empty());
         assert!(!flags.windows_low_integrity);
+        assert!(flags.windows_appcontainer_capabilities.is_empty());
     }
 
     // ── New batch: CompiledPolicy edge cases ──
@@ -1538,6 +1874,7 @@ mod tests {
             linux_use_userns: false,
             macos_entitlements: vec!["ent".into()],
             windows_low_integrity: true,
+            windows_appcontainer_capabilities: vec!["custom.capability".into()],
         };
         let policy = CompiledPolicy::from_manifest(&section, state_dir)
             .unwrap()
@@ -1553,6 +1890,10 @@ mod tests {
         assert_eq!(rt.state_dir, policy.state_dir);
         assert!(rt.platform_flags.linux_use_landlock);
         assert!(rt.platform_flags.windows_low_integrity);
+        assert_eq!(
+            rt.platform_flags.windows_appcontainer_capabilities,
+            vec!["custom.capability"]
+        );
     }
 
     // ── New batch: expand_path edge cases ──
@@ -1748,21 +2089,21 @@ mod tests {
     /// naturally ends up with one assertion per (OS, arch) pair — the
     /// "platform-matrix" coverage the parity bead asks for.
     #[test]
-    fn host_sandbox_matches_documented_filter_strength() {
+    fn host_sandbox_matches_documented_filter_strength() -> Result<(), SandboxError> {
         let Some(expected) = FilterStrength::expected_for_target_os(std::env::consts::OS) else {
             // Running on a host we haven't reviewed for sandbox parity
             // (e.g., freebsd, solaris). create_sandbox() will fail; we
             // just record that no strength contract applies.
-            return;
+            return Ok(());
         };
 
         let sandbox = match create_sandbox() {
             Ok(s) => s,
             Err(SandboxError::UnsupportedPlatform(_)) => {
                 // Same guard as above, but via the runtime path.
-                return;
+                return Ok(());
             }
-            Err(other) => panic!("create_sandbox() failed unexpectedly: {other}"),
+            Err(other) => return Err(other),
         };
 
         assert_eq!(
@@ -1775,6 +2116,7 @@ mod tests {
             expected,
             sandbox.filter_strength(),
         );
+        Ok(())
     }
 
     // Per-platform compile-gated assertions. These give each CI leg

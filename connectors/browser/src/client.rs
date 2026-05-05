@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use fcp_async_core::websocket::Message as WebSocketMessage;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
@@ -208,6 +209,28 @@ impl BrowserControlImplementation {
             Self::Cdp { methods } => format!("cdp methods [{}]", methods.join(", ")),
             Self::WorkerPolicy { .. } => "worker_policy".to_string(),
         }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+struct CdpCommand {
+    id: u64,
+    method: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    params: Option<serde_json::Value>,
+}
+
+impl CdpCommand {
+    fn new(id: u64, method: impl Into<String>, params: Option<serde_json::Value>) -> Self {
+        Self {
+            id,
+            method: method.into(),
+            params,
+        }
+    }
+
+    fn to_websocket_message(&self) -> BrowserResult<WebSocketMessage> {
+        Ok(WebSocketMessage::Text(serde_json::to_string(self)?))
     }
 }
 
@@ -1160,6 +1183,67 @@ fn contains_sensitive_marker(text: &str) -> bool {
         || normalized.contains("credential")
 }
 
+fn decode_cdp_response_message(
+    message: WebSocketMessage,
+    expected_command_id: u64,
+) -> BrowserResult<Option<serde_json::Value>> {
+    match message {
+        WebSocketMessage::Text(text) => decode_cdp_response_text(&text, expected_command_id),
+        WebSocketMessage::Binary(_) => Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol response must be UTF-8 text JSON".into(),
+            status_code: None,
+        }),
+        WebSocketMessage::Close(_) => Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol connection closed before command response".into(),
+            status_code: None,
+        }),
+        WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => Ok(None),
+    }
+}
+
+fn decode_cdp_response_text(
+    text: &str,
+    expected_command_id: u64,
+) -> BrowserResult<Option<serde_json::Value>> {
+    let mut value: serde_json::Value = serde_json::from_str(text)?;
+
+    let Some(id) = value.get("id").and_then(serde_json::Value::as_u64) else {
+        if value
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            return Ok(None);
+        }
+        return Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol response is missing numeric command id".into(),
+            status_code: None,
+        });
+    };
+
+    if id != expected_command_id {
+        return Ok(None);
+    }
+
+    if let Some(error) = value.get_mut("error") {
+        redact_sensitive_json(error);
+        return Err(BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol command {expected_command_id} failed: {}",
+                serde_json::to_string(error)?
+            ),
+            status_code: None,
+        });
+    }
+
+    Ok(Some(
+        value
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({})),
+    ))
+}
+
 fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), String> {
     let control_plane = body
         .get("control_plane")
@@ -1511,6 +1595,99 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_cdp_command_serializes_to_websocket_text_message() {
+        let command = CdpCommand::new(
+            7,
+            "Page.navigate",
+            Some(serde_json::json!({ "url": "https://example.com" })),
+        );
+
+        let message = command.to_websocket_message().unwrap();
+        assert!(matches!(
+            message,
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":7,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_cdp_command_omits_empty_params() {
+        let command = CdpCommand::new(8, "Page.enable", None);
+
+        let message = command.to_websocket_message().unwrap();
+        assert!(matches!(
+            message,
+            WebSocketMessage::Text(text) if text == r#"{"id":8,"method":"Page.enable"}"#
+        ));
+    }
+
+    #[test]
+    fn test_cdp_response_decoder_correlates_command_result() {
+        let result = decode_cdp_response_message(
+            WebSocketMessage::Text(r#"{"id":7,"result":{"frameId":"abc"}}"#.into()),
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(result, Some(serde_json::json!({ "frameId": "abc" })));
+    }
+
+    #[test]
+    fn test_cdp_response_decoder_ignores_events_and_other_command_ids() {
+        let event = decode_cdp_response_message(
+            WebSocketMessage::Text(
+                r#"{"method":"Page.loadEventFired","params":{"timestamp":1}}"#.into(),
+            ),
+            7,
+        )
+        .unwrap();
+        let other_command = decode_cdp_response_message(
+            WebSocketMessage::Text(r#"{"id":9,"result":{"ok":true}}"#.into()),
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(event, None);
+        assert_eq!(other_command, None);
+    }
+
+    #[test]
+    fn test_cdp_response_decoder_redacts_error_payloads() {
+        let err = decode_cdp_response_message(
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 7,
+                    "error": {
+                        "code": -32000,
+                        "message": "Authorization failed for Bearer browser-token",
+                        "data": {
+                            "access_token": "secret-token",
+                            "cookies": [{ "name": "session", "value": "secret-cookie" }]
+                        }
+                    }
+                })
+                .to_string(),
+            ),
+            7,
+        )
+        .unwrap_err();
+
+        let message = format!("{err}");
+        assert!(!message.contains("browser-token"));
+        assert!(!message.contains("secret-token"));
+        assert!(!message.contains("secret-cookie"));
+        assert!(message.contains("[redacted]"));
+    }
+
+    #[test]
+    fn test_cdp_response_decoder_rejects_non_text_messages() {
+        let err =
+            decode_cdp_response_message(WebSocketMessage::binary(vec![1_u8, 2, 3]), 7).unwrap_err();
+
+        assert!(format!("{err}").contains("UTF-8 text JSON"));
     }
 
     #[test]

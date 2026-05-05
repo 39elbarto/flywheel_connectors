@@ -715,6 +715,182 @@ pub struct ImageData {
     pub revised_prompt: Option<String>,
 }
 
+// ─────────────────────── Videos ───────────────────────
+
+/// OpenAI video generation models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoModel {
+    /// Sora 2
+    #[serde(rename = "sora-2")]
+    Sora2,
+    /// Sora 2 Pro
+    #[serde(rename = "sora-2-pro")]
+    Sora2Pro,
+}
+
+impl VideoModel {
+    /// Get the model string for API requests.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Sora2 => "sora-2",
+            Self::Sora2Pro => "sora-2-pro",
+        }
+    }
+}
+
+impl Default for VideoModel {
+    fn default() -> Self {
+        Self::Sora2
+    }
+}
+
+/// Supported OpenAI video durations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoDurationSeconds {
+    /// Four seconds.
+    #[serde(rename = "4")]
+    Seconds4,
+    /// Eight seconds.
+    #[serde(rename = "8")]
+    Seconds8,
+    /// Twelve seconds.
+    #[serde(rename = "12")]
+    Seconds12,
+}
+
+impl VideoDurationSeconds {
+    /// Parse an exact supported duration.
+    #[must_use]
+    pub const fn from_u64(value: u64) -> Option<Self> {
+        match value {
+            4 => Some(Self::Seconds4),
+            8 => Some(Self::Seconds8),
+            12 => Some(Self::Seconds12),
+            _ => None,
+        }
+    }
+
+    /// Get the API string.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Seconds4 => "4",
+            Self::Seconds8 => "8",
+            Self::Seconds12 => "12",
+        }
+    }
+}
+
+/// Supported OpenAI video output sizes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum VideoSize {
+    /// 720x1280 portrait.
+    #[serde(rename = "720x1280")]
+    Size720x1280,
+    /// 1280x720 landscape.
+    #[serde(rename = "1280x720")]
+    Size1280x720,
+    /// 1024x1792 portrait.
+    #[serde(rename = "1024x1792")]
+    Size1024x1792,
+    /// 1792x1024 landscape.
+    #[serde(rename = "1792x1024")]
+    Size1792x1024,
+}
+
+impl VideoSize {
+    /// Get the API string.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Size720x1280 => "720x1280",
+            Self::Size1280x720 => "1280x720",
+            Self::Size1024x1792 => "1024x1792",
+            Self::Size1792x1024 => "1792x1024",
+        }
+    }
+}
+
+/// Request to the Videos API.
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoGenerationRequest {
+    /// Model to use.
+    pub model: String,
+    /// Text prompt.
+    pub prompt: String,
+    /// Requested duration in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seconds: Option<String>,
+    /// Requested output size.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+}
+
+/// Video generation job status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoStatus {
+    /// Job is queued.
+    Queued,
+    /// Job is running.
+    InProgress,
+    /// Job completed.
+    Completed,
+    /// Job failed.
+    Failed,
+    /// Unknown status returned by the provider.
+    #[serde(other)]
+    Unknown,
+}
+
+/// OpenAI video generation error payload.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoError {
+    /// Provider error code.
+    pub code: Option<String>,
+    /// Provider error message.
+    pub message: Option<String>,
+}
+
+/// Response from the Videos API.
+#[derive(Debug, Clone, Deserialize)]
+pub struct VideoGenerationResponse {
+    /// Video job ID.
+    pub id: Option<String>,
+    /// Model used by the provider.
+    pub model: Option<String>,
+    /// Current job status.
+    pub status: Option<VideoStatus>,
+    /// Prompt associated with the job.
+    pub prompt: Option<String>,
+    /// Provider duration metadata.
+    pub seconds: Option<String>,
+    /// Provider size metadata.
+    pub size: Option<String>,
+    /// Provider error details.
+    pub error: Option<VideoError>,
+}
+
+/// Completed OpenAI video asset.
+#[derive(Debug, Clone)]
+pub struct GeneratedVideoAsset {
+    /// Provider job ID.
+    pub video_id: String,
+    /// Model reported by the provider.
+    pub model: String,
+    /// Final provider status.
+    pub status: VideoStatus,
+    /// Duration metadata.
+    pub seconds: Option<String>,
+    /// Size metadata.
+    pub size: Option<String>,
+    /// Downloaded video bytes.
+    pub bytes: Vec<u8>,
+    /// Downloaded video MIME type.
+    pub mime_type: String,
+}
+
 // ─────────────────────── Audio ───────────────────────
 
 /// Whisper transcription models.
@@ -1729,6 +1905,46 @@ mod tests {
         assert_eq!(json, "hd");
         let back: ImageQuality = serde_json::from_value(json).unwrap();
         assert_eq!(back, ImageQuality::Hd);
+    }
+
+    // ---- VideoModel ----
+
+    #[test]
+    fn video_model_default() {
+        assert_eq!(VideoModel::default(), VideoModel::Sora2);
+        assert_eq!(VideoModel::Sora2.as_str(), "sora-2");
+        assert_eq!(VideoModel::Sora2Pro.as_str(), "sora-2-pro");
+    }
+
+    #[test]
+    fn video_duration_seconds_exact_parse() {
+        assert_eq!(
+            VideoDurationSeconds::from_u64(4),
+            Some(VideoDurationSeconds::Seconds4)
+        );
+        assert_eq!(
+            VideoDurationSeconds::from_u64(8),
+            Some(VideoDurationSeconds::Seconds8)
+        );
+        assert_eq!(
+            VideoDurationSeconds::from_u64(12),
+            Some(VideoDurationSeconds::Seconds12)
+        );
+        assert_eq!(VideoDurationSeconds::from_u64(6), None);
+    }
+
+    #[test]
+    fn video_size_as_str_all() {
+        assert_eq!(VideoSize::Size720x1280.as_str(), "720x1280");
+        assert_eq!(VideoSize::Size1280x720.as_str(), "1280x720");
+        assert_eq!(VideoSize::Size1024x1792.as_str(), "1024x1792");
+        assert_eq!(VideoSize::Size1792x1024.as_str(), "1792x1024");
+    }
+
+    #[test]
+    fn video_status_unknown_deserializes_safely() {
+        let status: VideoStatus = serde_json::from_value(json!("provider_new_status")).unwrap();
+        assert_eq!(status, VideoStatus::Unknown);
     }
 
     // ---- WhisperModel ----

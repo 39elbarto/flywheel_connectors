@@ -19,11 +19,12 @@ use crate::{
         ApiError, Assistant, AssistantListResponse, ChatCompletionChunk, ChatCompletionRequest,
         ChatCompletionResponse, CreateAssistantRequest, CreateFineTuneRequest, EmbeddingInput,
         EmbeddingModel, EmbeddingRequest, EmbeddingResponse, FineTuneEventListResponse,
-        FineTuneHyperparameters, FineTuneJob, FineTuneListResponse, ImageGenerationRequest,
-        ImageGenerationResponse, ImageModel, ImageQuality, ImageSize, Message, Model, Run,
-        RunListResponse, Thread, ThreadMessage, ThreadMessageListResponse, Tool, ToolChoice,
-        TranscriptionResponse, TtsModel, TtsRequest, TtsResponseFormat, TtsVoice, Usage,
-        WhisperModel,
+        FineTuneHyperparameters, FineTuneJob, FineTuneListResponse, GeneratedVideoAsset,
+        ImageGenerationRequest, ImageGenerationResponse, ImageModel, ImageQuality, ImageSize,
+        Message, Model, Run, RunListResponse, Thread, ThreadMessage, ThreadMessageListResponse,
+        Tool, ToolChoice, TranscriptionResponse, TtsModel, TtsRequest, TtsResponseFormat, TtsVoice,
+        Usage, VideoDurationSeconds, VideoGenerationRequest, VideoGenerationResponse, VideoModel,
+        VideoSize, VideoStatus, WhisperModel,
     },
 };
 
@@ -31,6 +32,8 @@ use crate::{
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com";
 const MAX_RETRY_AFTER_MS: u64 = 300_000;
 const MAX_ERROR_MESSAGE_CHARS: usize = 512;
+const DEFAULT_VIDEO_POLL_INTERVAL_MS: u64 = 2_500;
+const DEFAULT_VIDEO_MAX_POLL_ATTEMPTS: u32 = 120;
 
 /// Authentication mode for OpenAI API access.
 #[derive(Clone)]
@@ -67,6 +70,24 @@ impl fmt::Debug for OpenAIAuth {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
             Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
+}
+
+/// Polling behavior for OpenAI video jobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VideoPollingOptions {
+    /// Delay between status checks.
+    pub poll_interval_ms: u64,
+    /// Maximum status checks before timing out.
+    pub max_poll_attempts: u32,
+}
+
+impl Default for VideoPollingOptions {
+    fn default() -> Self {
+        Self {
+            poll_interval_ms: DEFAULT_VIDEO_POLL_INTERVAL_MS,
+            max_poll_attempts: DEFAULT_VIDEO_MAX_POLL_ATTEMPTS,
         }
     }
 }
@@ -373,6 +394,136 @@ impl OpenAIClient {
         };
 
         self.post("/v1/images/generations", &request).await
+    }
+
+    /// Generate a video from a prompt.
+    ///
+    /// The Videos API is asynchronous: this submits the job, polls until it
+    /// completes or fails, then downloads the generated video bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// provider job failure, or if the job does not finish within the polling budget.
+    #[instrument(skip(self, prompt))]
+    pub async fn generate_video(
+        &self,
+        model: VideoModel,
+        prompt: &str,
+        seconds: Option<VideoDurationSeconds>,
+        size: Option<VideoSize>,
+        polling: VideoPollingOptions,
+    ) -> OpenAIResult<GeneratedVideoAsset> {
+        let request = VideoGenerationRequest {
+            model: model.as_str().into(),
+            prompt: prompt.to_string(),
+            seconds: seconds.map(|duration| duration.as_str().to_string()),
+            size: size.map(|video_size| video_size.as_str().to_string()),
+        };
+
+        let VideoGenerationResponse {
+            id: submitted_id,
+            model: submitted_model,
+            seconds: submitted_seconds,
+            size: submitted_size,
+            ..
+        } = self.post("/v1/videos", &request).await?;
+        let video_id = submitted_id
+            .filter(|id| !id.trim().is_empty())
+            .ok_or_else(|| OpenAIError::Api {
+                error_type: "video_response".into(),
+                message: "OpenAI video generation response missing video id".into(),
+                status_code: None,
+            })?;
+
+        let completed = self.poll_video_until_complete(&video_id, polling).await?;
+        let (bytes, mime_type) = self.download_video(&video_id).await?;
+        let VideoGenerationResponse {
+            model: completed_model,
+            status: completed_status,
+            seconds: completed_seconds,
+            size: completed_size,
+            ..
+        } = completed;
+        let resolved_model = completed_model
+            .or(submitted_model)
+            .unwrap_or_else(|| model.as_str().to_string());
+        let status = completed_status.unwrap_or(VideoStatus::Completed);
+
+        Ok(GeneratedVideoAsset {
+            video_id,
+            model: resolved_model,
+            status,
+            seconds: completed_seconds.or(submitted_seconds),
+            size: completed_size.or(submitted_size),
+            bytes,
+            mime_type,
+        })
+    }
+
+    async fn poll_video_until_complete(
+        &self,
+        video_id: &str,
+        polling: VideoPollingOptions,
+    ) -> OpenAIResult<VideoGenerationResponse> {
+        let ctx = self.runtime.request_context();
+        let url = format!("{}/v1/videos/{video_id}", self.base_url);
+        for attempt in 0..polling.max_poll_attempts {
+            let response: VideoGenerationResponse = self.get(&url).await?;
+            match response.status.unwrap_or(VideoStatus::Unknown) {
+                VideoStatus::Completed => return Ok(response),
+                VideoStatus::Failed => {
+                    return Err(OpenAIError::Api {
+                        error_type: "video_failed".into(),
+                        message: video_failure_message(&response),
+                        status_code: None,
+                    });
+                }
+                VideoStatus::Queued | VideoStatus::InProgress | VideoStatus::Unknown => {}
+            }
+
+            if attempt.saturating_add(1) < polling.max_poll_attempts {
+                ctx.sleep(Duration::from_millis(polling.poll_interval_ms))
+                    .await
+                    .map_err(
+                        <OpenAIError as fcp_sdk::migration::ConnectorErrorMapping>::from_async_error,
+                    )?;
+            }
+        }
+
+        Err(OpenAIError::Api {
+            error_type: "video_timeout".into(),
+            message: format!(
+                "OpenAI video generation task {video_id} did not finish within {} status checks",
+                polling.max_poll_attempts
+            ),
+            status_code: Some(408),
+        })
+    }
+
+    async fn download_video(&self, video_id: &str) -> OpenAIResult<(Vec<u8>, String)> {
+        let url = format!(
+            "{}/v1/videos/{video_id}/content?variant=video",
+            self.base_url
+        );
+        let request = self.client.get(&url).header("Accept", "application/binary");
+        let request = self.apply_auth(request);
+
+        let response = request.send().await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let mime_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("video/mp4")
+            .to_string();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            Ok((bytes.to_vec(), mime_type))
+        } else {
+            Err(parse_error_response(status, &headers, &bytes))
+        }
     }
 
     /// Transcribe audio using the Whisper model.
@@ -1163,6 +1314,16 @@ fn sanitize_error_message(message: &str) -> String {
         .collect::<String>()
 }
 
+fn video_failure_message(response: &VideoGenerationResponse) -> String {
+    response
+        .error
+        .as_ref()
+        .and_then(|error| error.message.as_deref())
+        .filter(|message| !message.trim().is_empty())
+        .map(sanitize_error_message)
+        .unwrap_or_else(|| "OpenAI video generation failed".to_string())
+}
+
 /// Parse SSE stream into chunks.
 fn parse_sse_stream(response: Response) -> impl Stream<Item = OpenAIResult<ChatCompletionChunk>> {
     async_stream::stream! {
@@ -1488,6 +1649,74 @@ mod tests {
             !logs.contains(secret_prompt),
             "prompt text should not appear in logs"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_generate_video_success() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/videos"))
+            .and(header("Authorization", "Bearer test_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "video-123",
+                "model": "sora-2",
+                "status": "queued",
+                "seconds": "4",
+                "size": "1280x720"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/video-123"))
+            .and(header("Authorization", "Bearer test_key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "video-123",
+                "model": "sora-2",
+                "status": "completed",
+                "seconds": "4",
+                "size": "1280x720"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        Mock::given(method("GET"))
+            .and(path("/v1/videos/video-123/content"))
+            .and(header("Authorization", "Bearer test_key"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "video/mp4")
+                    .set_body_bytes(b"video-bytes".to_vec()),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = OpenAIClient::new("test_key")
+            .unwrap()
+            .with_base_url(mock_server.uri());
+
+        let video = client
+            .generate_video(
+                VideoModel::Sora2,
+                "A quiet product shot",
+                Some(VideoDurationSeconds::Seconds4),
+                Some(VideoSize::Size1280x720),
+                VideoPollingOptions {
+                    poll_interval_ms: 1,
+                    max_poll_attempts: 2,
+                },
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(video.video_id, "video-123");
+        assert_eq!(video.model, "sora-2");
+        assert_eq!(video.status, VideoStatus::Completed);
+        assert_eq!(video.seconds.as_deref(), Some("4"));
+        assert_eq!(video.size.as_deref(), Some("1280x720"));
+        assert_eq!(video.mime_type, "video/mp4");
+        assert_eq!(video.bytes, b"video-bytes");
     }
 
     #[fcp_async_core::runtime::test]

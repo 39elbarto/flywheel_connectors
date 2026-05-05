@@ -43,6 +43,7 @@ optional = [
     "openai.chat",
     "openai.embeddings",
     "openai.images",
+    "openai.videos",
     "openai.audio.transcribe",
     "openai.audio.tts",
     "openai.finetune.create",
@@ -567,6 +568,126 @@ examples = [
     '{"prompt": "A cat", "model": "dall-e-3", "size": "1792x1024", "quality": "hd"}',
 ]
 related = []
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.videos_generate]
+description = "Generate a short video from a text prompt using OpenAI video models"
+capability = "openai.videos"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations.videos_generate.rate_limit]
+max = 20
+per_ms = 60000
+
+[provides.operations.videos_generate.input_schema]
+required = ["prompt"]
+type = "object"
+
+[provides.operations.videos_generate.input_schema.properties.prompt]
+description = "Text prompt for the video"
+type = "string"
+minLength = 1
+
+[provides.operations.videos_generate.input_schema.properties.model]
+description = "Video generation model"
+default = "sora-2"
+enum = ["sora-2", "sora-2-pro"]
+type = "string"
+
+[provides.operations.videos_generate.input_schema.properties.duration_seconds]
+description = "Requested video duration"
+enum = [4, 8, 12]
+type = "integer"
+
+[provides.operations.videos_generate.input_schema.properties.size]
+description = "Video output size"
+enum = ["720x1280", "1280x720", "1024x1792", "1792x1024"]
+type = "string"
+
+[provides.operations.videos_generate.input_schema.properties.aspect_ratio]
+description = "Aspect ratio shorthand mapped to a supported size"
+enum = ["9:16", "16:9", "4:7", "7:4"]
+type = "string"
+
+[provides.operations.videos_generate.input_schema.properties.poll_interval_ms]
+description = "Delay between video job status checks"
+type = "integer"
+default = 2500
+minimum = 1
+maximum = 60000
+
+[provides.operations.videos_generate.input_schema.properties.max_poll_attempts]
+description = "Maximum video job status checks"
+type = "integer"
+default = 120
+minimum = 1
+maximum = 120
+
+[provides.operations.videos_generate.output_schema]
+required = ["video_id", "model", "status", "mime_type", "video_b64"]
+type = "object"
+
+[provides.operations.videos_generate.output_schema.properties.video_id]
+description = "Provider video job ID"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.model]
+description = "Model used for generation"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.status]
+description = "Final provider job status"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.seconds]
+description = "Provider duration metadata"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.size]
+description = "Provider size metadata"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.mime_type]
+description = "Downloaded video MIME type"
+type = "string"
+
+[provides.operations.videos_generate.output_schema.properties.video_b64]
+description = "Base64-encoded video bytes"
+type = "string"
+
+[provides.operations.videos_generate.network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 104857600
+
+[provides.operations.videos_generate.ai_hints]
+when_to_use = "Generate a short OpenAI video and return downloaded video bytes."
+common_mistakes = [
+    "Assuming the submit response contains the final video bytes.",
+    "Using unsupported durations or sizes.",
+]
+examples = [
+    '{"prompt": "A product shot rotating on a white table", "duration_seconds": 4, "size": "1280x720"}',
+]
+related = ["openai.images.generate"]
 
 # -----------------------------------------------------------------------------
 
@@ -1961,6 +2082,13 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "openai.videos"
+requests = 20
+window_ms = 60000
+burst = 5
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "openai.audio"
 requests = 50
 window_ms = 60000
@@ -1998,6 +2126,7 @@ scope = "instance"
 [rate_limits.operation_pools]
 "openai.embeddings" = ["openai.embeddings"]
 "openai.images.generate" = ["openai.images"]
+"openai.videos.generate" = ["openai.videos"]
 "openai.audio.transcribe" = ["openai.audio"]
 "openai.audio.tts" = ["openai.audio"]
 "openai.finetune.create" = ["openai.finetune"]

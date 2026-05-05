@@ -40,6 +40,7 @@ fn capability_for_operation(op: &str) -> &str {
     match op {
         "openai.simple_chat" | "openai.get_usage" => "openai.chat",
         "openai.images.generate" => "openai.images",
+        "openai.videos.generate" => "openai.videos",
         // All other operations have capability == operation ID
         other => other,
     }
@@ -47,6 +48,23 @@ fn capability_for_operation(op: &str) -> &str {
 
 /// Generate a valid COSE capability token signed by the given key.
 fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+    generate_valid_token_with_instance(signing_key, op, None)
+}
+
+/// Generate a valid COSE capability token with an explicit connector instance binding.
+fn generate_valid_bound_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: &str,
+) -> fcp_core::CapabilityToken {
+    generate_valid_token_with_instance(signing_key, op, Some(instance_id))
+}
+
+fn generate_valid_token_with_instance(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: Option<&str>,
+) -> fcp_core::CapabilityToken {
     let cap = capability_for_operation(op);
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -56,7 +74,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
     };
     let mut cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-    let cose = CapabilityTokenBuilder::new()
+    let mut builder = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
@@ -64,9 +82,11 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
-        .expect("constraints CBOR should validate")
-        .sign(signing_key)
-        .unwrap();
+        .expect("constraints CBOR should validate");
+    if let Some(instance_id) = instance_id {
+        builder = builder.target_instance(instance_id);
+    }
+    let cose = builder.sign(signing_key).unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
 }
 
@@ -1094,6 +1114,10 @@ async fn lifecycle_introspect_operations() {
         "should include openai.images.generate"
     );
     assert!(
+        op_ids.contains(&"openai.videos.generate"),
+        "should include openai.videos.generate"
+    );
+    assert!(
         op_ids.contains(&"openai.audio.transcribe"),
         "should include openai.audio.transcribe"
     );
@@ -1837,6 +1861,144 @@ async fn images_generate_requires_correct_capability() {
         .handle_invoke(json!({
             "operation": "openai.images.generate",
             "input": { "prompt": "A cat" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+// ============================================================================
+// Video Generation Tests
+// ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn videos_generate_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.videos.generate.happy_path");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/videos"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "video-abc123",
+            "model": "sora-2",
+            "status": "queued",
+            "seconds": "4",
+            "size": "1280x720"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/video-abc123"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "id": "video-abc123",
+            "model": "sora-2",
+            "status": "completed",
+            "seconds": "4",
+            "size": "1280x720"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/v1/videos/video-abc123/content"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "video/mp4")
+                .set_body_bytes(b"video-bytes".to_vec()),
+        )
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.videos"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.videos.generate",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.videos.generate",
+            "input": {
+                "prompt": "A product shot rotating on a white table",
+                "duration_seconds": 4,
+                "size": "1280x720",
+                "poll_interval_ms": 1,
+                "max_poll_attempts": 2
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["video_id"], "video-abc123");
+    assert_eq!(result["model"], "sora-2");
+    assert_eq!(result["status"], "completed");
+    assert_eq!(result["seconds"], "4");
+    assert_eq!(result["size"], "1280x720");
+    assert_eq!(result["mime_type"], "video/mp4");
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(result["video_b64"].as_str().unwrap())
+        .unwrap();
+    assert_eq!(decoded, b"video-bytes");
+    assert_eq!(result["provenance"]["source"], "openai.videos");
+    assert!(result["provenance"]["derived"].as_bool().unwrap());
+}
+
+#[fcp_async_core::runtime::test]
+async fn videos_generate_rejects_unsupported_duration() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.videos"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.videos.generate",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.videos.generate",
+            "input": {
+                "prompt": "A cat",
+                "duration_seconds": 6
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    match result.unwrap_err() {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("duration_seconds"),
+                "error should mention duration_seconds: {message}"
+            );
+        }
+        other => panic!("Expected InvalidRequest for unsupported duration, got: {other:?}"),
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn videos_generate_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.images"]).await;
+    let token = generate_valid_token(&signing_key, "openai.images.generate");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.videos.generate",
+            "input": { "prompt": "A cat", "poll_interval_ms": 1, "max_poll_attempts": 1 },
             "capability_token": token
         }))
         .await;

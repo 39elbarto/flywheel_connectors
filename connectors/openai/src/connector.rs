@@ -16,11 +16,12 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, OpenAIAuth, OpenAIClient},
+    client::{DEFAULT_BASE_URL, OpenAIAuth, OpenAIClient, VideoPollingOptions},
     error::OpenAIError,
     types::{
         EmbeddingInput, EmbeddingModel, ImageModel, ImageQuality, ImageSize, Message, Model, Tool,
-        ToolChoice, TtsModel, TtsResponseFormat, TtsVoice, Usage, WhisperModel,
+        ToolChoice, TtsModel, TtsResponseFormat, TtsVoice, Usage, VideoDurationSeconds, VideoModel,
+        VideoSize, WhisperModel,
     },
 };
 
@@ -255,6 +256,7 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         "openai.chat" | "openai.simple_chat" | "openai.get_usage" => "openai.chat",
         "openai.embeddings" => "openai.embeddings",
         "openai.images.generate" => "openai.images",
+        "openai.videos.generate" => "openai.videos",
         "openai.audio.transcribe" => "openai.audio.transcribe",
         "openai.audio.tts" => "openai.audio.tts",
         "openai.finetune.create" => "openai.finetune.create",
@@ -280,6 +282,104 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         }
     };
     Ok(CapabilityId::from_static(capability))
+}
+
+fn parse_video_duration(input: &serde_json::Value) -> FcpResult<Option<VideoDurationSeconds>> {
+    let Some(value) = input
+        .get("duration_seconds")
+        .or_else(|| input.get("seconds"))
+    else {
+        return Ok(None);
+    };
+
+    let seconds = if let Some(number) = value.as_u64() {
+        number
+    } else if let Some(text) = value.as_str() {
+        text.parse::<u64>().map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: "duration_seconds must be one of 4, 8, or 12".into(),
+        })?
+    } else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "duration_seconds must be a number or string".into(),
+        });
+    };
+
+    VideoDurationSeconds::from_u64(seconds)
+        .map(Some)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "duration_seconds must be one of 4, 8, or 12".into(),
+        })
+}
+
+fn parse_video_size(input: &serde_json::Value) -> FcpResult<Option<VideoSize>> {
+    if let Some(size) = input.get("size").and_then(|v| v.as_str()) {
+        return match size {
+            "720x1280" => Ok(Some(VideoSize::Size720x1280)),
+            "1280x720" => Ok(Some(VideoSize::Size1280x720)),
+            "1024x1792" => Ok(Some(VideoSize::Size1024x1792)),
+            "1792x1024" => Ok(Some(VideoSize::Size1792x1024)),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unknown video size: {size}"),
+            }),
+        };
+    }
+
+    if let Some(aspect_ratio) = input.get("aspect_ratio").and_then(|v| v.as_str()) {
+        return match aspect_ratio {
+            "9:16" => Ok(Some(VideoSize::Size720x1280)),
+            "16:9" => Ok(Some(VideoSize::Size1280x720)),
+            "4:7" => Ok(Some(VideoSize::Size1024x1792)),
+            "7:4" => Ok(Some(VideoSize::Size1792x1024)),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unknown video aspect_ratio: {aspect_ratio}"),
+            }),
+        };
+    }
+
+    Ok(None)
+}
+
+fn parse_video_polling_options(input: &serde_json::Value) -> FcpResult<VideoPollingOptions> {
+    let mut options = VideoPollingOptions::default();
+
+    if let Some(value) = input.get("poll_interval_ms") {
+        let interval = value.as_u64().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "poll_interval_ms must be an integer".into(),
+        })?;
+        if !(1..=60_000).contains(&interval) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "poll_interval_ms must be between 1 and 60000".into(),
+            });
+        }
+        options.poll_interval_ms = interval;
+    }
+
+    if let Some(value) = input.get("max_poll_attempts") {
+        let attempts = value.as_u64().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "max_poll_attempts must be an integer".into(),
+        })?;
+        if !(1..=120).contains(&attempts) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "max_poll_attempts must be between 1 and 120".into(),
+            });
+        }
+        options.max_poll_attempts =
+            u32::try_from(attempts).map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "max_poll_attempts is too large".into(),
+            })?;
+    }
+
+    Ok(options)
 }
 
 /// Doctor check result.
@@ -357,6 +457,12 @@ impl OpenAIConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     /// Get total requests made.
     #[must_use]
     pub fn total_requests(&self) -> u64 {
@@ -411,6 +517,13 @@ impl OpenAIConnector {
                 .and_then(|v| v.as_str())
                 .unwrap_or(ImageModel::default().as_str());
             resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.videos.generate" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(VideoModel::default().as_str());
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:videos".to_string());
         } else if operation == "openai.audio.transcribe" {
             let model = input
                 .get("model")
@@ -976,6 +1089,76 @@ impl OpenAIConnector {
                             r#"{"prompt": "A cat", "model": "dall-e-3", "size": "1792x1024", "quality": "hd"}"#.into(),
                         ],
                         related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.videos.generate"),
+                    summary: "Generate videos from text prompts".into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "prompt": { "type": "string", "minLength": 1 },
+                            "model": {
+                                "type": "string",
+                                "enum": ["sora-2", "sora-2-pro"],
+                                "default": "sora-2"
+                            },
+                            "duration_seconds": {
+                                "type": "integer",
+                                "enum": [4, 8, 12]
+                            },
+                            "size": {
+                                "type": "string",
+                                "enum": ["720x1280", "1280x720", "1024x1792", "1792x1024"]
+                            },
+                            "aspect_ratio": {
+                                "type": "string",
+                                "enum": ["9:16", "16:9", "4:7", "7:4"]
+                            },
+                            "poll_interval_ms": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 60000,
+                                "default": 2500
+                            },
+                            "max_poll_attempts": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": 120,
+                                "default": 120
+                            }
+                        },
+                        "required": ["prompt"]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "video_id": { "type": "string" },
+                            "model": { "type": "string" },
+                            "status": { "type": "string" },
+                            "seconds": { "type": "string" },
+                            "size": { "type": "string" },
+                            "mime_type": { "type": "string" },
+                            "video_b64": { "type": "string" }
+                        }
+                    }),
+                    capability: CapabilityId::from_static("openai.videos"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Generate a short OpenAI video, poll the provider job, and return the downloaded video bytes as base64.".into(),
+                        common_mistakes: vec![
+                            "Expecting the provider to return video bytes in the initial submit response".into(),
+                            "Using unsupported durations or video sizes".into(),
+                        ],
+                        examples: vec![
+                            r#"{"prompt": "A product shot rotating on a white table", "duration_seconds": 4, "size": "1280x720"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.images.generate")],
                     },
                 },
                 OperationInfo {
@@ -1887,6 +2070,7 @@ impl OpenAIConnector {
             "openai.get_usage" => self.invoke_get_usage().await,
             "openai.embeddings" => self.invoke_embeddings(input).await,
             "openai.images.generate" => self.invoke_generate_image(input).await,
+            "openai.videos.generate" => self.invoke_generate_video(input).await,
             "openai.audio.transcribe" => self.invoke_transcribe(input).await,
             "openai.audio.tts" => self.invoke_tts(input).await,
             "openai.finetune.create" => self.invoke_finetune_create(input).await,
@@ -2319,6 +2503,70 @@ impl OpenAIConnector {
             })).collect::<Vec<_>>(),
             "provenance": {
                 "source": "openai.images",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input", "ai_generated"]
+        }))
+    }
+
+    async fn invoke_generate_video(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+
+        let model_str = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(VideoModel::default().as_str());
+
+        let model = match model_str {
+            "sora-2" => VideoModel::Sora2,
+            "sora-2-pro" => VideoModel::Sora2Pro,
+            _ => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Unknown video model: {model_str}"),
+                });
+            }
+        };
+
+        let prompt =
+            input
+                .get("prompt")
+                .and_then(|v| v.as_str())
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing prompt".into(),
+                })?;
+
+        if prompt.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Prompt cannot be empty".into(),
+            });
+        }
+
+        let seconds = parse_video_duration(&input)?;
+        let size = parse_video_size(&input)?;
+        let polling = parse_video_polling_options(&input)?;
+
+        let video = client
+            .generate_video(model, prompt, seconds, size, polling)
+            .await
+            .map_err(|e: OpenAIError| e.to_fcp_error())?;
+
+        Ok(json!({
+            "video_id": video.video_id,
+            "model": video.model,
+            "status": video.status,
+            "seconds": video.seconds,
+            "size": video.size,
+            "mime_type": video.mime_type,
+            "video_b64": base64::engine::general_purpose::STANDARD.encode(video.bytes),
+            "provenance": {
+                "source": "openai.videos",
                 "derived": true,
                 "scope": "model"
             },
@@ -3420,6 +3668,7 @@ mod tests {
         let cap = match op {
             "openai.embeddings" => "openai.embeddings",
             "openai.images.generate" => "openai.images",
+            "openai.videos.generate" => "openai.videos",
             "openai.audio.transcribe" => "openai.audio.transcribe",
             "openai.audio.tts" => "openai.audio.tts",
             "openai.finetune.create" => "openai.finetune.create",
@@ -3832,6 +4081,60 @@ mod tests {
     fn normalize_base_url_trims_whitespace() {
         let result = normalize_base_url("  https://api.openai.com  ").unwrap();
         assert_eq!(result, "https://api.openai.com");
+    }
+
+    #[test]
+    fn parse_video_duration_accepts_exact_values() {
+        let input = json!({ "duration_seconds": 8 });
+        assert_eq!(
+            parse_video_duration(&input).unwrap(),
+            Some(VideoDurationSeconds::Seconds8)
+        );
+
+        let input = json!({ "seconds": "12" });
+        assert_eq!(
+            parse_video_duration(&input).unwrap(),
+            Some(VideoDurationSeconds::Seconds12)
+        );
+    }
+
+    #[test]
+    fn parse_video_duration_rejects_unsupported_value() {
+        let input = json!({ "duration_seconds": 6 });
+        let result = parse_video_duration(&input);
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
+    }
+
+    #[test]
+    fn parse_video_size_accepts_size_and_aspect_ratio() {
+        let input = json!({ "size": "1280x720" });
+        assert_eq!(
+            parse_video_size(&input).unwrap(),
+            Some(VideoSize::Size1280x720)
+        );
+
+        let input = json!({ "aspect_ratio": "9:16" });
+        assert_eq!(
+            parse_video_size(&input).unwrap(),
+            Some(VideoSize::Size720x1280)
+        );
+    }
+
+    #[test]
+    fn parse_video_polling_options_bounds() {
+        let input = json!({
+            "poll_interval_ms": 10,
+            "max_poll_attempts": 2
+        });
+        let options = parse_video_polling_options(&input).unwrap();
+        assert_eq!(options.poll_interval_ms, 10);
+        assert_eq!(options.max_poll_attempts, 2);
+
+        let input = json!({ "max_poll_attempts": 0 });
+        assert!(matches!(
+            parse_video_polling_options(&input),
+            Err(FcpError::InvalidRequest { .. })
+        ));
     }
 
     // ═══════════════════════════════════════════════════════════════════
@@ -4264,11 +4567,11 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════
 
     #[fcp_async_core::runtime::test]
-    async fn introspection_has_22_operations() {
+    async fn introspection_has_24_operations() {
         let connector = OpenAIConnector::new();
         let value = connector.handle_introspect().await.unwrap();
         let ops = value["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 23, "Expected 23 operations");
+        assert_eq!(ops.len(), 24, "Expected 24 operations");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4329,6 +4632,7 @@ mod tests {
             "openai.get_usage",
             "openai.embeddings",
             "openai.images.generate",
+            "openai.videos.generate",
             "openai.audio.transcribe",
             "openai.audio.tts",
             "openai.finetune.create",
@@ -4421,6 +4725,7 @@ mod tests {
             "openai.chat",
             "openai.simple_chat",
             "openai.images.generate",
+            "openai.videos.generate",
             "openai.audio.transcribe",
             "openai.audio.tts",
             "openai.assistants.create",

@@ -617,10 +617,48 @@ impl GoogleMeetConnector {
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
         let req: SimulateRequest = serde_json::from_value(params)
             .map_err(|error| invalid_request(format!("Invalid simulate request: {error}")))?;
-        let response = SimulateResponse::allowed(req.id);
+        let response = self.simulate_request(req);
         serde_json::to_value(response).map_err(|error| FcpError::Internal {
             message: format!("Failed to serialize response: {error}"),
         })
+    }
+
+    fn simulate_request(&self, req: SimulateRequest) -> SimulateResponse {
+        let cap_id = match capability_for_operation(req.operation.as_str()) {
+            Ok(cap_id) => cap_id,
+            Err(error) => {
+                return SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            }
+        };
+
+        if self.client.is_none() {
+            return SimulateResponse::denied(
+                req.id,
+                FcpError::NotConfigured.to_string(),
+                FcpError::NotConfigured.error_code(),
+            );
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return SimulateResponse::denied(
+                req.id,
+                FcpError::NotHandshaken.to_string(),
+                FcpError::NotHandshaken.error_code(),
+            );
+        };
+
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &cap_id, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response = response.with_missing_capabilities(vec![cap_id.as_str().to_string()]);
+            }
+            return response;
+        }
+
+        SimulateResponse::allowed(req.id)
     }
 
     /// Handle invoke.
@@ -1405,7 +1443,7 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_manifest::ConnectorManifest;
-    use fcp_prelude::CapabilityConstraints;
+    use fcp_prelude::{CapabilityConstraints, RequestId, ZoneId};
 
     const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -1607,6 +1645,27 @@ mod tests {
 
     fn capability_for(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
         capability_for_cap(signing_key, op, MEET_SPACE_READ_CAP)
+    }
+
+    fn simulate_request_json(
+        signing_key: &Ed25519SigningKey,
+        operation: &str,
+        capability_id: &str,
+    ) -> serde_json::Value {
+        serde_json::to_value(SimulateRequest {
+            r#type: "simulate".into(),
+            id: RequestId::new(format!("sim-{operation}")),
+            connector_id: ConnectorId::from_static(CONNECTOR_ID),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: capability_for_cap(signing_key, operation, capability_id),
+            estimate_cost: false,
+            check_availability: false,
+            context: None,
+            correlation_id: None,
+        })
+        .expect("serialize simulate request")
     }
 
     async fn configure_and_handshake(
@@ -1831,6 +1890,81 @@ mod tests {
 
         assert_eq!(result["space_name"], "spaces/abc-defg-hij");
         assert_eq!(result["live_session"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_unknown_live_session_operation() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+
+        let result = connector
+            .handle_simulate(simulate_request_json(
+                &signing_key,
+                "gmeet.live.join",
+                "meeting.live_join",
+            ))
+            .await
+            .expect("simulate response");
+
+        assert_eq!(result["would_succeed"], false);
+        assert!(
+            result["failure_reason"]
+                .as_str()
+                .expect("failure reason")
+                .contains("gmeet.live.join")
+        );
+        assert!(
+            result["missing_capabilities"]
+                .as_array()
+                .expect("missing capabilities")
+                .is_empty()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_allows_supported_read_operation_with_capability() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+
+        let result = connector
+            .handle_simulate(simulate_request_json(
+                &signing_key,
+                CONFERENCE_RECORD_GET_OP,
+                MEET_CONFERENCE_READ_CAP,
+            ))
+            .await
+            .expect("simulate response");
+
+        assert_eq!(result["would_succeed"], true);
+        assert!(result.get("failure_reason").is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn simulate_denies_supported_read_operation_without_required_capability() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+
+        let result = connector
+            .handle_simulate(simulate_request_json(
+                &signing_key,
+                CONFERENCE_RECORD_GET_OP,
+                MEET_SPACE_READ_CAP,
+            ))
+            .await
+            .expect("simulate response");
+
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(
+            result["missing_capabilities"]
+                .as_array()
+                .expect("missing capabilities")
+                .first()
+                .and_then(serde_json::Value::as_str),
+            Some(MEET_CONFERENCE_READ_CAP)
+        );
     }
 
     #[test]

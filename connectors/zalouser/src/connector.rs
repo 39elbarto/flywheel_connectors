@@ -5,11 +5,13 @@ use serde_json::{Value, json};
 
 const CONNECTOR_ID: &str = "fcp.zalouser";
 const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str = "This first slice is a guarded helper-process contract. It does not bundle or emulate the upstream personal-account runtime.";
+const BOUNDARY: &str = "This first slice is a planned-only helper-process contract. It does not bundle or emulate the upstream personal-account runtime.";
+const PLANNED_HELPER_OPERATION_ID: &str = "zalouser.helper.exec";
 const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
 const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
 const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
+const EXEC_DISABLED_REASON_CODE: &str = "helper_exec_disabled";
 
 pub struct ZalouserConnector {
     base: Arc<BaseConnector>,
@@ -46,6 +48,7 @@ impl ZalouserConnector {
             "protocol_version": "2.0",
             "capabilities": [],
             "planned_capabilities": ["zalouser.helper"],
+            "execution_enabled": false,
             "surface_status": "quarantined",
             "surface_status_rationale": "High-risk surface requiring explicit operator approval"
         }))
@@ -56,6 +59,7 @@ impl ZalouserConnector {
             "status": if self.configured { "degraded" } else { "unconfigured" },
             "configured": self.configured,
             "handshaken": self.handshaken,
+            "execution_enabled": false,
             "live_requests_supported": false,
         }))
     }
@@ -67,6 +71,7 @@ impl ZalouserConnector {
                 { "name": "configuration", "passed": self.configured, "critical": true },
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
                 { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
+                { "name": "helper_exec", "passed": false, "critical": false, "reason_code": EXEC_DISABLED_REASON_CODE, "message": "No helper process policy is implemented; manifest forbids system.exec." },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ]
         }))
@@ -91,7 +96,8 @@ impl ZalouserConnector {
         Ok(json!({
             "status": status,
             "reason_code": reason_code,
-            "message": message
+            "message": message,
+            "execution_enabled": false
         }))
     }
 
@@ -100,10 +106,11 @@ impl ZalouserConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "zalouser.helper.exec", "summary": "Execute one guarded helper operation", "capability": "zalouser.helper", "risk_level": "high", "safety_tier": "risky", "idempotency": "none", "implemented": false }
+                { "id": PLANNED_HELPER_OPERATION_ID, "summary": "Planned guarded helper operation", "capability": "zalouser.helper", "risk_level": "high", "safety_tier": "risky", "requires_approval": "policy", "idempotency": "none", "implemented": false, "execution_enabled": false, "reason_code": EXEC_DISABLED_REASON_CODE }
             ],
             "surface_status": "quarantined",
             "surface_status_rationale": "High-risk surface requiring explicit operator approval",
+            "helper_process_policy": null,
             "events": [],
             "resource_types": []
         }))
@@ -122,7 +129,7 @@ impl ZalouserConnector {
 
         Err(FcpError::InvalidRequest {
             code: 1002,
-            message: if operation == "zalouser.helper.exec" {
+            message: if operation == PLANNED_HELPER_OPERATION_ID {
                 format!(
                     "Operation {operation} is planned but not implemented in this connector slice"
                 )
@@ -142,7 +149,13 @@ impl ZalouserConnector {
         Ok(json!({
             "allowed": false,
             "simulate_capability": "unsupported",
-            "reason": if operation == "zalouser.helper.exec" {
+            "reason_code": if operation == PLANNED_HELPER_OPERATION_ID {
+                UNIMPLEMENTED_REASON_CODE
+            } else {
+                "unknown_operation"
+            },
+            "execution_enabled": false,
+            "reason": if operation == PLANNED_HELPER_OPERATION_ID {
                 UNIMPLEMENTED_MESSAGE
             } else {
                 "Unknown operation."
@@ -194,13 +207,15 @@ mod tests {
             .await
             .expect("health should succeed");
         assert_eq!(health["status"], "degraded");
-        assert_eq!(health["live_requests_supported"], false);
+        assert!(!health["execution_enabled"].as_bool().expect("bool"));
+        assert!(!health["live_requests_supported"].as_bool().expect("bool"));
 
         let introspect = connector
             .handle_introspect()
             .await
             .expect("introspect should succeed");
         assert_eq!(introspect["surface_status"], "quarantined");
+        assert_eq!(introspect["helper_process_policy"], Value::Null);
         assert!(
             introspect["operations"]
                 .as_array()
@@ -208,6 +223,10 @@ mod tests {
                 .iter()
                 .all(|operation| {
                     operation.get("implemented").and_then(Value::as_bool) == Some(false)
+                        && operation.get("execution_enabled").and_then(Value::as_bool)
+                            == Some(false)
+                        && operation.get("requires_approval").and_then(Value::as_str)
+                            == Some("policy")
                 })
         );
 
@@ -232,16 +251,89 @@ mod tests {
             .expect("handshake should succeed");
 
         let error = connector
-            .handle_invoke(json!({"operation_id": "zalouser.helper.exec"}))
+            .handle_invoke(json!({"operation_id": PLANNED_HELPER_OPERATION_ID}))
             .await
             .expect_err("invoke should refuse planned operation");
         assert!(error.to_string().contains("not implemented"));
 
         let simulate = connector
-            .handle_simulate(json!({"operation_id": "zalouser.helper.exec"}))
+            .handle_simulate(json!({"operation_id": PLANNED_HELPER_OPERATION_ID}))
             .await
             .expect("simulate should succeed");
-        assert_eq!(simulate["allowed"], false);
+        assert!(!simulate["allowed"].as_bool().expect("bool"));
         assert_eq!(simulate["simulate_capability"], "unsupported");
+        assert_eq!(simulate["reason_code"], UNIMPLEMENTED_REASON_CODE);
+        assert!(!simulate["execution_enabled"].as_bool().expect("bool"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn every_introspected_operation_denies_invoke_and_simulate() {
+        let mut connector = ZalouserConnector::new();
+        connector
+            .handle_configure(json!({}))
+            .await
+            .expect("configure should succeed");
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+
+        let introspect = connector
+            .handle_introspect()
+            .await
+            .expect("introspect should succeed");
+        let operations = introspect["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert!(!operations.is_empty());
+
+        for operation in operations {
+            let operation_id = operation["id"].as_str().expect("operation id");
+            let error = connector
+                .handle_invoke(json!({"operation_id": operation_id}))
+                .await
+                .expect_err("planned operation should deny invoke");
+            assert!(error.to_string().contains("not implemented"));
+
+            let simulate = connector
+                .handle_simulate(json!({"operation_id": operation_id}))
+                .await
+                .expect("simulate should succeed");
+            assert!(!simulate["allowed"].as_bool().expect("bool"));
+            assert_eq!(simulate["reason_code"], UNIMPLEMENTED_REASON_CODE);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn malformed_and_unknown_operations_are_denied_without_execution() {
+        let mut connector = ZalouserConnector::new();
+        connector
+            .handle_configure(json!({}))
+            .await
+            .expect("configure should succeed");
+        connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+
+        let malformed = connector
+            .handle_invoke(json!({"operation_id": 7}))
+            .await
+            .expect_err("malformed operation id should fail");
+        assert!(malformed.to_string().contains("Missing operation_id"));
+
+        let unknown = connector
+            .handle_invoke(json!({"operation_id": "zalouser.unknown"}))
+            .await
+            .expect_err("unknown operation should fail");
+        assert!(unknown.to_string().contains("Unknown operation"));
+
+        let simulate = connector
+            .handle_simulate(json!({"operation_id": "zalouser.unknown"}))
+            .await
+            .expect("simulate should succeed");
+        assert!(!simulate["allowed"].as_bool().expect("bool"));
+        assert_eq!(simulate["reason_code"], "unknown_operation");
+        assert!(!simulate["execution_enabled"].as_bool().expect("bool"));
     }
 }

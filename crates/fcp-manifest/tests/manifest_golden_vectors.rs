@@ -4,7 +4,7 @@
 //! edge cases and providing structured test logging.
 
 use chrono::Utc;
-use fcp_manifest::{ConnectorManifest, ManifestError};
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode, ManifestError};
 use insta::assert_json_snapshot;
 use serde_json::json;
 use std::path::Path;
@@ -4918,6 +4918,55 @@ fn terraform_full_manifest_parses_with_all_operations() {
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
     assert_eq!(pools.pools.len(), 4);
+}
+
+// =============================================================================
+// ZaloUser connector tests
+// =============================================================================
+
+#[test]
+fn zalouser_planned_only_manifest_forbids_exec_until_helper_policy_exists() {
+    let _log = TestLog::new(
+        "zalouser_planned_only_manifest_forbids_exec_until_helper_policy_exists",
+        "fcp-manifest",
+        Some("fcp.zalouser"),
+        Some("0.1.0"),
+        Some(4),
+    );
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("../../connectors/zalouser/manifest.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read zalouser manifest: {err}"));
+    let parsed = ConnectorManifest::parse_str(&raw).expect("valid full zalouser manifest");
+
+    assert_eq!(parsed.connector.id.as_str(), "fcp.zalouser");
+    assert_eq!(parsed.connector.status.to_string(), "quarantined");
+    assert!(parsed.capabilities.required.is_empty());
+    assert!(
+        parsed
+            .capabilities
+            .optional
+            .iter()
+            .any(|capability| capability.as_str() == "zalouser.helper")
+    );
+    assert!(
+        parsed
+            .capabilities
+            .forbidden
+            .iter()
+            .any(|capability| capability.as_str() == "system.exec")
+    );
+    assert!(parsed.sandbox.deny_exec);
+
+    let operation = parsed
+        .provides
+        .operations
+        .get("zalouser.helper.exec")
+        .expect("planned helper operation");
+    assert_eq!(operation.capability.as_str(), "zalouser.helper");
+    assert_eq!(operation.requires_approval, ManifestApprovalMode::Policy);
+    assert_eq!(operation.risk_level, fcp_core::RiskLevel::High);
+    assert_eq!(operation.safety_tier, fcp_core::SafetyTier::Risky);
 }
 
 // =============================================================================

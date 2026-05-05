@@ -5,21 +5,21 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:de1046d2cba6595464ea525fbf2946573103ecf19d2eb8851ffc89932b8df852"
+interface_hash = "blake3-256:fcp.interface.v2:401f65a8b8a6d6b5891b375a4bc76f4db5b28b537d97bc1028cf016845a2c6e4"
 
 [connector]
 id = "fcp.zalouser"
 name = "Zalo User"
 version = "0.1.0"
 status = "quarantined"
-description = "Guarded helper-process connector for Zalo personal account automation"
-archetypes = ["cli-process"]
+description = "Planned-only Zalo personal account automation connector"
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
-model = "local-cache"
+model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: explicit helper-process contract only. No bundled personal-account runtime is shipped in this crate."
+migration_hint = "First slice: planned-only helper-process contract. No bundled personal-account runtime or exec grant is shipped in this crate."
 
 [zones]
 home = "z:owner"
@@ -27,24 +27,24 @@ allowed_sources = ["z:owner"]
 allowed_targets = ["z:owner"]
 
 [capabilities]
-required = ["system.exec"]
-optional = ["network.egress", "network.dns", "network.tls.sni"]
-forbidden = ["network.listen"]
+required = []
+optional = ["zalouser.helper", "network.egress", "network.dns", "network.tls.sni"]
+forbidden = ["network.listen", "system.exec"]
 
 [sandbox]
-profile = "medium"
+profile = "strict"
 memory_mb = 96
 cpu_percent = 25
 wall_clock_timeout_ms = 60000
-deny_exec = false
+deny_exec = true
 deny_ptrace = true
 
 [provides.operations."zalouser.helper.exec"]
-description = "Execute one guarded helper operation against the Zalo personal-account runtime"
+description = "Planned guarded helper operation for a future Zalo personal-account runtime"
 capability = "zalouser.helper"
 risk_level = "high"
 safety_tier = "risky"
-requires_approval = "none"
+requires_approval = "policy"
 idempotency = "none"
 
 [provides.operations."zalouser.helper.exec".input_schema]

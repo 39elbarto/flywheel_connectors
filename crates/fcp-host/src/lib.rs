@@ -53,6 +53,7 @@ mod resume_handshake;
 mod rollout;
 mod supervisor;
 mod supply_chain;
+mod tailnet_evidence;
 
 pub use admin_state::*;
 pub use agent_api::*;
@@ -77,3 +78,4 @@ pub use resume_handshake::*;
 pub use rollout::*;
 pub use supervisor::*;
 pub use supply_chain::*;
+pub use tailnet_evidence::*;

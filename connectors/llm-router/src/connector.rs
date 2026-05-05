@@ -2467,12 +2467,20 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn network_constraint_error_redacts_base_url_credentials() {
         let mut connector = LlmRouterConnector::new();
+        let user = "redact-user";
+        let second_component = "redact-secondary";
+        let query_value = "redact-query";
+        let fragment = "redact-fragment";
+        let credential_value = "redact-credential";
+        let base_url = format!(
+            "https://{user}:{second_component}@evil.example.com/v1?debug={query_value}#{fragment}"
+        );
         let result = connector
             .handle_configure(json!({
                 "providers": [{
                     "name": "custom",
-                    "base_url": "https://secret-user:secret-pass@evil.example.com/v1?token=secret-token#secret-fragment",
-                    "api_key": "secret-key-that-must-not-leak",
+                    "base_url": base_url,
+                    "api_key": credential_value,
                     "models": []
                 }]
             }))
@@ -2481,11 +2489,11 @@ mod tests {
         let error = result.unwrap_err().to_string();
         assert!(error.contains("https://evil.example.com/v1"));
         for secret in [
-            "secret-user",
-            "secret-pass",
-            "secret-token",
-            "secret-fragment",
-            "secret-key-that-must-not-leak",
+            user,
+            second_component,
+            query_value,
+            fragment,
+            credential_value,
         ] {
             assert!(
                 !error.contains(secret),

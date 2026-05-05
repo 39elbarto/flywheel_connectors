@@ -213,7 +213,7 @@ impl WebhookStore {
             });
         }
 
-        let events = self.events.entry(endpoint_id.clone()).or_default();
+        let events = self.events.entry(endpoint_id).or_default();
 
         // Evict oldest events if at capacity
         if events.len() >= MAX_EVENTS_PER_ENDPOINT {
@@ -398,12 +398,11 @@ mod tests {
             .unwrap();
         let result = store.create_endpoint("/hooks/github".into(), "s2".into(), vec![]);
         assert!(result.is_err());
-        match result.unwrap_err() {
-            WebhookReceiverError::DuplicatePath { path } => {
-                assert_eq!(path, "/hooks/github");
-            }
-            other => panic!("expected DuplicatePath, got {other:?}"),
-        }
+        let err = result.unwrap_err();
+        assert!(matches!(
+            &err,
+            WebhookReceiverError::DuplicatePath { path } if path == "/hooks/github"
+        ));
     }
 
     #[test]
@@ -561,16 +560,13 @@ mod tests {
         let err = store
             .record_event(duplicate)
             .expect_err("duplicate event_id must be rejected");
-        match err {
+        assert!(matches!(
+            &err,
             WebhookReceiverError::DuplicateEvent {
                 endpoint_id,
                 event_id,
-            } => {
-                assert_eq!(endpoint_id, ep.endpoint_id);
-                assert_eq!(event_id, "evt_dup");
-            }
-            other => panic!("expected DuplicateEvent, got {other:?}"),
-        }
+            } if endpoint_id == &ep.endpoint_id && event_id == "evt_dup"
+        ));
         assert_eq!(store.total_event_count(), 1);
     }
 
@@ -584,11 +580,11 @@ mod tests {
             .create_endpoint("/hooks/b".into(), "s2".into(), vec![])
             .unwrap();
 
-        let mut event_a = WebhookEvent::new(ep1.endpoint_id.clone(), json!({"a": 1}), true, None);
+        let mut event_a = WebhookEvent::new(ep1.endpoint_id, json!({"a": 1}), true, None);
         event_a.event_id = "evt_shared".into();
         store.record_event(event_a).unwrap();
 
-        let mut event_b = WebhookEvent::new(ep2.endpoint_id.clone(), json!({"b": 2}), true, None);
+        let mut event_b = WebhookEvent::new(ep2.endpoint_id, json!({"b": 2}), true, None);
         event_b.event_id = "evt_shared".into();
         store.record_event(event_b).unwrap();
 
@@ -664,16 +660,13 @@ mod tests {
         let err = store
             .record_event(replay)
             .expect_err("dedup state must outlive event-body eviction");
-        match err {
+        assert!(matches!(
+            &err,
             WebhookReceiverError::DuplicateEvent {
                 endpoint_id,
                 event_id,
-            } => {
-                assert_eq!(endpoint_id, ep.endpoint_id);
-                assert_eq!(event_id, "evt_replay");
-            }
-            other => panic!("expected DuplicateEvent, got {other:?}"),
-        }
+            } if endpoint_id == &ep.endpoint_id && event_id == "evt_replay"
+        ));
     }
 
     #[test]

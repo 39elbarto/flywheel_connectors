@@ -21,6 +21,9 @@ use crate::{
     types::WebhookProvider,
 };
 
+const INGRESS_LISTENER_STATUS: &str = "deferred";
+const INGRESS_LISTENER_MESSAGE: &str = "Native HTTP ingress listener is not implemented in this connector build; endpoint URLs are provisioning metadata only until a host or gateway ingress adapter binds them.";
+
 /// Parsed and validated webhook receiver configuration.
 #[derive(Debug, Clone)]
 struct WebhookReceiverConfig {
@@ -65,6 +68,8 @@ impl WebhookReceiverConfig {
             public_base_url_accepted,
             publicly_routable,
             public_base_url_message,
+            ingress_listener_status: INGRESS_LISTENER_STATUS.to_string(),
+            ingress_listener_message: INGRESS_LISTENER_MESSAGE.to_string(),
             endpoint_count: store.endpoint_count(),
             active_endpoint_count: store.active_endpoint_count(),
             invalid_endpoint_count: endpoints_with_issues.len(),
@@ -86,6 +91,8 @@ struct ProvisioningReadiness {
     public_base_url_accepted: bool,
     publicly_routable: bool,
     public_base_url_message: String,
+    ingress_listener_status: String,
+    ingress_listener_message: String,
     endpoint_count: usize,
     active_endpoint_count: usize,
     invalid_endpoint_count: usize,
@@ -181,6 +188,8 @@ impl WebhookReceiverConnector {
         self.base.set_configured(true);
         Ok(json!({
             "public_base_url": self.store.public_base_url(),
+            "ingress_listener_status": INGRESS_LISTENER_STATUS,
+            "ingress_listener_message": INGRESS_LISTENER_MESSAGE,
         }))
     }
 
@@ -238,6 +247,8 @@ impl WebhookReceiverConnector {
             "endpoints": self.store.endpoint_count(),
             "events": self.store.total_event_count(),
             "public_base_url": self.config.as_ref().map(|config| config.public_base_url.clone()),
+            "ingress_listener_status": INGRESS_LISTENER_STATUS,
+            "ingress_listener_message": INGRESS_LISTENER_MESSAGE,
         }))
     }
 
@@ -292,6 +303,12 @@ impl WebhookReceiverConnector {
                     ))
                 },
                 critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "ingress_listener".into(),
+                passed: false,
+                message: Some(readiness.ingress_listener_message),
+                critical: false,
             });
         }
 
@@ -349,7 +366,10 @@ impl WebhookReceiverConnector {
             return Self::serialize_self_check_report(report);
         }
 
-        let mut report = SelfCheckReport::ok();
+        let mut report = SelfCheckReport::degraded(
+            "ingress_listener_deferred",
+            readiness.ingress_listener_message.clone(),
+        );
         report.details = Some(json!({ "provisioning": readiness }));
         Self::serialize_self_check_report(report)
     }
@@ -361,6 +381,10 @@ impl WebhookReceiverConnector {
             "connector_id": "fcp.webhook-receiver",
             "version": "0.1.0",
             "operations": serde_json::to_value(&ops).unwrap_or_default(),
+            "ingress_listener": {
+                "status": INGRESS_LISTENER_STATUS,
+                "message": INGRESS_LISTENER_MESSAGE,
+            },
         }))
     }
 
@@ -447,12 +471,13 @@ impl WebhookReceiverConnector {
         }
 
         let provider = parse_provider(input)?;
-        let signing_secret = optional_str(input, "signing_secret")?
+        let provided_credential = optional_str(input, "signing_secret")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let signing_secret_generated = signing_secret.is_none();
-        let signing_secret = signing_secret.unwrap_or_else(|| generate_signing_secret(provider));
+        let credential_generated = provided_credential.is_none();
+        let endpoint_credential =
+            provided_credential.unwrap_or_else(|| generate_signing_secret(provider));
         let signature_header = optional_str(input, "signature_header")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
@@ -472,7 +497,7 @@ impl WebhookReceiverConnector {
 
         let endpoint = self.store.create_endpoint_profile(
             path.to_string(),
-            signing_secret,
+            endpoint_credential,
             allowed_sources,
             provider,
             signature_header,
@@ -487,7 +512,7 @@ impl WebhookReceiverConnector {
             "signature_algorithm": endpoint.signature_algorithm,
             "recommended_events": endpoint.provider.recommended_events(),
             "signing_secret": endpoint.signing_secret,
-            "signing_secret_generated": signing_secret_generated,
+            "signing_secret_generated": credential_generated,
             "secret_last_rotated_at": endpoint.secret_last_rotated_at.to_rfc3339(),
         }))
     }
@@ -498,15 +523,16 @@ impl WebhookReceiverConnector {
     ) -> Result<serde_json::Value, WebhookReceiverError> {
         let endpoint_id = require_str(input, "endpoint_id")?;
         let provider = self.store.get_endpoint(endpoint_id)?.provider;
-        let signing_secret = optional_str(input, "signing_secret")?
+        let provided_credential = optional_str(input, "signing_secret")?
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .map(str::to_string);
-        let signing_secret_generated = signing_secret.is_none();
-        let signing_secret = signing_secret.unwrap_or_else(|| generate_signing_secret(provider));
+        let credential_generated = provided_credential.is_none();
+        let endpoint_credential =
+            provided_credential.unwrap_or_else(|| generate_signing_secret(provider));
         let endpoint = self
             .store
-            .rotate_endpoint_secret(endpoint_id, signing_secret)?;
+            .rotate_endpoint_secret(endpoint_id, endpoint_credential)?;
 
         Ok(json!({
             "endpoint_id": endpoint.endpoint_id,
@@ -516,7 +542,7 @@ impl WebhookReceiverConnector {
             "signature_algorithm": endpoint.signature_algorithm,
             "recommended_events": endpoint.provider.recommended_events(),
             "signing_secret": endpoint.signing_secret,
-            "signing_secret_generated": signing_secret_generated,
+            "signing_secret_generated": credential_generated,
             "secret_last_rotated_at": endpoint.secret_last_rotated_at.to_rfc3339(),
         }))
     }
@@ -783,12 +809,12 @@ fn operations_info() -> Vec<OperationInfo> {
     vec![
         op_info(
             "webhook.endpoints.create",
-            "Register a new webhook endpoint with provider-aware verification defaults",
+            "Register webhook endpoint metadata with provider-aware verification defaults",
             json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
-                    "path": { "type": "string", "description": "URL path to listen on" },
+                    "path": { "type": "string", "description": "URL path to provision for a host or gateway ingress adapter" },
                     "provider": { "type": "string", "description": "Provider preset: generic, github, stripe, slack, twilio" },
                     "signing_secret": { "type": "string", "description": "Optional signing secret; omitted values are generated in-memory" },
                     "signature_header": { "type": "string", "description": "Override the expected signature header for generic endpoints" },
@@ -816,10 +842,11 @@ fn operations_info() -> Vec<OperationInfo> {
             SafetyTier::Risky,
             IdempotencyClass::Strict,
             AgentHint {
-                when_to_use: "Register a new webhook endpoint and auto-populate provider verification settings.".into(),
+                when_to_use: "Register webhook endpoint metadata and auto-populate provider verification settings for a host or gateway ingress adapter.".into(),
                 common_mistakes: vec![
                     "Using a provider preset with a mismatched signature header or algorithm.".into(),
                     "Configuring a localhost public_base_url and expecting the endpoint to be reachable from external webhook providers.".into(),
+                    "Assuming this connector build opens an HTTP listener; native ingress is explicitly deferred.".into(),
                 ],
                 examples: vec![
                     r#"{"path": "/hooks/github", "provider": "github"}"#.into(),
@@ -1069,6 +1096,16 @@ mod tests {
         assert!(ids.contains(&"webhook.endpoints.delete"));
         assert!(ids.contains(&"webhook.endpoints.list"));
         assert!(ids.contains(&"webhook.events.recent"));
+    }
+
+    #[test]
+    fn manifest_is_honest_about_deferred_ingress_listener() {
+        let manifest = include_str!("../manifest.toml");
+
+        assert!(manifest.contains("native HTTP ingress is deferred in this build"));
+        assert!(manifest.contains("streaming = false"));
+        assert!(!manifest.contains("\"network.listen\""));
+        assert!(manifest.contains("native ingress is explicitly deferred"));
     }
 
     #[test]

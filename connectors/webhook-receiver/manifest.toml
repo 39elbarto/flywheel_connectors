@@ -11,17 +11,16 @@ interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000
 id = "fcp.webhook-receiver"
 name = "Webhook Receiver Connector"
 version = "0.1.0"
-description = "FCP connector for receiving inbound webhooks, validating signatures, and routing payloads to the mesh"
+description = "FCP connector for provisioning webhook endpoints and replay-safe event storage; native HTTP ingress is deferred in this build"
 archetypes = [
     "operational",
-    "streaming",
 ]
 format = "wasi"
 
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores registered webhook endpoints, signing secrets, and last-seen event IDs for deduplication."
+migration_hint = "Stores registered webhook endpoint metadata, signing secrets, and last-seen event IDs for deduplication; endpoint URLs require a host or gateway ingress adapter."
 
 [zones]
 home = "z:work"
@@ -38,7 +37,6 @@ forbidden = [
 
 [capabilities]
 required = [
-    "network.listen",
     "storage.state",
 ]
 optional = [
@@ -56,7 +54,7 @@ forbidden = [
 ]
 
 [provides.operations."webhook.endpoints.create"]
-description = "Register a new webhook endpoint with provider-aware verification defaults"
+description = "Register webhook endpoint metadata with provider-aware verification defaults"
 capability = "webhook.endpoints.write"
 risk_level = "medium"
 safety_tier = "risky"
@@ -72,7 +70,7 @@ description = "IP CIDR ranges allowed to send webhooks"
 type = "array"
 
 [provides.operations."webhook.endpoints.create".input_schema.properties.path]
-description = "URL path to listen on"
+description = "URL path to provision for a host or gateway ingress adapter"
 type = "string"
 
 [provides.operations."webhook.endpoints.create".input_schema.properties.provider]
@@ -153,10 +151,11 @@ total_timeout_ms = 10000
 max_response_bytes = 1048576
 
 [provides.operations."webhook.endpoints.create".ai_hints]
-when_to_use = "Register a new webhook endpoint and auto-populate provider verification settings."
+when_to_use = "Register webhook endpoint metadata and auto-populate provider verification settings for a host or gateway ingress adapter."
 common_mistakes = [
     "Using a provider preset with a mismatched signature header or algorithm.",
     "Configuring a localhost public_base_url and expecting external webhook providers to reach it.",
+    "Assuming this connector build opens an HTTP listener; native ingress is explicitly deferred.",
 ]
 examples = [
     '{"path": "/hooks/github", "provider": "github"}',
@@ -411,7 +410,7 @@ examples = ['{"endpoint_id": "ep_abc123", "limit": 20}']
 related = ["webhook.endpoints.list"]
 
 [event_caps]
-streaming = true
+streaming = false
 replay = true
 min_buffer_events = 1000
 

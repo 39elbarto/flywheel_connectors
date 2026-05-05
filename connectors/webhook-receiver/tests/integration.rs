@@ -54,6 +54,13 @@ async fn lifecycle_full() {
     assert_eq!(h["status"], "healthy");
     assert_eq!(h["configured"], true);
     assert_eq!(h["handshaken"], true);
+    assert_eq!(h["ingress_listener_status"], "deferred");
+    assert!(
+        h["ingress_listener_message"]
+            .as_str()
+            .unwrap()
+            .contains("endpoint URLs are provisioning metadata only")
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -74,10 +81,15 @@ async fn lifecycle_shutdown() {
 async fn lifecycle_self_check_ready() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
-    assert_eq!(check["status"], "ok");
+    assert_eq!(check["status"], "degraded");
+    assert_eq!(check["reason_code"], "ingress_listener_deferred");
     assert_eq!(
         check["details"]["provisioning"]["public_base_url"],
         "https://hooks.flywheel.test"
+    );
+    assert_eq!(
+        check["details"]["provisioning"]["ingress_listener_status"],
+        "deferred"
     );
 }
 
@@ -93,7 +105,14 @@ async fn lifecycle_self_check_unconfigured() {
 async fn lifecycle_doctor_healthy() {
     let c = setup_connector().await;
     let doc = c.handle_doctor().await.unwrap();
-    assert_eq!(doc["status"], "healthy");
+    assert_eq!(doc["status"], "degraded");
+    let checks = doc["checks"].as_array().expect("doctor checks");
+    let ingress = checks
+        .iter()
+        .find(|check| check["name"] == "ingress_listener")
+        .expect("ingress listener check");
+    assert_eq!(ingress["passed"], false);
+    assert_eq!(ingress["critical"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -110,6 +129,7 @@ async fn lifecycle_introspect() {
     let ops = intro["operations"].as_array().expect("operations array");
     assert!(!ops.is_empty(), "introspect should list operations");
     assert!(ops[0]["id"].is_string());
+    assert_eq!(intro["ingress_listener"]["status"], "deferred");
 }
 
 #[fcp_async_core::runtime::test]

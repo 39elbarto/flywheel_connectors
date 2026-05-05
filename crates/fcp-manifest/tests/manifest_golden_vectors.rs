@@ -13,6 +13,7 @@ use uuid::Uuid;
 
 const PLACEHOLDER_HASH: &str =
     "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000";
+const INTERFACE_HASH_ASSIGNMENT: &str = "interface_hash = \"";
 
 struct TestLog {
     test_name: &'static str,
@@ -92,7 +93,55 @@ fn with_computed_hash(raw: &str) -> String {
     let computed = unchecked
         .compute_interface_hash()
         .expect("compute interface hash");
-    raw.replace(PLACEHOLDER_HASH, &computed.to_string())
+    let before = unchecked.manifest.interface_hash.to_string();
+    let after = computed.to_string();
+
+    if before != after {
+        println!(
+            "{}",
+            json!({
+                "module": "fcp-manifest",
+                "phase": "normalize_interface_hash",
+                "connector_id": unchecked.connector.id.as_str(),
+                "interface_hash_before": before,
+                "interface_hash_after": after,
+                "result": "refresh",
+            })
+        );
+    }
+
+    replace_interface_hash(raw, &after)
+}
+
+fn replace_interface_hash(raw: &str, replacement: &str) -> String {
+    let mut rendered = String::with_capacity(raw.len() + replacement.len());
+    let mut replaced = false;
+
+    for segment in raw.split_inclusive('\n') {
+        let (line, newline) = segment
+            .strip_suffix('\n')
+            .map_or((segment, ""), |line| (line, "\n"));
+
+        if let Some((prefix, value_tail)) = line.split_once(INTERFACE_HASH_ASSIGNMENT) {
+            let (_, suffix) = value_tail
+                .split_once('"')
+                .expect("interface_hash assignment must close quoted value");
+
+            rendered.push_str(prefix);
+            rendered.push_str(INTERFACE_HASH_ASSIGNMENT);
+            rendered.push_str(replacement);
+            rendered.push('"');
+            rendered.push_str(suffix);
+            rendered.push_str(newline);
+            replaced = true;
+        } else {
+            rendered.push_str(line);
+            rendered.push_str(newline);
+        }
+    }
+
+    assert!(replaced, "manifest vector must declare interface_hash");
+    rendered
 }
 
 fn base_manifest_toml(interface_hash: &str) -> String {
@@ -870,7 +919,7 @@ allowed_targets = ["z:work"]
 forbidden = []
 
 [capabilities]
-required = ["network.dns", "network.egress"]
+required = ["network.dns", "network.egress", "data.read", "data.write", "data.delete"]
 optional = []
 forbidden = ["system.exec"]
 
@@ -1665,10 +1714,12 @@ fn twilio_full_manifest_parses_with_all_operations() {
         "twilio.video.room.participants",
         "twilio.video.recording.list",
         // Webhook handling
+        "twilio.webhook.validate_signature",
+        "twilio.webhook.evaluate_inbound_policy",
+        "twilio.webhook.ingest_request",
         "twilio.webhook.parse_sms_event",
         "twilio.webhook.parse_status_callback",
         "twilio.webhook.parse_voice_event",
-        "twilio.webhook.validate_signature",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -1869,6 +1920,7 @@ fn github_full_manifest_parses_with_all_operations() {
         "github.trigger_workflow",
         "github.get_file_content",
         "github.search_code",
+        "github.process_webhook",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -2056,6 +2108,9 @@ fn stripe_full_manifest_parses_with_all_operations() {
         "stripe.delete_customer",
         "stripe.create_payment_intent",
         "stripe.get_payment_intent",
+        "stripe.confirm_payment_intent",
+        "stripe.capture_payment_intent",
+        "stripe.cancel_payment_intent",
         "stripe.create_refund",
         "stripe.create_subscription",
         "stripe.get_subscription",
@@ -2442,6 +2497,7 @@ fn gmail_full_manifest_parses_with_all_operations() {
         "gmail.trash_message",
         "gmail.get_thread",
         "gmail.get_draft",
+        "gmail.create_draft",
         "gmail.send_draft",
     ];
     for op_name in &expected_ops {
@@ -2453,9 +2509,9 @@ fn gmail_full_manifest_parses_with_all_operations() {
     let hash = unchecked.compute_interface_hash().expect("hash");
     println!("GMAIL_INTERFACE_HASH={hash}");
 
-    // Verify 4 rate limit pools
+    // Verify 5 rate limit pools
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 #[test]
@@ -2631,6 +2687,8 @@ fn youtube_full_manifest_parses_with_all_operations() {
         "youtube.get_captions",
         "youtube.get_caption_transcript",
         "youtube.upload_caption",
+        "youtube.get_analytics",
+        "youtube.upload_video",
     ];
     for op_name in &expected_ops {
         assert!(ops.contains_key(*op_name), "missing operation: {op_name}");
@@ -3468,7 +3526,7 @@ test_op = ["api"]
     let decls = rate_limits.to_declarations();
 
     assert_eq!(decls.limits.len(), 1);
-    let pool = &decls.limits[0];
+    let pool = decls.limits.first().expect("one rate-limit declaration");
     assert_eq!(pool.id, "api");
     assert_eq!(pool.description, "API limit");
     assert_eq!(pool.config.requests, 100);
@@ -3514,7 +3572,11 @@ fn openai_full_manifest_parses_with_all_operations() {
         "get_usage",
         "embeddings",
         "images_generate",
+        "videos_generate",
         "audio_transcribe",
+        "realtime_transcribe",
+        "realtime_voice",
+        "realtime_browser_session",
         "audio_tts",
         "finetune_create",
         "finetune_list",
@@ -3542,9 +3604,9 @@ fn openai_full_manifest_parses_with_all_operations() {
     let hash = unchecked.compute_interface_hash().expect("hash");
     println!("OPENAI_INTERFACE_HASH={hash}");
 
-    // Verify 9 rate limit pools
+    // Verify 10 rate limit pools
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 9);
+    assert_eq!(pools.pools.len(), 10);
 
     // Verify operation pool mappings exist for all pooled operations
     let op_pools = &pools.operation_pools;
@@ -3820,6 +3882,7 @@ fn google_ai_full_manifest_parses_with_all_operations() {
         "google-ai.embed_content",
         "google-ai.generate_content",
         "google-ai.generate_content_stream",
+        "google-ai.live.create_browser_session",
         "google-ai.get_model",
         "google-ai.get_usage",
         "google-ai.list_models",
@@ -4010,6 +4073,7 @@ fn telegram_manifest_parses_as_valid_toml_with_expected_structure() {
         "telegram.send_media",
         "telegram.get_file",
         "telegram.answer_callback_query",
+        "telegram.ingest_webhook_update",
     ];
     for op_name in &expected_ops {
         assert!(
@@ -4339,7 +4403,7 @@ fn hubspot_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 11);
+    assert_eq!(pools.pools.len(), 12);
 }
 
 // =============================================================================
@@ -4512,7 +4576,7 @@ fn dropbox_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -4639,7 +4703,7 @@ fn elasticsearch_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 // =============================================================================
@@ -5219,7 +5283,7 @@ fn todoist_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -5258,7 +5322,7 @@ fn clickup_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -5413,7 +5477,7 @@ fn asana_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -5452,7 +5516,7 @@ fn trello_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 3);
+    assert_eq!(pools.pools.len(), 4);
 }
 
 // =============================================================================
@@ -5479,7 +5543,7 @@ fn sendgrid_full_manifest_parses_with_all_operations() {
 
     let ops = &parsed.provides.operations;
     let expected_ops = [
-        "sendgrid.contacts.delete",
+        "sendgrid.lists.delete",
         "sendgrid.contacts.list",
         "sendgrid.mail.send",
         "sendgrid.stats.get",
@@ -5491,7 +5555,7 @@ fn sendgrid_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 // =============================================================================
@@ -5568,7 +5632,7 @@ fn algolia_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 4);
+    assert_eq!(pools.pools.len(), 5);
 }
 
 // =============================================================================
@@ -5908,7 +5972,7 @@ fn mailchimp_full_manifest_parses_with_all_operations() {
     assert_eq!(ops.len(), expected_ops.len());
 
     let pools = parsed.rate_limits.as_ref().expect("rate_limits");
-    assert_eq!(pools.pools.len(), 5);
+    assert_eq!(pools.pools.len(), 6);
 }
 
 // =============================================================================

@@ -38,6 +38,10 @@ required = [
     "network.dns",
     "network.egress",
     "network.tls.sni",
+    "anthropic.chat",
+    "anthropic.get_usage",
+    "anthropic.message",
+    "anthropic.message.stream",
 ]
 optional = []
 forbidden = [

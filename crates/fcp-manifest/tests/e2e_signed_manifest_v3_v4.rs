@@ -126,144 +126,177 @@ fn apply_for_recipient(
     *ring.active_zone_key().expect("active zone key")
 }
 
+struct ZoneKeyMigrationFixture {
+    zone_id: ZoneId,
+    issued_at: u64,
+    zone_key: ZoneKey,
+    object_id_key: ObjectIdKey,
+    alice_id: TailscaleNodeId,
+    bob_id: TailscaleNodeId,
+    alice_sk: X25519SecretKey,
+    bob_sk: X25519SecretKey,
+}
+
+impl ZoneKeyMigrationFixture {
+    fn new() -> Self {
+        Self {
+            zone_id: ZoneId::work(),
+            issued_at: 1_700_000_123,
+            zone_key: ZoneKey::from_bytes([0x42; ZONE_KEY_LEN]),
+            object_id_key: ObjectIdKey::from_bytes([0x24; ZONE_KEY_LEN]),
+            alice_id: TailscaleNodeId::new("node-alice-e2e"),
+            bob_id: TailscaleNodeId::new("node-bob-e2e"),
+            alice_sk: X25519SecretKey::generate(),
+            bob_sk: X25519SecretKey::generate(),
+        }
+    }
+}
+
+fn assert_signed_connector_manifest_phase(phases: &mut Vec<&'static str>) {
+    let span = span!(
+        Level::INFO,
+        "e2e_manifest_phase",
+        crate_name = "fcp-manifest",
+        phase = "signed_connector_manifest"
+    );
+    let _entered = span.enter();
+    phases.push("signed_connector_manifest");
+    let manifest = signed_connector_manifest();
+    let signatures = manifest.signatures.expect("signature section");
+    assert_eq!(signatures.publisher_signatures.len(), 1);
+    assert_eq!(
+        signatures.publisher_threshold.unwrap().to_string(),
+        "1-of-1"
+    );
+}
+
+fn construct_v3_manifest_phase(
+    phases: &mut Vec<&'static str>,
+    fixture: &ZoneKeyMigrationFixture,
+) -> ZoneKeyManifest {
+    let span = span!(
+        Level::INFO,
+        "e2e_manifest_phase",
+        crate_name = "fcp-manifest",
+        phase = "construct_v3"
+    );
+    let _entered = span.enter();
+    phases.push("construct_v3");
+    ZoneKeyManifest {
+        header: test_header(&fixture.zone_id),
+        zone_id: fixture.zone_id.clone(),
+        zone_key_id: ZoneKeyId::from_bytes([0x11; 8]),
+        object_id_key_id: ObjectIdKeyId::from_bytes([0x22; 8]),
+        algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
+        valid_from: fixture.issued_at,
+        valid_until: None,
+        prev_zone_key_id: None,
+        wrapped_keys: vec![
+            wrap_zone_key(
+                &fixture.alice_sk.public_key(),
+                &fixture.zone_id,
+                &fixture.alice_id,
+                fixture.issued_at,
+                &fixture.zone_key,
+            )
+            .expect("alice v3 zone wrap"),
+            wrap_zone_key(
+                &fixture.bob_sk.public_key(),
+                &fixture.zone_id,
+                &fixture.bob_id,
+                fixture.issued_at,
+                &fixture.zone_key,
+            )
+            .expect("bob v3 zone wrap"),
+        ],
+        wrapped_object_id_keys: vec![
+            wrap_object_id_key(
+                &fixture.alice_sk.public_key(),
+                &fixture.zone_id,
+                &fixture.alice_id,
+                fixture.issued_at,
+                &fixture.object_id_key,
+            )
+            .expect("alice object-id wrap"),
+            wrap_object_id_key(
+                &fixture.bob_sk.public_key(),
+                &fixture.zone_id,
+                &fixture.bob_id,
+                fixture.issued_at,
+                &fixture.object_id_key,
+            )
+            .expect("bob object-id wrap"),
+        ],
+        rekey_policy: None,
+        signature: test_signature(),
+        kem: ZoneKemAlgorithm::HpkeX25519,
+        wrapped_keys_v4: Vec::new(),
+    }
+}
+
+fn migrate_v4_phase(
+    phases: &mut Vec<&'static str>,
+    v3_manifest: &ZoneKeyManifest,
+) -> ZoneKeyManifest {
+    let span = span!(
+        Level::INFO,
+        "e2e_manifest_phase",
+        crate_name = "fcp-manifest",
+        phase = "migrate_v4"
+    );
+    let _entered = span.enter();
+    phases.push("migrate_v4");
+    let unsigned = v3_manifest.migrated_to_v4(ZoneKemAlgorithm::XWing);
+    let payload = unsigned.as_payload();
+    assert_eq!(payload.kem, ZoneKemAlgorithm::XWing);
+    assert_eq!(payload.wrapped_keys_v4.len(), payload.wrapped_keys.len());
+    for v3 in &payload.wrapped_keys {
+        let v4 = payload
+            .wrapped_key_v4_for(&v3.recipient)
+            .expect("promoted v4 wrap");
+        assert_eq!(v4.sealed.kem(), ZoneKemAlgorithm::HpkeX25519);
+        let sealed = v4
+            .sealed
+            .hpke_sealed()
+            .expect("safe migration promotes V3 HPKE bytes");
+        assert_eq!(sealed.enc, v3.sealed.enc);
+        assert_eq!(sealed.ciphertext, v3.sealed.ciphertext);
+    }
+    unsigned.sign(test_signature())
+}
+
+fn assert_cross_recipient_phase(
+    phases: &mut Vec<&'static str>,
+    migrated: &ZoneKeyManifest,
+    fixture: &ZoneKeyMigrationFixture,
+) {
+    let span = span!(
+        Level::INFO,
+        "e2e_manifest_phase",
+        crate_name = "fcp-manifest",
+        phase = "cross_recipient_verify"
+    );
+    let _entered = span.enter();
+    phases.push("cross_recipient_verify");
+    migrated
+        .validate_no_recipient_split_view()
+        .expect("promoted V4 wraps are split-view safe");
+    let alice_key = apply_for_recipient(migrated, &fixture.alice_id, &fixture.alice_sk);
+    let bob_key = apply_for_recipient(migrated, &fixture.bob_id, &fixture.bob_sk);
+    assert_eq!(alice_key.as_bytes(), fixture.zone_key.as_bytes());
+    assert_eq!(bob_key.as_bytes(), fixture.zone_key.as_bytes());
+    assert_eq!(alice_key, bob_key);
+}
+
 #[test]
 fn e2e_signed_manifest_v3_v4_migration_preserves_recipient_zone_key() {
     let mut phases = Vec::new();
+    let fixture = ZoneKeyMigrationFixture::new();
 
-    {
-        let span = span!(
-            Level::INFO,
-            "e2e_manifest_phase",
-            crate_name = "fcp-manifest",
-            phase = "signed_connector_manifest"
-        );
-        let _entered = span.enter();
-        phases.push("signed_connector_manifest");
-        let manifest = signed_connector_manifest();
-        let signatures = manifest.signatures.expect("signature section");
-        assert_eq!(signatures.publisher_signatures.len(), 1);
-        assert_eq!(
-            signatures.publisher_threshold.unwrap().to_string(),
-            "1-of-1"
-        );
-    }
-
-    let zone_id = ZoneId::work();
-    let issued_at = 1_700_000_123;
-    let zone_key = ZoneKey::from_bytes([0x42; ZONE_KEY_LEN]);
-    let object_id_key = ObjectIdKey::from_bytes([0x24; ZONE_KEY_LEN]);
-    let alice_id = TailscaleNodeId::new("node-alice-e2e");
-    let bob_id = TailscaleNodeId::new("node-bob-e2e");
-    let alice_sk = X25519SecretKey::generate();
-    let bob_sk = X25519SecretKey::generate();
-
-    let v3_manifest = {
-        let span = span!(
-            Level::INFO,
-            "e2e_manifest_phase",
-            crate_name = "fcp-manifest",
-            phase = "construct_v3"
-        );
-        let _entered = span.enter();
-        phases.push("construct_v3");
-        ZoneKeyManifest {
-            header: test_header(&zone_id),
-            zone_id: zone_id.clone(),
-            zone_key_id: ZoneKeyId::from_bytes([0x11; 8]),
-            object_id_key_id: ObjectIdKeyId::from_bytes([0x22; 8]),
-            algorithm: ZoneKeyAlgorithm::ChaCha20Poly1305,
-            valid_from: issued_at,
-            valid_until: None,
-            prev_zone_key_id: None,
-            wrapped_keys: vec![
-                wrap_zone_key(
-                    &alice_sk.public_key(),
-                    &zone_id,
-                    &alice_id,
-                    issued_at,
-                    &zone_key,
-                )
-                .expect("alice v3 zone wrap"),
-                wrap_zone_key(
-                    &bob_sk.public_key(),
-                    &zone_id,
-                    &bob_id,
-                    issued_at,
-                    &zone_key,
-                )
-                .expect("bob v3 zone wrap"),
-            ],
-            wrapped_object_id_keys: vec![
-                wrap_object_id_key(
-                    &alice_sk.public_key(),
-                    &zone_id,
-                    &alice_id,
-                    issued_at,
-                    &object_id_key,
-                )
-                .expect("alice object-id wrap"),
-                wrap_object_id_key(
-                    &bob_sk.public_key(),
-                    &zone_id,
-                    &bob_id,
-                    issued_at,
-                    &object_id_key,
-                )
-                .expect("bob object-id wrap"),
-            ],
-            rekey_policy: None,
-            signature: test_signature(),
-            kem: ZoneKemAlgorithm::HpkeX25519,
-            wrapped_keys_v4: Vec::new(),
-        }
-    };
-
-    let migrated = {
-        let span = span!(
-            Level::INFO,
-            "e2e_manifest_phase",
-            crate_name = "fcp-manifest",
-            phase = "migrate_v4"
-        );
-        let _entered = span.enter();
-        phases.push("migrate_v4");
-        let unsigned = v3_manifest.migrated_to_v4(ZoneKemAlgorithm::XWing);
-        let payload = unsigned.as_payload();
-        assert_eq!(payload.kem, ZoneKemAlgorithm::XWing);
-        assert_eq!(payload.wrapped_keys_v4.len(), payload.wrapped_keys.len());
-        for v3 in &payload.wrapped_keys {
-            let v4 = payload
-                .wrapped_key_v4_for(&v3.recipient)
-                .expect("promoted v4 wrap");
-            assert_eq!(v4.sealed.kem(), ZoneKemAlgorithm::HpkeX25519);
-            let sealed = v4
-                .sealed
-                .hpke_sealed()
-                .expect("safe migration promotes V3 HPKE bytes");
-            assert_eq!(sealed.enc, v3.sealed.enc);
-            assert_eq!(sealed.ciphertext, v3.sealed.ciphertext);
-        }
-        unsigned.sign(test_signature())
-    };
-
-    {
-        let span = span!(
-            Level::INFO,
-            "e2e_manifest_phase",
-            crate_name = "fcp-manifest",
-            phase = "cross_recipient_verify"
-        );
-        let _entered = span.enter();
-        phases.push("cross_recipient_verify");
-        migrated
-            .validate_no_recipient_split_view()
-            .expect("promoted V4 wraps are split-view safe");
-        let alice_key = apply_for_recipient(&migrated, &alice_id, &alice_sk);
-        let bob_key = apply_for_recipient(&migrated, &bob_id, &bob_sk);
-        assert_eq!(alice_key.as_bytes(), zone_key.as_bytes());
-        assert_eq!(bob_key.as_bytes(), zone_key.as_bytes());
-        assert_eq!(alice_key, bob_key);
-    }
+    assert_signed_connector_manifest_phase(&mut phases);
+    let v3_manifest = construct_v3_manifest_phase(&mut phases, &fixture);
+    let migrated = migrate_v4_phase(&mut phases, &v3_manifest);
+    assert_cross_recipient_phase(&mut phases, &migrated, &fixture);
 
     assert_eq!(
         phases,

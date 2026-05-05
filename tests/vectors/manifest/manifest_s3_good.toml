@@ -31,7 +31,7 @@ allowed_targets = ["z:private", "z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "s3.write", "s3.read"]
 optional = ["media.download", "media.upload"]
 forbidden = ["system.exec", "network.listen"]
 

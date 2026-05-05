@@ -31,7 +31,7 @@ allowed_targets = ["z:private"]
 forbidden = ["z:public", "z:work"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "stripe.payment", "stripe.read"]
 optional = []
 forbidden = ["system.exec", "network.listen"]
 

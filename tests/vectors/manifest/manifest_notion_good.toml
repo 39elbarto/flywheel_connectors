@@ -31,7 +31,7 @@ allowed_targets = ["z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state", "notion.write", "notion.read"]
 optional = ["media.download"]
 forbidden = ["system.exec", "network.listen"]
 

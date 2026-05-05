@@ -31,7 +31,7 @@ allowed_targets = ["z:work"]
 forbidden = ["z:public"]
 
 [capabilities]
-required = ["network.dns", "network.egress", "network.tls.sni"]
+required = ["network.dns", "network.egress", "network.tls.sni", "twitter.read", "twitter.write", "twitter.stream"]
 optional = []
 forbidden = ["system.exec", "network.listen", "storage.state"]
 

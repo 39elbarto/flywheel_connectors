@@ -1080,6 +1080,7 @@ scope = "instance"
 "google-ai.tuning.get_operation" = ["google-ai.tuning"]
 "google-ai.tuning.cancel" = ["google-ai.tuning"]
 "google-ai.generate_content_stream" = ["google-ai.generate"]
+"google-ai.live.create_browser_session" = ["google-ai.generate"]
 "google-ai.embed_content" = ["google-ai.embed"]
 "google-ai.get_usage" = ["google-ai.models"]
 "google-ai.generate_content" = ["google-ai.generate"]

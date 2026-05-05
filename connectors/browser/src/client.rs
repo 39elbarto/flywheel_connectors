@@ -308,6 +308,54 @@ fn cdp_websocket_error(error: &WsError) -> BrowserError {
     }
 }
 
+struct CdpSession<T> {
+    transport: T,
+    next_command_id: u64,
+}
+
+impl<T> CdpSession<T>
+where
+    T: CdpCommandTransport + Send,
+{
+    fn new(transport: T) -> Self {
+        Self {
+            transport,
+            next_command_id: 1,
+        }
+    }
+
+    async fn call_method(
+        &mut self,
+        cx: &Cx,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> BrowserResult<serde_json::Value> {
+        let command = self.next_command(method, params)?;
+        execute_cdp_command(cx, &mut self.transport, command).await
+    }
+
+    fn next_command(
+        &mut self,
+        method: impl Into<String>,
+        params: Option<serde_json::Value>,
+    ) -> BrowserResult<CdpCommand> {
+        let id = self.next_command_id;
+        self.next_command_id =
+            self.next_command_id
+                .checked_add(1)
+                .ok_or_else(|| BrowserError::Api {
+                    message: "Chrome DevTools Protocol command id space exhausted".into(),
+                    status_code: None,
+                })?;
+        Ok(CdpCommand::new(id, method, params))
+    }
+
+    #[cfg(test)]
+    fn into_transport(self) -> T {
+        self.transport
+    }
+}
+
 #[derive(Clone, Copy)]
 struct BrowserConnectorOperation {
     id: &'static str,
@@ -1865,6 +1913,51 @@ mod tests {
         let message = format!("{err}");
         assert!(message.contains("cancelled before send"));
         assert!(transport.sent.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_allocates_monotonic_command_ids() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{"enabled":true}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"frameId":"abc"}}"#.into()),
+        ]));
+
+        let page_enable = session.call_method(&cx, "Page.enable", None).await.unwrap();
+        let navigate = session
+            .call_method(
+                &cx,
+                "Page.navigate",
+                Some(serde_json::json!({ "url": "https://example.com" })),
+            )
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(page_enable, serde_json::json!({ "enabled": true }));
+        assert_eq!(navigate, serde_json::json!({ "frameId": "abc" }));
+        assert_eq!(transport.sent.len(), 2);
+        assert!(matches!(
+            &transport.sent[0],
+            WebSocketMessage::Text(text) if text == r#"{"id":1,"method":"Page.enable"}"#
+        ));
+        assert!(matches!(
+            &transport.sent[1],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":2,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_cdp_session_rejects_exhausted_command_ids() {
+        let mut session = CdpSession {
+            transport: FakeCdpTransport::default(),
+            next_command_id: u64::MAX,
+        };
+
+        let err = session.next_command("Page.enable", None).unwrap_err();
+
+        assert!(format!("{err}").contains("command id space exhausted"));
     }
 
     #[test]

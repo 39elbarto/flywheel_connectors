@@ -4342,6 +4342,92 @@ mod tests {
         assert!(!*connector.socket_connected.read().await);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn handle_configure_stops_socket_and_swaps_monitor_policy() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123",
+                "monitor_policy": {
+                    "require_mention": false,
+                    "allowed_channels": ["c_old"]
+                }
+            }))
+            .unwrap();
+        connector
+            .monitor_policy_audit
+            .record_denial("mention_required");
+        *connector.subscribed_topics.write().await = vec!["mattermost.posted".to_string()];
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        *connector.socket_running.write().await = true;
+        connector.socket_shutdown_tx = Some(shutdown_tx);
+        connector.socket_task = Some(fcp_async_core::task::spawn(async move {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        }));
+
+        let response = connector
+            .handle_configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_456",
+                "monitor_policy": {
+                    "require_mention": false,
+                    "allowed_channels": ["c_new"]
+                }
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.get("status").and_then(Value::as_str),
+            Some("configured")
+        );
+        assert!(connector.socket_task.is_none());
+        assert!(connector.socket_shutdown_tx.is_none());
+        assert!(!*connector.socket_running.read().await);
+        assert!(connector.subscribed_topics.read().await.is_empty());
+        assert_eq!(
+            connector
+                .monitor_policy_audit
+                .to_redacted_json()
+                .get("denied_total")
+                .and_then(Value::as_u64),
+            Some(0)
+        );
+
+        let new_channel_message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {"post": "{\"id\":\"p1\",\"channel_id\":\"c_new\",\"user_id\":\"u1\",\"message\":\"hi\"}"},
+            "broadcast": {"channel_id": "c_new", "user_id": "u1"}
+        }))
+        .unwrap();
+        let old_channel_message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {"post": "{\"id\":\"p2\",\"channel_id\":\"c_old\",\"user_id\":\"u1\",\"message\":\"hi\"}"},
+            "broadcast": {"channel_id": "c_old", "user_id": "u1"}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            connector
+                .monitor_policy
+                .evaluate_socket_message(&new_channel_message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+        assert_eq!(
+            connector
+                .monitor_policy
+                .evaluate_socket_message(&old_channel_message),
+            MattermostMonitorPolicyDecision::Denied("channel_not_allowed")
+        );
+    }
+
     #[test]
     fn parse_subscribe_topics_defaults() {
         let topics = parse_subscribe_topics(&json!({}));

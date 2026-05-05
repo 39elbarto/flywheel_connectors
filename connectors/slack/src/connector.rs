@@ -1936,12 +1936,7 @@ fn socket_frame_to_event(
         .map_or_else(|| seq.to_string(), str::to_owned);
 
     let mut resource_uris = Vec::new();
-    if let Some(channel) = payload
-        .get("event")
-        .and_then(|event| event.get("channel"))
-        .and_then(Value::as_str)
-        .or_else(|| payload.get("channel").and_then(Value::as_str))
-    {
+    if let Some(channel) = socket_payload_channel(payload) {
         resource_uris.push(format!("slack:channel:{channel}"));
     }
     if let Some(team_id) = payload.get("team_id").and_then(Value::as_str) {

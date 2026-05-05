@@ -68,7 +68,7 @@ const WEBHOOK_EVENT_BUFFER_MIN_EVENTS_USIZE: usize = 64;
 const WEBHOOK_EVENT_BUFFER_MAX_EVENTS: usize = 256;
 
 #[must_use]
-fn webhook_event_caps() -> EventCaps {
+const fn webhook_event_caps() -> EventCaps {
     EventCaps {
         streaming: true,
         replay: true,
@@ -3336,8 +3336,7 @@ impl FcpConnector for BlueBubblesConnector {
     async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()> {
         self.base.check_ready()?;
         let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
-        let mut stream = state.lock_webhook_events()?;
-        stream.unsubscribe(&req.topics);
+        state.lock_webhook_events()?.unsubscribe(&req.topics);
         Ok(())
     }
 }
@@ -3351,14 +3350,23 @@ impl BlueBubblesConnector {
         account_id: &str,
         events: &[NormalizedBlueBubblesWebhookMessage],
     ) -> FcpResult<Vec<EventEnvelope>> {
-        let mut stream = state.lock_webhook_events()?;
         let mut envelopes = Vec::with_capacity(events.len());
         for event in events {
-            let envelope =
-                self.webhook_event_envelope(zone_id, correlation_id, account_id, event)?;
-            envelopes.push(stream.record(envelope));
+            envelopes.push(self.webhook_event_envelope(
+                zone_id,
+                correlation_id,
+                account_id,
+                event,
+            )?);
         }
-        Ok(envelopes)
+        let recorded = {
+            let mut stream = state.lock_webhook_events()?;
+            envelopes
+                .into_iter()
+                .map(|envelope| stream.record(envelope))
+                .collect()
+        };
+        Ok(recorded)
     }
 
     fn webhook_event_envelope(

@@ -37,6 +37,11 @@ const CONTROL_TIMEOUT_MS_CAPTURE: u64 = 60_000;
 const CONTROL_OPERATION_HEADER: &str = "X-FCP-Browser-Operation";
 const CONTROL_RESPONSE_BUDGET_HEADER: &str = "X-FCP-Browser-Max-Response-Bytes";
 const CONTROL_TIMEOUT_BUDGET_HEADER: &str = "X-FCP-Browser-Timeout-Ms";
+const CONTROL_TARGET_SCOPE_HEADER: &str = "X-FCP-Browser-Target-Scope";
+const CONTROL_TARGET_SELECTION_HEADER: &str = "X-FCP-Browser-Target-Selection";
+const CONTROL_STALE_TARGET_RECOVERY_HEADER: &str = "X-FCP-Browser-Stale-Target-Recovery";
+const CONTROL_CURRENT_TAB_GUARD_HEADER: &str = "X-FCP-Browser-Current-Tab-Guard";
+const CONTROL_EXPORT_GUARD_HEADER: &str = "X-FCP-Browser-Export-Guard";
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -850,6 +855,23 @@ impl BrowserClient {
                     CONTROL_TIMEOUT_BUDGET_HEADER,
                     operation.timeout_ms.to_string(),
                 )
+                .header(CONTROL_TARGET_SCOPE_HEADER, operation.target_policy.scope)
+                .header(
+                    CONTROL_TARGET_SELECTION_HEADER,
+                    operation.target_policy.selection,
+                )
+                .header(
+                    CONTROL_STALE_TARGET_RECOVERY_HEADER,
+                    operation.target_policy.stale_target_recovery.to_string(),
+                )
+                .header(
+                    CONTROL_CURRENT_TAB_GUARD_HEADER,
+                    operation.target_policy.current_tab_guard.to_string(),
+                )
+                .header(
+                    CONTROL_EXPORT_GUARD_HEADER,
+                    operation.target_policy.export_guard.to_string(),
+                )
                 .json(body)
         })
         .await
@@ -1646,6 +1668,14 @@ mod tests {
                 CONTROL_TIMEOUT_BUDGET_HEADER,
                 CONTROL_TIMEOUT_MS_CAPTURE.to_string(),
             ))
+            .and(header(CONTROL_TARGET_SCOPE_HEADER, "page"))
+            .and(header(
+                CONTROL_TARGET_SELECTION_HEADER,
+                "create_or_reuse_active_page",
+            ))
+            .and(header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true"))
+            .and(header(CONTROL_CURRENT_TAB_GUARD_HEADER, "false"))
+            .and(header(CONTROL_EXPORT_GUARD_HEADER, "false"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "url": "https://example.com",
                 "status": 200,
@@ -1673,6 +1703,14 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/screenshot"))
+            .and(header(CONTROL_TARGET_SCOPE_HEADER, "page"))
+            .and(header(
+                CONTROL_TARGET_SELECTION_HEADER,
+                "active_page_required",
+            ))
+            .and(header(CONTROL_STALE_TARGET_RECOVERY_HEADER, "true"))
+            .and(header(CONTROL_CURRENT_TAB_GUARD_HEADER, "true"))
+            .and(header(CONTROL_EXPORT_GUARD_HEADER, "true"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "image_data": "iVBOR...",
                 "width": 1920,

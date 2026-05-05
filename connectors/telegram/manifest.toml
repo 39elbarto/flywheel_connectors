@@ -46,6 +46,7 @@ required = [
 optional = [
     "telegram.send",
     "telegram.read",
+    "telegram.webhook",
 ]
 forbidden = [
     "system.exec",
@@ -82,6 +83,11 @@ enum = ["HTML", "MarkdownV2"]
 
 [provides.operations."telegram.send_message".input_schema.properties.reply_to_message_id]
 type = "integer"
+
+[provides.operations."telegram.send_message".input_schema.properties.message_thread_id]
+description = "Telegram forum topic or private-chat topic thread ID"
+type = "integer"
+minimum = 0
 
 [provides.operations."telegram.send_message".output_schema]
 type = "object"
@@ -145,6 +151,11 @@ enum = ["HTML", "MarkdownV2"]
 
 [provides.operations."telegram.send_media".input_schema.properties.reply_to_message_id]
 type = "integer"
+
+[provides.operations."telegram.send_media".input_schema.properties.message_thread_id]
+description = "Telegram forum topic or private-chat topic thread ID"
+type = "integer"
+minimum = 0
 
 [provides.operations."telegram.send_media".output_schema]
 type = "object"
@@ -252,6 +263,68 @@ common_mistakes = [
     "Forgetting to call this after processing a button press",
 ]
 
+[provides.operations."telegram.ingest_webhook_update"]
+description = "Validate and ingest a Telegram webhook update forwarded by fcp-host"
+capability = "telegram.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."telegram.ingest_webhook_update".input_schema]
+type = "object"
+required = ["payload"]
+
+[provides.operations."telegram.ingest_webhook_update".input_schema.properties.payload]
+description = "Raw Telegram Update JSON payload forwarded by fcp-host"
+type = "string"
+maxLength = 1048576
+
+[provides.operations."telegram.ingest_webhook_update".input_schema.properties.secret_token]
+description = "Value from X-Telegram-Bot-Api-Secret-Token"
+type = "string"
+minLength = 1
+maxLength = 256
+
+[provides.operations."telegram.ingest_webhook_update".input_schema.properties.delivery_id]
+type = "string"
+
+[provides.operations."telegram.ingest_webhook_update".input_schema.properties.received_at]
+type = "integer"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema]
+type = "object"
+required = ["accepted", "event_emitted", "update_id", "secret_verified"]
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.accepted]
+type = "boolean"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.event_emitted]
+type = "boolean"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.update_id]
+type = "integer"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.secret_verified]
+type = "boolean"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.topic]
+type = "string"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.resource_uris]
+type = "array"
+
+[provides.operations."telegram.ingest_webhook_update".output_schema.properties.reason]
+type = "string"
+
+[provides.operations."telegram.ingest_webhook_update".ai_hints]
+when_to_use = "Process Telegram webhook deliveries forwarded by host ingress."
+common_mistakes = [
+    "Passing a decoded object instead of the raw payload string",
+    "Omitting secret_token when webhook_secret_token is configured",
+]
+
 # --- Events ---
 
 [provides.events."telegram.message.new"]
@@ -306,3 +379,4 @@ burst = 20
 "telegram.send_media" = "telegram.send"
 "telegram.answer_callback_query" = "telegram.send"
 "telegram.get_file" = "telegram.read"
+"telegram.ingest_webhook_update" = "telegram.webhook"

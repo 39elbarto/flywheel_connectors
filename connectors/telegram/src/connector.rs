@@ -21,6 +21,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 
 use crate::client::TelegramClient;
@@ -32,6 +33,7 @@ const TELEGRAM_POLL_CURSOR_FILE: &str = "telegram_poll_cursor.json";
 const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
 const TELEGRAM_BOT_ID_MAX_DIGITS: usize = 20;
 const TELEGRAM_BOT_SECRET_MAX_CHARS: usize = 128;
+const MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn current_unix_timestamp_secs() -> u64 {
@@ -380,6 +382,7 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
             "telegram.send"
         }
         "telegram.get_file" => "telegram.read",
+        "telegram.ingest_webhook_update" => "telegram.webhook",
         _ => {
             return Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -927,6 +930,44 @@ impl TelegramConnector {
         })
     }
 
+    fn ingest_webhook_update_input_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "payload": {
+                    "type": "string",
+                    "maxLength": MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES,
+                    "description": "Raw Telegram Update JSON payload forwarded by fcp-host"
+                },
+                "secret_token": {
+                    "type": "string",
+                    "minLength": MIN_WEBHOOK_SECRET_TOKEN_CHARS,
+                    "maxLength": MAX_WEBHOOK_SECRET_TOKEN_CHARS,
+                    "description": "Value from X-Telegram-Bot-Api-Secret-Token"
+                },
+                "delivery_id": { "type": "string" },
+                "received_at": { "type": "integer" }
+            },
+            "required": ["payload"]
+        })
+    }
+
+    fn ingest_webhook_update_output_schema() -> serde_json::Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "accepted": { "type": "boolean" },
+                "event_emitted": { "type": "boolean" },
+                "update_id": { "type": "integer" },
+                "topic": { "type": "string" },
+                "resource_uris": { "type": "array", "items": { "type": "string" } },
+                "secret_verified": { "type": "boolean" },
+                "reason": { "type": "string" }
+            },
+            "required": ["accepted", "event_emitted", "update_id", "secret_verified"]
+        })
+    }
+
     fn message_event_schema() -> serde_json::Value {
         json!({
             "type": "object",
@@ -957,6 +998,7 @@ impl TelegramConnector {
             "telegram.send_media" => Some(Self::send_media_input_schema()),
             "telegram.get_file" => Some(Self::get_file_input_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_input_schema()),
+            "telegram.ingest_webhook_update" => Some(Self::ingest_webhook_update_input_schema()),
             _ => None,
         }
     }
@@ -967,6 +1009,7 @@ impl TelegramConnector {
             "telegram.send_media" => Some(Self::send_media_output_schema()),
             "telegram.get_file" => Some(Self::get_file_output_schema()),
             "telegram.answer_callback_query" => Some(Self::answer_callback_query_output_schema()),
+            "telegram.ingest_webhook_update" => Some(Self::ingest_webhook_update_output_schema()),
             _ => None,
         }
     }
@@ -990,7 +1033,14 @@ impl TelegramConnector {
         Ok(Some(thread_id))
     }
 
-    fn resource_uris_for_input(input: &serde_json::Value) -> FcpResult<Vec<String>> {
+    fn resource_uris_for_operation(
+        operation: &str,
+        input: &serde_json::Value,
+    ) -> FcpResult<Vec<String>> {
+        if operation == "telegram.ingest_webhook_update" {
+            return Ok(vec!["telegram:webhook".into()]);
+        }
+
         let mut resource_uris = Vec::new();
         let message_thread_id = Self::message_thread_id_from_input(input)?;
 
@@ -1112,6 +1162,33 @@ impl TelegramConnector {
                     rate_limit: None,
                     requires_approval: None,
                 },
+                OperationInfo {
+                    id: OperationId::from_static("telegram.ingest_webhook_update"),
+                    summary: "Validate and ingest a Telegram webhook update".into(),
+                    description: Some(
+                        "Processes a Telegram Update payload forwarded by fcp-host webhook ingress."
+                            .into(),
+                    ),
+                    input_schema: Self::ingest_webhook_update_input_schema(),
+                    output_schema: Self::ingest_webhook_update_output_schema(),
+                    capability: CapabilityId::from_static("telegram.webhook"),
+                    risk_level: RiskLevel::Low,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::Strict,
+                    ai_hints: AgentHint {
+                        when_to_use:
+                            "Process a Telegram webhook delivery forwarded by the host ingress path."
+                                .into(),
+                        common_mistakes: vec![
+                            "Passing a decoded object instead of the raw payload string".into(),
+                            "Omitting secret_token when webhook_secret_token is configured".into(),
+                        ],
+                        examples: vec![],
+                        related: vec![],
+                    },
+                    rate_limit: None,
+                    requires_approval: None,
+                },
             ],
             events: vec![
                 EventInfo {
@@ -1203,16 +1280,17 @@ impl TelegramConnector {
             });
         };
 
-        let resource_uris = match Self::resource_uris_for_input(&req.input) {
-            Ok(resource_uris) => resource_uris,
-            Err(error) => {
-                let response =
-                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
-                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
-                    message: format!("Failed to serialize response: {e}"),
-                });
-            }
-        };
+        let resource_uris =
+            match Self::resource_uris_for_operation(req.operation.as_str(), &req.input) {
+                Ok(resource_uris) => resource_uris,
+                Err(error) => {
+                    let response =
+                        SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                    return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                        message: format!("Failed to serialize response: {e}"),
+                    });
+                }
+            };
         let response = match verifier.verify_bound(
             req.capability_token,
             &capability,
@@ -1330,7 +1408,7 @@ impl TelegramConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let cap_id = capability_for_operation(operation)?;
-        let resource_uris = Self::resource_uris_for_input(&input)?;
+        let resource_uris = Self::resource_uris_for_operation(operation, &input)?;
 
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
@@ -1340,6 +1418,7 @@ impl TelegramConnector {
             "telegram.send_media" => self.invoke_send_media(input).await,
             "telegram.get_file" => self.invoke_get_file(input).await,
             "telegram.answer_callback_query" => self.invoke_answer_callback_query(input).await,
+            "telegram.ingest_webhook_update" => self.invoke_ingest_webhook_update(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1621,6 +1700,102 @@ impl TelegramConnector {
             validate_output_with_limits(&schema, &response, &Limits::default())?;
         }
 
+        Ok(response)
+    }
+
+    async fn invoke_ingest_webhook_update(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let payload = required_string_field(&input, "payload")?;
+        if payload.len() > MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Telegram webhook payload exceeds {MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES} bytes"
+                ),
+            });
+        }
+
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let secret_verified = verify_forwarded_webhook_secret(config, &input)?;
+        let update: Update =
+            serde_json::from_str(payload).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("payload must be a valid Telegram Update JSON object: {error}"),
+            })?;
+
+        if !is_valid_telegram_update_id(update.update_id) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Telegram webhook update_id must be non-negative".into(),
+            });
+        }
+
+        let delivery_id = input
+            .get("delivery_id")
+            .and_then(|value| value.as_str())
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| update.update_id.to_string());
+        let received_at = input.get("received_at").and_then(|value| value.as_i64());
+
+        let Some(event) = authorized_update_to_event(
+            &update,
+            &self.base.id,
+            &self.base.instance_id,
+            &config.inbound_policy,
+        ) else {
+            let response = json!({
+                "accepted": true,
+                "event_emitted": false,
+                "update_id": update.update_id,
+                "delivery_id": delivery_id,
+                "received_at": received_at,
+                "secret_verified": secret_verified,
+                "reason": "inbound_policy_denied_or_unknown_update",
+            });
+            if let Some(schema) = Self::output_schema_for("telegram.ingest_webhook_update") {
+                validate_output_with_limits(&schema, &response, &Limits::default())?;
+            }
+            return Ok(response);
+        };
+
+        let topic = event.topic.clone();
+        let resource_uris = event.data.resource_uris.clone();
+        let trust = format!("{:?}", event.data.principal.trust);
+
+        if self.event_tx.send(Ok(event)).is_err() {
+            let response = json!({
+                "accepted": true,
+                "event_emitted": false,
+                "update_id": update.update_id,
+                "delivery_id": delivery_id,
+                "received_at": received_at,
+                "secret_verified": secret_verified,
+                "reason": "event_receiver_dropped",
+            });
+            if let Some(schema) = Self::output_schema_for("telegram.ingest_webhook_update") {
+                validate_output_with_limits(&schema, &response, &Limits::default())?;
+            }
+            return Ok(response);
+        }
+
+        self.base.record_event();
+        let response = json!({
+            "accepted": true,
+            "event_emitted": true,
+            "update_id": update.update_id,
+            "delivery_id": delivery_id,
+            "received_at": received_at,
+            "secret_verified": secret_verified,
+            "topic": topic,
+            "resource_uris": resource_uris,
+            "principal_trust": trust,
+        });
+        if let Some(schema) = Self::output_schema_for("telegram.ingest_webhook_update") {
+            validate_output_with_limits(&schema, &response, &Limits::default())?;
+        }
         Ok(response)
     }
 
@@ -1990,6 +2165,39 @@ fn update_message(update: &Update) -> Option<&Message> {
     }
 }
 
+fn required_string_field<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(|value| value.as_str())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Missing or invalid {field}"),
+        })
+}
+
+fn verify_forwarded_webhook_secret(
+    config: &TelegramConfig,
+    input: &serde_json::Value,
+) -> FcpResult<bool> {
+    let Some(expected) = config.webhook_secret_token.as_deref() else {
+        return Ok(false);
+    };
+    let Some(supplied) = input.get("secret_token").and_then(|value| value.as_str()) else {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Missing Telegram webhook secret token".into(),
+        });
+    };
+    if supplied.as_bytes().ct_eq(expected.as_bytes()).into() {
+        Ok(true)
+    } else {
+        Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Telegram webhook secret token mismatch".into(),
+        })
+    }
+}
+
 fn message_thread_info(msg: &Message) -> Option<ThreadInfo> {
     msg.message_thread_id.map(|thread_id| {
         ThreadInfo::from_telegram_message_thread(thread_id, msg.chat.id.to_string())
@@ -2171,8 +2379,44 @@ impl FcpConnector for TelegramConnector {
                     SafetyTier::Safe,
                     IdempotencyClass::None,
                 ),
+                operation(
+                    "telegram.ingest_webhook_update",
+                    "Validate and ingest a Telegram webhook update",
+                    Self::ingest_webhook_update_input_schema(),
+                    Self::ingest_webhook_update_output_schema(),
+                    "telegram.webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                ),
             ],
-            events: Vec::new(),
+            events: vec![
+                EventInfo {
+                    topic: "telegram.message.new".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.message.edited".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.channel_post.new".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.channel_post.edited".into(),
+                    schema: Self::message_event_schema(),
+                    requires_ack: false,
+                },
+                EventInfo {
+                    topic: "telegram.callback_query".into(),
+                    schema: Self::callback_query_event_schema(),
+                    requires_ack: false,
+                },
+            ],
             resource_types: Vec::new(),
             auth_caps: None,
             event_caps: Some(EventCaps {
@@ -2232,6 +2476,10 @@ mod tests {
     use crate::types::{Chat, User};
     use serde_json::json;
 
+    fn webhook_test_header_value() -> String {
+        ["telegram", "webhook", "fixture"].join("-")
+    }
+
     #[test]
     fn test_validate_input_early_unicode_length() {
         // Create a string that is below the message limit in characters but above it in bytes.
@@ -2282,6 +2530,7 @@ mod tests {
             "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
                 "telegram.send"
             }
+            "telegram.ingest_webhook_update" => "telegram.webhook",
             _ => "telegram.read",
         };
         let now = Utc::now();
@@ -3412,11 +3661,30 @@ mod tests {
         });
 
         assert_eq!(
-            TelegramConnector::resource_uris_for_input(&input).expect("resource uris"),
+            TelegramConnector::resource_uris_for_operation("telegram.send_message", &input)
+                .expect("resource uris"),
             vec![
                 "telegram:chat:208214988:topic:17585",
                 "telegram:chat:208214988",
             ]
+        );
+    }
+
+    #[test]
+    fn test_resource_uris_for_webhook_ingest_uses_webhook_scope() {
+        let forwarded_header = webhook_test_header_value();
+        let input = json!({
+            "payload": "{}",
+            "secret_token": forwarded_header
+        });
+
+        assert_eq!(
+            TelegramConnector::resource_uris_for_operation(
+                "telegram.ingest_webhook_update",
+                &input,
+            )
+            .expect("resource uris"),
+            vec!["telegram:webhook"]
         );
     }
 
@@ -3685,6 +3953,220 @@ mod tests {
             return;
         };
         assert_eq!(operation, "telegram.send_message");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ingest_webhook_update_verifies_secret_and_emits_event() {
+        let (mut connector, token, server) =
+            setup_connector_with_token("telegram.ingest_webhook_update").await;
+        let forwarded_header = webhook_test_header_value();
+        connector
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": server.uri(),
+                "webhook_secret_token": forwarded_header.clone(),
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [208214988]
+                }
+            }))
+            .await
+            .expect("configure webhook fixture");
+        let mut event_rx = connector.event_tx.subscribe();
+
+        let payload = json!({
+            "update_id": 2003,
+            "message": {
+                "message_id": 13,
+                "message_thread_id": 17585,
+                "from": {
+                    "id": 208214988,
+                    "is_bot": false,
+                    "first_name": "Topic",
+                    "username": "topic_user"
+                },
+                "chat": {
+                    "id": 208214988,
+                    "type": "private",
+                    "first_name": "Topic",
+                    "username": "topic_user"
+                },
+                "date": 1700000010,
+                "text": "/new from webhook"
+            }
+        })
+        .to_string();
+
+        let response = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload,
+                    "secret_token": forwarded_header,
+                    "delivery_id": "telegram-delivery-2003",
+                    "received_at": 1700000011
+                },
+                "capability_token": token
+            }))
+            .await
+            .expect("webhook ingest should succeed");
+
+        assert_eq!(
+            response.get("accepted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            response.get("event_emitted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            response.get("secret_verified").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            response.get("topic").and_then(|v| v.as_str()),
+            Some("telegram.message.new")
+        );
+
+        let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timed out waiting for webhook event")
+            .expect("broadcast receive should succeed")
+            .expect("event payload should be ok");
+        assert_eq!(event.seq, 2003);
+        assert_eq!(event.data.principal.trust, TrustLevel::Paired);
+        assert_eq!(
+            event.data.resource_uris,
+            vec![
+                "telegram:chat:208214988:topic:17585",
+                "telegram:chat:208214988",
+                "telegram:user:208214988",
+            ]
+        );
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should stop polling");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ingest_webhook_update_rejects_bad_secret() {
+        let (mut connector, token, server) =
+            setup_connector_with_token("telegram.ingest_webhook_update").await;
+        let forwarded_header = webhook_test_header_value();
+        connector
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": server.uri(),
+                "webhook_secret_token": forwarded_header
+            }))
+            .await
+            .expect("configure webhook fixture");
+        let mismatched_header = ["mismatched", "fixture"].join("-");
+
+        let payload = json!({
+            "update_id": 2004,
+            "message": {
+                "message_id": 14,
+                "from": {
+                    "id": 208214988,
+                    "is_bot": false,
+                    "first_name": "Root"
+                },
+                "chat": {
+                    "id": 208214988,
+                    "type": "private",
+                    "first_name": "Root"
+                },
+                "date": 1700000012,
+                "text": "/new"
+            }
+        })
+        .to_string();
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload,
+                    "secret_token": mismatched_header
+                },
+                "capability_token": token
+            }))
+            .await;
+
+        assert!(
+            matches!(&result, Err(FcpError::Unauthorized { code: 2001, .. })),
+            "expected Unauthorized for bad webhook secret, got {result:?}"
+        );
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should stop polling");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ingest_webhook_update_drops_unauthorized_sender() {
+        let (mut connector, token, _server) =
+            setup_connector_with_token("telegram.ingest_webhook_update").await;
+        connector
+            .config
+            .as_mut()
+            .expect("connector should be configured")
+            .inbound_policy = inbound_policy(json!({
+            "mode": "allowlist",
+            "allowed_user_ids": [208214988]
+        }));
+
+        let payload = json!({
+            "update_id": 2005,
+            "message": {
+                "message_id": 15,
+                "from": {
+                    "id": 999999999,
+                    "is_bot": false,
+                    "first_name": "Intruder"
+                },
+                "chat": {
+                    "id": 999999999,
+                    "type": "private",
+                    "first_name": "Intruder"
+                },
+                "date": 1700000013,
+                "text": "/new unauthorized"
+            }
+        })
+        .to_string();
+
+        let response = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload,
+                    "delivery_id": "telegram-delivery-2005"
+                },
+                "capability_token": token
+            }))
+            .await
+            .expect("unauthorized sender should be acknowledged but dropped");
+
+        assert_eq!(
+            response.get("accepted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            response.get("event_emitted").and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            response.get("reason").and_then(|v| v.as_str()),
+            Some("inbound_policy_denied_or_unknown_update")
+        );
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should stop polling");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4114,18 +4596,19 @@ mod tests {
     }
 
     #[test]
-    fn test_introspect_has_four_operations() {
+    fn test_introspect_has_five_operations() {
         let rt = fcp_async_core::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let connector = TelegramConnector::new();
             let result = connector.handle_introspect().await.unwrap();
             let ops = result["operations"].as_array().unwrap();
-            assert_eq!(ops.len(), 4, "expected 4 operations, got {}", ops.len());
+            assert_eq!(ops.len(), 5, "expected 5 operations, got {}", ops.len());
             let op_ids: Vec<&str> = ops.iter().filter_map(|o| o["id"].as_str()).collect();
             assert!(op_ids.contains(&"telegram.send_message"));
             assert!(op_ids.contains(&"telegram.send_media"));
             assert!(op_ids.contains(&"telegram.get_file"));
             assert!(op_ids.contains(&"telegram.answer_callback_query"));
+            assert!(op_ids.contains(&"telegram.ingest_webhook_update"));
         });
     }
 
@@ -4136,6 +4619,7 @@ mod tests {
         "telegram.send_media",
         "telegram.get_file",
         "telegram.answer_callback_query",
+        "telegram.ingest_webhook_update",
     ];
 
     #[test]
@@ -4977,6 +5461,21 @@ mod tests {
         assert!(ops.contains_key("telegram.send_media"));
         assert!(ops.contains_key("telegram.get_file"));
         assert!(ops.contains_key("telegram.answer_callback_query"));
+        assert!(ops.contains_key("telegram.ingest_webhook_update"));
+
+        let send_message_props = ops["telegram.send_message"]["input_schema"]["properties"]
+            .as_table()
+            .expect("send_message input properties");
+        assert!(send_message_props.contains_key("message_thread_id"));
+        let send_media_props = ops["telegram.send_media"]["input_schema"]["properties"]
+            .as_table()
+            .expect("send_media input properties");
+        assert!(send_media_props.contains_key("message_thread_id"));
+        let webhook_props = ops["telegram.ingest_webhook_update"]["input_schema"]["properties"]
+            .as_table()
+            .expect("webhook ingest input properties");
+        assert!(webhook_props.contains_key("payload"));
+        assert!(webhook_props.contains_key("secret_token"));
 
         // Verify interface_hash field exists with expected prefix
         let hash = table["manifest"]["interface_hash"].as_str().unwrap();

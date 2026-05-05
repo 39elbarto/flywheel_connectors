@@ -14,6 +14,8 @@ pub const DEFAULT_TELEGRAM_BASE_URL: &str = "https://api.telegram.org";
 pub const MIN_POLL_TIMEOUT_SECS: i32 = 1;
 pub const MAX_POLL_TIMEOUT_SECS: i32 = 50;
 pub const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
+pub const MIN_WEBHOOK_SECRET_TOKEN_CHARS: usize = 1;
+pub const MAX_WEBHOOK_SECRET_TOKEN_CHARS: usize = 256;
 const MAX_REPLY_TO_MESSAGE_DEPTH: usize = 8;
 pub const DEFAULT_TELEGRAM_ALLOWED_UPDATES: &[&str] = &[
     "message",
@@ -551,6 +553,11 @@ pub struct TelegramConfig {
     /// External Telegram sender policy, enforced before EventEnvelope emission.
     #[serde(default)]
     pub inbound_policy: TelegramInboundPolicy,
+
+    /// Optional Telegram webhook secret token forwarded from
+    /// X-Telegram-Bot-Api-Secret-Token.
+    #[serde(default)]
+    pub webhook_secret_token: Option<String>,
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -565,6 +572,10 @@ impl std::fmt::Debug for TelegramConfig {
             .field("poll_timeout", &self.poll_timeout)
             .field("allowed_updates", &self.allowed_updates)
             .field("inbound_policy", &self.inbound_policy)
+            .field(
+                "webhook_secret_token",
+                &self.webhook_secret_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .finish()
     }
 }
@@ -699,6 +710,9 @@ impl TelegramConfig {
         }
 
         self.inbound_policy.validate()?;
+        if let Some(token) = self.webhook_secret_token.as_deref() {
+            validate_webhook_secret_token(token)?;
+        }
 
         Ok(())
     }
@@ -722,6 +736,25 @@ impl TelegramConfig {
             "bot_token"
         }
     }
+}
+
+pub(crate) fn validate_webhook_secret_token(token: &str) -> FcpResult<()> {
+    if token.len() < MIN_WEBHOOK_SECRET_TOKEN_CHARS || token.len() > MAX_WEBHOOK_SECRET_TOKEN_CHARS
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "webhook_secret_token must be between {MIN_WEBHOOK_SECRET_TOKEN_CHARS} and {MAX_WEBHOOK_SECRET_TOKEN_CHARS} characters"
+            ),
+        });
+    }
+    if token.trim() != token || token.chars().any(char::is_control) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook_secret_token must not contain leading/trailing whitespace or control characters".into(),
+        });
+    }
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1814,6 +1847,37 @@ mod tests {
             assert!(
                 matches!(err, FcpError::InvalidRequest { .. }),
                 "base_url should be rejected: {base_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn telegram_config_accepts_valid_webhook_secret_token() {
+        let forwarded_header = ["telegram", "webhook", "fixture"].join("-");
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "credential": "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345",
+            "webhook_secret_token": forwarded_header
+        }))
+        .unwrap();
+
+        assert!(config.validate_runtime_settings().is_ok());
+        assert_eq!(
+            config.webhook_secret_token.as_deref(),
+            Some(forwarded_header.as_str())
+        );
+    }
+
+    #[test]
+    fn telegram_config_rejects_invalid_webhook_secret_tokens() {
+        for secret in ["", " leading", "trailing ", "line\nbreak"] {
+            let config: TelegramConfig = serde_json::from_value(json!({
+                "credential": "123456:ABCDEFGHIJKLMNOPQRSTUVWXyz012345",
+                "webhook_secret_token": secret
+            }))
+            .unwrap();
+            assert!(
+                config.validate_runtime_settings().is_err(),
+                "webhook_secret_token should be rejected: {secret:?}"
             );
         }
     }

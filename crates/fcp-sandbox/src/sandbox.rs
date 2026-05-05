@@ -336,6 +336,8 @@ pub enum WindowsAppContainerCleanupDecision {
     None,
     /// The profile is retained for deterministic connector-instance reuse.
     RetainProfile,
+    /// The profile was removed by an explicit smoke-test cleanup pass.
+    DeleteProfile,
 }
 
 /// Fakeable profile API used by the Windows backend lifecycle controller.
@@ -350,6 +352,9 @@ pub(super) trait WindowsAppContainerProfileApi {
 
     /// Resolve the SID for an existing profile.
     fn derive_profile_sid(&mut self, profile_name: &str) -> Result<(), SandboxError>;
+
+    /// Delete the profile for smoke/e2e cleanup.
+    fn delete_profile(&mut self, profile_name: &str) -> Result<(), SandboxError>;
 }
 
 /// Structured report for Windows `AppContainer` profile preparation.
@@ -426,6 +431,22 @@ where
             ))
         }
     }
+}
+
+/// Delete a Windows `AppContainer` profile through the fakeable profile API.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+#[allow(dead_code)]
+pub(super) fn cleanup_windows_appcontainer_profile<A>(
+    profile_name: &str,
+    api: &mut A,
+) -> Result<WindowsAppContainerCleanupDecision, SandboxError>
+where
+    A: WindowsAppContainerProfileApi,
+{
+    validate_windows_appcontainer_profile_name(profile_name)?;
+    api.delete_profile(profile_name)?;
+    Ok(WindowsAppContainerCleanupDecision::DeleteProfile)
 }
 
 /// Redaction-safe JSONL evidence for Windows `AppContainer` smoke/skips.
@@ -1386,6 +1407,7 @@ mod tests {
     struct FakeWindowsAppContainerApi {
         create_result: FakeCreateProfileResult,
         derive_fails: bool,
+        delete_fails: bool,
         calls: Vec<String>,
     }
 
@@ -1394,12 +1416,18 @@ mod tests {
             Self {
                 create_result,
                 derive_fails: false,
+                delete_fails: false,
                 calls: Vec::new(),
             }
         }
 
         fn with_derive_failure(mut self) -> Self {
             self.derive_fails = true;
+            self
+        }
+
+        fn with_delete_failure(mut self) -> Self {
+            self.delete_fails = true;
             self
         }
     }
@@ -1426,6 +1454,17 @@ mod tests {
             if self.derive_fails {
                 Err(SandboxError::SyscallFailed(
                     "DeriveAppContainerSidFromAppContainerName failed: invalid argument".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        fn delete_profile(&mut self, profile_name: &str) -> Result<(), SandboxError> {
+            self.calls.push(format!("delete:{profile_name}"));
+            if self.delete_fails {
+                Err(SandboxError::SyscallFailed(
+                    "DeleteAppContainerProfile failed: access denied".into(),
                 ))
             } else {
                 Ok(())
@@ -1536,6 +1575,56 @@ mod tests {
                 "derive:fcp-test-connector-0123456789abcdef"
             ]
         );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_cleanup_deletes_profile() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::Created);
+
+        let cleanup = cleanup_windows_appcontainer_profile(&profile.name, &mut api).unwrap();
+
+        assert_eq!(cleanup, WindowsAppContainerCleanupDecision::DeleteProfile);
+        assert_eq!(
+            api.calls,
+            vec!["delete:fcp-test-connector-0123456789abcdef"]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_cleanup_maps_delete_failure() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api =
+            FakeWindowsAppContainerApi::new(FakeCreateProfileResult::Created).with_delete_failure();
+
+        let err = cleanup_windows_appcontainer_profile(&profile.name, &mut api).unwrap_err();
+
+        assert!(err.to_string().contains("DeleteAppContainerProfile"));
+        assert_eq!(
+            api.calls,
+            vec!["delete:fcp-test-connector-0123456789abcdef"]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_evidence_records_cleanup_delete() {
+        let report = WindowsAppContainerLifecycleReport {
+            profile: fake_windows_appcontainer_profile(),
+            action: WindowsAppContainerLifecycleAction::Created,
+            sid_present: true,
+            cleanup: WindowsAppContainerCleanupDecision::DeleteProfile,
+            skip_reason: None,
+        };
+        let evidence =
+            WindowsAppContainerEvidence::from_lifecycle("connector", &report, true, "real_smoke");
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert_eq!(
+            evidence.cleanup,
+            WindowsAppContainerCleanupDecision::DeleteProfile
+        );
+        assert!(line.contains("\"cleanup\":\"delete_profile\""));
+        assert_eq!(evidence.action_result, "real_smoke");
     }
 
     #[test]

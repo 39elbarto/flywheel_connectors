@@ -674,6 +674,8 @@ unsafe extern "system" {
         pszAppContainerName: LPCWSTR,
         ppsidAppContainerSid: *mut PSID,
     ) -> HRESULT;
+
+    fn DeleteAppContainerProfile(pszAppContainerName: LPCWSTR) -> HRESULT;
 }
 
 // ============================================================================
@@ -746,6 +748,10 @@ impl WindowsAppContainerProfileApi for NativeWindowsAppContainerApi {
         let _sid = derive_appcontainer_sid(profile_name)?;
         Ok(())
     }
+
+    fn delete_profile(&mut self, profile_name: &str) -> Result<(), SandboxError> {
+        delete_appcontainer_profile(profile_name)
+    }
 }
 
 fn create_appcontainer_profile(
@@ -794,6 +800,20 @@ fn derive_appcontainer_sid(profile_name: &str) -> Result<OwnedSid, SandboxError>
     } else {
         Err(SandboxError::SyscallFailed(format_hresult(
             "DeriveAppContainerSidFromAppContainerName",
+            hr,
+        )))
+    }
+}
+
+fn delete_appcontainer_profile(profile_name: &str) -> Result<(), SandboxError> {
+    let appcontainer_name = to_wide_string(profile_name);
+    let hr = unsafe { DeleteAppContainerProfile(appcontainer_name.as_ptr()) };
+
+    if hr == S_OK {
+        Ok(())
+    } else {
+        Err(SandboxError::SyscallFailed(format_hresult(
+            "DeleteAppContainerProfile",
             hr,
         )))
     }

@@ -3807,6 +3807,234 @@ mod tests {
             .expect("loopback event should be successful")
     }
 
+    #[derive(Debug)]
+    struct LoopbackHttpRequest {
+        method: String,
+        target: String,
+        authorization: Option<String>,
+        content_type: Option<String>,
+        body: Vec<u8>,
+    }
+
+    fn read_loopback_http_request(stream: &mut StdTcpStream) -> LoopbackHttpRequest {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while request.windows(4).all(|window| window != b"\r\n\r\n") {
+            let read = stream
+                .read(&mut buf)
+                .expect("loopback HTTP request should be readable");
+            assert!(read > 0, "client closed before HTTP headers finished");
+            request.extend(buf.iter().take(read).copied());
+        }
+
+        let header_end = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("HTTP headers should terminate")
+            + 4;
+        let (headers, body) = request.split_at(header_end);
+        let header_text = String::from_utf8_lossy(headers);
+        let mut lines = header_text.lines();
+        let request_line = lines.next().expect("HTTP request line should be present");
+        let mut request_parts = request_line.split_whitespace();
+        let method = request_parts
+            .next()
+            .expect("HTTP method should be present")
+            .to_string();
+        let target = request_parts
+            .next()
+            .expect("HTTP target should be present")
+            .to_string();
+
+        let mut authorization = None;
+        let mut content_type = None;
+        let mut content_length = 0_usize;
+        for line in lines {
+            let Some((name, value)) = line.split_once(':') else {
+                continue;
+            };
+            let value = value.trim();
+            match name.to_ascii_lowercase().as_str() {
+                "authorization" => authorization = Some(value.to_string()),
+                "content-type" => content_type = Some(value.to_string()),
+                "content-length" => {
+                    content_length = parse_loopback_content_length(value);
+                }
+                _ => {}
+            }
+        }
+
+        let mut body = body.to_vec();
+        while body.len() < content_length {
+            let read = stream
+                .read(&mut buf)
+                .expect("loopback HTTP body should be readable");
+            assert!(read > 0, "client closed before HTTP body finished");
+            body.extend(buf.iter().take(read).copied());
+        }
+        body.truncate(content_length);
+
+        LoopbackHttpRequest {
+            method,
+            target,
+            authorization,
+            content_type,
+            body,
+        }
+    }
+
+    fn parse_loopback_content_length(value: &str) -> usize {
+        let mut length = 0_usize;
+        for byte in value.bytes() {
+            assert!(
+                byte.is_ascii_digit(),
+                "content-length should be a valid integer"
+            );
+            length = length
+                .checked_mul(10)
+                .and_then(|length| length.checked_add(usize::from(byte - b'0')))
+                .expect("content-length should fit usize");
+        }
+        length
+    }
+
+    fn write_loopback_http_response(
+        stream: &mut StdTcpStream,
+        status: u16,
+        content_type: &str,
+        body: &[u8],
+    ) {
+        let reason = match status {
+            200 => "OK",
+            201 => "Created",
+            204 => "No Content",
+            404 => "Not Found",
+            _ => "Unknown",
+        };
+        let response = format!(
+            "HTTP/1.1 {status} {reason}\r\n\
+             content-type: {content_type}\r\n\
+             content-length: {}\r\n\
+             connection: close\r\n\
+             x-request-id: loopback-rest\r\n\
+             \r\n",
+            body.len()
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("loopback HTTP response headers should write");
+        stream
+            .write_all(body)
+            .expect("loopback HTTP response body should write");
+        stream.flush().expect("loopback HTTP response should flush");
+    }
+
+    fn loopback_file_info() -> Value {
+        json!({
+            "id": "f_loop",
+            "user_id": "u_loop",
+            "post_id": "p_loop",
+            "channel_id": "c_loop",
+            "name": "loop.txt",
+            "extension": "txt",
+            "size": 10,
+            "mime_type": "text/plain"
+        })
+    }
+
+    fn loopback_post(message: &str) -> Value {
+        json!({
+            "id": "p_loop",
+            "channel_id": "c_loop",
+            "user_id": "u_loop",
+            "message": message,
+            "file_ids": ["f_loop"]
+        })
+    }
+
+    fn loopback_reaction() -> Value {
+        json!({
+            "user_id": "u_loop",
+            "post_id": "p_loop",
+            "emoji_name": "eyes",
+            "create_at": 123
+        })
+    }
+
+    fn loopback_rest_response(request: &LoopbackHttpRequest) -> (u16, &'static str, Vec<u8>) {
+        let json_response = |status, body: Value| {
+            (
+                status,
+                "application/json",
+                serde_json::to_vec(&body).expect("loopback JSON response should serialize"),
+            )
+        };
+
+        match (request.method.as_str(), request.target.as_str()) {
+            ("POST", "/api/v4/posts") => json_response(201, loopback_post("loopback post")),
+            ("GET", "/api/v4/posts/p_loop") => json_response(200, loopback_post("loopback post")),
+            ("PUT", "/api/v4/posts/p_loop/patch") => {
+                json_response(200, loopback_post("updated loopback post"))
+            }
+            ("POST", "/api/v4/posts/p_loop/pin" | "/api/v4/posts/p_loop/unpin")
+            | (
+                "DELETE",
+                "/api/v4/posts/p_loop" | "/api/v4/users/u_loop/posts/p_loop/reactions/eyes",
+            ) => (200, "application/json", Vec::new()),
+            ("POST", "/api/v4/reactions") => json_response(201, loopback_reaction()),
+            ("GET", "/api/v4/posts/p_loop/reactions") => {
+                json_response(200, json!([loopback_reaction()]))
+            }
+            ("GET", "/api/v4/files/f_loop/info") => json_response(200, loopback_file_info()),
+            ("GET", "/api/v4/files/f_loop/link") => json_response(
+                200,
+                json!({"link": "http://mattermost-loopback.local/files/f_loop"}),
+            ),
+            ("GET", "/api/v4/files/f_loop") => (200, "text/plain", b"hello file".to_vec()),
+            ("GET", "/api/v4/posts/p_loop/files/info") => {
+                json_response(200, json!([loopback_file_info()]))
+            }
+            ("POST", "/api/v4/files") => json_response(
+                201,
+                json!({
+                    "file_infos": [loopback_file_info()],
+                    "client_ids": ["client-loop"]
+                }),
+            ),
+            _ => json_response(
+                404,
+                json!({
+                    "id": "loopback.not_found",
+                    "message": format!("unexpected {} {}", request.method, request.target)
+                }),
+            ),
+        }
+    }
+
+    fn spawn_mattermost_loopback_rest(
+        expected_requests: usize,
+    ) -> (String, JoinHandle<Vec<LoopbackHttpRequest>>) {
+        let listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("loopback REST listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback REST listener should have an address");
+        let handle = thread::spawn(move || {
+            let mut requests = Vec::with_capacity(expected_requests);
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("loopback REST server should accept client");
+                let request = read_loopback_http_request(&mut stream);
+                let (status, content_type, body) = loopback_rest_response(&request);
+                write_loopback_http_response(&mut stream, status, content_type, &body);
+                requests.push(request);
+            }
+            requests
+        });
+        (format!("http://{address}"), handle)
+    }
+
     async fn wait_for_socket_stopped(connector: &MattermostConnector) -> Value {
         fcp_async_core::time::timeout(Duration::from_secs(3), async {
             loop {
@@ -5142,6 +5370,203 @@ mod tests {
         server
             .join()
             .expect("loopback websocket server thread should finish");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn rest_loopback_verifies_post_reaction_and_file_operations() {
+        let (base_url, server) = spawn_mattermost_loopback_rest(14);
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": base_url,
+                "token": "tok_loopback",
+                "request_timeout_ms": 5_000
+            }))
+            .unwrap();
+        let client = connector
+            .client
+            .as_ref()
+            .expect("configured connector should have a Mattermost client");
+
+        let file_body = base64::engine::general_purpose::STANDARD.encode(b"hello file");
+        let created = invoke_create_post(
+            client,
+            &json!({
+                "channel_id": "c_loop",
+                "message": "loopback post",
+                "file_ids": ["f_loop"]
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created["id"], "p_loop");
+
+        let fetched = invoke_get_post(client, &json!({"post_id": "p_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(fetched["file_ids"][0], "f_loop");
+
+        let updated = invoke_update_post(
+            client,
+            &json!({
+                "id": "p_loop",
+                "message": "updated loopback post"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(updated["message"], "updated loopback post");
+
+        assert_eq!(
+            invoke_pin_post(client, &json!({"post_id": "p_loop"}))
+                .await
+                .unwrap()["status"],
+            "pinned"
+        );
+        assert_eq!(
+            invoke_unpin_post(client, &json!({"post_id": "p_loop"}))
+                .await
+                .unwrap()["status"],
+            "unpinned"
+        );
+
+        let reaction = invoke_create_reaction(
+            client,
+            &json!({
+                "user_id": "u_loop",
+                "post_id": "p_loop",
+                "emoji_name": "eyes"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(reaction["emoji_name"], "eyes");
+
+        let reactions = invoke_get_reactions_for_post(client, &json!({"post_id": "p_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(reactions[0]["user_id"], "u_loop");
+
+        assert_eq!(
+            invoke_delete_reaction(
+                client,
+                &json!({
+                    "user_id": "u_loop",
+                    "post_id": "p_loop",
+                    "emoji_name": "eyes"
+                }),
+            )
+            .await
+            .unwrap()["status"],
+            "deleted"
+        );
+
+        let file_info = invoke_get_file_info(client, &json!({"file_id": "f_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(file_info["file"]["name"], "loop.txt");
+        assert!(
+            file_info["paths"]["download_url"]
+                .as_str()
+                .is_some_and(|url| url.ends_with("/api/v4/files/f_loop"))
+        );
+
+        let file_link = invoke_get_file_link(client, &json!({"file_id": "f_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(
+            file_link["link"],
+            "http://mattermost-loopback.local/files/f_loop"
+        );
+
+        let downloaded = invoke_download_file(client, &json!({"file_id": "f_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(downloaded["content_base64"], file_body);
+        assert_eq!(downloaded["content_type"], "text/plain");
+
+        let files_for_post = invoke_get_file_infos_for_post(client, &json!({"post_id": "p_loop"}))
+            .await
+            .unwrap();
+        assert_eq!(files_for_post["files"][0]["file"]["id"], "f_loop");
+
+        let uploaded = invoke_upload_file(
+            client,
+            &json!({
+                "channel_id": "c_loop",
+                "filename": "loop.txt",
+                "content_base64": file_body,
+                "client_id": "client-loop",
+                "content_type": "text/plain"
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(uploaded["files"][0]["file"]["id"], "f_loop");
+        assert_eq!(uploaded["client_ids"][0], "client-loop");
+
+        assert_eq!(
+            invoke_delete_post(client, &json!({"post_id": "p_loop"}))
+                .await
+                .unwrap()["status"],
+            "deleted"
+        );
+
+        let requests = server
+            .join()
+            .expect("loopback REST server thread should finish");
+        let request_lines = requests
+            .iter()
+            .map(|request| format!("{} {}", request.method, request.target))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            request_lines,
+            vec![
+                "POST /api/v4/posts",
+                "GET /api/v4/posts/p_loop",
+                "PUT /api/v4/posts/p_loop/patch",
+                "POST /api/v4/posts/p_loop/pin",
+                "POST /api/v4/posts/p_loop/unpin",
+                "POST /api/v4/reactions",
+                "GET /api/v4/posts/p_loop/reactions",
+                "DELETE /api/v4/users/u_loop/posts/p_loop/reactions/eyes",
+                "GET /api/v4/files/f_loop/info",
+                "GET /api/v4/files/f_loop/link",
+                "GET /api/v4/files/f_loop",
+                "GET /api/v4/posts/p_loop/files/info",
+                "POST /api/v4/files",
+                "DELETE /api/v4/posts/p_loop",
+            ]
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer tok_loopback"))
+        );
+
+        let create_post_request = requests
+            .first()
+            .expect("create_post request should be captured");
+        let create_post_body: Value =
+            serde_json::from_slice(&create_post_request.body).unwrap_or(Value::Null);
+        assert_eq!(create_post_body["channel_id"], "c_loop");
+        assert_eq!(create_post_body["file_ids"][0], "f_loop");
+
+        let upload_request = requests
+            .iter()
+            .find(|request| request.method == "POST" && request.target == "/api/v4/files")
+            .expect("upload_file request should be captured");
+        assert!(
+            upload_request
+                .content_type
+                .as_deref()
+                .is_some_and(|content_type| content_type.starts_with("multipart/form-data;"))
+        );
+        let upload_body = String::from_utf8_lossy(&upload_request.body);
+        assert!(upload_body.contains("name=\"channel_id\""));
+        assert!(upload_body.contains("c_loop"));
+        assert!(upload_body.contains("name=\"files\""));
+        assert!(upload_body.contains("hello file"));
     }
 
     #[test]

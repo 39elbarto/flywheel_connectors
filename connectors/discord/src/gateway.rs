@@ -1,13 +1,14 @@
 //! Discord Gateway (WebSocket) client.
 
 use std::sync::{
-    Arc,
+    Arc, Mutex as StdMutex, OnceLock,
     atomic::{AtomicBool, Ordering},
 };
 use std::{
+    collections::{BTreeMap, VecDeque},
     fs, io,
     path::{Path, PathBuf},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use fcp_async_core::channel::mpsc;
@@ -57,12 +58,160 @@ pub enum GatewayOpcode {
 
 const GATEWAY_EVENT_BUFFER_CAPACITY: usize = 256;
 pub const DISCORD_GATEWAY_STATE_FILE: &str = "discord_gateway_state.json";
+const GATEWAY_SEND_LIMIT: usize = 120;
+const GATEWAY_SEND_WINDOW: Duration = Duration::from_secs(60);
+#[cfg(not(test))]
+const GATEWAY_IDENTIFY_WINDOW: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const GATEWAY_IDENTIFY_WINDOW: Duration = Duration::from_millis(5);
 
 async fn connect_gateway_websocket(url: &str) -> DiscordResult<WsConnection> {
     WsClient::new(url)
         .connect()
         .await
         .map_err(DiscordError::from)
+}
+
+#[derive(Debug)]
+struct GatewaySendLimiter {
+    limit: usize,
+    window: Duration,
+    sent_at: VecDeque<Instant>,
+}
+
+impl GatewaySendLimiter {
+    fn new(limit: usize, window: Duration) -> Self {
+        Self {
+            limit: limit.max(1),
+            window,
+            sent_at: VecDeque::new(),
+        }
+    }
+
+    async fn wait_for_slot(&mut self, critical: bool) {
+        if critical {
+            return;
+        }
+
+        loop {
+            let now = Instant::now();
+            self.prune(now);
+            if self.sent_at.len() < self.limit {
+                self.sent_at.push_back(now);
+                return;
+            }
+
+            let Some(oldest) = self.sent_at.front().copied() else {
+                continue;
+            };
+            let wait = (oldest + self.window).saturating_duration_since(now);
+            fcp_async_core::time::sleep(wait).await;
+        }
+    }
+
+    fn status(&mut self) -> GatewaySendLimiterStatus {
+        let now = Instant::now();
+        self.prune(now);
+        let reset_in = self
+            .sent_at
+            .front()
+            .map(|oldest| (*oldest + self.window).saturating_duration_since(now))
+            .unwrap_or(self.window);
+        GatewaySendLimiterStatus {
+            remaining_events: self.limit.saturating_sub(self.sent_at.len()),
+            current_event_count: self.sent_at.len(),
+            reset_in,
+        }
+    }
+
+    fn prune(&mut self, now: Instant) {
+        let window_start = now.checked_sub(self.window).unwrap_or(now);
+        while self
+            .sent_at
+            .front()
+            .is_some_and(|sent_at| *sent_at <= window_start)
+        {
+            let _ = self.sent_at.pop_front();
+        }
+    }
+}
+
+impl Default for GatewaySendLimiter {
+    fn default() -> Self {
+        Self::new(GATEWAY_SEND_LIMIT, GATEWAY_SEND_WINDOW)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct GatewaySendLimiterStatus {
+    remaining_events: usize,
+    current_event_count: usize,
+    reset_in: Duration,
+}
+
+#[derive(Debug)]
+struct GatewayIdentifyLimiter {
+    next_allowed_at_by_key: StdMutex<BTreeMap<u32, Instant>>,
+    window: Duration,
+}
+
+impl GatewayIdentifyLimiter {
+    const fn new(window: Duration) -> Self {
+        Self {
+            next_allowed_at_by_key: StdMutex::new(BTreeMap::new()),
+            window,
+        }
+    }
+
+    async fn wait(&self, config: &DiscordConfig) {
+        let (shard_id, max_concurrency) = identify_limiter_params(config);
+        self.wait_for(shard_id, max_concurrency).await;
+    }
+
+    async fn wait_for(&self, shard_id: u32, max_concurrency: u32) {
+        let wait = self.reserve_wait(shard_id, max_concurrency);
+        if !wait.is_zero() {
+            fcp_async_core::time::sleep(wait).await;
+        }
+    }
+
+    fn reserve_wait(&self, shard_id: u32, max_concurrency: u32) -> Duration {
+        let key = shard_id % max_concurrency.max(1);
+        let now = Instant::now();
+        let mut next_allowed_at_by_key = self
+            .next_allowed_at_by_key
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let next_allowed_at = next_allowed_at_by_key.get(&key).copied().unwrap_or(now);
+        let wait = next_allowed_at.saturating_duration_since(now);
+        next_allowed_at_by_key.insert(key, now.max(next_allowed_at) + self.window);
+        wait
+    }
+}
+
+fn identify_limiter_params(config: &DiscordConfig) -> (u32, u32) {
+    let shard_id = config.shard.as_ref().map_or(0, |shard| shard.shard_id);
+    (shard_id, config.gateway_identify_max_concurrency.max(1))
+}
+
+fn shared_gateway_identify_limiter() -> &'static GatewayIdentifyLimiter {
+    static LIMITER: OnceLock<GatewayIdentifyLimiter> = OnceLock::new();
+    LIMITER.get_or_init(|| GatewayIdentifyLimiter::new(GATEWAY_IDENTIFY_WINDOW))
+}
+
+async fn send_gateway_payload(
+    ws_stream: &mut WsConnection,
+    send_limiter: &mut GatewaySendLimiter,
+    payload: &GatewayPayload,
+    critical: bool,
+    context: &str,
+) -> DiscordResult<()> {
+    let serialized = serde_json::to_string(payload)?;
+    send_limiter.wait_for_slot(critical).await;
+    ws_stream
+        .send_text(serialized)
+        .await
+        .map_err(|error| DiscordError::Gateway(format!("Failed to send {context}: {error}")))
 }
 
 #[cfg(test)]
@@ -213,6 +362,87 @@ mod tests {
         assert!(GatewayOpcode::try_from(42).is_err());
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn gateway_send_limiter_waits_when_window_full() {
+        let mut limiter = GatewaySendLimiter::new(1, Duration::from_millis(5));
+        limiter.wait_for_slot(false).await;
+        let full_status = limiter.status();
+        assert_eq!(full_status.remaining_events, 0);
+        assert_eq!(full_status.current_event_count, 1);
+
+        let started = Instant::now();
+        limiter.wait_for_slot(false).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(4),
+            "second non-critical send should wait for the rate window"
+        );
+
+        let drained_status = limiter.status();
+        assert_eq!(drained_status.current_event_count, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_send_limiter_does_not_delay_critical_frames() {
+        let mut limiter = GatewaySendLimiter::new(1, Duration::from_millis(50));
+        limiter.wait_for_slot(false).await;
+
+        let started = Instant::now();
+        limiter.wait_for_slot(true).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(10),
+            "critical heartbeat/identify/resume frames should bypass the send bucket"
+        );
+        assert_eq!(
+            limiter.status().current_event_count,
+            1,
+            "critical frames should not consume non-critical send quota"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_identify_limiter_spaces_same_bucket() {
+        let limiter = GatewayIdentifyLimiter::new(Duration::from_millis(5));
+        limiter.wait_for(0, 1).await;
+
+        let started = Instant::now();
+        limiter.wait_for(0, 1).await;
+        assert!(
+            started.elapsed() >= Duration::from_millis(4),
+            "same identify bucket should be spaced by the configured window"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn gateway_identify_limiter_allows_distinct_buckets() {
+        let limiter = GatewayIdentifyLimiter::new(Duration::from_millis(50));
+        limiter.wait_for(0, 2).await;
+
+        let started = Instant::now();
+        limiter.wait_for(1, 2).await;
+        assert!(
+            started.elapsed() < Duration::from_millis(10),
+            "different identify buckets should not block each other"
+        );
+    }
+
+    #[test]
+    fn gateway_identify_params_default_to_safe_single_bucket() {
+        let mut config = test_config("ws://127.0.0.1:1".into());
+        config.shard = Some(crate::config::ShardConfig {
+            shard_id: 7,
+            shard_count: 16,
+        });
+
+        assert_eq!(
+            identify_limiter_params(&config),
+            (7, 1),
+            "shard_count is not Discord gateway max_concurrency; default must serialize IDENTIFY"
+        );
+
+        config.gateway_identify_max_concurrency = 4;
+        assert_eq!(identify_limiter_params(&config), (7, 4));
+    }
+
     #[test]
     fn dispatch_event_updates_state_on_ready() {
         let mut state = GatewayState::default();
@@ -326,9 +556,15 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
-            .await
-            .expect("gateway loop success");
+        Box::pin(run_gateway_loop_inner(
+            client_ws,
+            test_config(ws_url),
+            &event_tx,
+            &mut state,
+            None,
+        ))
+        .await
+        .expect("gateway loop success");
 
         match event_rx.recv().await.expect("ready event") {
             GatewayEventFrame {
@@ -395,9 +631,15 @@ mod tests {
             sequence: Some(7),
         };
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
-            .await
-            .expect("gateway loop success");
+        Box::pin(run_gateway_loop_inner(
+            client_ws,
+            test_config(ws_url),
+            &event_tx,
+            &mut state,
+            None,
+        ))
+        .await
+        .expect("gateway loop success");
 
         match event_rx.recv().await.expect("resumed event") {
             GatewayEventFrame {
@@ -447,9 +689,15 @@ mod tests {
         let (event_tx, mut event_rx) = mpsc::channel(8);
         let mut state = GatewayState::default();
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
-            .await
-            .expect("gateway loop success");
+        Box::pin(run_gateway_loop_inner(
+            client_ws,
+            test_config(ws_url),
+            &event_tx,
+            &mut state,
+            None,
+        ))
+        .await
+        .expect("gateway loop success");
 
         match event_rx.recv().await.expect("message delete event") {
             GatewayEventFrame {
@@ -492,9 +740,15 @@ mod tests {
             sequence: None,
         };
 
-        run_gateway_loop_inner(client_ws, test_config(ws_url), &event_tx, &mut state, None)
-            .await
-            .expect("gateway loop success");
+        Box::pin(run_gateway_loop_inner(
+            client_ws,
+            test_config(ws_url),
+            &event_tx,
+            &mut state,
+            None,
+        ))
+        .await
+        .expect("gateway loop success");
 
         assert_eq!(state.session_id, None);
         assert_eq!(state.resume_url, None);
@@ -882,14 +1136,14 @@ impl GatewayConnection {
 
         let active_connection = Arc::clone(&self.active_connection);
         let join_handle = fcp_async_core::task::spawn(async move {
-            let result = run_gateway_loop(
+            let result = Box::pin(run_gateway_loop(
                 ws_stream,
                 config,
                 event_tx,
                 state_snapshot,
                 state_store,
                 state_path,
-            )
+            ))
             .await;
             active_connection.store(false, Ordering::Release);
             result
@@ -1079,13 +1333,13 @@ async fn run_gateway_loop(
     state_store: Arc<Mutex<GatewayState>>,
     state_path: Option<PathBuf>,
 ) -> DiscordResult<()> {
-    let result = run_gateway_loop_inner(
+    let result = Box::pin(run_gateway_loop_inner(
         ws_stream,
         config,
         &event_tx,
         &mut state,
         state_path.as_deref(),
-    )
+    ))
     .await;
     let persisted_state = state.clone();
     let mut store = state_store.lock().await;
@@ -1095,6 +1349,7 @@ async fn run_gateway_loop(
     result
 }
 
+#[allow(clippy::large_futures)]
 async fn run_gateway_loop_inner(
     mut ws_stream: WsConnection,
     config: DiscordConfig,
@@ -1134,6 +1389,7 @@ async fn run_gateway_loop_inner(
 
     let heartbeat_interval = Duration::from_millis(hello.heartbeat_interval);
     debug!(interval_ms = hello.heartbeat_interval, "Received Hello");
+    let mut send_limiter = GatewaySendLimiter::default();
 
     if state.session_id.is_some() ^ state.sequence.is_some() {
         warn!("Incomplete resume state detected; clearing state and re-identifying");
@@ -1162,15 +1418,14 @@ async fn run_gateway_loop_inner(
             t: None,
         };
 
-        if let Err(e) = ws_stream
-            .send_text(match serde_json::to_string(&resume_payload) {
-                Ok(s) => s,
-                Err(e) => return Err(e.into()),
-            })
-            .await
-        {
-            return Err(DiscordError::Gateway(format!("Failed to send Resume: {e}")));
-        }
+        send_gateway_payload(
+            &mut ws_stream,
+            &mut send_limiter,
+            &resume_payload,
+            true,
+            "Resume",
+        )
+        .await?;
     } else {
         // Fresh connection - send Identify
         let identify = GatewayIdentify {
@@ -1194,17 +1449,20 @@ async fn run_gateway_loop_inner(
             t: None,
         };
 
-        if let Err(e) = ws_stream
-            .send_text(match serde_json::to_string(&identify_payload) {
-                Ok(s) => s,
-                Err(e) => return Err(e.into()),
-            })
-            .await
-        {
-            return Err(DiscordError::Gateway(format!(
-                "Failed to send Identify: {e}"
-            )));
-        }
+        let (shard_id, max_concurrency) = identify_limiter_params(&config);
+        debug!(
+            shard_id,
+            max_concurrency, "Waiting for Discord gateway identify limiter"
+        );
+        shared_gateway_identify_limiter().wait(&config).await;
+        send_gateway_payload(
+            &mut ws_stream,
+            &mut send_limiter,
+            &identify_payload,
+            true,
+            "Identify",
+        )
+        .await?;
     }
 
     // Main event loop
@@ -1221,20 +1479,23 @@ async fn run_gateway_loop_inner(
                     warn!("Heartbeat not acknowledged, connection zombied");
                     return Err(DiscordError::Gateway("Heartbeat timeout (zombied)".into()));
                 }
-                let heartbeat = json!({
-                    "op": GatewayOpcode::Heartbeat as i32,
-                    "d": state.sequence
-                });
-                if let Err(e) = ws_stream
-                    .send_text(
-                        serde_json::to_string(&heartbeat).expect("heartbeat payload serializes"),
-                    )
-                    .await
+                let heartbeat = GatewayPayload {
+                    op: GatewayOpcode::Heartbeat as i32,
+                    d: Some(json!(state.sequence)),
+                    s: None,
+                    t: None,
+                };
+                if let Err(e) = send_gateway_payload(
+                    &mut ws_stream,
+                    &mut send_limiter,
+                    &heartbeat,
+                    true,
+                    "heartbeat",
+                )
+                .await
                 {
                     error!(error = %e, "Failed to send heartbeat");
-                    return Err(DiscordError::Gateway(format!(
-                        "Failed to send heartbeat: {e}"
-                    )));
+                    return Err(e);
                 }
                 heartbeat_acked = false;
                 next_heartbeat_at = std::time::Instant::now() + heartbeat_interval;
@@ -1257,8 +1518,8 @@ async fn run_gateway_loop_inner(
 
                 match GatewayOpcode::try_from(payload.op) {
                     Ok(GatewayOpcode::Dispatch) => {
-                        let event_name = payload.t.clone().unwrap_or_default();
-                        let data = payload.d.clone().unwrap_or_default();
+                        let event_name = payload.t.unwrap_or_default();
+                        let data = payload.d.unwrap_or_default();
                         let event = dispatch_event(event_name, data, state)?;
                         let frame = GatewayEventFrame {
                             seq: payload.s,
@@ -1290,21 +1551,23 @@ async fn run_gateway_loop_inner(
                         return Ok(());
                     }
                     Ok(GatewayOpcode::Heartbeat) => {
-                        let heartbeat = json!({
-                            "op": GatewayOpcode::Heartbeat as i32,
-                            "d": state.sequence
-                        });
-                        if let Err(e) = ws_stream
-                            .send_text(
-                                serde_json::to_string(&heartbeat)
-                                    .expect("heartbeat payload serializes"),
-                            )
-                            .await
+                        let heartbeat = GatewayPayload {
+                            op: GatewayOpcode::Heartbeat as i32,
+                            d: Some(json!(state.sequence)),
+                            s: None,
+                            t: None,
+                        };
+                        if let Err(e) = send_gateway_payload(
+                            &mut ws_stream,
+                            &mut send_limiter,
+                            &heartbeat,
+                            true,
+                            "heartbeat",
+                        )
+                        .await
                         {
                             error!(error = %e, "Failed to send heartbeat response");
-                            return Err(DiscordError::Gateway(format!(
-                                "Failed to send heartbeat: {e}"
-                            )));
+                            return Err(e);
                         }
                     }
                     _ => {

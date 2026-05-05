@@ -38,7 +38,7 @@ fn sanitize_retry_after_seconds(value: f64) -> Option<f64> {
         .then_some(value.clamp(0.0, MAX_RETRY_AFTER_SECONDS))
 }
 
-pub(crate) fn parse_api_error_response(status: u16, body: &[u8]) -> DiscordError {
+pub fn parse_api_error_response(status: u16, body: &[u8]) -> DiscordError {
     let error = serde_json::from_slice::<DiscordApiErrorBody>(body).unwrap_or_else(|_| {
         DiscordApiErrorBody {
             code: Some(i32::from(status)),
@@ -54,7 +54,7 @@ pub(crate) fn parse_api_error_response(status: u16, body: &[u8]) -> DiscordError
     }
 }
 
-pub(crate) fn parse_rate_limit_retry_after_seconds(header_value: Option<&str>, body: &[u8]) -> f64 {
+pub fn parse_rate_limit_retry_after_seconds(header_value: Option<&str>, body: &[u8]) -> f64 {
     header_value
         .and_then(|value| value.parse::<f64>().ok())
         .and_then(sanitize_retry_after_seconds)
@@ -380,6 +380,7 @@ impl DiscordApiClient {
         #[derive(Serialize)]
         struct MessageReference<'a> {
             message_id: &'a str,
+            fail_if_not_exists: bool,
         }
 
         let channel_id = validate_snowflake_id(channel_id, "channel_id")?;
@@ -390,7 +391,10 @@ impl DiscordApiClient {
         let request = CreateMessageRequest {
             content,
             embeds,
-            message_reference: reply_to.map(|id| MessageReference { message_id: id }),
+            message_reference: reply_to.map(|id| MessageReference {
+                message_id: id,
+                fail_if_not_exists: false,
+            }),
         };
 
         self.post(&format!("/channels/{channel_id}/messages"), &request)

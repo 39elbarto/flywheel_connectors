@@ -12,16 +12,28 @@
 
 #![allow(clippy::too_many_lines)]
 
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
 use chrono::{Duration, Utc};
+use fcp_async_core::net::TcpListener;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
-use fcp_prelude::CapabilityConstraints;
+use fcp_prelude::{CapabilityConstraints, InstanceId};
+use fcp_testkit::LogCapture;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
+use std::future::poll_fn;
 use std::io::{Read, Write};
 use std::net::TcpListener as StdTcpListener;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::task::Poll;
 use std::thread;
+use std::time::Duration as StdDuration;
 use uuid::Uuid;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -46,7 +58,12 @@ const ALL_REQUIRED_INTENTS: u64 =
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+struct BoundTestSigningKey {
+    signing_key: Ed25519SigningKey,
+    instance_id: InstanceId,
+}
+
+fn generate_valid_token(signing_key: &BoundTestSigningKey, op: &str) -> fcp_core::CapabilityToken {
     let cap = match op {
         "discord.send_message" | "discord.trigger_typing" => "discord.send",
         "discord.edit_message" => "discord.edit",
@@ -70,8 +87,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
-        .sign(signing_key)
+        .target_instance(signing_key.instance_id.as_ref())
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should be valid")
+        .sign(&signing_key.signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
 }
@@ -100,7 +119,7 @@ struct StructuredHttpResponse {
 }
 
 impl StructuredHttpResponse {
-    fn json(status: u16, body: serde_json::Value) -> Self {
+    fn json(status: u16, body: &serde_json::Value) -> Self {
         Self {
             status,
             headers: vec![("content-type".into(), "application/json".into())],
@@ -214,7 +233,6 @@ fn write_structured_http_response(
     response: StructuredHttpResponse,
 ) {
     let reason = match response.status {
-        200 => "OK",
         401 => "Unauthorized",
         429 => "Too Many Requests",
         _ => "OK",
@@ -226,7 +244,7 @@ fn write_structured_http_response(
         response.body.len()
     );
     for (name, value) in response.headers {
-        raw.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(raw, "{name}: {value}\r\n");
     }
     raw.push_str("\r\n");
     stream
@@ -237,12 +255,120 @@ fn write_structured_http_response(
         .expect("write fake http response body");
 }
 
+type TestGatewayWebSocket = ServerWebSocket<fcp_async_core::net::TcpStream>;
+
+async fn read_gateway_websocket_headers<IO: AsyncRead + Unpin>(
+    io: &mut IO,
+) -> std::io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buffer = Vec::with_capacity(1024);
+    let mut temp = [0u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "EOF before Discord gateway WebSocket handshake completed",
+            ));
+        }
+
+        buffer.extend_from_slice(&temp[..read]);
+        if buffer.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buffer);
+        }
+        if buffer.len() > MAX_HEADERS {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Discord gateway WebSocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_test_gateway_websocket(
+    mut stream: fcp_async_core::net::TcpStream,
+) -> TestGatewayWebSocket {
+    let request = read_gateway_websocket_headers(&mut stream)
+        .await
+        .expect("read gateway websocket handshake");
+    WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept gateway websocket")
+}
+
+async fn recv_gateway_payload(ws: &mut TestGatewayWebSocket, context: &str) -> serde_json::Value {
+    let message = ws
+        .recv(&Cx::for_testing())
+        .await
+        .expect(context)
+        .unwrap_or_else(|| panic!("{context} missing"));
+    match message {
+        ServerWsMessage::Text(text) => serde_json::from_str(&text).expect("gateway payload json"),
+        other => panic!("expected text gateway payload for {context}, got {other:?}"),
+    }
+}
+
+async fn send_gateway_json(
+    ws: &mut TestGatewayWebSocket,
+    payload: &serde_json::Value,
+    context: &str,
+) {
+    ws.send(
+        &Cx::for_testing(),
+        ServerWsMessage::Text(serde_json::to_string(payload).expect("gateway payload serializes")),
+    )
+    .await
+    .expect(context);
+}
+
+async fn close_test_gateway_websocket(ws: &mut TestGatewayWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+}
+
+fn gateway_hello(interval_ms: u64) -> serde_json::Value {
+    json!({
+        "op": 10,
+        "d": { "heartbeat_interval": interval_ms },
+        "s": null,
+        "t": null,
+    })
+}
+
+fn gateway_dispatch(
+    event_name: &str,
+    sequence: u64,
+    data: &serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "op": 0,
+        "d": data,
+        "s": sequence,
+        "t": event_name,
+    })
+}
+
 async fn mock_current_user_ok(mock_server: &MockServer, token: &str) {
+    mock_current_user_ok_with_id(mock_server, token, "123456789").await;
+}
+
+async fn mock_current_user_ok_with_id(mock_server: &MockServer, token: &str, user_id: &str) {
     Mock::given(method("GET"))
         .and(path("/users/@me"))
         .and(header("Authorization", format!("Bot {token}")))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "123456789",
+            "id": user_id,
             "username": "TestBot",
             "discriminator": "0",
             "bot": true
@@ -275,7 +401,7 @@ async fn setup_configure(connector: &mut DiscordConnector, base_url: &str) {
         .expect("configure should succeed");
 }
 
-async fn setup_handshake(connector: &mut DiscordConnector, caps: &[&str]) -> Ed25519SigningKey {
+async fn setup_handshake(connector: &mut DiscordConnector, caps: &[&str]) -> BoundTestSigningKey {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let zone_dir = unique_zone_dir("integration-handshake");
@@ -292,7 +418,10 @@ async fn setup_handshake(connector: &mut DiscordConnector, caps: &[&str]) -> Ed2
         .await
         .expect("handshake should succeed");
 
-    signing_key
+    BoundTestSigningKey {
+        signing_key,
+        instance_id: connector.instance_id().clone(),
+    }
 }
 
 /// Full lifecycle: configure + mock user + handshake.
@@ -300,7 +429,7 @@ async fn setup_full(
     connector: &mut DiscordConnector,
     mock_server: &MockServer,
     caps: &[&str],
-) -> Ed25519SigningKey {
+) -> BoundTestSigningKey {
     mock_current_user_ok(mock_server, "test_token").await;
     setup_configure(connector, &mock_server.uri()).await;
     setup_handshake(connector, caps).await
@@ -395,7 +524,7 @@ async fn send_message_happy_path() {
             );
             StructuredHttpResponse::json(
                 200,
-                json!({
+                &json!({
                     "id": "123456789",
                     "username": "TestBot",
                     "discriminator": "0",
@@ -419,7 +548,7 @@ async fn send_message_happy_path() {
             assert_eq!(body["content"], "Hello Discord!");
             StructuredHttpResponse::json(
                 200,
-                json!({
+                &json!({
                     "id": "100000000000000001",
                     "channel_id": "111",
                     "content": "Hello Discord!",
@@ -450,7 +579,373 @@ async fn send_message_happy_path() {
     assert_eq!(result["id"], "100000000000000001");
     assert_eq!(result["channel_id"], "111");
     assert_eq!(result["content"], "Hello Discord!");
+    assert_eq!(result["delivery"]["status"], "delivered");
+    assert_eq!(result["delivery"]["kind"], "final");
+    assert_eq!(result["delivery"]["visibility"], "visible");
+    assert_eq!(result["delivery"]["final"], true);
+    assert_eq!(result["delivery"]["visible"], true);
+    assert_eq!(result["delivery"]["message_id"], "100000000000000001");
+    assert_eq!(result["delivery"]["reply_to"], serde_json::Value::Null);
+    assert_eq!(result["delivery"]["content_present"], true);
+    assert_eq!(result["delivery"]["requested_embed_count"], 0);
     assert_eq!(fake_server.requests().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_delivery_accounting_logs_without_body_or_token() {
+    let capture = LogCapture::new();
+    let _guard = capture.install_json_with_filter("info");
+    let secret_content = "TopSecretDeliveryBody";
+
+    let fake_server = StructuredFakeHttpServer::spawn(2, move |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            &json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord final send body json");
+            assert_eq!(body["content"], secret_content);
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000021",
+                    "channel_id": "111",
+                    "content": secret_content,
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": secret_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible",
+                    "label": "final-answer"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("final send should succeed");
+
+    assert_eq!(result["delivery"]["status"], "delivered");
+    assert_eq!(result["delivery"]["label"], "final-answer");
+    assert_eq!(result["delivery"]["final"], true);
+    assert_eq!(result["delivery"]["visible"], true);
+
+    let logs = capture.jsonl();
+    assert!(
+        logs.contains("Discord message delivery accounted"),
+        "delivery accounting log missing; logs={logs}"
+    );
+    assert!(
+        !logs.contains(secret_content),
+        "message body must not be written to delivery logs: {logs}"
+    );
+    assert!(
+        !logs.contains("test_token"),
+        "bot token must not be written to delivery logs: {logs}"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_hidden_progress_suppresses_rest_send() {
+    let fake_server = StructuredFakeHttpServer::spawn(1, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        _ => panic!("hidden progress should not issue request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "working on it",
+                "delivery": {
+                    "kind": "progress",
+                    "visibility": "hidden",
+                    "label": "background-progress"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("hidden non-final progress should be accounted without REST");
+
+    assert_eq!(result["id"], serde_json::Value::Null);
+    assert_eq!(result["channel_id"], "111");
+    assert_eq!(result["delivery"]["status"], "suppressed");
+    assert_eq!(result["delivery"]["reason"], "hidden_non_final_update");
+    assert_eq!(result["delivery"]["kind"], "progress");
+    assert_eq!(result["delivery"]["visibility"], "hidden");
+    assert_eq!(result["delivery"]["final"], false);
+    assert_eq!(result["delivery"]["visible"], false);
+    assert_eq!(result["delivery"]["label"], "background-progress");
+    assert_eq!(
+        fake_server.requests().len(),
+        1,
+        "hidden progress must not call Discord REST"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_rejects_hidden_final_reply_before_rest() {
+    let fake_server = StructuredFakeHttpServer::spawn(1, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        _ => panic!("hidden final rejection should not issue request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "final answer",
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "hidden"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("hidden final replies must be rejected");
+
+    match err {
+        fcp_core::FcpError::InvalidRequest { message, .. } => {
+            assert!(
+                message.contains("hidden") && message.contains("final"),
+                "unexpected error: {message}"
+            );
+        }
+        other => panic!("expected InvalidRequest, got {other:?}"),
+    }
+    assert_eq!(
+        fake_server.requests().len(),
+        1,
+        "invalid final delivery must fail before Discord REST"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_embeds_only_final_delivery_preserves_rich_payload() {
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            &json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord embed send body json");
+            assert!(
+                body.get("content").is_none(),
+                "embeds-only rich payload must not gain synthetic content: {body}"
+            );
+            assert_eq!(body["embeds"][0]["title"], "Incident summary");
+            assert_eq!(body["embeds"][0]["description"], "All systems recovered");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000022",
+                    "channel_id": "111",
+                    "content": "",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"},
+                    "embeds": [{
+                        "title": "Incident summary",
+                        "description": "All systems recovered"
+                    }]
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "embeds": [{
+                    "title": "Incident summary",
+                    "description": "All systems recovered"
+                }],
+                "delivery": {
+                    "kind": "final",
+                    "label": "rich-final"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("embeds-only final delivery should succeed");
+
+    assert_eq!(result["content"], "");
+    assert_eq!(result["embeds"][0]["title"], "Incident summary");
+    assert_eq!(result["delivery"]["status"], "delivered");
+    assert_eq!(result["delivery"]["label"], "rich-final");
+    assert_eq!(result["delivery"]["content_present"], false);
+    assert_eq!(result["delivery"]["requested_embed_count"], 1);
+    assert_eq!(result["delivery"]["delivered_embed_count"], 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_final_delivery_5xx_is_observable_failure() {
+    let capture = LogCapture::new();
+    let _guard = capture.install_json_with_filter("warn");
+    let final_content = "Final answer that must not be logged";
+
+    let fake_server = StructuredFakeHttpServer::spawn(2, move |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            &json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord failed send body json");
+            assert_eq!(body["content"], final_content);
+            StructuredHttpResponse::json(
+                500,
+                &json!({
+                    "message": "Discord upstream unavailable",
+                    "code": 500
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": fake_server.url(),
+            "gateway_url": "ws://127.0.0.1:1/",
+            "intents": ALL_REQUIRED_INTENTS,
+            "retry": {
+                "max_attempts": 0,
+                "initial_delay_ms": 10,
+                "max_delay_ms": 100,
+                "jitter": 0.0
+            }
+        }))
+        .await
+        .expect("configure should succeed");
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": final_content,
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("final delivery 5xx must be observable failure");
+
+    match err {
+        fcp_core::FcpError::External {
+            service,
+            status_code,
+            retryable,
+            ..
+        } => {
+            assert_eq!(service, "discord");
+            assert_eq!(status_code, Some(500));
+            assert!(retryable, "Discord 5xx should remain retryable");
+        }
+        other => panic!("expected External 500, got {other:?}"),
+    }
+
+    let logs = capture.jsonl();
+    assert!(
+        logs.contains("Discord visible/final message delivery failed"),
+        "final failure log missing; logs={logs}"
+    );
+    assert!(
+        !logs.contains(final_content),
+        "failed final body must not be written to delivery logs: {logs}"
+    );
+    assert!(
+        !logs.contains("test_token"),
+        "bot token must not be written to delivery logs: {logs}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -484,7 +979,7 @@ async fn send_message_rate_limit_preserves_retry_after() {
             assert_eq!(request.path, "/users/@me");
             StructuredHttpResponse::json(
                 200,
-                json!({
+                &json!({
                     "id": "123456789",
                     "username": "TestBot",
                     "discriminator": "0",
@@ -551,6 +1046,99 @@ async fn send_message_rate_limit_preserves_retry_after() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn send_message_final_delivery_429_retries_and_accounts_success() {
+    let fake_server = StructuredFakeHttpServer::spawn(3, |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            &json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            StructuredHttpResponse {
+                status: 429,
+                headers: vec![
+                    ("content-type".into(), "application/json".into()),
+                    ("retry-after".into(), "0".into()),
+                ],
+                body: json!({
+                    "message": "Too Many Requests",
+                    "retry_after": 0.0
+                })
+                .to_string()
+                .into_bytes(),
+            }
+        }
+        2 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord retry send body json");
+            assert_eq!(body["content"], "Retried final answer");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000023",
+                    "channel_id": "111",
+                    "content": "Retried final answer",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let mut connector = DiscordConnector::new();
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": fake_server.url(),
+            "gateway_url": "ws://127.0.0.1:1/",
+            "intents": ALL_REQUIRED_INTENTS,
+            "retry": {
+                "max_attempts": 1,
+                "initial_delay_ms": 1,
+                "max_delay_ms": 1,
+                "jitter": 0.0
+            }
+        }))
+        .await
+        .expect("configure should succeed");
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token(&signing_key, "discord.send_message");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "Retried final answer",
+                "delivery": {
+                    "kind": "final",
+                    "visibility": "visible"
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("final delivery should retry 429 once and succeed");
+
+    assert_eq!(result["id"], "100000000000000023");
+    assert_eq!(result["delivery"]["status"], "delivered");
+    assert_eq!(result["delivery"]["final"], true);
+    assert_eq!(
+        fake_server.requests().len(),
+        3,
+        "configure plus two POST attempts should be observed"
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn send_message_rate_limit_uses_body_retry_after_without_header() {
     let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
         0 => {
@@ -558,7 +1146,7 @@ async fn send_message_rate_limit_uses_body_retry_after_without_header() {
             assert_eq!(request.path, "/users/@me");
             StructuredHttpResponse::json(
                 200,
-                json!({
+                &json!({
                     "id": "123456789",
                     "username": "TestBot",
                     "discriminator": "0",
@@ -644,8 +1232,8 @@ async fn send_message_missing_content_and_embeds() {
 /// must surface as `FcpError::InvalidRequest` that explicitly names the
 /// `embeds` field, not be silently discarded. Prior to the fix, the
 /// connector parsed with `serde_json::from_value(...).ok()` and treated
-/// the decode error as `None`, which on send_message fell through to
-/// the generic "content or embeds required" branch and on edit_message
+/// the decode error as `None`, which on `send_message` fell through to
+/// the generic "content or embeds required" branch and on `edit_message`
 /// proceeded as if no embeds had been supplied at all.
 #[fcp_async_core::runtime::test]
 async fn send_message_malformed_embeds_returns_typed_error() {
@@ -687,7 +1275,7 @@ async fn send_message_malformed_embeds_returns_typed_error() {
     }
 }
 
-/// Regression (flywheel_connectors-cmkuk): edit_message must also reject
+/// Regression (flywheel_connectors-cmkuk): `edit_message` must also reject
 /// malformed embeds with a typed error. This is the more dangerous
 /// branch — previously a bad embeds payload bypassed validation
 /// entirely and the edit proceeded as though no embeds had been
@@ -1136,7 +1724,7 @@ async fn api_401_maps_to_unauthorized() {
             assert_eq!(request.path, "/users/@me");
             StructuredHttpResponse::json(
                 200,
-                json!({
+                &json!({
                     "id": "123456789",
                     "username": "TestBot",
                     "discriminator": "0",
@@ -1151,7 +1739,7 @@ async fn api_401_maps_to_unauthorized() {
                 request.headers.get("authorization").map(String::as_str),
                 Some("Bot test_token")
             );
-            StructuredHttpResponse::json(401, json!({"message": "401: Unauthorized", "code": 0}))
+            StructuredHttpResponse::json(401, &json!({"message": "401: Unauthorized", "code": 0}))
         }
         _ => panic!("unexpected request index {idx}"),
     });
@@ -1176,7 +1764,7 @@ async fn api_429_maps_to_rate_limited() {
     let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
         0 => StructuredHttpResponse::json(
             200,
-            json!({
+            &json!({
                 "id": "123456789",
                 "username": "TestBot",
                 "discriminator": "0",
@@ -1917,20 +2505,45 @@ async fn edit_message_with_embeds_only_no_content() {
 
 #[fcp_async_core::runtime::test]
 async fn send_message_with_reply_to() {
-    let mock_server = MockServer::start().await;
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => StructuredHttpResponse::json(
+            200,
+            &json!({
+                "id": "123456789",
+                "username": "TestBot",
+                "discriminator": "0",
+                "bot": true
+            }),
+        ),
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord reply send body json");
+            assert_eq!(body["content"], "This is a reply");
+            assert_eq!(
+                body["message_reference"]["message_id"],
+                "100000000000000003"
+            );
+            assert_eq!(
+                body["message_reference"]["fail_if_not_exists"], false,
+                "reply sends should keep final content deliverable when the target disappeared"
+            );
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000011",
+                    "channel_id": "111",
+                    "content": "This is a reply",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00"
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
     let mut connector = DiscordConnector::new();
-    let signing_key = setup_full(&mut connector, &mock_server, &["discord.send"]).await;
-
-    Mock::given(method("POST"))
-        .and(path("/channels/111/messages"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": "100000000000000011",
-            "channel_id": "111",
-            "content": "This is a reply",
-            "timestamp": "2026-03-02T12:00:00.000000+00:00"
-        })))
-        .mount(&mock_server)
-        .await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
 
     let token = generate_valid_token(&signing_key, "discord.send_message");
     let result = connector
@@ -1946,7 +2559,10 @@ async fn send_message_with_reply_to() {
         .await;
 
     assert!(result.is_ok(), "send_message with reply_to should succeed");
-    assert_eq!(result.unwrap()["id"], "100000000000000011");
+    let result = result.unwrap();
+    assert_eq!(result["id"], "100000000000000011");
+    assert_eq!(result["delivery"]["reply_to"], "100000000000000003");
+    assert_eq!(result["delivery"]["reply_to_fail_if_not_exists"], false);
 }
 
 #[fcp_async_core::runtime::test]
@@ -2317,6 +2933,153 @@ async fn subscribe_confirms_topics() {
     assert_eq!(confirmed.len(), 1);
     assert_eq!(confirmed[0], "discord.message");
     assert_eq!(result["replay_supported"], false);
+}
+
+#[fcp_async_core::runtime::test]
+async fn gateway_inbound_policy_loopback_drops_unauthorized_and_emits_authorized() {
+    let mock_server = MockServer::start().await;
+    mock_current_user_ok_with_id(&mock_server, "test_token", "999").await;
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind gateway listener");
+    let addr = listener.local_addr().expect("gateway listener addr");
+    let gateway_url = format!("ws://{addr}");
+
+    let gateway_task = fcp_async_core::task::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept gateway client");
+        let mut ws = accept_test_gateway_websocket(socket).await;
+
+        send_gateway_json(&mut ws, &gateway_hello(1_000), "send gateway hello").await;
+
+        let identify = recv_gateway_payload(&mut ws, "client identify").await;
+        assert_eq!(identify["op"], 2, "connector must identify before events");
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "READY",
+                1,
+                &json!({
+                    "v": 10,
+                    "user": { "id": "999", "username": "TestBot" },
+                    "session_id": "sess-policy",
+                    "resume_gateway_url": "wss://gateway.discord.gg"
+                }),
+            ),
+            "send ready",
+        )
+        .await;
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "MESSAGE_CREATE",
+                2,
+                &json!({
+                    "id": "message-denied",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "content": "not addressed to the bot",
+                    "author": { "id": "300", "username": "alice" }
+                }),
+            ),
+            "send unauthorized message",
+        )
+        .await;
+
+        send_gateway_json(
+            &mut ws,
+            &gateway_dispatch(
+                "MESSAGE_CREATE",
+                3,
+                &json!({
+                    "id": "message-allowed",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "content": "please handle this <@999>",
+                    "author": { "id": "300", "username": "alice" }
+                }),
+            ),
+            "send authorized message",
+        )
+        .await;
+
+        close_test_gateway_websocket(&mut ws).await;
+    });
+
+    let mut connector = DiscordConnector::new();
+    connector
+        .handle_configure(json!({
+            "bot_credential": "test_token",
+            "api_url": mock_server.uri(),
+            "gateway_url": gateway_url,
+            "intents": ALL_REQUIRED_INTENTS,
+            "inbound_policy": {
+                "require_mention_in_guilds": true,
+                "allowed_guilds": ["100"],
+                "allowed_channels": ["200"],
+                "allowed_users": ["300"]
+            }
+        }))
+        .await
+        .expect("configure should succeed");
+
+    let mut event_rx = connector.subscribe_events();
+    let _signing_key = setup_handshake(&mut connector, &["discord.read"]).await;
+    connector
+        .handle_subscribe(json!({
+            "topics": ["discord.ready", "discord.message"]
+        }))
+        .await
+        .expect("subscribe should succeed");
+
+    let mut saw_ready = false;
+    let mut saw_authorized = false;
+    for _ in 0..2 {
+        let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timeout waiting for Discord gateway event")
+            .expect("broadcast receive")
+            .expect("event payload");
+
+        assert_ne!(
+            event.data.payload["id"], "message-denied",
+            "unauthorized Discord gateway event leaked through inbound policy"
+        );
+
+        match event.topic.as_str() {
+            "discord.ready" => {
+                saw_ready = true;
+                assert_eq!(event.seq, 1);
+            }
+            "discord.message" => {
+                saw_authorized = true;
+                assert_eq!(event.seq, 3);
+                assert_eq!(event.data.payload["id"], "message-allowed");
+                assert_eq!(event.data.principal.id, "300");
+            }
+            other => panic!("unexpected Discord gateway event topic {other}"),
+        }
+    }
+
+    assert!(saw_ready, "READY event should still be emitted");
+    assert!(
+        saw_authorized,
+        "authorized Discord message should be emitted"
+    );
+
+    let extra = fcp_async_core::time::timeout(StdDuration::from_millis(200), event_rx.recv()).await;
+    assert!(
+        extra.is_err(),
+        "only READY and the authorized message should be emitted"
+    );
+
+    connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    gateway_task.await.expect("gateway task should finish");
 }
 
 #[fcp_async_core::runtime::test]

@@ -3,6 +3,7 @@
 //! Implements handler methods for FCP protocol with Discord-specific operations.
 
 use std::{
+    collections::BTreeSet,
     fs, io,
     path::{Path, PathBuf},
     sync::Arc,
@@ -39,7 +40,7 @@ use crate::{
         EMBED_DESCRIPTION_MAX_CHARS, EMBED_TITLE_MAX_CHARS, EMBED_TOTAL_MAX_CHARS,
         EMBEDS_MAX_COUNT, MESSAGE_CONTENT_MAX_CHARS, THREAD_NAME_MAX_CHARS,
     },
-    types::{DoctorCheck, DoctorReport, Embed},
+    types::{DoctorCheck, DoctorReport, Embed, Message},
 };
 
 /// Discord FCP connector.
@@ -52,6 +53,7 @@ pub struct DiscordConnector {
     session_id: Option<SessionId>,
     zone_dir: Option<PathBuf>,
     bot_user_id: Option<String>,
+    inbound_policy: DiscordInboundPolicy,
     gateway_lease: Option<DiscordGatewayLease>,
 
     // Event broadcast
@@ -74,6 +76,9 @@ const DISCORD_GATEWAY_LEASE_FILE: &str = "discord_gateway_lease.json";
 const DISCORD_GATEWAY_LEASE_TTL_SECONDS: u64 = 120;
 const DISCORD_GATEWAY_LEASE_RENEW_INTERVAL_SECONDS: u64 = 30;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const DISCORD_INBOUND_POLICY_MAX_SET_ITEMS: usize = 256;
+const DISCORD_INBOUND_POLICY_ID_MAX_CHARS: usize = 128;
+const DISCORD_DELIVERY_LABEL_MAX_CHARS: usize = 96;
 
 const REQUIRED_GATEWAY_INTENTS: [(&str, u64); 4] = [
     ("GUILDS", INTENT_GUILDS),
@@ -250,6 +255,325 @@ impl DiscordGatewayLease {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordInboundPolicy {
+    require_mention_in_guilds: bool,
+    allow_dms: bool,
+    allowed_guilds: BTreeSet<String>,
+    allowed_channels: BTreeSet<String>,
+    allowed_users: BTreeSet<String>,
+}
+
+impl Default for DiscordInboundPolicy {
+    fn default() -> Self {
+        Self {
+            require_mention_in_guilds: true,
+            allow_dms: true,
+            allowed_guilds: BTreeSet::new(),
+            allowed_channels: BTreeSet::new(),
+            allowed_users: BTreeSet::new(),
+        }
+    }
+}
+
+impl DiscordInboundPolicy {
+    fn from_config(value: Option<&serde_json::Value>) -> FcpResult<Self> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+
+        let serde_json::Value::Object(object) = value else {
+            return Err(invalid_inbound_policy(
+                "inbound_policy must be an object when provided",
+            ));
+        };
+
+        let mut policy = Self::default();
+        if let Some(value) = object
+            .get("require_mention_in_guilds")
+            .or_else(|| object.get("require_mention"))
+            .filter(|value| !value.is_null())
+        {
+            policy.require_mention_in_guilds =
+                parse_inbound_policy_bool("inbound_policy.require_mention_in_guilds", value)?;
+        }
+        if let Some(value) = object.get("allow_dms").filter(|value| !value.is_null()) {
+            policy.allow_dms = parse_inbound_policy_bool("inbound_policy.allow_dms", value)?;
+        }
+        if let Some(value) = object.get("allowed_guilds") {
+            policy.allowed_guilds =
+                parse_inbound_policy_set("inbound_policy.allowed_guilds", value)?;
+        }
+        if let Some(value) = object.get("allowed_channels") {
+            policy.allowed_channels =
+                parse_inbound_policy_set("inbound_policy.allowed_channels", value)?;
+        }
+        if let Some(value) = object.get("allowed_users") {
+            policy.allowed_users = parse_inbound_policy_set("inbound_policy.allowed_users", value)?;
+        }
+
+        Ok(policy)
+    }
+
+    fn to_redacted_json(&self) -> serde_json::Value {
+        json!({
+            "require_mention_in_guilds": self.require_mention_in_guilds,
+            "allow_dms": self.allow_dms,
+            "allowed_guilds_configured": !self.allowed_guilds.is_empty(),
+            "allowed_guilds_count": self.allowed_guilds.len(),
+            "allowed_channels_configured": !self.allowed_channels.is_empty(),
+            "allowed_channels_count": self.allowed_channels.len(),
+            "allowed_users_configured": !self.allowed_users.is_empty(),
+            "allowed_users_count": self.allowed_users.len(),
+        })
+    }
+
+    fn allows_gateway_event(&self, event: &GatewayEvent, bot_user_id: Option<&str>) -> bool {
+        if matches!(event, GatewayEvent::Ready(_) | GatewayEvent::Resumed) {
+            return true;
+        }
+
+        let Some(payload) = discord_gateway_event_payload(event) else {
+            return true;
+        };
+        let guild_id = discord_payload_guild_id(payload);
+        if guild_id.is_none() && !self.allow_dms {
+            return false;
+        }
+        if !policy_set_allows(&self.allowed_guilds, guild_id) {
+            return false;
+        }
+        if !policy_set_allows(
+            &self.allowed_channels,
+            discord_gateway_event_channel_id(event, payload),
+        ) {
+            return false;
+        }
+        if !policy_set_allows(&self.allowed_users, discord_payload_user_id(payload)) {
+            return false;
+        }
+        if self.require_mention_in_guilds
+            && matches!(event, GatewayEvent::MessageCreate(_))
+            && guild_id.is_some()
+        {
+            return bot_user_id.is_some_and(|bot_user_id| {
+                discord_payload_text(payload)
+                    .is_some_and(|text| discord_text_mentions_bot(text, bot_user_id))
+            });
+        }
+
+        true
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscordDeliveryKind {
+    Final,
+    Progress,
+    Tool,
+    Block,
+}
+
+impl DiscordDeliveryKind {
+    fn from_value(value: Option<&serde_json::Value>) -> FcpResult<Self> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(Self::Final);
+        };
+        let Some(raw) = value.as_str() else {
+            return Err(invalid_delivery_options(
+                "delivery.kind must be a string when provided",
+            ));
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "final" => Ok(Self::Final),
+            "progress" | "intermediate" => Ok(Self::Progress),
+            "tool" | "command" => Ok(Self::Tool),
+            "block" => Ok(Self::Block),
+            _ => Err(invalid_delivery_options(format!(
+                "delivery.kind must be one of final, progress, tool, or block (got {raw:?})"
+            ))),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Final => "final",
+            Self::Progress => "progress",
+            Self::Tool => "tool",
+            Self::Block => "block",
+        }
+    }
+
+    const fn is_final(self) -> bool {
+        matches!(self, Self::Final)
+    }
+
+    const fn allows_hidden(self) -> bool {
+        matches!(self, Self::Progress | Self::Tool)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DiscordDeliveryVisibility {
+    Visible,
+    Hidden,
+}
+
+impl DiscordDeliveryVisibility {
+    fn from_value(value: Option<&serde_json::Value>) -> FcpResult<Self> {
+        let Some(value) = value.filter(|value| !value.is_null()) else {
+            return Ok(Self::Visible);
+        };
+        let Some(raw) = value.as_str() else {
+            return Err(invalid_delivery_options(
+                "delivery.visibility must be a string when provided",
+            ));
+        };
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "visible" => Ok(Self::Visible),
+            "hidden" | "suppressed" => Ok(Self::Hidden),
+            _ => Err(invalid_delivery_options(format!(
+                "delivery.visibility must be visible or hidden (got {raw:?})"
+            ))),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Visible => "visible",
+            Self::Hidden => "hidden",
+        }
+    }
+
+    const fn is_visible(self) -> bool {
+        matches!(self, Self::Visible)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DiscordDeliveryOptions {
+    kind: DiscordDeliveryKind,
+    visibility: DiscordDeliveryVisibility,
+    label: Option<String>,
+}
+
+impl DiscordDeliveryOptions {
+    fn from_input(input: &serde_json::Value) -> FcpResult<Self> {
+        let Some(value) = input.get("delivery").filter(|value| !value.is_null()) else {
+            return Ok(Self::default());
+        };
+        let serde_json::Value::Object(object) = value else {
+            return Err(invalid_delivery_options(
+                "delivery must be an object when provided",
+            ));
+        };
+
+        let kind = DiscordDeliveryKind::from_value(object.get("kind"))?;
+        let visibility = DiscordDeliveryVisibility::from_value(object.get("visibility"))?;
+        let label = parse_delivery_label(object.get("label"))?;
+        let options = Self {
+            kind,
+            visibility,
+            label,
+        };
+        options.validate()?;
+        Ok(options)
+    }
+
+    fn validate(&self) -> FcpResult<()> {
+        if !self.visibility.is_visible() && !self.kind.allows_hidden() {
+            return Err(invalid_delivery_options(format!(
+                "delivery.visibility=hidden is only valid for non-final progress/tool updates, not {} replies",
+                self.kind.as_str()
+            )));
+        }
+        Ok(())
+    }
+
+    const fn final_reply(&self) -> bool {
+        self.kind.is_final()
+    }
+
+    const fn visible(&self) -> bool {
+        self.visibility.is_visible()
+    }
+
+    const fn suppresses_discord_send(&self) -> bool {
+        !self.visibility.is_visible() && self.kind.allows_hidden()
+    }
+
+    fn delivered_receipt(
+        &self,
+        message: &Message,
+        reply_to: Option<&str>,
+        requested_embed_count: usize,
+    ) -> serde_json::Value {
+        let mut receipt = json!({
+            "status": "delivered",
+            "kind": self.kind.as_str(),
+            "visibility": self.visibility.as_str(),
+            "visible": self.visible(),
+            "final": self.final_reply(),
+            "message_id": &message.id,
+            "channel_id": &message.channel_id,
+            "reply_to": reply_to,
+            "reply_to_fail_if_not_exists": reply_to.map(|_| false),
+            "content_present": !message.content.is_empty(),
+            "requested_embed_count": requested_embed_count,
+            "delivered_embed_count": message.embeds.len(),
+            "attachment_count": message.attachments.len(),
+        });
+        self.add_label(&mut receipt);
+        receipt
+    }
+
+    fn suppressed_receipt(
+        &self,
+        channel_id: &str,
+        reply_to: Option<&str>,
+        content_present: bool,
+        requested_embed_count: usize,
+    ) -> serde_json::Value {
+        let mut receipt = json!({
+            "status": "suppressed",
+            "reason": "hidden_non_final_update",
+            "kind": self.kind.as_str(),
+            "visibility": self.visibility.as_str(),
+            "visible": false,
+            "final": false,
+            "message_id": null,
+            "channel_id": channel_id,
+            "reply_to": reply_to,
+            "reply_to_fail_if_not_exists": reply_to.map(|_| false),
+            "content_present": content_present,
+            "requested_embed_count": requested_embed_count,
+            "delivered_embed_count": 0,
+            "attachment_count": 0,
+        });
+        self.add_label(&mut receipt);
+        receipt
+    }
+
+    fn add_label(&self, receipt: &mut serde_json::Value) {
+        if let (Some(label), Some(object)) = (&self.label, receipt.as_object_mut()) {
+            object.insert("label".to_string(), json!(label));
+        }
+    }
+}
+
+impl Default for DiscordDeliveryOptions {
+    fn default() -> Self {
+        Self {
+            kind: DiscordDeliveryKind::Final,
+            visibility: DiscordDeliveryVisibility::Visible,
+            label: None,
+        }
+    }
+}
+
 impl DiscordConnector {
     /// Create a new Discord connector.
     #[must_use]
@@ -265,6 +589,7 @@ impl DiscordConnector {
             session_id: None,
             zone_dir: None,
             bot_user_id: None,
+            inbound_policy: DiscordInboundPolicy::default(),
             gateway_lease: None,
             event_tx,
             gateway_task: None,
@@ -272,6 +597,18 @@ impl DiscordConnector {
             gateway_lease_task: None,
             start_time: Instant::now(),
         }
+    }
+
+    /// Return this connector process instance ID.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
+    /// Subscribe to emitted Discord event envelopes.
+    #[must_use]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
     }
 
     fn manifest_hash() -> String {
@@ -285,6 +622,7 @@ impl DiscordConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
+        let inbound_policy = DiscordInboundPolicy::from_config(params.get("inbound_policy"))?;
         let config: DiscordConfig =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
@@ -339,6 +677,7 @@ impl DiscordConnector {
         self.bot_user_id = Some(user.id.clone());
         self.api_client = Some(api_client.clone());
         self.gateway = Some(Arc::new(GatewayConnection::new(config.clone(), api_client)));
+        self.inbound_policy = inbound_policy;
         self.config = Some(config);
         self.base.set_configured(true);
 
@@ -353,6 +692,7 @@ impl DiscordConnector {
                 "intents_ok": true,
                 "network_ok": true
             },
+            "inbound_policy": self.inbound_policy.to_redacted_json(),
         }))
     }
 
@@ -444,11 +784,13 @@ impl DiscordConnector {
                 "status": "ready",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
                 "gateway_connected": self.gateway_task.is_some(),
+                "inbound_policy": self.inbound_policy.to_redacted_json(),
                 "metrics": self.base.metrics()
             })),
             Err(e) => Ok(json!({
                 "status": "degraded",
                 "uptime_ms": self.start_time.elapsed().as_millis() as u64,
+                "inbound_policy": self.inbound_policy.to_redacted_json(),
                 "error": e.to_string()
             })),
         }
@@ -600,6 +942,7 @@ impl DiscordConnector {
                         "network": network.details_json(),
                         "user_id": user.id,
                         "username": user.username,
+                        "inbound_policy": self.inbound_policy.to_redacted_json(),
                     }));
                     report
                 } else if !network.network_ok {
@@ -614,6 +957,7 @@ impl DiscordConnector {
                         "network": network.details_json(),
                         "user_id": user.id,
                         "username": user.username,
+                        "inbound_policy": self.inbound_policy.to_redacted_json(),
                     }));
                     report
                 } else {
@@ -627,6 +971,7 @@ impl DiscordConnector {
                         "user_id": user.id,
                         "username": user.username,
                         "bot": user.bot,
+                        "inbound_policy": self.inbound_policy.to_redacted_json(),
                     }));
                     report
                 }
@@ -643,6 +988,7 @@ impl DiscordConnector {
                     "missing_intents": missing_intents,
                     "network_ok": network.network_ok,
                     "network": network.details_json(),
+                    "inbound_policy": self.inbound_policy.to_redacted_json(),
                 }));
                 report
             }
@@ -660,7 +1006,28 @@ impl DiscordConnector {
                 "channel_id": { "type": "string", "description": "Channel ID" },
                 "content": { "type": "string", "description": "Message content" },
                 "embeds": { "type": "array", "items": { "type": "object" } },
-                "reply_to": { "type": "string", "description": "Message ID to reply to" }
+                "reply_to": { "type": "string", "description": "Message ID to reply to" },
+                "delivery": {
+                    "type": "object",
+                    "description": "Delivery accounting metadata for final replies, progress updates, and visible labels",
+                    "properties": {
+                        "kind": {
+                            "type": "string",
+                            "enum": ["final", "progress", "tool", "block"],
+                            "description": "Logical reply kind; defaults to visible final"
+                        },
+                        "visibility": {
+                            "type": "string",
+                            "enum": ["visible", "hidden"],
+                            "description": "Hidden is valid only for non-final progress/tool noise"
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "Optional operator-facing label copied into the delivery receipt"
+                        }
+                    },
+                    "additionalProperties": false
+                }
             },
             "required": ["channel_id"]
         })
@@ -670,9 +1037,29 @@ impl DiscordConnector {
         json!({
             "type": "object",
             "properties": {
-                "id": { "type": "string" },
+                "id": { "type": ["string", "null"] },
                 "channel_id": { "type": "string" },
-                "content": { "type": "string" }
+                "content": { "type": ["string", "null"] },
+                "delivery": {
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string", "enum": ["delivered", "suppressed"] },
+                        "kind": { "type": "string" },
+                        "visibility": { "type": "string" },
+                        "visible": { "type": "boolean" },
+                        "final": { "type": "boolean" },
+                        "message_id": { "type": ["string", "null"] },
+                        "channel_id": { "type": "string" },
+                        "reply_to": { "type": ["string", "null"] },
+                        "reply_to_fail_if_not_exists": { "type": ["boolean", "null"] },
+                        "content_present": { "type": "boolean" },
+                        "requested_embed_count": { "type": "integer" },
+                        "delivered_embed_count": { "type": "integer" },
+                        "attachment_count": { "type": "integer" },
+                        "label": { "type": "string" },
+                        "reason": { "type": "string" }
+                    }
+                }
             }
         })
     }
@@ -1121,9 +1508,16 @@ impl DiscordConnector {
             }),
         };
 
-        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+        let mut value = serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),
-        })
+        })?;
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "inbound_policy".into(),
+                self.inbound_policy.to_redacted_json(),
+            );
+        }
+        Ok(value)
     }
 
     /// Handle simulate method.
@@ -1214,6 +1608,9 @@ impl DiscordConnector {
     fn validate_input_early(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
         if matches!(operation, "discord.send_message" | "discord.edit_message") {
             parse_embeds(input)?;
+        }
+        if operation == "discord.send_message" {
+            DiscordDeliveryOptions::from_input(input)?;
         }
 
         if let Some(schema) = Self::input_schema_for(operation) {
@@ -1427,10 +1824,17 @@ impl DiscordConnector {
                 code: 1003,
                 message: "Missing channel_id".into(),
             })?;
+        let channel_id = normalize_discord_snowflake_id("channel_id", channel_id)?;
 
         let content = input.get("content").and_then(|v| v.as_str());
         let embeds: Option<Vec<Embed>> = parse_embeds(&input)?;
-        let reply_to = input.get("reply_to").and_then(|v| v.as_str());
+        let requested_embed_count = embeds.as_ref().map_or(0, Vec::len);
+        let reply_to = input
+            .get("reply_to")
+            .and_then(|v| v.as_str())
+            .map(|id| normalize_discord_snowflake_id("reply_to", id))
+            .transpose()?;
+        let delivery = DiscordDeliveryOptions::from_input(&input)?;
 
         // Validate that at least content or embeds is provided
         if content.is_none() && embeds.is_none() {
@@ -1499,17 +1903,86 @@ impl DiscordConnector {
             }
         }
 
+        if delivery.suppresses_discord_send() {
+            self.base.check_ready()?;
+            let content_present = content.is_some_and(|content| !content.is_empty());
+            let receipt = delivery.suppressed_receipt(
+                channel_id,
+                reply_to,
+                content_present,
+                requested_embed_count,
+            );
+            let response = json!({
+                "id": null,
+                "channel_id": channel_id,
+                "content": null,
+                "delivery": receipt
+            });
+            tracing::debug!(
+                delivery_kind = delivery.kind.as_str(),
+                visibility = delivery.visibility.as_str(),
+                final_reply = delivery.final_reply(),
+                visible = delivery.visible(),
+                reply_to_configured = reply_to.is_some(),
+                content_present,
+                requested_embed_count,
+                "Discord hidden non-final delivery suppressed before REST send"
+            );
+            if let Some(schema) = Self::output_schema_for("discord.send_message") {
+                validate_output_with_limits(&schema, &response, &Limits::default())?;
+            }
+            return Ok(response);
+        }
+
         // Now check that we're configured
         let api = self.require_api()?;
 
-        let message = api
+        let message = match api
             .create_message(channel_id, content, embeds, reply_to)
             .await
-            .map_err(|e| e.to_fcp_error())?;
+        {
+            Ok(message) => message,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    delivery_kind = delivery.kind.as_str(),
+                    visibility = delivery.visibility.as_str(),
+                    final_reply = delivery.final_reply(),
+                    visible = delivery.visible(),
+                    reply_to_configured = reply_to.is_some(),
+                    content_present = content.is_some_and(|content| !content.is_empty()),
+                    requested_embed_count,
+                    "Discord visible/final message delivery failed"
+                );
+                return Err(error.to_fcp_error());
+            }
+        };
 
-        let response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
+        let delivery_receipt =
+            delivery.delivered_receipt(&message, reply_to, requested_embed_count);
+        tracing::info!(
+            message_id = %message.id,
+            delivery_kind = delivery.kind.as_str(),
+            visibility = delivery.visibility.as_str(),
+            final_reply = delivery.final_reply(),
+            visible = delivery.visible(),
+            reply_to_configured = reply_to.is_some(),
+            content_present = !message.content.is_empty(),
+            requested_embed_count,
+            delivered_embed_count = message.embeds.len(),
+            attachment_count = message.attachments.len(),
+            "Discord message delivery accounted"
+        );
+
+        let mut response = serde_json::to_value(message).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize message: {e}"),
         })?;
+        response
+            .as_object_mut()
+            .ok_or_else(|| FcpError::Internal {
+                message: "Serialized Discord message response was not an object".into(),
+            })?
+            .insert("delivery".into(), delivery_receipt);
 
         if let Some(schema) = Self::output_schema_for("discord.send_message") {
             validate_output_with_limits(&schema, &response, &Limits::default())?;
@@ -1900,6 +2373,7 @@ impl DiscordConnector {
         self.session_id = None;
         self.zone_dir = None;
         self.bot_user_id = None;
+        self.inbound_policy = DiscordInboundPolicy::default();
         self.config = None;
         self.base.set_handshaken(false);
         self.base.set_configured(false);
@@ -1950,6 +2424,8 @@ impl DiscordConnector {
         let event_tx = self.event_tx.clone();
         let connector_id = self.base.id.clone();
         let instance_id = self.base.instance_id.clone();
+        let inbound_policy = self.inbound_policy.clone();
+        let bot_user_id = self.bot_user_id.clone();
         let base = self.base.clone();
         let lease_shutdown_tx = shutdown_tx.clone();
 
@@ -2018,12 +2494,18 @@ impl DiscordConnector {
                         let event_tx = event_tx.clone();
                         let connector_id = connector_id.clone();
                         let instance_id = instance_id.clone();
+                        let inbound_policy = inbound_policy.clone();
+                        let bot_user_id = bot_user_id.clone();
                         let base = base.clone();
                         let shutdown_tx = shutdown_tx.clone();
                         async move {
-                            if let Some(event) =
-                                gateway_event_to_fcp(&gateway_event, &connector_id, &instance_id)
-                            {
+                            if let Some(event) = gateway_event_to_fcp_with_policy(
+                                &gateway_event,
+                                &connector_id,
+                                &instance_id,
+                                &inbound_policy,
+                                bot_user_id.as_deref(),
+                            ) {
                                 base.record_event();
                                 if event_tx.send(Ok(event)).is_err() {
                                     tracing::info!(
@@ -2069,7 +2551,7 @@ impl Default for DiscordConnector {
 /// flywheel_connectors-cmkuk. Previously the `.and_then(|v| …ok())`
 /// shape dropped the serde error on the floor, so invalid embeds either
 /// tripped the generic "content or embeds required" fallback on send,
-/// or were accepted by edit_message as if they had never been supplied.
+/// or were accepted by `edit_message` as if they had never been supplied.
 fn parse_embeds(input: &serde_json::Value) -> FcpResult<Option<Vec<Embed>>> {
     let Some(raw) = input.get("embeds") else {
         return Ok(None);
@@ -2170,11 +2652,11 @@ fn validate_network_constraints_hosts(config: &DiscordConfig) -> FcpResult<()> {
 /// `host_allowed_by_network_constraints`; this function only owns the
 /// scheme / userinfo / query / fragment discipline so that a
 /// well-hosted URL cannot smuggle junk into downstream `format!` URL
-/// construction. Accepts `wss://` on gateway_url because Discord's
+/// construction. Accepts `wss://` on `gateway_url` because Discord's
 /// gateway uses WebSocket; the scheme check permits both `https` and
-/// `wss` for either field since validate_network_constraints_hosts is
+/// `wss` for either field since `validate_network_constraints_hosts` is
 /// called with a single helper, and misapplied schemes are caught at
-/// connect time by WsClient / reqwest.
+/// connect time by `WsClient` / `reqwest`.
 fn validate_discord_endpoint_url(raw: &str, field: &str) -> FcpResult<()> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -2247,12 +2729,341 @@ fn host_allowed_by_network_constraints(host: &str) -> bool {
     false
 }
 
+fn parse_delivery_label(value: Option<&serde_json::Value>) -> FcpResult<Option<String>> {
+    let Some(value) = value.filter(|value| !value.is_null()) else {
+        return Ok(None);
+    };
+    let Some(label) = value.as_str() else {
+        return Err(invalid_delivery_options(
+            "delivery.label must be a string when provided",
+        ));
+    };
+    let label = label.trim();
+    if label.is_empty() {
+        return Ok(None);
+    }
+    if label.chars().any(char::is_control) {
+        return Err(invalid_delivery_options(
+            "delivery.label must not contain control characters",
+        ));
+    }
+    if label.chars().count() > DISCORD_DELIVERY_LABEL_MAX_CHARS {
+        return Err(invalid_delivery_options(format!(
+            "delivery.label must be at most {DISCORD_DELIVERY_LABEL_MAX_CHARS} characters"
+        )));
+    }
+    Ok(Some(label.to_string()))
+}
+
+fn normalize_discord_snowflake_id<'a>(field: &str, value: &'a str) -> FcpResult<&'a str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must not be empty"),
+        });
+    }
+    if !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be a numeric Discord snowflake ID"),
+        });
+    }
+    Ok(value)
+}
+
+fn invalid_delivery_options(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn invalid_inbound_policy(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn parse_inbound_policy_bool(field: &str, value: &serde_json::Value) -> FcpResult<bool> {
+    match value {
+        serde_json::Value::Bool(value) => Ok(*value),
+        serde_json::Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Ok(true),
+            "false" | "no" | "off" | "0" => Ok(false),
+            _ => Err(invalid_inbound_policy(format!(
+                "{field} must be a boolean or boolean-like string"
+            ))),
+        },
+        _ => Err(invalid_inbound_policy(format!(
+            "{field} must be a boolean or boolean-like string"
+        ))),
+    }
+}
+
+fn parse_inbound_policy_set(field: &str, value: &serde_json::Value) -> FcpResult<BTreeSet<String>> {
+    let mut parsed = BTreeSet::new();
+    match value {
+        serde_json::Value::Null => {}
+        serde_json::Value::Array(values) => {
+            for value in values {
+                let raw = value.as_str().ok_or_else(|| {
+                    invalid_inbound_policy(format!("{field} entries must be strings"))
+                })?;
+                insert_inbound_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        serde_json::Value::String(value) => {
+            for raw in value.split(',') {
+                insert_inbound_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        _ => {
+            return Err(invalid_inbound_policy(format!(
+                "{field} must be a comma-separated string or array of strings"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn insert_inbound_policy_set_value(
+    field: &str,
+    raw: &str,
+    parsed: &mut BTreeSet<String>,
+) -> FcpResult<()> {
+    if let Some(value) = normalize_inbound_policy_id(field, raw)? {
+        parsed.insert(value);
+    }
+    if parsed.len() > DISCORD_INBOUND_POLICY_MAX_SET_ITEMS {
+        return Err(invalid_inbound_policy(format!(
+            "{field} must contain at most {DISCORD_INBOUND_POLICY_MAX_SET_ITEMS} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_inbound_policy_id(field: &str, value: &str) -> FcpResult<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = normalize_discord_policy_identifier(field, value);
+    if value.len() > DISCORD_INBOUND_POLICY_ID_MAX_CHARS {
+        return Err(invalid_inbound_policy(format!(
+            "{field} entries must be at most {DISCORD_INBOUND_POLICY_ID_MAX_CHARS} characters"
+        )));
+    }
+    if value != "*" && !value.chars().all(|character| character.is_ascii_digit()) {
+        return Err(invalid_inbound_policy(format!(
+            "{field} entries must be stable Discord IDs or '*'"
+        )));
+    }
+
+    Ok(Some(value))
+}
+
+fn normalize_discord_policy_identifier(field: &str, value: &str) -> String {
+    if field.ends_with(".allowed_users") {
+        return normalize_discord_user_policy_id(value);
+    }
+    if field.ends_with(".allowed_channels") {
+        return normalize_discord_channel_policy_id(value);
+    }
+    if field.ends_with(".allowed_guilds") {
+        return normalize_discord_guild_policy_id(value);
+    }
+    value.to_string()
+}
+
+fn normalize_discord_user_policy_id(value: &str) -> String {
+    let unwrapped = unwrap_discord_user_mention(value).unwrap_or(value);
+    unwrapped
+        .strip_prefix("discord:user:")
+        .or_else(|| unwrapped.strip_prefix("discord:"))
+        .or_else(|| unwrapped.strip_prefix("user:"))
+        .or_else(|| unwrapped.strip_prefix("pk:"))
+        .unwrap_or(unwrapped)
+        .to_string()
+}
+
+fn normalize_discord_channel_policy_id(value: &str) -> String {
+    let unwrapped = unwrap_discord_channel_mention(value).unwrap_or(value);
+    unwrapped
+        .strip_prefix("discord:channel:")
+        .or_else(|| unwrapped.strip_prefix("channel:"))
+        .or_else(|| unwrapped.strip_prefix("discord:"))
+        .unwrap_or(unwrapped)
+        .to_string()
+}
+
+fn normalize_discord_guild_policy_id(value: &str) -> String {
+    value
+        .strip_prefix("discord:guild:")
+        .or_else(|| value.strip_prefix("guild:"))
+        .or_else(|| value.strip_prefix("discord:"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn unwrap_discord_user_mention(value: &str) -> Option<&str> {
+    let inner = value.strip_prefix("<@")?.strip_suffix('>')?;
+    let id = inner.strip_prefix('!').unwrap_or(inner);
+    (!id.is_empty()).then_some(id)
+}
+
+fn unwrap_discord_channel_mention(value: &str) -> Option<&str> {
+    let inner = value.strip_prefix("<#")?.strip_suffix('>')?;
+    (!inner.is_empty()).then_some(inner)
+}
+
+fn policy_set_allows(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
+    policy_set.is_empty()
+        || policy_set.contains("*")
+        || candidate.is_some_and(|candidate| policy_set.contains(candidate))
+}
+
+const fn discord_gateway_event_payload(event: &GatewayEvent) -> Option<&serde_json::Value> {
+    match event {
+        GatewayEvent::MessageCreate(data)
+        | GatewayEvent::MessageUpdate(data)
+        | GatewayEvent::MessageDelete(data)
+        | GatewayEvent::GuildCreate(data)
+        | GatewayEvent::GuildUpdate(data)
+        | GatewayEvent::ChannelCreate(data)
+        | GatewayEvent::ChannelUpdate(data)
+        | GatewayEvent::TypingStart(data)
+        | GatewayEvent::Unknown { data, .. } => Some(data),
+        GatewayEvent::Ready(_) | GatewayEvent::Resumed => None,
+    }
+}
+
+fn discord_payload_guild_id(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("guild_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("guild")
+                .and_then(|guild| guild.get("id"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn discord_payload_channel_id(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("channel_id")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            payload
+                .get("channel")
+                .and_then(|channel| channel.get("id"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn discord_gateway_event_channel_id<'a>(
+    event: &GatewayEvent,
+    payload: &'a serde_json::Value,
+) -> Option<&'a str> {
+    discord_payload_channel_id(payload).or_else(|| {
+        matches!(
+            event,
+            GatewayEvent::ChannelCreate(_) | GatewayEvent::ChannelUpdate(_)
+        )
+        .then(|| payload.get("id").and_then(serde_json::Value::as_str))
+        .flatten()
+    })
+}
+
+fn discord_payload_user_id(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("author")
+        .and_then(|author| author.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("user_id").and_then(serde_json::Value::as_str))
+        .or_else(|| {
+            payload
+                .get("user")
+                .and_then(|user| user.get("id"))
+                .and_then(serde_json::Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("member")
+                .and_then(|member| member.get("user"))
+                .and_then(|user| user.get("id"))
+                .and_then(serde_json::Value::as_str)
+        })
+}
+
+fn discord_payload_text(payload: &serde_json::Value) -> Option<&str> {
+    payload
+        .get("content")
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| payload.get("text").and_then(serde_json::Value::as_str))
+}
+
+fn discord_text_mentions_bot(text: &str, bot_user_id: &str) -> bool {
+    text.match_indices("<@").any(|(index, _)| {
+        let after_marker = &text[index + 2..];
+        if let Some(after_bot_id) = after_marker.strip_prefix(bot_user_id) {
+            return after_bot_id.starts_with('>');
+        }
+        after_marker
+            .strip_prefix('!')
+            .and_then(|after_bang| after_bang.strip_prefix(bot_user_id))
+            .is_some_and(|after_bot_id| after_bot_id.starts_with('>'))
+    })
+}
+
+fn discord_gateway_event_name(event: &GatewayEvent) -> &str {
+    match event {
+        GatewayEvent::Ready(_) => "READY",
+        GatewayEvent::Resumed => "RESUMED",
+        GatewayEvent::MessageCreate(_) => "MESSAGE_CREATE",
+        GatewayEvent::MessageUpdate(_) => "MESSAGE_UPDATE",
+        GatewayEvent::MessageDelete(_) => "MESSAGE_DELETE",
+        GatewayEvent::GuildCreate(_) => "GUILD_CREATE",
+        GatewayEvent::GuildUpdate(_) => "GUILD_UPDATE",
+        GatewayEvent::ChannelCreate(_) => "CHANNEL_CREATE",
+        GatewayEvent::ChannelUpdate(_) => "CHANNEL_UPDATE",
+        GatewayEvent::TypingStart(_) => "TYPING_START",
+        GatewayEvent::Unknown { event_name, .. } => event_name,
+    }
+}
+
 /// Convert a Discord gateway event to an FCP `EventEnvelope`.
 fn gateway_event_to_fcp(
     event: &GatewayEventFrame,
     connector_id: &ConnectorId,
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
+    gateway_event_to_fcp_with_policy(
+        event,
+        connector_id,
+        instance_id,
+        &DiscordInboundPolicy::default(),
+        None,
+    )
+}
+
+fn gateway_event_to_fcp_with_policy(
+    event: &GatewayEventFrame,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    inbound_policy: &DiscordInboundPolicy,
+    bot_user_id: Option<&str>,
+) -> Option<EventEnvelope> {
+    if !inbound_policy.allows_gateway_event(&event.event, bot_user_id) {
+        info!(
+            event = discord_gateway_event_name(&event.event),
+            "Discord gateway event suppressed by inbound policy"
+        );
+        return None;
+    }
+
     let (topic, payload, principal_info, thread_info) = match &event.event {
         GatewayEvent::Ready(ready) => {
             let payload = json!({
@@ -2503,6 +3314,15 @@ mod tests {
         capability_id: &str,
         operations: &[&str],
     ) -> CapabilityArtifact {
+        generate_capability_with_instance(signing_key, capability_id, operations, None)
+    }
+
+    fn generate_capability_with_instance(
+        signing_key: &Ed25519SigningKey,
+        capability_id: &str,
+        operations: &[&str],
+        target_instance: Option<&InstanceId>,
+    ) -> CapabilityArtifact {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
         let constraints = fcp_core::CapabilityConstraints {
@@ -2511,20 +3331,23 @@ mod tests {
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        let cose = CapabilityBuilder::new()
+        let mut builder = CapabilityBuilder::new()
             .capability_id(capability_id)
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
-            .sign(signing_key)
-            .unwrap();
+            .try_constraints_cbor(&cbor)
+            .expect("constraints CBOR should be valid");
+        if let Some(target_instance) = target_instance {
+            builder = builder.target_instance(target_instance.as_ref());
+        }
+        let cose = builder.sign(signing_key).unwrap();
         CapabilityArtifact::from_raw(cose)
     }
 
-    fn simulate_send_message_payload(capability: CapabilityArtifact) -> serde_json::Value {
+    fn simulate_send_message_payload(capability: &CapabilityArtifact) -> serde_json::Value {
         json!({
             "type": "simulate",
             "id": "simulate-discord-send-message",
@@ -2535,7 +3358,7 @@ mod tests {
                 "channel_id": "123456789",
                 "content": "Hello"
             },
-            "capability_token": capability
+                "capability_token": capability
         })
     }
 
@@ -2571,6 +3394,86 @@ mod tests {
             .join(format!("{label}-{}", Uuid::new_v4()))
             .to_string_lossy()
             .into_owned()
+    }
+
+    #[test]
+    fn delivery_options_default_to_visible_final() {
+        let options = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "reply"
+        }))
+        .expect("default delivery options should parse");
+
+        assert_eq!(options.kind, DiscordDeliveryKind::Final);
+        assert_eq!(options.visibility, DiscordDeliveryVisibility::Visible);
+        assert!(options.final_reply());
+        assert!(options.visible());
+        assert!(
+            !options.suppresses_discord_send(),
+            "visible final replies must reach Discord REST"
+        );
+    }
+
+    #[test]
+    fn delivery_options_allow_hidden_progress_suppression() {
+        let options = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "working",
+            "delivery": {
+                "kind": "progress",
+                "visibility": "hidden",
+                "label": "tool-progress"
+            }
+        }))
+        .expect("hidden progress delivery should parse");
+
+        assert_eq!(options.kind, DiscordDeliveryKind::Progress);
+        assert_eq!(options.visibility, DiscordDeliveryVisibility::Hidden);
+        assert_eq!(options.label.as_deref(), Some("tool-progress"));
+        assert!(options.suppresses_discord_send());
+    }
+
+    #[test]
+    fn delivery_options_reject_hidden_final_reply() {
+        let err = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "final answer",
+            "delivery": {
+                "kind": "final",
+                "visibility": "hidden"
+            }
+        }))
+        .expect_err("hidden final replies must be invalid");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(
+                    message.contains("hidden") && message.contains("final"),
+                    "unexpected error: {message}"
+                );
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn delivery_options_reject_control_char_label() {
+        let err = DiscordDeliveryOptions::from_input(&json!({
+            "channel_id": "123456789",
+            "content": "reply",
+            "delivery": {
+                "kind": "final",
+                "label": "bad\nlabel"
+            }
+        }))
+        .expect_err("labels with control characters must be invalid");
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("control"), "unexpected error: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -3077,10 +3980,11 @@ mod tests {
             connector.base.instance_id.clone(),
         ));
 
-        let capability = generate_capability(
+        let capability = generate_capability_with_instance(
             &signing_key,
             "discord.get_channel",
             &["discord.get_channel"],
+            Some(&connector.base.instance_id),
         );
 
         let result = connector
@@ -3156,6 +4060,250 @@ mod tests {
                 "thread-1",
                 Some("channel-1".into())
             ))
+        );
+    }
+
+    #[test]
+    fn test_discord_inbound_policy_normalizes_prefixed_ids_and_mentions() {
+        let policy = DiscordInboundPolicy::from_config(Some(&json!({
+            "require_mention": "yes",
+            "allow_dms": "off",
+            "allowed_guilds": "guild:111, discord:guild:112, discord:113",
+            "allowed_channels": ["channel:221", "discord:channel:222", "<#223>"],
+            "allowed_users": ["discord:user:331", "discord:332", "user:333", "pk:334", "<@!335>", "<@336>"],
+        })))
+        .expect("policy should parse");
+
+        assert!(policy.require_mention_in_guilds);
+        assert!(!policy.allow_dms);
+        assert_eq!(
+            policy.allowed_guilds,
+            BTreeSet::from(["111".into(), "112".into(), "113".into()])
+        );
+        assert_eq!(
+            policy.allowed_channels,
+            BTreeSet::from(["221".into(), "222".into(), "223".into()])
+        );
+        assert_eq!(
+            policy.allowed_users,
+            BTreeSet::from([
+                "331".into(),
+                "332".into(),
+                "333".into(),
+                "334".into(),
+                "335".into(),
+                "336".into()
+            ])
+        );
+
+        let redacted = policy.to_redacted_json();
+        assert_eq!(redacted["allowed_guilds_count"], 3);
+        assert_eq!(redacted["allowed_channels_count"], 3);
+        assert_eq!(redacted["allowed_users_count"], 6);
+        let redacted_text = redacted.to_string();
+        assert!(
+            !redacted_text.contains("331"),
+            "redacted policy must not disclose configured IDs"
+        );
+    }
+
+    #[test]
+    fn test_discord_inbound_policy_rejects_non_stable_ids() {
+        let err = DiscordInboundPolicy::from_config(Some(&json!({
+            "allowed_users": ["alice"]
+        })))
+        .unwrap_err();
+
+        match err {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("stable Discord IDs"), "got: {message}");
+            }
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_discord_inbound_policy_requires_guild_mention_but_allows_dms() {
+        let policy = DiscordInboundPolicy::default();
+        let mut payload = json!({
+            "id": "message-1",
+            "guild_id": "guild-1",
+            "channel_id": "channel-1",
+            "content": "hello",
+            "author": { "id": "user-1" }
+        });
+
+        let event = GatewayEvent::MessageCreate(payload.clone());
+        assert!(!policy.allows_gateway_event(&event, Some("bot-1")));
+
+        payload["content"] = json!("hello <@!bot-1>");
+        let event = GatewayEvent::MessageCreate(payload);
+        assert!(policy.allows_gateway_event(&event, Some("bot-1")));
+
+        let dm_event = GatewayEvent::MessageCreate(json!({
+            "id": "message-2",
+            "channel_id": "dm-channel-1",
+            "content": "hello",
+            "author": { "id": "user-1" }
+        }));
+        assert!(policy.allows_gateway_event(&dm_event, None));
+    }
+
+    #[test]
+    fn test_discord_inbound_policy_blocks_dms_when_configured() {
+        let policy = DiscordInboundPolicy::from_config(Some(&json!({
+            "allow_dms": false
+        })))
+        .expect("policy should parse");
+
+        let dm_event = GatewayEvent::MessageCreate(json!({
+            "id": "message-1",
+            "channel_id": "dm-channel-1",
+            "content": "hello",
+            "author": { "id": "user-1" }
+        }));
+
+        assert!(!policy.allows_gateway_event(&dm_event, Some("bot-1")));
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_inbound_policy_filters_channel_user_and_mentions() {
+        let connector_id = ConnectorId::from_static("fcp.discord");
+        let instance_id = InstanceId::new();
+        let policy = DiscordInboundPolicy::from_config(Some(&json!({
+            "require_mention_in_guilds": true,
+            "allowed_guilds": ["100"],
+            "allowed_channels": ["200"],
+            "allowed_users": ["300"],
+        })))
+        .expect("policy should parse");
+
+        let allowed = GatewayEventFrame {
+            seq: Some(101),
+            event: GatewayEvent::MessageCreate(json!({
+                "id": "message-1",
+                "guild_id": "100",
+                "channel_id": "200",
+                "content": "please handle <@999>",
+                "author": {
+                    "id": "300",
+                    "username": "alice"
+                }
+            })),
+        };
+        let envelope = gateway_event_to_fcp_with_policy(
+            &allowed,
+            &connector_id,
+            &instance_id,
+            &policy,
+            Some("999"),
+        )
+        .expect("authorized event should pass");
+        assert_eq!(envelope.topic, "discord.message");
+        assert_eq!(envelope.seq, 101);
+
+        let wrong_channel = GatewayEventFrame {
+            seq: Some(102),
+            event: GatewayEvent::MessageCreate(json!({
+                "id": "message-2",
+                "guild_id": "100",
+                "channel_id": "201",
+                "content": "please handle <@999>",
+                "author": { "id": "300" }
+            })),
+        };
+        assert!(
+            gateway_event_to_fcp_with_policy(
+                &wrong_channel,
+                &connector_id,
+                &instance_id,
+                &policy,
+                Some("999"),
+            )
+            .is_none()
+        );
+
+        let missing_mention = GatewayEventFrame {
+            seq: Some(103),
+            event: GatewayEvent::MessageCreate(json!({
+                "id": "message-3",
+                "guild_id": "100",
+                "channel_id": "200",
+                "content": "please handle",
+                "author": { "id": "300" }
+            })),
+        };
+        assert!(
+            gateway_event_to_fcp_with_policy(
+                &missing_mention,
+                &connector_id,
+                &instance_id,
+                &policy,
+                Some("999"),
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn test_gateway_event_to_fcp_inbound_policy_filters_interaction_payloads() {
+        let connector_id = ConnectorId::from_static("fcp.discord");
+        let instance_id = InstanceId::new();
+        let policy = DiscordInboundPolicy::from_config(Some(&json!({
+            "require_mention_in_guilds": false,
+            "allowed_guilds": ["100"],
+            "allowed_channels": ["200"],
+            "allowed_users": ["300"],
+        })))
+        .expect("policy should parse");
+
+        let allowed = GatewayEventFrame {
+            seq: Some(201),
+            event: GatewayEvent::Unknown {
+                event_name: "INTERACTION_CREATE".into(),
+                data: json!({
+                    "id": "interaction-1",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "member": {
+                        "user": { "id": "300" }
+                    }
+                }),
+            },
+        };
+        let envelope = gateway_event_to_fcp_with_policy(
+            &allowed,
+            &connector_id,
+            &instance_id,
+            &policy,
+            Some("999"),
+        )
+        .expect("authorized interaction should pass");
+        assert_eq!(envelope.topic, "discord.interaction_create");
+
+        let wrong_user = GatewayEventFrame {
+            seq: Some(202),
+            event: GatewayEvent::Unknown {
+                event_name: "INTERACTION_CREATE".into(),
+                data: json!({
+                    "id": "interaction-2",
+                    "guild_id": "100",
+                    "channel_id": "200",
+                    "member": {
+                        "user": { "id": "301" }
+                    }
+                }),
+            },
+        };
+        assert!(
+            gateway_event_to_fcp_with_policy(
+                &wrong_user,
+                &connector_id,
+                &instance_id,
+                &policy,
+                Some("999"),
+            )
+            .is_none()
         );
     }
 
@@ -3436,10 +4584,11 @@ mod tests {
         ));
 
         // Token grants discord.get_channel, try discord.delete_message
-        let capability = generate_capability(
+        let capability = generate_capability_with_instance(
             &signing_key,
             "discord.get_channel",
             &["discord.get_channel"],
+            Some(&connector.base.instance_id),
         );
 
         let result = connector
@@ -3468,7 +4617,7 @@ mod tests {
             generate_capability(&signing_key, "discord.send", &["discord.send_message"]);
 
         let result = connector
-            .handle_simulate(simulate_send_message_payload(capability))
+            .handle_simulate(simulate_send_message_payload(&capability))
             .await
             .expect("simulate should return a denial response");
 
@@ -3489,14 +4638,15 @@ mod tests {
             connector.base.instance_id.clone(),
         ));
 
-        let capability = generate_capability(
+        let capability = generate_capability_with_instance(
             &signing_key,
             "discord.get_channel",
             &["discord.get_channel"],
+            Some(&connector.base.instance_id),
         );
 
         let result = connector
-            .handle_simulate(simulate_send_message_payload(capability))
+            .handle_simulate(simulate_send_message_payload(&capability))
             .await
             .expect("simulate should return a denial response");
 

@@ -372,7 +372,7 @@ impl std::error::Error for GatewayHelloValidationError {}
 /// The WebSocket peer controls this value, so parsing alone is not enough: the
 /// gateway loop later converts it into a [`std::time::Duration`] and schedules
 /// heartbeat deadlines from it.
-pub fn validate_gateway_hello(
+pub const fn validate_gateway_hello(
     hello: GatewayHello,
 ) -> Result<GatewayHello, GatewayHelloValidationError> {
     match hello.heartbeat_interval {

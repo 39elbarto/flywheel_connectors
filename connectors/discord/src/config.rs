@@ -37,6 +37,13 @@ pub struct DiscordConfig {
     /// Shard configuration
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shard: Option<ShardConfig>,
+
+    /// Discord gateway identify `max_concurrency` bucket count.
+    ///
+    /// Defaults to 1 unless the operator supplies the value from Discord's
+    /// gateway bot metadata; this fails safe by serializing IDENTIFY frames.
+    #[serde(default = "default_gateway_identify_max_concurrency")]
+    pub gateway_identify_max_concurrency: u32,
 }
 
 impl std::fmt::Debug for DiscordConfig {
@@ -50,6 +57,10 @@ impl std::fmt::Debug for DiscordConfig {
             .field("retry", &self.retry)
             .field("intents", &self.intents)
             .field("shard", &self.shard)
+            .field(
+                "gateway_identify_max_concurrency",
+                &self.gateway_identify_max_concurrency,
+            )
             .finish()
     }
 }
@@ -65,6 +76,10 @@ const fn default_timeout() -> Duration {
 const fn default_intents() -> u64 {
     // Default intents: Guilds, GuildMessages, MessageContent, DirectMessages
     (1 << 0) | (1 << 9) | (1 << 15) | (1 << 12)
+}
+
+const fn default_gateway_identify_max_concurrency() -> u32 {
+    1
 }
 
 mod duration_secs {
@@ -155,6 +170,7 @@ impl Default for DiscordConfig {
             retry: RetryConfig::default(),
             intents: default_intents(),
             shard: None,
+            gateway_identify_max_concurrency: default_gateway_identify_max_concurrency(),
         }
     }
 }

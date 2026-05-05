@@ -67,11 +67,13 @@ pub mod __fuzz {
     };
 
     /// Parse a raw Discord API error body with a caller-supplied HTTP status.
+    #[must_use]
     pub fn parse_rest_api_error_response(status_code: u16, body: &[u8]) -> DiscordError {
         parse_api_error_response(status_code, body)
     }
 
     /// Parse a Discord rate-limit delay from an optional header and raw body.
+    #[must_use]
     pub fn parse_rest_retry_after_seconds(header_value: Option<&str>, body: &[u8]) -> f64 {
         parse_rate_limit_retry_after_seconds(header_value, body)
     }

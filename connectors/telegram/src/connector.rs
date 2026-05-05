@@ -72,12 +72,14 @@ struct TelegramPollingCursor {
     last_poll_at: Option<Instant>,
     last_poll_count: usize,
     state_path: Option<PathBuf>,
+    bot_id: Option<String>,
 }
 
 impl TelegramPollingCursor {
-    fn new(state_path: Option<PathBuf>) -> Self {
+    fn new(state_path: Option<PathBuf>, bot_id: Option<String>) -> Self {
         Self {
             state_path,
+            bot_id,
             ..Self::default()
         }
     }
@@ -89,7 +91,11 @@ impl PollingCursor for TelegramPollingCursor {
     }
 
     fn set_offset(&mut self, offset: i64) {
-        self.offset = Some(offset);
+        if is_valid_telegram_update_id(offset) {
+            self.offset = Some(offset);
+        } else {
+            warn!(offset, "Ignoring invalid negative Telegram polling offset");
+        }
     }
 
     fn clear_offset(&mut self) {
@@ -109,9 +115,22 @@ impl PollingCursor for TelegramPollingCursor {
         self.last_poll_count
     }
 
+    fn advance_if_newer(&mut self, update_id: i64) {
+        if !is_valid_telegram_update_id(update_id) {
+            warn!(update_id, "Ignoring invalid negative Telegram update_id");
+            return;
+        }
+        let new_offset = update_id.saturating_add(1);
+        if self.offset().is_none_or(|current| new_offset > current) {
+            self.set_offset(new_offset);
+        }
+    }
+
     fn persist(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if let Some(path) = &self.state_path {
             let state = TelegramPollingCursorState {
+                version: TELEGRAM_POLLING_CURSOR_STATE_VERSION,
+                bot_id: self.bot_id.clone(),
                 offset: self.offset,
                 last_poll_count: self.last_poll_count,
                 updated_at: current_unix_timestamp_secs(),
@@ -125,8 +144,23 @@ impl PollingCursor for TelegramPollingCursor {
         if let Some(path) = &self.state_path
             && let Some(state) = read_json_file_if_exists::<TelegramPollingCursorState>(path)?
         {
-            self.offset = state.offset;
-            self.last_poll_count = state.last_poll_count;
+            if let Some(expected_bot_id) = self.bot_id.as_deref() {
+                let state_bot_id = state.bot_id.as_deref().filter(|value| !value.is_empty());
+                if state_bot_id != Some(expected_bot_id) {
+                    self.clear_offset();
+                    self.last_poll_count = 0;
+                    return Ok(());
+                }
+            }
+
+            self.offset = state.offset.filter(|offset| {
+                let valid = is_valid_telegram_update_id(*offset);
+                if !valid {
+                    warn!(offset, "Ignoring invalid persisted Telegram polling offset");
+                }
+                valid
+            });
+            self.last_poll_count = self.offset.map_or(0, |_| state.last_poll_count);
         }
         Ok(())
     }
@@ -311,6 +345,18 @@ fn validate_bot_token_syntax(token: &str) -> FcpResult<()> {
     }
 
     Ok(())
+}
+
+fn extract_bot_id_from_token(token: &str) -> Option<String> {
+    let (bot_id, _) = token.trim().split_once(':')?;
+    if bot_id.is_empty() || !bot_id.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    Some(bot_id.to_string())
+}
+
+fn is_valid_telegram_update_id(update_id: i64) -> bool {
+    update_id >= 0
 }
 
 fn is_telegram_or_local_base_url(base_url: &str) -> bool {
@@ -641,7 +687,10 @@ impl TelegramConnector {
             name: "allowed_updates".into(),
             passed: true,
             message: Some(if config.allowed_updates.is_empty() {
-                "allowed_updates not set (Telegram defaults will apply)".into()
+                format!(
+                    "using explicit default allowed_updates: {}",
+                    config.normalized_allowed_updates().join(", ")
+                )
             } else {
                 format!(
                     "allowed_updates configured: {}",
@@ -1600,6 +1649,10 @@ impl TelegramConnector {
         })?;
         let cursor_path = zone_dir.join(TELEGRAM_POLL_CURSOR_FILE);
         let lease_path = zone_dir.join(TELEGRAM_POLL_LEASE_FILE);
+        let cursor_bot_id = config
+            .credential
+            .as_deref()
+            .and_then(extract_bot_id_from_token);
         let poll_timeout_secs =
             u64::try_from(config.poll_timeout.max(MIN_POLL_TIMEOUT_SECS)).unwrap_or(30);
         let poll_lease = TelegramPollLease::acquire(
@@ -1618,7 +1671,7 @@ impl TelegramConnector {
 
             let mut supervisor = PollingSupervisor::new(
                 SupervisorConfig::default(),
-                TelegramPollingCursor::new(Some(cursor_path)),
+                TelegramPollingCursor::new(Some(cursor_path), cursor_bot_id),
             );
 
             let outcome = supervisor
@@ -1640,11 +1693,7 @@ impl TelegramConnector {
                                 offset,
                                 limit: Some(100),
                                 timeout: Some(config.poll_timeout),
-                                allowed_updates: if config.allowed_updates.is_empty() {
-                                    None
-                                } else {
-                                    Some(config.allowed_updates.clone())
-                                },
+                                allowed_updates: Some(config.normalized_allowed_updates()),
                             };
 
                             match client.get_updates(request).await {
@@ -1658,6 +1707,13 @@ impl TelegramConnector {
                     },
                     |updates, cursor| {
                         for update in updates {
+                            if !is_valid_telegram_update_id(update.update_id) {
+                                warn!(
+                                    update_id = update.update_id,
+                                    "Dropping Telegram update with invalid negative update_id"
+                                );
+                                continue;
+                            }
                             cursor.advance_if_newer(update.update_id);
 
                             if let Some(event) =
@@ -2227,7 +2283,8 @@ mod tests {
     fn test_polling_cursor_advances_and_persists() {
         let cursor_path = std::path::PathBuf::from(unique_zone_dir("cursor-state"))
             .join(TELEGRAM_POLL_CURSOR_FILE);
-        let mut cursor = TelegramPollingCursor::new(Some(cursor_path.clone()));
+        let mut cursor =
+            TelegramPollingCursor::new(Some(cursor_path.clone()), Some(TEST_BOT_ID.into()));
         assert_eq!(cursor.offset(), None);
 
         cursor.advance_if_newer(100);
@@ -2240,9 +2297,26 @@ mod tests {
         assert_eq!(cursor.offset(), Some(102));
 
         assert!(cursor.persist().is_ok());
-        let mut restored = TelegramPollingCursor::new(Some(cursor_path));
+        let mut restored = TelegramPollingCursor::new(Some(cursor_path), Some(TEST_BOT_ID.into()));
         assert!(restored.restore().is_ok());
         assert_eq!(restored.offset(), Some(102));
+    }
+
+    #[test]
+    fn test_polling_cursor_resets_on_bot_id_mismatch() {
+        let cursor_path = std::path::PathBuf::from(unique_zone_dir("cursor-bot-mismatch"))
+            .join(TELEGRAM_POLL_CURSOR_FILE);
+        let mut cursor =
+            TelegramPollingCursor::new(Some(cursor_path.clone()), Some(TEST_BOT_ID.into()));
+        cursor.advance_if_newer(100);
+        cursor.record_poll(Instant::now(), 1);
+        cursor.persist().unwrap();
+
+        let mut restored =
+            TelegramPollingCursor::new(Some(cursor_path), Some("654321".to_string()));
+        restored.restore().unwrap();
+        assert_eq!(restored.offset(), None);
+        assert_eq!(restored.last_poll_count(), 0);
     }
 
     #[fcp_async_core::runtime::test]
@@ -3370,6 +3444,16 @@ mod tests {
     }
 
     #[test]
+    fn test_telegram_config_normalized_allowed_updates_uses_rich_default() {
+        let config: TelegramConfig = serde_json::from_value(json!({})).unwrap();
+        let updates = config.normalized_allowed_updates();
+        assert!(updates.contains(&"message".to_string()));
+        assert!(updates.contains(&"channel_post".to_string()));
+        assert!(updates.contains(&"message_reaction".to_string()));
+        assert!(updates.contains(&"business_message".to_string()));
+    }
+
+    #[test]
     fn test_telegram_config_serde_roundtrip() {
         let credential = test_bot_credential();
         let config: TelegramConfig = serde_json::from_value(json!({
@@ -3575,6 +3659,15 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_runtime_settings_allowed_updates_reaction_and_business_valid() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "allowed_updates": ["message_reaction", "business_message", "deleted_business_messages"]
+        }))
+        .unwrap();
+        assert!(config.validate_runtime_settings().is_ok());
+    }
+
+    #[test]
     fn test_validate_runtime_settings_allowed_updates_empty_entry() {
         let config: TelegramConfig = serde_json::from_value(json!({
             "allowed_updates": ["message", ""]
@@ -3756,12 +3849,16 @@ mod tests {
     #[test]
     fn test_polling_cursor_state_serde_roundtrip() {
         let state = TelegramPollingCursorState {
+            version: TELEGRAM_POLLING_CURSOR_STATE_VERSION,
+            bot_id: Some(TEST_BOT_ID.into()),
             offset: Some(42),
             last_poll_count: 5,
             updated_at: 1700000000,
         };
         let json_str = serde_json::to_string(&state).unwrap();
         let back: TelegramPollingCursorState = serde_json::from_str(&json_str).unwrap();
+        assert_eq!(back.version, TELEGRAM_POLLING_CURSOR_STATE_VERSION);
+        assert_eq!(back.bot_id.as_deref(), Some(TEST_BOT_ID));
         assert_eq!(back.offset, Some(42));
         assert_eq!(back.last_poll_count, 5);
         assert_eq!(back.updated_at, 1700000000);
@@ -3770,6 +3867,8 @@ mod tests {
     #[test]
     fn test_polling_cursor_state_none_offset() {
         let state = TelegramPollingCursorState {
+            version: TELEGRAM_POLLING_CURSOR_STATE_VERSION,
+            bot_id: None,
             offset: None,
             last_poll_count: 0,
             updated_at: 0,
@@ -3784,20 +3883,48 @@ mod tests {
 
     #[test]
     fn test_polling_cursor_new_without_path() {
-        let cursor = TelegramPollingCursor::new(None);
+        let cursor = TelegramPollingCursor::new(None, None);
         assert!(cursor.offset().is_none());
         assert!(cursor.state_path.is_none());
     }
 
     #[test]
     fn test_polling_cursor_advance_monotonic() {
-        let mut cursor = TelegramPollingCursor::new(None);
+        let mut cursor = TelegramPollingCursor::new(None, None);
         cursor.advance_if_newer(10);
         assert_eq!(cursor.offset(), Some(11));
         cursor.advance_if_newer(5); // should not regress
         assert_eq!(cursor.offset(), Some(11));
         cursor.advance_if_newer(11);
         assert_eq!(cursor.offset(), Some(12));
+    }
+
+    #[test]
+    fn test_polling_cursor_ignores_negative_update_ids() {
+        let mut cursor = TelegramPollingCursor::new(None, None);
+        cursor.advance_if_newer(-1);
+        assert_eq!(cursor.offset(), None);
+        cursor.set_offset(-5);
+        assert_eq!(cursor.offset(), None);
+    }
+
+    #[test]
+    fn test_polling_cursor_restore_rejects_negative_offset() {
+        let cursor_path = std::path::PathBuf::from(unique_zone_dir("cursor-negative-offset"))
+            .join(TELEGRAM_POLL_CURSOR_FILE);
+        let state = TelegramPollingCursorState {
+            version: TELEGRAM_POLLING_CURSOR_STATE_VERSION,
+            bot_id: None,
+            offset: Some(-1),
+            last_poll_count: 1,
+            updated_at: 1700000000,
+        };
+        write_json_file_atomic(&cursor_path, &state).unwrap();
+
+        let mut cursor = TelegramPollingCursor::new(Some(cursor_path), None);
+        cursor.restore().unwrap();
+        assert_eq!(cursor.offset(), None);
+        assert_eq!(cursor.last_poll_count(), 0);
     }
 
     // ─── is_telegram_or_local_base_url edge cases ──────────────────
@@ -3853,8 +3980,7 @@ mod tests {
 
     #[test]
     fn test_known_allowed_updates_count() {
-        // Telegram documents exactly these update types
-        assert_eq!(KNOWN_ALLOWED_UPDATES.len(), 14);
+        assert_eq!(KNOWN_ALLOWED_UPDATES.len(), 20);
     }
 
     #[test]
@@ -3863,6 +3989,8 @@ mod tests {
         assert!(KNOWN_ALLOWED_UPDATES.contains(&"edited_message"));
         assert!(KNOWN_ALLOWED_UPDATES.contains(&"callback_query"));
         assert!(KNOWN_ALLOWED_UPDATES.contains(&"channel_post"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"business_message"));
+        assert!(KNOWN_ALLOWED_UPDATES.contains(&"message_reaction"));
         assert!(KNOWN_ALLOWED_UPDATES.contains(&"poll"));
     }
 

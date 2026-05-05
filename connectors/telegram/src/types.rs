@@ -15,11 +15,17 @@ pub const MIN_POLL_TIMEOUT_SECS: i32 = 1;
 pub const MAX_POLL_TIMEOUT_SECS: i32 = 50;
 pub const MIN_POLL_LEASE_TTL_SECS: u64 = 10;
 const MAX_REPLY_TO_MESSAGE_DEPTH: usize = 8;
-pub const KNOWN_ALLOWED_UPDATES: &[&str] = &[
+pub const DEFAULT_TELEGRAM_ALLOWED_UPDATES: &[&str] = &[
     "message",
     "edited_message",
     "channel_post",
     "edited_channel_post",
+    "business_connection",
+    "business_message",
+    "edited_business_message",
+    "deleted_business_messages",
+    "message_reaction",
+    "message_reaction_count",
     "inline_query",
     "chosen_inline_result",
     "callback_query",
@@ -31,6 +37,8 @@ pub const KNOWN_ALLOWED_UPDATES: &[&str] = &[
     "chat_member",
     "chat_join_request",
 ];
+pub const KNOWN_ALLOWED_UPDATES: &[&str] = DEFAULT_TELEGRAM_ALLOWED_UPDATES;
+pub const TELEGRAM_POLLING_CURSOR_STATE_VERSION: u8 = 2;
 
 /// Update object representing an incoming event.
 /// Telegram API response wrapper.
@@ -477,6 +485,17 @@ impl TelegramConfig {
     }
 
     #[must_use]
+    pub fn normalized_allowed_updates(&self) -> Vec<String> {
+        if self.allowed_updates.is_empty() {
+            return DEFAULT_TELEGRAM_ALLOWED_UPDATES
+                .iter()
+                .map(|update| (*update).to_string())
+                .collect();
+        }
+        self.allowed_updates.clone()
+    }
+
+    #[must_use]
     pub fn auth_label(&self) -> &'static str {
         if self.credential_id.is_some() {
             "credential_id"
@@ -526,6 +545,10 @@ impl DoctorResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TelegramPollingCursorState {
+    #[serde(default)]
+    pub version: u8,
+    #[serde(default)]
+    pub bot_id: Option<String>,
     pub offset: Option<i64>,
     pub last_poll_count: usize,
     pub updated_at: u64,

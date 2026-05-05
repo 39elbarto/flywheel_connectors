@@ -1769,9 +1769,12 @@ impl TelegramConnector {
                             }
                             cursor.advance_if_newer(update.update_id);
 
-                            if let Some(event) =
-                                update_to_event(&update, &connector_id, &instance_id)
-                            {
+                            if let Some(event) = authorized_update_to_event(
+                                &update,
+                                &connector_id,
+                                &instance_id,
+                                &config.inbound_policy,
+                            ) {
                                 base.record_event();
                                 if event_tx.send(Ok(event)).is_err() {
                                     info!("Event receiver dropped, closing polling loop");
@@ -1874,6 +1877,117 @@ fn update_to_event(
     // update_id is always positive per Telegram API, but use saturating conversion for safety
     let seq = u64::try_from(update.update_id).unwrap_or(0);
     Some(EventEnvelope::new(topic, event_data).with_seq(seq))
+}
+
+enum TelegramInboundPolicyDecision {
+    Allow(TrustLevel),
+    Deny(&'static str),
+}
+
+fn authorized_update_to_event(
+    update: &Update,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    policy: &TelegramInboundPolicy,
+) -> Option<EventEnvelope> {
+    let trust = match evaluate_telegram_inbound_policy(update, policy) {
+        TelegramInboundPolicyDecision::Allow(trust) => trust,
+        TelegramInboundPolicyDecision::Deny(reason) => {
+            warn!(
+                update_id = update.update_id,
+                reason, "Dropping Telegram update before EventEnvelope emission"
+            );
+            return None;
+        }
+    };
+
+    let mut event = update_to_event(update, connector_id, instance_id)?;
+    event.data.principal.trust = trust;
+    Some(event)
+}
+
+fn evaluate_telegram_inbound_policy(
+    update: &Update,
+    policy: &TelegramInboundPolicy,
+) -> TelegramInboundPolicyDecision {
+    match policy.mode {
+        TelegramInboundPolicyMode::Deny => {
+            TelegramInboundPolicyDecision::Deny("inbound-policy-deny")
+        }
+        TelegramInboundPolicyMode::Open => {
+            TelegramInboundPolicyDecision::Allow(TrustLevel::Untrusted)
+        }
+        TelegramInboundPolicyMode::Allowlist => {
+            let sender_id = update_sender_id(update);
+            if let Some(sender_id) = sender_id.as_deref()
+                && policy
+                    .allowed_user_ids
+                    .iter()
+                    .any(|allowed| allowed.as_str() == sender_id)
+            {
+                return TelegramInboundPolicyDecision::Allow(TrustLevel::Paired);
+            }
+
+            let chat_id = update_chat_id(update);
+            if let Some(chat_id) = chat_id.as_deref()
+                && policy
+                    .allowed_chat_ids
+                    .iter()
+                    .any(|allowed| allowed.as_str() == chat_id)
+            {
+                return TelegramInboundPolicyDecision::Allow(TrustLevel::Paired);
+            }
+
+            let resource_uris = update_resource_uris(update);
+            if resource_uris.iter().any(|resource_uri| {
+                policy
+                    .allowed_topic_resource_uris
+                    .iter()
+                    .any(|allowed| allowed == resource_uri)
+            }) {
+                return TelegramInboundPolicyDecision::Allow(TrustLevel::Paired);
+            }
+
+            TelegramInboundPolicyDecision::Deny("inbound-policy-allowlist")
+        }
+    }
+}
+
+fn update_sender_id(update: &Update) -> Option<String> {
+    match &update.kind {
+        UpdateKind::Message(msg)
+        | UpdateKind::EditedMessage(msg)
+        | UpdateKind::ChannelPost(msg)
+        | UpdateKind::EditedChannelPost(msg) => msg.from.as_ref().map(|from| from.id.to_string()),
+        UpdateKind::CallbackQuery(callback) => Some(callback.from.id.to_string()),
+        UpdateKind::Unknown => None,
+    }
+}
+
+fn update_chat_id(update: &Update) -> Option<String> {
+    update_message(update).map(|message| message.chat.id.to_string())
+}
+
+fn update_resource_uris(update: &Update) -> Vec<String> {
+    match &update.kind {
+        UpdateKind::Message(msg)
+        | UpdateKind::EditedMessage(msg)
+        | UpdateKind::ChannelPost(msg)
+        | UpdateKind::EditedChannelPost(msg) => message_resource_uris(msg),
+        UpdateKind::CallbackQuery(callback) => callback_resource_uris(callback),
+        UpdateKind::Unknown => Vec::new(),
+    }
+}
+
+fn update_message(update: &Update) -> Option<&Message> {
+    match &update.kind {
+        UpdateKind::Message(msg)
+        | UpdateKind::EditedMessage(msg)
+        | UpdateKind::ChannelPost(msg)
+        | UpdateKind::EditedChannelPost(msg) => Some(msg),
+        UpdateKind::CallbackQuery(callback) => callback.message.as_ref(),
+        UpdateKind::Unknown => None,
+    }
 }
 
 fn message_thread_info(msg: &Message) -> Option<ThreadInfo> {
@@ -2223,6 +2337,55 @@ mod tests {
             .into_owned()
     }
 
+    fn inbound_policy(value: serde_json::Value) -> TelegramInboundPolicy {
+        serde_json::from_value(value).expect("inbound policy fixture should deserialize")
+    }
+
+    fn message_update(
+        update_id: i64,
+        chat_id: i64,
+        from_user_id: i64,
+        thread_id: Option<i64>,
+        text: &str,
+    ) -> Update {
+        Update {
+            update_id,
+            kind: UpdateKind::Message(Message {
+                message_id: update_id,
+                from: Some(User {
+                    id: from_user_id,
+                    is_bot: false,
+                    first_name: "Sender".into(),
+                    last_name: None,
+                    username: Some(format!("sender_{from_user_id}")),
+                    language_code: None,
+                }),
+                chat: Chat {
+                    id: chat_id,
+                    chat_type: if chat_id < 0 {
+                        "supergroup".into()
+                    } else {
+                        "private".into()
+                    },
+                    title: None,
+                    username: None,
+                    first_name: Some("Sender".into()),
+                    last_name: None,
+                },
+                date: 1_700_000_000,
+                text: Some(text.into()),
+                caption: None,
+                photo: None,
+                document: None,
+                audio: None,
+                video: None,
+                voice: None,
+                reply_to_message: None,
+                message_thread_id: thread_id,
+            }),
+        }
+    }
+
     struct LoopbackTelegramServer {
         base_url: String,
         stop: Arc<AtomicBool>,
@@ -2304,6 +2467,26 @@ mod tests {
                 json!({
                     "ok": true,
                     "result": [
+                        {
+                            "update_id": 1999,
+                            "message": {
+                                "message_id": 9,
+                                "from": {
+                                    "id": 999999999,
+                                    "is_bot": false,
+                                    "first_name": "Intruder",
+                                    "username": "intruder"
+                                },
+                                "chat": {
+                                    "id": 999999999,
+                                    "type": "private",
+                                    "first_name": "Intruder",
+                                    "username": "intruder"
+                                },
+                                "date": 1699999999,
+                                "text": "/new unauthorized"
+                            }
+                        },
                         {
                             "update_id": 2000,
                             "message": {
@@ -3143,6 +3326,84 @@ mod tests {
     }
 
     #[test]
+    fn test_inbound_policy_default_denies_before_event_emission() {
+        let update = message_update(60, 208214988, 208214988, None, "root message");
+        let event = authorized_update_to_event(
+            &update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+            &TelegramInboundPolicy::default(),
+        );
+
+        assert!(event.is_none());
+    }
+
+    #[test]
+    fn test_inbound_policy_open_keeps_untrusted_principal() {
+        let update = message_update(61, 208214988, 208214988, None, "root message");
+        let policy = inbound_policy(json!({ "mode": "open" }));
+        let event = authorized_update_to_event(
+            &update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+            &policy,
+        )
+        .expect("open policy should emit event");
+
+        assert_eq!(event.data.principal.trust, TrustLevel::Untrusted);
+    }
+
+    #[test]
+    fn test_inbound_policy_allowlisted_user_emits_paired_principal() {
+        let update = message_update(62, 208214988, 208214988, None, "root message");
+        let policy = inbound_policy(json!({
+            "mode": "allowlist",
+            "allowed_user_ids": [208214988]
+        }));
+        let event = authorized_update_to_event(
+            &update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+            &policy,
+        )
+        .expect("allowlisted sender should emit event");
+
+        assert_eq!(event.data.principal.trust, TrustLevel::Paired);
+    }
+
+    #[test]
+    fn test_inbound_policy_topic_resource_allows_topic_without_chat_wildening() {
+        let policy = inbound_policy(json!({
+            "mode": "allowlist",
+            "allowed_topic_resource_uris": ["telegram:chat:208214988:topic:17585"]
+        }));
+        let topic_update = message_update(63, 208214988, 999999999, Some(17_585), "topic message");
+        let topic_event = authorized_update_to_event(
+            &topic_update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+            &policy,
+        )
+        .expect("topic resource should allow matching topic event");
+
+        assert_eq!(
+            topic_event.data.resource_uris[0],
+            "telegram:chat:208214988:topic:17585"
+        );
+        assert_eq!(topic_event.data.principal.trust, TrustLevel::Paired);
+
+        let root_update = message_update(64, 208214988, 999999999, None, "root message");
+        let root_event = authorized_update_to_event(
+            &root_update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+            &policy,
+        );
+
+        assert!(root_event.is_none());
+    }
+
+    #[test]
     fn test_resource_uris_for_input_prefers_topic_before_chat() {
         let input = json!({
             "chat_id": 208214988,
@@ -3225,7 +3486,11 @@ mod tests {
             .handle_configure(json!({
                 "credential": test_bot_credential(),
                 "base_url": mock_server.uri(),
-                "poll_timeout": 1
+                "poll_timeout": 1,
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [7]
+                }
             }))
             .await
             .expect("configure should succeed");
@@ -3253,7 +3518,7 @@ mod tests {
 
         assert_eq!(event.topic, "telegram.message.new");
         assert_eq!(event.seq, 1000);
-        assert_eq!(event.data.principal.trust, TrustLevel::Untrusted);
+        assert_eq!(event.data.principal.trust, TrustLevel::Paired);
         assert_eq!(
             event.data.payload.get("text").and_then(|v| v.as_str()),
             Some("hello poll")
@@ -3275,7 +3540,11 @@ mod tests {
             .handle_configure(json!({
                 "credential": test_bot_credential(),
                 "base_url": loopback.base_url.clone(),
-                "poll_timeout": 1
+                "poll_timeout": 1,
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [208214988]
+                }
             }))
             .await
             .expect("configure should hit loopback getMe");
@@ -3305,6 +3574,10 @@ mod tests {
             events.push(event);
         }
         events.sort_by_key(|event| event.seq);
+        assert!(
+            events.iter().all(|event| event.seq != 1999),
+            "unauthorized sender update should be dropped before EventEnvelope emission"
+        );
 
         let root_new = &events[0];
         assert_eq!(root_new.seq, 2000);
@@ -4038,6 +4311,8 @@ mod tests {
         assert!(config.base_url.is_none());
         assert_eq!(config.poll_timeout, 30); // default_poll_timeout()
         assert!(config.allowed_updates.is_empty());
+        assert_eq!(config.inbound_policy.mode, TelegramInboundPolicyMode::Deny);
+        assert!(!config.inbound_policy.has_allowlist_entries());
     }
 
     #[test]
@@ -4057,13 +4332,31 @@ mod tests {
             "credential": credential,
             "base_url": "https://custom.api.tg",
             "poll_timeout": 15,
-            "allowed_updates": ["message", "callback_query"]
+            "allowed_updates": ["message", "callback_query"],
+            "inbound_policy": {
+                "mode": "allowlist",
+                "allowed_user_ids": ["208214988"],
+                "allowed_chat_ids": ["-1001234567890"],
+                "allowed_topic_resource_uris": ["telegram:chat:208214988:topic:17585"]
+            }
         }))
         .unwrap();
         assert_eq!(config.credential.as_deref(), Some(credential.as_str()));
         assert_eq!(config.base_url.as_deref(), Some("https://custom.api.tg"));
         assert_eq!(config.poll_timeout, 15);
         assert_eq!(config.allowed_updates.len(), 2);
+        assert_eq!(
+            config.inbound_policy.mode,
+            TelegramInboundPolicyMode::Allowlist
+        );
+        assert_eq!(
+            config.inbound_policy.allowed_user_ids[0].as_str(),
+            "208214988"
+        );
+        assert_eq!(
+            config.inbound_policy.allowed_chat_ids[0].as_str(),
+            "-1001234567890"
+        );
     }
 
     #[test]
@@ -4297,6 +4590,50 @@ mod tests {
         let err = config.validate_runtime_settings().unwrap_err();
         if let FcpError::InvalidRequest { message, .. } = err {
             assert!(message.contains("unsupported"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_rejects_empty_inbound_allowlist_mode() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "inbound_policy": {
+                "mode": "allowlist"
+            }
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("requires at least one"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_rejects_username_in_inbound_user_allowlist() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "inbound_policy": {
+                "mode": "allowlist",
+                "allowed_user_ids": ["@someone"]
+            }
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("allowed_user_ids"));
+        }
+    }
+
+    #[test]
+    fn test_validate_runtime_settings_rejects_malformed_topic_resource_allowlist() {
+        let config: TelegramConfig = serde_json::from_value(json!({
+            "inbound_policy": {
+                "mode": "allowlist",
+                "allowed_topic_resource_uris": ["telegram:chat:208214988"]
+            }
+        }))
+        .unwrap();
+        let err = config.validate_runtime_settings().unwrap_err();
+        if let FcpError::InvalidRequest { message, .. } = err {
+            assert!(message.contains("topic resource URI"));
         }
     }
 

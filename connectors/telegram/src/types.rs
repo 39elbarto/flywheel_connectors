@@ -4,7 +4,7 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::{collections::HashSet, fmt};
 
 use fcp_prelude::{CredentialId, FcpError, FcpResult};
 use reqwest::Url;
@@ -313,6 +313,218 @@ pub enum TelegramAuthConfig {
     CredentialId(CredentialId),
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TelegramInboundPolicyMode {
+    #[default]
+    Deny,
+    Open,
+    Allowlist,
+}
+
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct TelegramPolicyId(String);
+
+impl TelegramPolicyId {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for TelegramPolicyId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED_TELEGRAM_ID]")
+    }
+}
+
+impl<'de> Deserialize<'de> for TelegramPolicyId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct TelegramPolicyIdVisitor;
+
+        impl de::Visitor<'_> for TelegramPolicyIdVisitor {
+            type Value = TelegramPolicyId;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a Telegram numeric ID as a string or integer")
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                let value = value.trim();
+                if value.is_empty() {
+                    return Err(E::custom("Telegram policy IDs must not be empty"));
+                }
+                Ok(TelegramPolicyId(value.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(TelegramPolicyId(value.to_string()))
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(TelegramPolicyId(value.to_string()))
+            }
+        }
+
+        deserializer.deserialize_any(TelegramPolicyIdVisitor)
+    }
+}
+
+#[derive(Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TelegramInboundPolicy {
+    pub mode: TelegramInboundPolicyMode,
+    pub allowed_user_ids: Vec<TelegramPolicyId>,
+    pub allowed_chat_ids: Vec<TelegramPolicyId>,
+    pub allowed_topic_resource_uris: Vec<String>,
+}
+
+impl Default for TelegramInboundPolicy {
+    fn default() -> Self {
+        Self {
+            mode: TelegramInboundPolicyMode::Deny,
+            allowed_user_ids: Vec::new(),
+            allowed_chat_ids: Vec::new(),
+            allowed_topic_resource_uris: Vec::new(),
+        }
+    }
+}
+
+impl fmt::Debug for TelegramInboundPolicy {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TelegramInboundPolicy")
+            .field("mode", &self.mode)
+            .field("allowed_user_ids", &self.allowed_user_ids.len())
+            .field("allowed_chat_ids", &self.allowed_chat_ids.len())
+            .field(
+                "allowed_topic_resource_uris",
+                &self.allowed_topic_resource_uris.len(),
+            )
+            .finish()
+    }
+}
+
+impl TelegramInboundPolicy {
+    #[must_use]
+    pub fn has_allowlist_entries(&self) -> bool {
+        !self.allowed_user_ids.is_empty()
+            || !self.allowed_chat_ids.is_empty()
+            || !self.allowed_topic_resource_uris.is_empty()
+    }
+
+    pub fn validate(&self) -> FcpResult<()> {
+        validate_policy_ids("allowed_user_ids", &self.allowed_user_ids, false)?;
+        validate_policy_ids("allowed_chat_ids", &self.allowed_chat_ids, true)?;
+        validate_topic_resource_uris(&self.allowed_topic_resource_uris)?;
+
+        if self.mode == TelegramInboundPolicyMode::Allowlist && !self.has_allowlist_entries() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message:
+                    "inbound_policy allowlist mode requires at least one allowed user, chat, or topic resource"
+                        .into(),
+            });
+        }
+
+        Ok(())
+    }
+}
+
+fn validate_policy_ids(
+    label: &str,
+    ids: &[TelegramPolicyId],
+    allow_negative: bool,
+) -> FcpResult<()> {
+    let mut seen = HashSet::new();
+    for id in ids {
+        let value = id.as_str();
+        if !is_valid_policy_numeric_id(value, allow_negative) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{label} contains invalid Telegram ID: {value}"),
+            });
+        }
+        if !seen.insert(value) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{label} contains duplicate Telegram ID: {value}"),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_topic_resource_uris(values: &[String]) -> FcpResult<()> {
+    let mut seen = HashSet::new();
+    for value in values {
+        if value.trim() != value || value.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "allowed_topic_resource_uris entries must be non-empty canonical strings"
+                    .into(),
+            });
+        }
+        if !is_valid_topic_resource_uri(value) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "allowed_topic_resource_uris contains invalid Telegram topic resource URI: {value}"
+                ),
+            });
+        }
+        if !seen.insert(value.as_str()) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "allowed_topic_resource_uris contains duplicate Telegram topic resource URI: {value}"
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn is_valid_topic_resource_uri(value: &str) -> bool {
+    let Some(rest) = value.strip_prefix("telegram:chat:") else {
+        return false;
+    };
+    let Some((chat_id, topic_id)) = rest.split_once(":topic:") else {
+        return false;
+    };
+    is_valid_policy_numeric_id(chat_id, true) && is_valid_policy_numeric_id(topic_id, false)
+}
+
+fn is_valid_policy_numeric_id(value: &str, allow_negative: bool) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let digits = if allow_negative {
+        value.strip_prefix('-').unwrap_or(value)
+    } else {
+        value
+    };
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Telegram connector configuration.
 #[derive(Clone, Default, Deserialize)]
 pub struct TelegramConfig {
@@ -335,6 +547,10 @@ pub struct TelegramConfig {
     /// Allowed updates filter
     #[serde(default)]
     pub allowed_updates: Vec<String>,
+
+    /// External Telegram sender policy, enforced before EventEnvelope emission.
+    #[serde(default)]
+    pub inbound_policy: TelegramInboundPolicy,
 }
 
 impl std::fmt::Debug for TelegramConfig {
@@ -348,6 +564,7 @@ impl std::fmt::Debug for TelegramConfig {
             .field("base_url", &self.base_url)
             .field("poll_timeout", &self.poll_timeout)
             .field("allowed_updates", &self.allowed_updates)
+            .field("inbound_policy", &self.inbound_policy)
             .finish()
     }
 }
@@ -358,13 +575,13 @@ pub(crate) fn default_poll_timeout() -> i32 {
 
 impl TelegramConfig {
     pub fn resolve_auth_mode(&self) -> FcpResult<TelegramAuthConfig> {
-        let token = self
+        let inline_credential = self
             .credential
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty());
 
-        match (token, self.credential_id) {
+        match (inline_credential, self.credential_id) {
             (Some(_), None) => Ok(TelegramAuthConfig::BotToken),
             (None, Some(id)) => Ok(TelegramAuthConfig::CredentialId(id)),
             (Some(_), Some(_)) => Err(FcpError::InvalidRequest {
@@ -480,6 +697,8 @@ impl TelegramConfig {
                 });
             }
         }
+
+        self.inbound_policy.validate()?;
 
         Ok(())
     }
@@ -896,9 +1115,9 @@ mod tests {
         });
         let update: Update = serde_json::from_value(json).unwrap();
         assert_eq!(update.update_id, 100);
-        match &update.kind {
-            UpdateKind::Message(msg) => assert_eq!(msg.text.as_deref(), Some("hi")),
-            _ => panic!("expected Message"),
+        assert!(matches!(update.kind, UpdateKind::Message(_)));
+        if let UpdateKind::Message(msg) = &update.kind {
+            assert_eq!(msg.text.as_deref(), Some("hi"));
         }
     }
 
@@ -1614,12 +1833,10 @@ mod tests {
         });
         let update: Update = serde_json::from_value(json).unwrap();
         assert_eq!(update.update_id, 200);
-        match &update.kind {
-            UpdateKind::EditedMessage(msg) => {
-                assert_eq!(msg.message_id, 5);
-                assert_eq!(msg.text.as_deref(), Some("edited text"));
-            }
-            other => panic!("expected EditedMessage, got {other:?}"),
+        assert!(matches!(update.kind, UpdateKind::EditedMessage(_)));
+        if let UpdateKind::EditedMessage(msg) = &update.kind {
+            assert_eq!(msg.message_id, 5);
+            assert_eq!(msg.text.as_deref(), Some("edited text"));
         }
     }
 
@@ -1635,13 +1852,11 @@ mod tests {
             }
         });
         let update: Update = serde_json::from_value(json).unwrap();
-        match &update.kind {
-            UpdateKind::ChannelPost(msg) => {
-                assert_eq!(msg.message_id, 77);
-                assert_eq!(msg.chat.chat_type, "channel");
-                assert_eq!(msg.text.as_deref(), Some("Channel announcement"));
-            }
-            other => panic!("expected ChannelPost, got {other:?}"),
+        assert!(matches!(update.kind, UpdateKind::ChannelPost(_)));
+        if let UpdateKind::ChannelPost(msg) = &update.kind {
+            assert_eq!(msg.message_id, 77);
+            assert_eq!(msg.chat.chat_type, "channel");
+            assert_eq!(msg.text.as_deref(), Some("Channel announcement"));
         }
     }
 
@@ -1657,12 +1872,10 @@ mod tests {
             }
         });
         let update: Update = serde_json::from_value(json).unwrap();
-        match &update.kind {
-            UpdateKind::CallbackQuery(cq) => {
-                assert_eq!(cq.id, "cq_update");
-                assert_eq!(cq.data.as_deref(), Some("btn_press"));
-            }
-            other => panic!("expected CallbackQuery, got {other:?}"),
+        assert!(matches!(update.kind, UpdateKind::CallbackQuery(_)));
+        if let UpdateKind::CallbackQuery(cq) = &update.kind {
+            assert_eq!(cq.id, "cq_update");
+            assert_eq!(cq.data.as_deref(), Some("btn_press"));
         }
     }
 
@@ -1777,12 +1990,10 @@ mod tests {
             }
         });
         let update: Update = serde_json::from_value(json).unwrap();
-        match &update.kind {
-            UpdateKind::EditedChannelPost(msg) => {
-                assert_eq!(msg.message_id, 88);
-                assert_eq!(msg.text.as_deref(), Some("Corrected post"));
-            }
-            other => panic!("expected EditedChannelPost, got {other:?}"),
+        assert!(matches!(update.kind, UpdateKind::EditedChannelPost(_)));
+        if let UpdateKind::EditedChannelPost(msg) = &update.kind {
+            assert_eq!(msg.message_id, 88);
+            assert_eq!(msg.text.as_deref(), Some("Corrected post"));
         }
     }
 }

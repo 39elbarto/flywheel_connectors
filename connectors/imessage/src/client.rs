@@ -36,10 +36,15 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&
 }
 
 use crate::types::{
-    BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SEND_METHOD_APPLE_SCRIPT,
-    SEND_METHOD_PRIVATE_API, SendMessageRequest, SendMessageResponse, ServerInfo,
-    WebhookRegistration, WebhookRegistrationRequest,
+    BlueBubblesConfig, BlueBubblesSendTarget, BlueBubblesTargetResolution,
+    BlueBubblesTargetService, Chat, Message, PaginatedResponse, QueryParams,
+    SEND_METHOD_APPLE_SCRIPT, SEND_METHOD_PRIVATE_API, SendMessageOptions, SendMessageRequest,
+    SendMessageResponse, ServerInfo, WebhookRegistration, WebhookRegistrationRequest,
+    normalize_bluebubbles_handle,
 };
+
+const TARGET_RESOLUTION_PAGE_LIMIT: u64 = 500;
+const TARGET_RESOLUTION_MAX_SCAN: u64 = 5_000;
 
 fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
@@ -150,6 +155,131 @@ fn parse_macos_major_version(version: Option<&str>) -> Option<u64> {
     }
 }
 
+fn extract_chat_identifier_from_guid(chat_guid: &str) -> Option<String> {
+    let mut parts = chat_guid.split(';');
+    let _service = parts.next()?;
+    let _separator = parts.next()?;
+    let identifier = parts.next()?.trim();
+    if parts.next().is_some() || identifier.is_empty() {
+        None
+    } else {
+        Some(identifier.to_string())
+    }
+}
+
+fn extract_handle_from_chat_guid(chat_guid: &str) -> Option<String> {
+    let mut parts = chat_guid.split(';');
+    let _service = parts.next()?;
+    let separator = parts.next()?;
+    let handle = parts.next()?;
+    if parts.next().is_some() || separator != "-" {
+        None
+    } else {
+        normalize_bluebubbles_handle(handle)
+    }
+}
+
+fn chat_matches_identifier(chat: &Chat, target: &str) -> bool {
+    chat.guid == target
+        || chat
+            .chat_identifier
+            .as_deref()
+            .is_some_and(|identifier| identifier == target)
+        || extract_chat_identifier_from_guid(&chat.guid).as_deref() == Some(target)
+}
+
+fn preferred_and_other_service(
+    service: BlueBubblesTargetService,
+) -> (&'static str, &'static str, Option<&'static str>) {
+    let preferred = service.preferred_guid_service();
+    let other = if preferred == "SMS" {
+        "iMessage"
+    } else {
+        "SMS"
+    };
+    (preferred, other, Some(service.as_str()))
+}
+
+fn parse_chat_query_response(value: &Value) -> BlueBubblesResult<Vec<Chat>> {
+    let data = value
+        .get("data")
+        .filter(|value| value.is_array() || value.is_object())
+        .unwrap_or(value);
+
+    if data.is_array() {
+        return serde_json::from_value(data.clone()).map_err(BlueBubblesError::Json);
+    }
+
+    if let Some(chats) = data
+        .as_object()
+        .and_then(|object| object.get("chats"))
+        .and_then(Value::as_array)
+    {
+        return serde_json::from_value(Value::Array(chats.clone())).map_err(BlueBubblesError::Json);
+    }
+
+    Err(BlueBubblesError::Json(serde_json::Error::io(
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BlueBubbles chat query response did not contain an array",
+        ),
+    )))
+}
+
+fn value_string(value: &Value, keys: &[&str]) -> Option<String> {
+    let object = value.as_object()?;
+    keys.iter()
+        .filter_map(|key| object.get(*key))
+        .find_map(|candidate| match candidate {
+            Value::String(value) if !value.trim().is_empty() => Some(value.trim().to_string()),
+            Value::Number(value) => Some(value.to_string()),
+            _ => None,
+        })
+}
+
+fn extract_bluebubbles_message_id(value: &Value) -> Option<String> {
+    let data_array_first = value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|array| array.first());
+    let roots = [
+        Some(value),
+        value.get("data"),
+        value.get("result"),
+        value.get("payload"),
+        value.get("message"),
+        data_array_first,
+    ];
+
+    roots.into_iter().flatten().find_map(|root| {
+        value_string(
+            root,
+            &[
+                "message_id",
+                "messageId",
+                "messageGuid",
+                "message_guid",
+                "guid",
+                "id",
+                "uuid",
+            ],
+        )
+    })
+}
+
+fn extract_created_chat_guid(value: &Value) -> Option<String> {
+    let data = value.get("data").unwrap_or(value);
+    value_string(data, &["chatGuid", "chat_guid", "guid"]).or_else(|| {
+        let chats = data.get("chats").or_else(|| data.get("chat"))?;
+        if let Some(array) = chats.as_array() {
+            return array
+                .first()
+                .and_then(|chat| value_string(chat, &["guid", "chatGuid", "chat_guid"]));
+        }
+        value_string(chats, &["guid", "chatGuid", "chat_guid"])
+    })
+}
+
 /// Send-method decision used for `BlueBubbles` text sends.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SendMethodDecision {
@@ -168,17 +298,33 @@ pub struct SendMethodDecision {
 }
 
 impl SendMethodDecision {
-    fn from_server_info(info: &ServerInfo) -> Self {
+    fn for_options(info: &ServerInfo, options: &SendMessageOptions) -> BlueBubblesResult<Self> {
+        if options.requires_private_api() {
+            if !info.private_api {
+                return Err(BlueBubblesError::PrivateApiRequired {
+                    feature: options.private_api_feature_label(),
+                });
+            }
+            return Ok(Self {
+                method: SEND_METHOD_PRIVATE_API.to_string(),
+                reason: "rich_send_private_api_available",
+                server_info_available: true,
+                private_api: Some(true),
+                os_version: info.os_version.clone(),
+                warning: None,
+            });
+        }
+
         let major = parse_macos_major_version(info.os_version.as_deref());
         if info.private_api && major.is_some_and(|major| major >= 26) {
-            return Self {
+            return Ok(Self {
                 method: SEND_METHOD_PRIVATE_API.to_string(),
                 reason: "macos26_private_api_available",
                 server_info_available: true,
                 private_api: Some(true),
                 os_version: info.os_version.clone(),
                 warning: None,
-            };
+            });
         }
 
         let reason = match (info.private_api, major) {
@@ -190,14 +336,14 @@ impl SendMethodDecision {
             (false, _) => "private_api_disabled_apple_script_fallback",
         };
 
-        Self {
+        Ok(Self {
             method: SEND_METHOD_APPLE_SCRIPT.to_string(),
             reason,
             server_info_available: true,
             private_api: Some(info.private_api),
             os_version: info.os_version.clone(),
             warning: None,
-        }
+        })
     }
 
     fn unavailable(error: &BlueBubblesError) -> Self {
@@ -212,6 +358,27 @@ impl SendMethodDecision {
             )),
         }
     }
+
+    fn unavailable_for_options(
+        error: BlueBubblesError,
+        options: &SendMessageOptions,
+    ) -> BlueBubblesResult<Self> {
+        if options.requires_private_api() {
+            if matches!(
+                &error,
+                BlueBubblesError::Unauthorized { .. } | BlueBubblesError::RateLimited { .. }
+            ) {
+                return Err(error);
+            }
+            return Err(BlueBubblesError::PrivateApiRequired {
+                feature: format!(
+                    "{} (server info unavailable: {error})",
+                    options.private_api_feature_label()
+                ),
+            });
+        }
+        Ok(Self::unavailable(&error))
+    }
 }
 
 /// Result of a `BlueBubbles` send plus the method decision that shaped the request.
@@ -221,6 +388,19 @@ pub struct SendMessageOutcome {
     pub response: SendMessageResponse,
     /// Send method decision used for the request body.
     pub decision: SendMethodDecision,
+}
+
+/// Result of creating a new `BlueBubbles` DM chat.
+#[derive(Debug, Clone)]
+pub struct CreateChatOutcome {
+    /// Raw `BlueBubbles` response.
+    pub response: Value,
+    /// Private API decision used before creating the chat.
+    pub decision: SendMethodDecision,
+    /// Chat GUID extracted from the response when present.
+    pub chat_guid: Option<String>,
+    /// Message GUID extracted from the response when present.
+    pub message_id: Option<String>,
 }
 
 /// `BlueBubbles` API client.
@@ -672,14 +852,15 @@ impl BlueBubblesClient {
         runtime: &ConnectorRuntime,
         chat_guid: &str,
         text: &str,
+        options: SendMessageOptions,
     ) -> BlueBubblesResult<SendMessageOutcome> {
         let url = format!("{}/api/v1/message/text", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
         let server_passcode = self.server_passcode.clone();
         let decision = match self.server_info(runtime).await {
-            Ok(info) => SendMethodDecision::from_server_info(&info),
-            Err(error) => SendMethodDecision::unavailable(&error),
+            Ok(info) => SendMethodDecision::for_options(&info, &options)?,
+            Err(error) => SendMethodDecision::unavailable_for_options(error, &options)?,
         };
 
         let body = SendMessageRequest {
@@ -687,6 +868,12 @@ impl BlueBubblesClient {
             message: text.to_string(),
             temp_guid: Some(uuid::Uuid::new_v4().to_string()),
             method: decision.method.clone(),
+            selected_message_guid: options.reply_to_message_guid.clone(),
+            part_index: options
+                .reply_to_message_guid
+                .as_ref()
+                .map(|_| options.reply_to_part_index.unwrap_or(0)),
+            effect_id: options.effect_id.clone(),
         };
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
@@ -754,6 +941,423 @@ impl BlueBubblesClient {
                     Ok(response) => {
                         AttemptOutcome::Success(SendMessageOutcome { response, decision })
                     }
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    async fn query_chats_for_target_resolution(
+        &self,
+        runtime: &ConnectorRuntime,
+        offset: u64,
+        limit: u64,
+    ) -> BlueBubblesResult<Vec<Chat>> {
+        #[derive(Clone, Debug, serde::Serialize)]
+        struct ChatQueryRequest {
+            limit: u64,
+            offset: u64,
+            #[serde(rename = "with")]
+            include: Vec<&'static str>,
+        }
+
+        let url = format!("{}/api/v1/chat/query", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+        let body = ChatQueryRequest {
+            limit,
+            offset,
+            include: vec!["participants"],
+        };
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let body = body.clone();
+            async move {
+                debug!(
+                    attempt,
+                    offset, limit, "Querying BlueBubbles chats for send-target resolution"
+                );
+                let resp = match client
+                    .post(&url)
+                    .query(&[("password", &server_passcode)])
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_json_value(resp)
+                    .await
+                    .and_then(|value| parse_chat_query_response(&value))
+                {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Resolve an explicit send target into a chat GUID without sending a message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the `BlueBubbles` chat query API fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn resolve_send_target(
+        &self,
+        runtime: &ConnectorRuntime,
+        target: &BlueBubblesSendTarget,
+        max_scan_chats: u64,
+    ) -> BlueBubblesResult<BlueBubblesTargetResolution> {
+        if let BlueBubblesSendTarget::ChatGuid(chat_guid) = target {
+            return Ok(BlueBubblesTargetResolution::direct(chat_guid.clone()));
+        }
+
+        let max_scan_chats = max_scan_chats.clamp(1, TARGET_RESOLUTION_MAX_SCAN);
+        let mut offset = 0;
+        let mut scanned_chats = 0;
+        let mut scanned_pages = 0;
+
+        let mut direct_other_service_match: Option<String> = None;
+        let mut direct_unknown_service_match: Option<String> = None;
+        let mut participant_preferred_match: Option<String> = None;
+        let mut participant_other_service_match: Option<String> = None;
+        let mut participant_unknown_service_match: Option<String> = None;
+
+        let (preferred_service, other_service, service_preference) = match target {
+            BlueBubblesSendTarget::Handle { service, .. } => preferred_and_other_service(*service),
+            _ => ("iMessage", "SMS", None),
+        };
+        let preferred_prefix = format!("{preferred_service};-;");
+        let other_prefix = format!("{other_service};-;");
+        let normalized_handle = match target {
+            BlueBubblesSendTarget::Handle { address, .. } => {
+                Some(normalize_bluebubbles_handle(address).ok_or_else(|| {
+                    BlueBubblesError::Validation("handle target must not be empty".into())
+                })?)
+            }
+            _ => None,
+        };
+
+        while offset < max_scan_chats {
+            let remaining = max_scan_chats - offset;
+            let limit = TARGET_RESOLUTION_PAGE_LIMIT.min(remaining);
+            let chats = self
+                .query_chats_for_target_resolution(runtime, offset, limit)
+                .await?;
+            scanned_pages += 1;
+            scanned_chats += chats.len();
+
+            if chats.is_empty() {
+                return Ok(BlueBubblesTargetResolution::not_found(
+                    target.kind(),
+                    service_preference,
+                    scanned_chats,
+                    scanned_pages,
+                    false,
+                ));
+            }
+
+            for chat in &chats {
+                match target {
+                    BlueBubblesSendTarget::ChatId(chat_id) => {
+                        if chat.id == Some(*chat_id) {
+                            return Ok(BlueBubblesTargetResolution {
+                                chat_guid: Some(chat.guid.clone()),
+                                target_kind: target.kind(),
+                                match_kind: "chat_id",
+                                service_preference: None,
+                                scanned_chats,
+                                scanned_pages,
+                                exhausted: false,
+                            });
+                        }
+                    }
+                    BlueBubblesSendTarget::ChatIdentifier(identifier) => {
+                        if chat_matches_identifier(chat, identifier) {
+                            return Ok(BlueBubblesTargetResolution {
+                                chat_guid: Some(chat.guid.clone()),
+                                target_kind: target.kind(),
+                                match_kind: "chat_identifier",
+                                service_preference: None,
+                                scanned_chats,
+                                scanned_pages,
+                                exhausted: false,
+                            });
+                        }
+                    }
+                    BlueBubblesSendTarget::Handle { .. } => {
+                        let Some(normalized_handle) = normalized_handle.as_deref() else {
+                            continue;
+                        };
+                        if let Some(direct_handle) = extract_handle_from_chat_guid(&chat.guid) {
+                            if direct_handle == normalized_handle {
+                                if chat.guid.starts_with(&preferred_prefix) {
+                                    return Ok(BlueBubblesTargetResolution {
+                                        chat_guid: Some(chat.guid.clone()),
+                                        target_kind: target.kind(),
+                                        match_kind: "direct_preferred_service",
+                                        service_preference,
+                                        scanned_chats,
+                                        scanned_pages,
+                                        exhausted: false,
+                                    });
+                                }
+                                if chat.guid.starts_with(&other_prefix) {
+                                    direct_other_service_match
+                                        .get_or_insert_with(|| chat.guid.clone());
+                                } else {
+                                    direct_unknown_service_match
+                                        .get_or_insert_with(|| chat.guid.clone());
+                                }
+                            }
+                        }
+
+                        if chat.guid.contains(";-;")
+                            && chat.participants.iter().any(|participant| {
+                                normalize_bluebubbles_handle(&participant.address).as_deref()
+                                    == Some(normalized_handle)
+                            })
+                        {
+                            if chat.guid.starts_with(&preferred_prefix) {
+                                participant_preferred_match
+                                    .get_or_insert_with(|| chat.guid.clone());
+                            } else if chat.guid.starts_with(&other_prefix) {
+                                participant_other_service_match
+                                    .get_or_insert_with(|| chat.guid.clone());
+                            } else {
+                                participant_unknown_service_match
+                                    .get_or_insert_with(|| chat.guid.clone());
+                            }
+                        }
+                    }
+                    BlueBubblesSendTarget::ChatGuid(_) => {}
+                }
+            }
+
+            offset += limit;
+            if chats.len() < usize::try_from(limit).unwrap_or(usize::MAX) {
+                break;
+            }
+        }
+
+        let exhausted = offset >= max_scan_chats;
+        let matched = participant_preferred_match
+            .map(|chat_guid| (chat_guid, "participant_preferred_service"))
+            .or_else(|| {
+                direct_other_service_match.map(|chat_guid| (chat_guid, "direct_other_service"))
+            })
+            .or_else(|| {
+                participant_other_service_match
+                    .map(|chat_guid| (chat_guid, "participant_other_service"))
+            })
+            .or_else(|| {
+                direct_unknown_service_match.map(|chat_guid| (chat_guid, "direct_unknown_service"))
+            })
+            .or_else(|| {
+                participant_unknown_service_match
+                    .map(|chat_guid| (chat_guid, "participant_unknown_service"))
+            });
+
+        if let Some((chat_guid, match_kind)) = matched {
+            Ok(BlueBubblesTargetResolution {
+                chat_guid: Some(chat_guid),
+                target_kind: target.kind(),
+                match_kind,
+                service_preference,
+                scanned_chats,
+                scanned_pages,
+                exhausted,
+            })
+        } else {
+            Ok(BlueBubblesTargetResolution::not_found(
+                target.kind(),
+                service_preference,
+                scanned_chats,
+                scanned_pages,
+                exhausted,
+            ))
+        }
+    }
+
+    /// Create a new direct-message chat through the `BlueBubbles` Private API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Private API support is unavailable or the API call fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn create_chat(
+        &self,
+        runtime: &ConnectorRuntime,
+        address: &str,
+        message: &str,
+    ) -> BlueBubblesResult<CreateChatOutcome> {
+        #[derive(Clone, Debug, serde::Serialize)]
+        struct CreateChatRequest {
+            addresses: Vec<String>,
+            message: String,
+            #[serde(rename = "tempGuid")]
+            temp_guid: String,
+        }
+
+        let address = address.trim();
+        if address.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "create_chat address must not be empty".into(),
+            ));
+        }
+        if message.trim().is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "create_chat message must not be empty".into(),
+            ));
+        }
+
+        let info = match self.server_info(runtime).await {
+            Ok(info) => info,
+            Err(error) => {
+                if matches!(
+                    &error,
+                    BlueBubblesError::Unauthorized { .. } | BlueBubblesError::RateLimited { .. }
+                ) {
+                    return Err(error);
+                }
+                return Err(BlueBubblesError::PrivateApiRequired {
+                    feature: format!("new chat creation (server info unavailable: {error})"),
+                });
+            }
+        };
+        if !info.private_api {
+            return Err(BlueBubblesError::PrivateApiRequired {
+                feature: "new chat creation".into(),
+            });
+        }
+        let decision = SendMethodDecision {
+            method: SEND_METHOD_PRIVATE_API.to_string(),
+            reason: "new_chat_private_api_available",
+            server_info_available: true,
+            private_api: Some(true),
+            os_version: info.os_version.clone(),
+            warning: None,
+        };
+
+        let url = format!("{}/api/v1/chat/new", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+        let body = CreateChatRequest {
+            addresses: vec![address.to_string()],
+            message: message.to_string(),
+            temp_guid: uuid::Uuid::new_v4().to_string(),
+        };
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let body = body.clone();
+            let decision = decision.clone();
+            async move {
+                debug!(attempt, "Creating BlueBubbles DM chat");
+                let resp = match client
+                    .post(&url)
+                    .query(&[("password", &server_passcode)])
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_json_value(resp).await {
+                    Ok(response) => AttemptOutcome::Success(CreateChatOutcome {
+                        chat_guid: extract_created_chat_guid(&response),
+                        message_id: extract_bluebubbles_message_id(&response),
+                        response,
+                        decision,
+                    }),
                     Err(error) => AttemptOutcome::Terminal(error),
                 }
             }
@@ -1315,9 +1919,14 @@ mod tests {
         }
     }
 
+    fn plain_send_decision(info: &ServerInfo) -> SendMethodDecision {
+        SendMethodDecision::for_options(info, &SendMessageOptions::default())
+            .expect("plain text send does not require Private API")
+    }
+
     #[test]
     fn send_method_uses_private_api_for_macos26_when_available() {
-        let decision = SendMethodDecision::from_server_info(&server_info(true, Some("26.0.1")));
+        let decision = plain_send_decision(&server_info(true, Some("26.0.1")));
         assert_eq!(decision.method, SEND_METHOD_PRIVATE_API);
         assert_eq!(decision.reason, "macos26_private_api_available");
         assert_eq!(decision.private_api, Some(true));
@@ -1325,14 +1934,31 @@ mod tests {
 
     #[test]
     fn send_method_keeps_apple_script_for_older_macos_plain_text() {
-        let decision = SendMethodDecision::from_server_info(&server_info(true, Some("15.5")));
+        let decision = plain_send_decision(&server_info(true, Some("15.5")));
         assert_eq!(decision.method, SEND_METHOD_APPLE_SCRIPT);
         assert_eq!(decision.reason, "plain_text_apple_script_supported");
     }
 
     #[test]
+    fn send_method_requires_private_api_for_reply_or_effects() {
+        let options = SendMessageOptions {
+            reply_to_message_guid: Some("reply-guid-123".into()),
+            reply_to_part_index: Some(0),
+            effect_id: Some("com.apple.messages.effect.CKConfettiEffect".into()),
+        };
+        let decision =
+            SendMethodDecision::for_options(&server_info(true, Some("15.5")), &options).unwrap();
+        assert_eq!(decision.method, SEND_METHOD_PRIVATE_API);
+        assert_eq!(decision.reason, "rich_send_private_api_available");
+
+        let err = SendMethodDecision::for_options(&server_info(false, Some("26.0")), &options)
+            .unwrap_err();
+        assert!(matches!(err, BlueBubblesError::PrivateApiRequired { .. }));
+    }
+
+    #[test]
     fn send_method_falls_back_when_private_api_disabled_on_macos26() {
-        let decision = SendMethodDecision::from_server_info(&server_info(false, Some("26.0")));
+        let decision = plain_send_decision(&server_info(false, Some("26.0")));
         assert_eq!(decision.method, SEND_METHOD_APPLE_SCRIPT);
         assert_eq!(
             decision.reason,

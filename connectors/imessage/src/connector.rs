@@ -25,15 +25,19 @@ use sha2::{Digest, Sha256};
 use crate::client::BlueBubblesClient;
 use crate::types::{
     BlueBubblesConfig, BlueBubblesContactsEnrichmentConfig, BlueBubblesReplyContext,
-    BlueBubblesWebhookCoalescingConfig, Message, NormalizedBlueBubblesWebhookMessage, QueryParams,
+    BlueBubblesSendTarget, BlueBubblesTargetService, BlueBubblesWebhookCoalescingConfig, Message,
+    NormalizedBlueBubblesWebhookMessage, QueryParams, SendMessageOptions,
     bluebubbles_webhook_source_dedupe_ids, default_webhook_events,
-    normalize_bluebubbles_contact_phone_key, normalize_bluebubbles_webhook_payload,
+    normalize_bluebubbles_contact_phone_key, normalize_bluebubbles_message_effect,
+    normalize_bluebubbles_webhook_payload,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // Operation IDs
 const OP_SEND_MESSAGE: &str = "imessage.send_message";
+const OP_RESOLVE_SEND_TARGET: &str = "imessage.resolve_send_target";
+const OP_CREATE_CHAT: &str = "imessage.create_chat";
 const OP_GET_CHATS: &str = "imessage.get_chats";
 const OP_GET_CHAT: &str = "imessage.get_chat";
 const OP_GET_MESSAGES: &str = "imessage.get_messages";
@@ -1584,12 +1588,13 @@ impl BlueBubblesConnector {
 
     fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         let capability = match operation {
-            OP_SEND_MESSAGE | OP_MARK_READ => CAP_SEND,
+            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_MARK_READ => CAP_SEND,
             OP_GET_CHATS
             | OP_GET_CHAT
             | OP_GET_MESSAGES
             | OP_SYNC_EVENTS
             | OP_DOWNLOAD_ATTACHMENT
+            | OP_RESOLVE_SEND_TARGET
             | OP_INGEST_WEBHOOK_EVENT => CAP_READ,
             OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
                 CAP_ADMIN
@@ -1801,6 +1806,135 @@ impl Default for BlueBubblesConnector {
     }
 }
 
+fn optional_string_field(input: &Value, names: &[&str], label: &str) -> FcpResult<Option<String>> {
+    for name in names {
+        let Some(value) = input.get(*name) else {
+            continue;
+        };
+        let Some(text) = value.as_str() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{label} must be a string"),
+            });
+        };
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{label} must not be empty"),
+            });
+        }
+        return Ok(Some(trimmed.to_string()));
+    }
+    Ok(None)
+}
+
+fn optional_u64_field(input: &Value, names: &[&str], label: &str) -> FcpResult<Option<u64>> {
+    for name in names {
+        let Some(value) = input.get(*name) else {
+            continue;
+        };
+        let Some(number) = value.as_u64() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{label} must be a non-negative integer"),
+            });
+        };
+        return Ok(Some(number));
+    }
+    Ok(None)
+}
+
+fn parse_send_message_options(input: &Value) -> FcpResult<SendMessageOptions> {
+    let reply_to_message_guid = optional_string_field(
+        input,
+        &[
+            "reply_to_message_guid",
+            "replyToMessageGuid",
+            "selectedMessageGuid",
+        ],
+        "reply_to_message_guid",
+    )?;
+    let reply_to_part_index = optional_u64_field(
+        input,
+        &["reply_to_part_index", "replyToPartIndex", "partIndex"],
+        "reply_to_part_index",
+    )?;
+    let effect_id = optional_string_field(input, &["effect_id", "effectId"], "effect_id")?
+        .map(|effect| normalize_bluebubbles_message_effect(&effect).unwrap_or(effect));
+
+    if reply_to_message_guid.is_none() && reply_to_part_index.is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "reply_to_part_index requires reply_to_message_guid".into(),
+        });
+    }
+
+    Ok(SendMessageOptions {
+        reply_to_message_guid,
+        reply_to_part_index,
+        effect_id,
+    })
+}
+
+fn parse_target_service(input: &Value) -> FcpResult<BlueBubblesTargetService> {
+    let Some(raw) = optional_string_field(input, &["service"], "service")? else {
+        return Ok(BlueBubblesTargetService::Auto);
+    };
+    match raw.to_ascii_lowercase().as_str() {
+        "imessage" => Ok(BlueBubblesTargetService::Imessage),
+        "sms" => Ok(BlueBubblesTargetService::Sms),
+        "auto" => Ok(BlueBubblesTargetService::Auto),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "service must be one of: imessage, sms, auto".into(),
+        }),
+    }
+}
+
+fn parse_send_target(input: &Value) -> FcpResult<BlueBubblesSendTarget> {
+    let present = ["chat_guid", "chat_id", "chat_identifier", "handle"]
+        .into_iter()
+        .filter(|name| input.get(*name).is_some())
+        .count();
+    if present != 1 {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message:
+                "Exactly one target field is required: chat_guid, chat_id, chat_identifier, handle"
+                    .into(),
+        });
+    }
+
+    if let Some(chat_guid) = optional_string_field(input, &["chat_guid"], "chat_guid")? {
+        return Ok(BlueBubblesSendTarget::ChatGuid(chat_guid));
+    }
+    if let Some(chat_id) = optional_u64_field(input, &["chat_id"], "chat_id")? {
+        let chat_id = i64::try_from(chat_id).map_err(|_| FcpError::InvalidRequest {
+            code: 1005,
+            message: "chat_id must fit in a signed 64-bit integer".into(),
+        })?;
+        return Ok(BlueBubblesSendTarget::ChatId(chat_id));
+    }
+    if let Some(chat_identifier) =
+        optional_string_field(input, &["chat_identifier"], "chat_identifier")?
+    {
+        return Ok(BlueBubblesSendTarget::ChatIdentifier(chat_identifier));
+    }
+    let handle = optional_string_field(input, &["handle"], "handle")?.ok_or_else(|| {
+        FcpError::InvalidRequest {
+            code: 1005,
+            message:
+                "Exactly one target field is required: chat_guid, chat_id, chat_identifier, handle"
+                    .into(),
+        }
+    })?;
+    Ok(BlueBubblesSendTarget::Handle {
+        address: handle,
+        service: parse_target_service(input)?,
+    })
+}
+
 /// Build the typed operations catalog.
 #[must_use]
 #[allow(clippy::too_many_lines)]
@@ -1810,7 +1944,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SEND_MESSAGE),
             summary: "Send an iMessage".into(),
             description: Some(
-                "Sends a text message to a chat via BlueBubbles, choosing an explicit AppleScript or Private API send method from server capabilities".into(),
+                "Sends a text message to a chat via BlueBubbles, choosing an explicit AppleScript or Private API send method from server capabilities. Optional reply/effect fields require known enabled Private API support and fail closed when unavailable.".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -1823,6 +1957,19 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "message": {
                         "type": "string",
                         "description": "Message text to send"
+                    },
+                    "reply_to_message_guid": {
+                        "type": "string",
+                        "description": "Optional message GUID for Private API reply threading"
+                    },
+                    "reply_to_part_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional message part index for reply threading; defaults to 0"
+                    },
+                    "effect_id": {
+                        "type": "string",
+                        "description": "Optional full Apple effect ID or alias such as slam, confetti, invisible ink, fireworks"
                     }
                 }
             }),
@@ -1846,9 +1993,122 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "Chat GUID format is 'iMessage;-;+15551234567' for DMs or 'iMessage;+;chatXXX' for groups".into(),
                     "The BlueBubbles server must be running on a Mac with iMessage signed in".into(),
                     "Plain text sends refresh server info and prefer Private API on macOS 26+ when the bridge reports Private API support".into(),
+                    "Reply threading and message effects are not silently downgraded; they require Private API to be known enabled before send".into(),
                 ],
                 examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_GET_CHATS)],
+                related: vec![
+                    CapabilityId::from_static(OP_GET_CHATS),
+                    CapabilityId::from_static(OP_RESOLVE_SEND_TARGET),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_RESOLVE_SEND_TARGET),
+            summary: "Resolve an iMessage send target".into(),
+            description: Some(
+                "Resolves an explicit chat_guid, chat_id, chat_identifier, or handle target into a chat GUID without sending. Handle lookup preserves iMessage/SMS caller intent and never routes a handle to a group chat only because the handle is a participant.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "oneOf": [
+                    { "required": ["chat_guid"] },
+                    { "required": ["chat_id"] },
+                    { "required": ["chat_identifier"] },
+                    { "required": ["handle"] }
+                ],
+                "properties": {
+                    "chat_guid": { "type": "string" },
+                    "chat_id": { "type": "integer", "minimum": 0 },
+                    "chat_identifier": { "type": "string" },
+                    "handle": { "type": "string", "description": "Phone number or email handle to resolve" },
+                    "service": {
+                        "type": "string",
+                        "enum": ["imessage", "sms", "auto"],
+                        "description": "Handle service preference; sms preserves explicit SMS intent"
+                    },
+                    "scan_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5000,
+                        "description": "Maximum chat records to inspect; default 5000"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat_guid": { "type": ["string", "null"] },
+                    "target_kind": { "type": "string" },
+                    "match_kind": { "type": "string" },
+                    "service_preference": { "type": "string" },
+                    "scanned_chats": { "type": "integer" },
+                    "scanned_pages": { "type": "integer" },
+                    "exhausted": { "type": "boolean" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you have a handle, chat_id, or chat_identifier and need a chat_guid before sending".into(),
+                common_mistakes: vec![
+                    "Do not treat a group participant match as a DM target".into(),
+                    "Set service to sms only when the caller explicitly requested SMS".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_SEND_MESSAGE)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_CREATE_CHAT),
+            summary: "Create an iMessage DM chat".into(),
+            description: Some(
+                "Creates a new direct-message chat by sending the initial message through BlueBubbles /api/v1/chat/new. This operation requires known enabled Private API support and fails closed otherwise.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["address", "message"],
+                "properties": {
+                    "address": {
+                        "type": "string",
+                        "description": "Phone number or email address for the new DM"
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Initial message body"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "chat_guid": { "type": ["string", "null"] },
+                    "message_id": { "type": ["string", "null"] },
+                    "send_method": { "type": "string", "enum": ["private-api"] },
+                    "send_method_decision": { "type": "object" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When no existing DM chat can be resolved and the caller explicitly wants to start a new iMessage conversation".into(),
+                common_mistakes: vec![
+                    "This is not a target resolver; it sends the initial message while creating the chat".into(),
+                    "Private API must be enabled and known before this operation can run".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![
+                    CapabilityId::from_static(OP_RESOLVE_SEND_TARGET),
+                    CapabilityId::from_static(OP_SEND_MESSAGE),
+                ],
             },
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
@@ -2695,9 +2955,10 @@ impl BlueBubblesConnector {
                         code: 1005,
                         message: "Missing 'message' field".into(),
                     })?;
+                let options = parse_send_message_options(&req.input)?;
 
                 let outcome = client
-                    .send_message(runtime, chat_guid, message)
+                    .send_message(runtime, chat_guid, message, options)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
 
@@ -2720,6 +2981,50 @@ impl BlueBubblesConnector {
                     );
                 }
                 output
+            }
+            OP_RESOLVE_SEND_TARGET => {
+                let target = parse_send_target(&req.input)?;
+                let scan_limit = req
+                    .input
+                    .get("scan_limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5_000);
+                let resolution = client
+                    .resolve_send_target(runtime, &target, scan_limit)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&resolution).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize target resolution: {e}"),
+                })?
+            }
+            OP_CREATE_CHAT => {
+                let address = req
+                    .input
+                    .get("address")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'address' field".into(),
+                    })?;
+                let message = req
+                    .input
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'message' field".into(),
+                    })?;
+                let outcome = client
+                    .create_chat(runtime, address, message)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "chat_guid": outcome.chat_guid,
+                    "message_id": outcome.message_id,
+                    "send_method": outcome.decision.method,
+                    "send_method_decision": outcome.decision,
+                    "response": outcome.response,
+                })
             }
             OP_GET_CHATS => {
                 let offset = req.input.get("offset").and_then(serde_json::Value::as_u64);
@@ -3298,7 +3603,7 @@ mod tests {
         op: &str,
     ) -> CapabilityToken {
         let capability = match op {
-            OP_SEND_MESSAGE | OP_MARK_READ => CAP_SEND,
+            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_MARK_READ => CAP_SEND,
             OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
                 CAP_ADMIN
             }
@@ -3528,8 +3833,10 @@ mod tests {
         })
     }
 
-    async fn invoke_send_against_loopback(
+    async fn invoke_against_loopback(
         server_url: &str,
+        operation: &'static str,
+        input: Value,
         request_timeout_ms: Option<u64>,
     ) -> FcpResult<Value> {
         let mut config = loopback_config(server_url);
@@ -3544,17 +3851,30 @@ mod tests {
             .handshake(handshake_for_signing_key(&signing_key))
             .await?;
         let req = InvokeRequest {
-            input: json!({
-                "chat_guid": "iMessage;-;+15551234567",
-                "message": "hello from fcp"
-            }),
-            capability_token: generate_valid_token(&connector, &signing_key, OP_SEND_MESSAGE),
-            ..base_invoke(connector.id(), OP_SEND_MESSAGE)
+            input,
+            capability_token: generate_valid_token(&connector, &signing_key, operation),
+            ..base_invoke(connector.id(), operation)
         };
         let response = connector.invoke(req).await?;
         response.result.ok_or_else(|| FcpError::Internal {
-            message: "send response should include a result".into(),
+            message: "invoke response should include a result".into(),
         })
+    }
+
+    async fn invoke_send_against_loopback(
+        server_url: &str,
+        request_timeout_ms: Option<u64>,
+    ) -> FcpResult<Value> {
+        invoke_against_loopback(
+            server_url,
+            OP_SEND_MESSAGE,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "hello from fcp"
+            }),
+            request_timeout_ms,
+        )
+        .await
     }
 
     #[fcp_async_core::runtime::test]
@@ -3722,12 +4042,24 @@ mod tests {
     fn test_introspection_operations() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 12);
+        assert_eq!(intro.operations.len(), 14);
         assert!(
             intro
                 .operations
                 .iter()
                 .any(|op| op.id.as_str() == OP_SEND_MESSAGE)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_RESOLVE_SEND_TARGET)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_CREATE_CHAT)
         );
         assert!(
             intro
@@ -3850,6 +4182,28 @@ mod tests {
         req.input = json!({ "chat_guid": "iMessage;-;+15551234567" }); // missing message
         let result = connector.invoke(req).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_reply_part_index_requires_reply_guid() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let req = InvokeRequest {
+            input: json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "hello",
+                "reply_to_part_index": 1
+            }),
+            capability_token: generate_valid_token(&connector, &signing_key, OP_SEND_MESSAGE),
+            ..base_invoke(connector.id(), OP_SEND_MESSAGE)
+        };
+        let result = connector.invoke(req).await;
+        assert!(matches!(result, Err(FcpError::InvalidRequest { .. })));
     }
 
     #[fcp_async_core::runtime::test]
@@ -4060,10 +4414,351 @@ mod tests {
         assert_eq!(unavailable_logs.len(), 2);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn send_message_loopback_adds_reply_and_effect_only_with_private_api() {
+        let server = BlueBubblesLoopback::spawn(
+            "rich-send-private-api",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "15.7",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "status": 200,
+                        "message": "Message sent!",
+                        "data": {
+                            "guid": "msg-rich-send",
+                            "text": "reply with confetti",
+                            "is_from_me": true,
+                            "attachments": []
+                        }
+                    }),
+                ),
+            ],
+        );
+
+        let result = invoke_against_loopback(
+            server.uri(),
+            OP_SEND_MESSAGE,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "reply with confetti",
+                "reply_to_message_guid": "reply-guid-123",
+                "reply_to_part_index": 1,
+                "effect_id": "invisible ink"
+            }),
+            None,
+        )
+        .await
+        .expect("rich send should succeed with Private API");
+        assert_eq!(result["send_method"], "private-api");
+        assert_eq!(
+            result["send_method_decision"]["reason"],
+            "rich_send_private_api_available"
+        );
+
+        let (requests, logs) = server.finish();
+        assert_eq!(requests.len(), 2);
+        let send_body = requests[1].json_body();
+        assert_eq!(send_body["method"], "private-api");
+        assert_eq!(send_body["selectedMessageGuid"], "reply-guid-123");
+        assert_eq!(send_body["partIndex"], 1);
+        assert_eq!(
+            send_body["effectId"],
+            "com.apple.MobileSMS.expressivesend.invisibleink"
+        );
+        assert!(
+            logs.iter().all(|entry| entry["target"]
+                .as_str()
+                .is_some_and(|target| !target.contains("test-password-123"))),
+            "rich-send loopback transcript must redact the passcode"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_loopback_denies_rich_send_when_private_api_disabled_or_unknown() {
+        let disabled = BlueBubblesLoopback::spawn(
+            "rich-send-private-api-disabled",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "26.0",
+                        "server_version": "1.9.0",
+                        "private_api": false
+                    }
+                }),
+            )],
+        );
+        let disabled_error = invoke_against_loopback(
+            disabled.uri(),
+            OP_SEND_MESSAGE,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "reply denied",
+                "reply_to_message_guid": "reply-guid-123"
+            }),
+            None,
+        )
+        .await
+        .expect_err("reply threading should fail closed when Private API is disabled");
+        assert!(matches!(disabled_error, FcpError::InvalidRequest { .. }));
+        let (disabled_requests, _) = disabled.finish();
+        assert_eq!(disabled_requests.len(), 1);
+
+        let unknown = BlueBubblesLoopback::spawn(
+            "rich-send-private-api-unknown",
+            vec![LoopbackResponse::json(
+                503,
+                &json!({"error": "server info temporarily unavailable"}),
+            )],
+        );
+        let unknown_error = invoke_against_loopback(
+            unknown.uri(),
+            OP_SEND_MESSAGE,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "effect denied",
+                "effect_id": "confetti"
+            }),
+            None,
+        )
+        .await
+        .expect_err("message effects should fail closed when Private API status is unknown");
+        assert!(matches!(unknown_error, FcpError::InvalidRequest { .. }));
+        let (unknown_requests, _) = unknown.finish();
+        assert_eq!(unknown_requests.len(), 1);
+
+        let auth_failure = BlueBubblesLoopback::spawn(
+            "rich-send-server-info-auth-failure",
+            vec![LoopbackResponse::json(
+                401,
+                &json!({"error": "bad password"}),
+            )],
+        );
+        let auth_error = invoke_against_loopback(
+            auth_failure.uri(),
+            OP_SEND_MESSAGE,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message": "reply auth denied",
+                "reply_to_message_guid": "reply-guid-123"
+            }),
+            None,
+        )
+        .await
+        .expect_err("server-info auth failure should remain Unauthorized");
+        assert!(matches!(auth_error, FcpError::Unauthorized { .. }));
+        let (auth_requests, _) = auth_failure.finish();
+        assert_eq!(auth_requests.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn resolve_send_target_loopback_preserves_service_intent_and_rejects_group_participant() {
+        let service_server = BlueBubblesLoopback::spawn(
+            "resolve-target-service-order",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": [
+                        {
+                            "id": 1,
+                            "guid": "iMessage;-;+15551234567",
+                            "participants": [{ "address": "+15551234567" }]
+                        },
+                        {
+                            "id": 2,
+                            "guid": "SMS;-;+15551234567",
+                            "participants": [{ "address": "+15551234567" }]
+                        }
+                    ]
+                }),
+            )],
+        );
+        let sms_result = invoke_against_loopback(
+            service_server.uri(),
+            OP_RESOLVE_SEND_TARGET,
+            json!({
+                "handle": "+15551234567",
+                "service": "sms"
+            }),
+            None,
+        )
+        .await
+        .expect("target resolution should succeed");
+        assert_eq!(sms_result["chat_guid"], "SMS;-;+15551234567");
+        assert_eq!(sms_result["match_kind"], "direct_preferred_service");
+        assert_eq!(sms_result["service_preference"], "sms");
+        let (service_requests, _) = service_server.finish();
+        assert_eq!(service_requests[0].json_body()["with"][0], "participants");
+
+        let group_server = BlueBubblesLoopback::spawn(
+            "resolve-target-group-participant-only",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": [
+                        {
+                            "id": 3,
+                            "guid": "iMessage;+;family-group",
+                            "participants": [
+                                { "address": "+15551234567" },
+                                { "address": "+15557654321" }
+                            ]
+                        }
+                    ]
+                }),
+            )],
+        );
+        let group_result = invoke_against_loopback(
+            group_server.uri(),
+            OP_RESOLVE_SEND_TARGET,
+            json!({
+                "handle": "+15551234567",
+                "service": "imessage"
+            }),
+            None,
+        )
+        .await
+        .expect("target resolution should return deterministic not_found");
+        assert!(group_result["chat_guid"].is_null());
+        assert_eq!(group_result["match_kind"], "not_found");
+        let (group_requests, _) = group_server.finish();
+        assert_eq!(group_requests.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn resolve_send_target_loopback_bounds_paginated_chat_queries() {
+        let first_page = (0..500)
+            .map(|idx| {
+                json!({
+                    "id": idx,
+                    "guid": format!("iMessage;-;+1555000{idx:03}"),
+                    "participants": []
+                })
+            })
+            .collect::<Vec<_>>();
+        let server = BlueBubblesLoopback::spawn(
+            "resolve-target-pagination-bounds",
+            vec![
+                LoopbackResponse::json(200, &json!({ "data": first_page })),
+                LoopbackResponse::json(200, &json!({ "data": [] })),
+            ],
+        );
+        let result = invoke_against_loopback(
+            server.uri(),
+            OP_RESOLVE_SEND_TARGET,
+            json!({
+                "chat_id": 9999,
+                "scan_limit": 750
+            }),
+            None,
+        )
+        .await
+        .expect("bounded target resolution should succeed");
+        assert!(result["chat_guid"].is_null());
+        assert_eq!(result["scanned_chats"], 500);
+        assert_eq!(result["scanned_pages"], 2);
+
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].json_body()["limit"], 500);
+        assert_eq!(requests[0].json_body()["offset"], 0);
+        assert_eq!(requests[1].json_body()["limit"], 250);
+        assert_eq!(requests[1].json_body()["offset"], 500);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn create_chat_loopback_requires_private_api_and_uses_chat_new() {
+        let server = BlueBubblesLoopback::spawn(
+            "create-chat-private-api",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "15.7",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "chatGuid": "iMessage;-;+15550008888",
+                            "messageGuid": "msg-new-chat"
+                        }
+                    }),
+                ),
+            ],
+        );
+        let result = invoke_against_loopback(
+            server.uri(),
+            OP_CREATE_CHAT,
+            json!({
+                "address": "+15550008888",
+                "message": "hello new chat"
+            }),
+            None,
+        )
+        .await
+        .expect("create chat should succeed with Private API");
+        assert_eq!(result["chat_guid"], "iMessage;-;+15550008888");
+        assert_eq!(result["message_id"], "msg-new-chat");
+        assert_eq!(result["send_method"], "private-api");
+
+        let (requests, _) = server.finish();
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/chat/new")
+        );
+        let create_body = requests[1].json_body();
+        assert_eq!(create_body["addresses"][0], "+15550008888");
+        assert_eq!(create_body["message"], "hello new chat");
+
+        let disabled = BlueBubblesLoopback::spawn(
+            "create-chat-private-api-disabled",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "15.7",
+                        "server_version": "1.9.0",
+                        "private_api": false
+                    }
+                }),
+            )],
+        );
+        let disabled_error = invoke_against_loopback(
+            disabled.uri(),
+            OP_CREATE_CHAT,
+            json!({
+                "address": "+15550008888",
+                "message": "hello new chat"
+            }),
+            None,
+        )
+        .await
+        .expect_err("create_chat should fail closed when Private API is disabled");
+        assert!(matches!(disabled_error, FcpError::InvalidRequest { .. }));
+        let (disabled_requests, _) = disabled.finish();
+        assert_eq!(disabled_requests.len(), 1);
+    }
+
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 12);
+        assert_eq!(ops.len(), 14);
     }
 
     #[test]
@@ -4103,6 +4798,30 @@ mod tests {
             .unwrap();
         assert_eq!(send.safety_tier, SafetyTier::Risky);
         assert_eq!(send.idempotency, IdempotencyClass::None);
+        assert_eq!(send.capability, CapabilityId::from_static(CAP_SEND));
+        assert!(send.input_schema["properties"]["reply_to_message_guid"].is_object());
+        assert!(send.input_schema["properties"]["reply_to_part_index"].is_object());
+        assert!(send.input_schema["properties"]["effect_id"].is_object());
+    }
+
+    #[test]
+    fn test_rich_send_parity_operations_are_explicitly_cataloged() {
+        let ops = operations_info();
+        let resolve = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_RESOLVE_SEND_TARGET)
+            .unwrap();
+        assert_eq!(resolve.capability, CapabilityId::from_static(CAP_READ));
+        assert_eq!(resolve.safety_tier, SafetyTier::Safe);
+        assert!(resolve.input_schema["properties"]["service"].is_object());
+
+        let create = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_CREATE_CHAT)
+            .unwrap();
+        assert_eq!(create.capability, CapabilityId::from_static(CAP_SEND));
+        assert_eq!(create.safety_tier, SafetyTier::Risky);
+        assert_eq!(create.idempotency, IdempotencyClass::None);
     }
 
     #[test]

@@ -974,6 +974,82 @@ pub fn normalize_bluebubbles_contact_phone_key(value: &str) -> Option<String> {
     (normalized.len() >= 7).then_some(normalized)
 }
 
+/// Normalize a `BlueBubbles` handle for send-target matching.
+#[must_use]
+pub fn normalize_bluebubbles_handle(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    for prefix in ["imessage:", "sms:", "auto:"] {
+        if lower.starts_with(prefix) {
+            return trimmed
+                .get(prefix.len()..)
+                .and_then(normalize_bluebubbles_handle);
+        }
+    }
+
+    if trimmed.contains('@') {
+        Some(lower)
+    } else {
+        let compact = trimmed.split_whitespace().collect::<String>();
+        (!compact.is_empty()).then_some(compact)
+    }
+}
+
+fn effect_alias_to_id(alias: &str) -> Option<&'static str> {
+    Some(match alias {
+        "slam" => "com.apple.MobileSMS.expressivesend.impact",
+        "loud" => "com.apple.MobileSMS.expressivesend.loud",
+        "gentle" => "com.apple.MobileSMS.expressivesend.gentle",
+        "invisible" | "invisible-ink" | "invisibleink" => {
+            "com.apple.MobileSMS.expressivesend.invisibleink"
+        }
+        "echo" => "com.apple.messages.effect.CKEchoEffect",
+        "spotlight" => "com.apple.messages.effect.CKSpotlightEffect",
+        "balloons" => "com.apple.messages.effect.CKHappyBirthdayEffect",
+        "confetti" => "com.apple.messages.effect.CKConfettiEffect",
+        "love" | "heart" | "hearts" => "com.apple.messages.effect.CKHeartEffect",
+        "lasers" => "com.apple.messages.effect.CKLasersEffect",
+        "fireworks" => "com.apple.messages.effect.CKFireworksEffect",
+        "celebration" => "com.apple.messages.effect.CKSparklesEffect",
+        _ => return None,
+    })
+}
+
+/// Normalize a user-facing iMessage effect alias into the `BlueBubbles` effect ID.
+#[must_use]
+pub fn normalize_bluebubbles_message_effect(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    let dashed = lower
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_whitespace() || ch == '_' {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let compact = lower
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '_' && *ch != '-')
+        .collect::<String>();
+
+    effect_alias_to_id(&lower)
+        .or_else(|| effect_alias_to_id(&dashed))
+        .or_else(|| effect_alias_to_id(&compact))
+        .map(str::to_string)
+        .or_else(|| Some(trimmed.to_string()))
+}
+
 // ---------------------------------------------------------------------------
 // Chat types
 // ---------------------------------------------------------------------------
@@ -982,7 +1058,21 @@ pub fn normalize_bluebubbles_contact_phone_key(value: &str) -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Chat {
     /// Unique chat identifier (e.g. "iMessage;-;+15551234567").
+    #[serde(alias = "chatGuid", alias = "chat_guid")]
     pub guid: String,
+
+    /// Numeric chat ID, when the server includes it.
+    #[serde(default, alias = "chatId", alias = "chat_id")]
+    pub id: Option<i64>,
+
+    /// Server chat identifier, when distinct from the full GUID.
+    #[serde(
+        default,
+        rename = "chatIdentifier",
+        alias = "chat_identifier",
+        alias = "identifier"
+    )]
+    pub chat_identifier: Option<String>,
 
     /// Human-readable display name for the chat.
     #[serde(default)]
@@ -1009,6 +1099,7 @@ pub struct Chat {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatParticipant {
     /// Address (phone number or email).
+    #[serde(default, alias = "handle", alias = "id", alias = "identifier")]
     pub address: String,
 
     /// Human-readable display name.
@@ -1186,6 +1277,44 @@ pub struct Attachment {
 // Request / Response types
 // ---------------------------------------------------------------------------
 
+/// Rich-send options accepted by `imessage.send_message`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SendMessageOptions {
+    /// Message GUID to thread the outbound message under.
+    #[serde(default)]
+    pub reply_to_message_guid: Option<String>,
+
+    /// Message part index to thread under. Defaults to `0` when a reply GUID is present.
+    #[serde(default)]
+    pub reply_to_part_index: Option<u64>,
+
+    /// Fully-qualified `BlueBubbles` effect ID or normalized alias.
+    #[serde(default)]
+    pub effect_id: Option<String>,
+}
+
+impl SendMessageOptions {
+    /// Whether this request needs `BlueBubbles` Private API support.
+    #[must_use]
+    pub const fn requires_private_api(&self) -> bool {
+        self.reply_to_message_guid.is_some() || self.effect_id.is_some()
+    }
+
+    /// Stable operator-facing feature label for deterministic Private API errors.
+    #[must_use]
+    pub fn private_api_feature_label(&self) -> String {
+        match (
+            self.reply_to_message_guid.is_some(),
+            self.effect_id.is_some(),
+        ) {
+            (true, true) => "reply threading + message effects".to_string(),
+            (true, false) => "reply threading".to_string(),
+            (false, true) => "message effects".to_string(),
+            (false, false) => "plain text send".to_string(),
+        }
+    }
+}
+
 /// Request to send a message via `BlueBubbles`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SendMessageRequest {
@@ -1203,6 +1332,22 @@ pub struct SendMessageRequest {
     /// Sending method ("apple-script" or "private-api").
     #[serde(default = "default_send_method")]
     pub method: String,
+
+    /// Message GUID selected for Private API reply threading.
+    #[serde(
+        rename = "selectedMessageGuid",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub selected_message_guid: Option<String>,
+
+    /// Message part index selected for Private API reply threading.
+    #[serde(rename = "partIndex", default, skip_serializing_if = "Option::is_none")]
+    pub part_index: Option<u64>,
+
+    /// Message effect ID selected for Private API expressive send.
+    #[serde(rename = "effectId", default, skip_serializing_if = "Option::is_none")]
+    pub effect_id: Option<String>,
 }
 
 /// `BlueBubbles` `AppleScript` send mode.
@@ -1213,6 +1358,138 @@ pub const SEND_METHOD_PRIVATE_API: &str = "private-api";
 
 fn default_send_method() -> String {
     SEND_METHOD_APPLE_SCRIPT.to_string()
+}
+
+/// Caller intent for handle-based `BlueBubbles` send-target resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum BlueBubblesTargetService {
+    /// Prefer iMessage direct chats, falling back only when needed.
+    #[serde(rename = "imessage")]
+    Imessage,
+
+    /// Prefer SMS direct chats, preserving explicit caller intent.
+    #[serde(rename = "sms")]
+    Sms,
+
+    /// Automatic mode uses the iMessage-first ordering.
+    #[serde(rename = "auto")]
+    #[default]
+    Auto,
+}
+
+impl BlueBubblesTargetService {
+    /// Preferred `BlueBubbles` chat GUID service prefix.
+    #[must_use]
+    pub const fn preferred_guid_service(self) -> &'static str {
+        match self {
+            Self::Sms => "SMS",
+            Self::Imessage | Self::Auto => "iMessage",
+        }
+    }
+
+    /// JSON/API label.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Imessage => "imessage",
+            Self::Sms => "sms",
+            Self::Auto => "auto",
+        }
+    }
+}
+
+/// Explicit send target to resolve before sending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BlueBubblesSendTarget {
+    /// Direct chat GUID. No network lookup is needed.
+    ChatGuid(String),
+
+    /// Numeric `BlueBubbles` chat ID.
+    ChatId(i64),
+
+    /// `BlueBubbles` chat identifier or GUID third component.
+    ChatIdentifier(String),
+
+    /// Handle/phone/email with caller service preference.
+    Handle {
+        address: String,
+        service: BlueBubblesTargetService,
+    },
+}
+
+impl BlueBubblesSendTarget {
+    /// Stable target kind label.
+    #[must_use]
+    pub const fn kind(&self) -> &'static str {
+        match self {
+            Self::ChatGuid(_) => "chat_guid",
+            Self::ChatId(_) => "chat_id",
+            Self::ChatIdentifier(_) => "chat_identifier",
+            Self::Handle { .. } => "handle",
+        }
+    }
+}
+
+/// Result of explicit send-target resolution.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesTargetResolution {
+    /// Resolved chat GUID, or `None` when not found.
+    pub chat_guid: Option<String>,
+
+    /// Input target kind.
+    pub target_kind: &'static str,
+
+    /// Stable match class used for tests and operator diagnostics.
+    pub match_kind: &'static str,
+
+    /// Caller service preference for handle targets.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_preference: Option<&'static str>,
+
+    /// Number of chat records inspected.
+    pub scanned_chats: usize,
+
+    /// Number of chat-query pages fetched.
+    pub scanned_pages: u64,
+
+    /// Whether the configured scan bound was reached.
+    pub exhausted: bool,
+}
+
+impl BlueBubblesTargetResolution {
+    /// Create a direct resolution that performed no chat scan.
+    #[must_use]
+    pub const fn direct(chat_guid: String) -> Self {
+        Self {
+            chat_guid: Some(chat_guid),
+            target_kind: "chat_guid",
+            match_kind: "direct_chat_guid",
+            service_preference: None,
+            scanned_chats: 0,
+            scanned_pages: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Create a not-found resolution preserving the scan evidence.
+    #[must_use]
+    pub const fn not_found(
+        target_kind: &'static str,
+        service_preference: Option<&'static str>,
+        scanned_chats: usize,
+        scanned_pages: u64,
+        exhausted: bool,
+    ) -> Self {
+        Self {
+            chat_guid: None,
+            target_kind,
+            match_kind: "not_found",
+            service_preference,
+            scanned_chats,
+            scanned_pages,
+            exhausted,
+        }
+    }
 }
 
 /// Response from sending a message.
@@ -2422,12 +2699,52 @@ mod tests {
             message: "Hello!".to_string(),
             temp_guid: Some("tmp-001".to_string()),
             method: "apple-script".to_string(),
+            selected_message_guid: None,
+            part_index: None,
+            effect_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chatGuid"], "iMessage;-;+15551234567");
         assert_eq!(json["message"], "Hello!");
         assert_eq!(json["tempGuid"], "tmp-001");
         assert_eq!(json["method"], SEND_METHOD_APPLE_SCRIPT);
+    }
+
+    #[test]
+    fn send_message_request_serializes_private_api_reply_and_effect_fields() {
+        let req = SendMessageRequest {
+            chat_guid: "iMessage;-;+15551234567".to_string(),
+            message: "Hello!".to_string(),
+            temp_guid: Some("tmp-002".to_string()),
+            method: SEND_METHOD_PRIVATE_API.to_string(),
+            selected_message_guid: Some("reply-guid-123".to_string()),
+            part_index: Some(1),
+            effect_id: Some("com.apple.messages.effect.CKConfettiEffect".to_string()),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["selectedMessageGuid"], "reply-guid-123");
+        assert_eq!(json["partIndex"], 1);
+        assert_eq!(
+            json["effectId"],
+            "com.apple.messages.effect.CKConfettiEffect"
+        );
+    }
+
+    #[test]
+    fn effect_alias_normalization_matches_bluebubbles_private_api_ids() {
+        assert_eq!(
+            normalize_bluebubbles_message_effect("invisible ink").as_deref(),
+            Some("com.apple.MobileSMS.expressivesend.invisibleink")
+        );
+        assert_eq!(
+            normalize_bluebubbles_message_effect("CONFETTI").as_deref(),
+            Some("com.apple.messages.effect.CKConfettiEffect")
+        );
+        assert_eq!(
+            normalize_bluebubbles_message_effect("custom.effect.id").as_deref(),
+            Some("custom.effect.id")
+        );
+        assert!(normalize_bluebubbles_message_effect("   ").is_none());
     }
 
     #[test]

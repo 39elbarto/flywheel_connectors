@@ -36,7 +36,41 @@ deny_private_ranges = false
 max_redirects = 0
 
 [provides.operations.send_message.ai_hints]
-when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge. The shared implementation refreshes server info and explicitly selects private-api for macOS 26+ hosts when Private API is enabled; otherwise it uses an observable apple-script fallback."
+when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge to a known chat GUID. The shared implementation refreshes server info and explicitly selects private-api for macOS 26+ hosts when Private API is enabled; otherwise it uses an observable apple-script fallback. Optional reply_to_message_guid, reply_to_part_index, and effect_id fields require known enabled Private API support and fail closed when unavailable."
+
+[provides.operations.resolve_send_target]
+summary = "Resolve a BlueBubbles send target"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.resolve_send_target.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.resolve_send_target.ai_hints]
+when_to_use = "When you have a handle, chat ID, or chat identifier and need a chat GUID before sending. Handle resolution preserves explicit SMS intent, otherwise prefers iMessage, and never routes to a group chat just because the handle is a participant."
+
+[provides.operations.create_chat]
+summary = "Create a BlueBubbles DM chat"
+capability = "imessage.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.create_chat.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.create_chat.ai_hints]
+when_to_use = "When no existing DM chat can be resolved and the caller explicitly wants to create a new iMessage conversation by sending the first message through BlueBubbles Private API."
 
 [provides.operations.get_chats]
 summary = "List BlueBubbles chats"

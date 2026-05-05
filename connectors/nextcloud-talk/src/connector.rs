@@ -17,7 +17,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::NextcloudTalkClient;
-use crate::config::NextcloudTalkConfig;
+use crate::config::{NextcloudTalkConfig, NextcloudTalkSecretRef};
 use crate::types::{
     AddParticipantRequest, AttendeeId, ChatMessagesQuery, ConversationListQuery, ConversationToken,
     CreateConversationRequest, MessageId, ParticipantListQuery, ReactionRequest, ReadMarkerRequest,
@@ -59,6 +59,8 @@ pub struct DoctorCheck {
     passed: bool,
     message: Option<String>,
     critical: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    details: Option<serde_json::Value>,
 }
 
 impl DoctorResult {
@@ -68,6 +70,23 @@ impl DoctorResult {
             .filter(|check| check.critical)
             .all(|check| check.passed);
         Self { passed, checks }
+    }
+}
+
+impl DoctorCheck {
+    fn new(name: impl Into<String>, passed: bool, message: Option<String>, critical: bool) -> Self {
+        Self {
+            name: name.into(),
+            passed,
+            message,
+            critical,
+            details: None,
+        }
+    }
+
+    fn with_details(mut self, details: serde_json::Value) -> Self {
+        self.details = Some(details);
+        self
     }
 }
 
@@ -108,64 +127,120 @@ impl NextcloudTalkConnector {
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
 
-        checks.push(DoctorCheck {
-            name: "configuration".into(),
-            passed: self.config.is_some(),
-            message: Some(if self.config.is_some() {
+        checks.push(DoctorCheck::new(
+            "configuration",
+            self.config.is_some(),
+            Some(if self.config.is_some() {
                 "Configuration loaded".into()
             } else {
                 "Not configured - run configure first".into()
             }),
-            critical: true,
-        });
+            true,
+        ));
 
-        checks.push(DoctorCheck {
-            name: "client_initialized".into(),
-            passed: self.client.is_some(),
-            message: Some(if self.client.is_some() {
+        checks.push(DoctorCheck::new(
+            "client_initialized",
+            self.client.is_some(),
+            Some(if self.client.is_some() {
                 "HTTP client initialized".into()
             } else {
                 "HTTP client missing; re-run configure".into()
             }),
-            critical: true,
-        });
+            true,
+        ));
 
-        checks.push(DoctorCheck {
-            name: "runtime".into(),
-            passed: self.runtime.is_some(),
-            message: Some(if self.runtime.is_some() {
+        checks.push(DoctorCheck::new(
+            "runtime",
+            self.runtime.is_some(),
+            Some(if self.runtime.is_some() {
                 "ConnectorRuntime initialized".into()
             } else {
                 "Runtime missing; re-run configure".into()
             }),
-            critical: true,
-        });
+            true,
+        ));
 
         if let Some(config) = &self.config {
-            checks.push(DoctorCheck {
-                name: "server_url".into(),
-                passed: true,
-                message: Some(format!("Target server: {}", config.normalized_server_url())),
-                critical: false,
-            });
-            checks.push(DoctorCheck {
-                name: "auth_mode".into(),
-                passed: true,
-                message: Some(format!("Auth mode: {}", config.auth.mode_label())),
-                critical: false,
-            });
+            let policy = config.server_url_policy_report();
+            let policy_details = policy.as_ref().map_or_else(
+                |error| json!({ "allowed": false, "error": error.to_string() }),
+                |report| {
+                    json!({
+                        "url": report.url,
+                        "host": report.host,
+                        "classification": report.classification,
+                        "allowed": report.allowed,
+                        "reason": report.reason,
+                        "network_constraints": runtime_network_constraints_projection(config),
+                    })
+                },
+            );
+            let policy_allowed = policy.as_ref().is_ok_and(|report| report.allowed);
+            checks.push(
+                DoctorCheck::new(
+                    "server_url",
+                    policy_allowed,
+                    Some(format!("Target server: {}", config.normalized_server_url())),
+                    true,
+                )
+                .with_details(policy_details),
+            );
+            checks.push(
+                DoctorCheck::new(
+                    "account_setup",
+                    true,
+                    Some(format!("Account: {}", config.account_label())),
+                    false,
+                )
+                .with_details(setup_details(config)),
+            );
+            checks.push(
+                DoctorCheck::new(
+                    "ocs_auth_source",
+                    true,
+                    Some(format!("OCS auth mode: {}", config.auth.mode_label())),
+                    false,
+                )
+                .with_details(json!({
+                    "mode": config.auth.mode_label(),
+                    "secret_redacted": true,
+                })),
+            );
+            checks.push(
+                DoctorCheck::new(
+                    "webhook_readiness",
+                    config.webhook.readiness_label() != "webhook_missing_secret",
+                    Some(webhook_readiness_message(config)),
+                    false,
+                )
+                .with_details(webhook_details(config)),
+            );
+            checks.push(
+                DoctorCheck::new(
+                    "inbound_policy",
+                    true,
+                    Some(format!(
+                        "DM policy: {}; group policy: {}; room allowlist entries: {}",
+                        config.inbound_policy.dm_policy,
+                        config.inbound_policy.group_policy,
+                        config.inbound_policy.rooms.len()
+                    )),
+                    false,
+                )
+                .with_details(inbound_policy_details(config)),
+            );
         }
 
-        checks.push(DoctorCheck {
-            name: "capability_verifier".into(),
-            passed: self.verifier.is_some(),
-            message: Some(if self.verifier.is_some() {
+        checks.push(DoctorCheck::new(
+            "capability_verifier",
+            self.verifier.is_some(),
+            Some(if self.verifier.is_some() {
                 "Handshake completed".into()
             } else {
                 "Handshake not performed yet".into()
             }),
-            critical: false,
-        });
+            false,
+        ));
 
         DoctorResult::from_checks(checks)
     }
@@ -175,6 +250,118 @@ impl Default for NextcloudTalkConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn setup_details(config: &NextcloudTalkConfig) -> serde_json::Value {
+    json!({
+        "account_id": config.account_id(),
+        "account_name_configured": config.account_name.is_some(),
+        "ocs_auth_mode": config.auth.mode_label(),
+        "webhook_mode": if config.webhook.enabled { "webhook" } else { "manual_poll" },
+        "webhook_readiness": config.webhook.readiness_label(),
+        "credential_sources": {
+            "ocs": config.auth.mode_label(),
+            "webhook_bot_secret": config.webhook.secret_source_label(),
+        },
+    })
+}
+
+fn webhook_details(config: &NextcloudTalkConfig) -> serde_json::Value {
+    json!({
+        "enabled": config.webhook.enabled,
+        "mode": if config.webhook.enabled { "webhook" } else { "manual_poll" },
+        "public_path": config.webhook.public_path,
+        "public_url_configured": config.webhook.public_url.is_some(),
+        "bot_secret_source": config.webhook.secret_source_label(),
+        "bot_secret_fingerprint": config
+            .webhook
+            .bot_secret
+            .as_ref()
+            .map(secret_fingerprint),
+        "secret_redacted": true,
+        "backend_allowlist": effective_backend_allowlist(config),
+    })
+}
+
+fn webhook_readiness_message(config: &NextcloudTalkConfig) -> String {
+    match (
+        config.webhook.enabled,
+        config
+            .webhook
+            .bot_secret
+            .as_ref()
+            .map(NextcloudTalkSecretRef::source_label),
+    ) {
+        (false, _) => "Manual-poll mode; webhook receiver is not enabled".to_string(),
+        (true, Some(source)) => format!("Webhook mode ready; bot secret source: {source}"),
+        (true, None) => "Webhook mode requested but bot secret is missing".to_string(),
+    }
+}
+
+fn inbound_policy_details(config: &NextcloudTalkConfig) -> serde_json::Value {
+    json!({
+        "dm_policy": config.inbound_policy.dm_policy,
+        "group_policy": config.inbound_policy.group_policy,
+        "allow_from_count": config.inbound_policy.allow_from.len(),
+        "group_allow_from_count": config.inbound_policy.group_allow_from.len(),
+        "rooms_count": config.inbound_policy.rooms.len(),
+    })
+}
+
+fn runtime_network_constraints_projection(config: &NextcloudTalkConfig) -> serde_json::Value {
+    json!({
+        "host_allow": effective_host_allowlist(config),
+        "port_allow": [80, 443],
+        "cidr_deny": [],
+        "deny_localhost": !config.network.allow_private_networks,
+        "deny_private_ranges": !config.network.allow_private_networks,
+        "deny_tailnet_ranges": !config.network.allow_tailnet_networks,
+        "require_sni": true,
+        "deny_ip_literals": false,
+        "require_host_canonicalization": true,
+        "max_redirects": 5,
+        "connect_timeout_ms": 10_000,
+        "total_timeout_ms": config.request_timeout_ms,
+    })
+}
+
+fn effective_host_allowlist(config: &NextcloudTalkConfig) -> Vec<String> {
+    if !config.network.allowed_hosts.is_empty() {
+        return config.network.allowed_hosts.clone();
+    }
+    config
+        .server_url_policy_report()
+        .map_or_else(|_| Vec::new(), |report| vec![report.host])
+}
+
+fn effective_backend_allowlist(config: &NextcloudTalkConfig) -> Vec<String> {
+    if !config.webhook.backend_allowlist.is_empty() {
+        return config.webhook.backend_allowlist.clone();
+    }
+    vec![config.normalized_server_url()]
+}
+
+fn secret_fingerprint(secret: &NextcloudTalkSecretRef) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(secret.fingerprint_material().as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("sha256:{}", &digest[..16])
+}
+
+fn attach_self_check_details(
+    mut report: SelfCheckReport,
+    config: Option<&NextcloudTalkConfig>,
+) -> SelfCheckReport {
+    report.details = Some(match config {
+        Some(config) => json!({
+            "setup": setup_details(config),
+            "webhook": webhook_details(config),
+            "inbound_policy": inbound_policy_details(config),
+            "network_policy": runtime_network_constraints_projection(config),
+        }),
+        None => json!({ "configured": false }),
+    });
+    report
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -916,35 +1103,42 @@ impl FcpConnector for NextcloudTalkConnector {
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
+        snapshot.details = Some(match &self.config {
+            Some(config) => setup_details(config),
+            None => json!({ "configured": false }),
+        });
         snapshot
     }
 
     async fn self_check(&self) -> FcpResult<SelfCheckReport> {
         let Some(client) = &self.client else {
-            return Ok(SelfCheckReport::degraded(
-                "not_configured",
-                "Connector is not configured",
+            return Ok(attach_self_check_details(
+                SelfCheckReport::degraded("not_configured", "Connector is not configured"),
+                self.config.as_ref(),
             ));
         };
         let Some(runtime) = &self.runtime else {
-            return Ok(SelfCheckReport::failed(
-                "runtime_missing",
-                "Connector runtime is not initialized",
+            return Ok(attach_self_check_details(
+                SelfCheckReport::failed("runtime_missing", "Connector runtime is not initialized"),
+                self.config.as_ref(),
             ));
         };
 
         match client.health_check(runtime).await {
-            Ok(_) => Ok(SelfCheckReport::ok()),
+            Ok(_) => Ok(attach_self_check_details(
+                SelfCheckReport::ok(),
+                self.config.as_ref(),
+            )),
             Err(error) => {
                 if error.is_retryable() {
-                    Ok(SelfCheckReport::degraded(
-                        "self_check_retryable",
-                        error.to_string(),
+                    Ok(attach_self_check_details(
+                        SelfCheckReport::degraded("self_check_retryable", error.to_string()),
+                        self.config.as_ref(),
                     ))
                 } else {
-                    Ok(SelfCheckReport::failed(
-                        "self_check_failed",
-                        error.to_string(),
+                    Ok(attach_self_check_details(
+                        SelfCheckReport::failed("self_check_failed", error.to_string()),
+                        self.config.as_ref(),
                     ))
                 }
             }
@@ -1342,6 +1536,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operations: &[&'static str],
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = fcp_core::CapabilityConstraints {
@@ -1357,6 +1552,7 @@ mod tests {
             .operations(operations)
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
+            .target_instance(instance_id.as_str())
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
             .sign(signing_key)
@@ -1393,14 +1589,74 @@ mod tests {
 
         let report = connector.doctor();
         assert!(report.passed);
-        assert!(report.checks.iter().any(|check| check.name == "auth_mode"));
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "ocs_auth_source")
+        );
+        assert!(
+            report
+                .checks
+                .iter()
+                .any(|check| check.name == "webhook_readiness")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_reports_webhook_setup_without_secret_leak() {
+        let mut connector = NextcloudTalkConnector::new();
+        connector
+            .configure(json!({
+                "server_url": "https://cloud.example.com",
+                "auth": {
+                    "mode": "credential_id",
+                    "credential_id": "ocs_cred"
+                },
+                "account_id": "work",
+                "account_name": "Work Talk",
+                "webhook": {
+                    "enabled": true,
+                    "bot_secret": {
+                        "source": "inline",
+                        "secret": "super-secret-webhook-material"
+                    },
+                    "backend_allowlist": ["https://cloud.example.com"]
+                },
+                "inbound_policy": {
+                    "dm_policy": "allowlist",
+                    "allow_from": ["alice"],
+                    "rooms": ["engineering"]
+                }
+            }))
+            .await
+            .expect("configure");
+
+        let report = connector.doctor();
+        let encoded = serde_json::to_string(&report).expect("doctor json");
+        assert!(report.passed);
+        assert!(encoded.contains("webhook_ready"));
+        assert!(encoded.contains("sha256:"));
+        assert!(!encoded.contains("super-secret-webhook-material"));
+        assert!(report.checks.iter().any(|check| {
+            check.name == "webhook_readiness"
+                && check
+                    .message
+                    .as_deref()
+                    .is_some_and(|m| m.contains("bot secret source: inline"))
+        }));
     }
 
     #[fcp_async_core::runtime::test]
     async fn simulate_requires_configuration() {
         let connector = NextcloudTalkConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_HEALTH]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_HEALTH],
+            &connector.base.instance_id,
+        );
         let response = connector
             .simulate(base_simulate(connector.id(), OP_HEALTH, grant))
             .await
@@ -1423,7 +1679,8 @@ mod tests {
                 "auth": {
                     "mode": "bearer_token",
                     "access_token": "oauth-test-material"
-                }
+                },
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1433,7 +1690,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_SEND_MESSAGE]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_SEND_MESSAGE],
+            &connector.base.instance_id,
+        );
         let response = connector
             .simulate(base_simulate(connector.id(), OP_SEND_MESSAGE, grant))
             .await
@@ -1505,7 +1767,8 @@ mod tests {
                 "auth": {
                     "mode": "bearer_token",
                     "access_token": "oidc"
-                }
+                },
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1515,7 +1778,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_HEALTH]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_HEALTH],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(connector.id(), OP_HEALTH, grant, json!({})))
             .await
@@ -1563,7 +1831,8 @@ mod tests {
                     "mode": "app_password",
                     "username": "alice",
                     "app_password": "secret"
-                }
+                },
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1573,7 +1842,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_LIST_CONVERSATIONS]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_LIST_CONVERSATIONS],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
@@ -1631,7 +1905,8 @@ mod tests {
                     "mode": "app_password",
                     "username": "alice",
                     "app_password": "secret"
-                }
+                },
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1641,7 +1916,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_WRITE, &[OP_SEND_MESSAGE]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WRITE,
+            &[OP_SEND_MESSAGE],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
@@ -1706,7 +1986,8 @@ mod tests {
                     "mode": "app_password",
                     "username": "alice",
                     "app_password": "secret"
-                }
+                },
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1716,7 +1997,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_MANAGE, &[OP_DELETE_MESSAGE]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_MANAGE,
+            &[OP_DELETE_MESSAGE],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
@@ -1761,7 +2047,8 @@ mod tests {
                     "mode": "bearer_token",
                     "access_token": "oidc"
                 },
-                "long_poll_timeout_secs": 17
+                "long_poll_timeout_secs": 17,
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1771,7 +2058,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_MESSAGES]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_GET_MESSAGES],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
@@ -1844,7 +2136,8 @@ mod tests {
                     "mode": "bearer_token",
                     "access_token": "oidc"
                 },
-                "long_poll_timeout_secs": 11
+                "long_poll_timeout_secs": 11,
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1854,7 +2147,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_POLL_CONVERSATION_EVENTS],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),
@@ -1904,7 +2202,8 @@ mod tests {
                     "mode": "bearer_token",
                     "access_token": "oidc"
                 },
-                "long_poll_timeout_secs": 11
+                "long_poll_timeout_secs": 11,
+                "network": { "allow_private_networks": true }
             }))
             .await
             .expect("configure");
@@ -1914,7 +2213,12 @@ mod tests {
         handshake.host_public_key = verifying_key.to_bytes();
         connector.handshake(handshake).await.expect("handshake");
 
-        let grant = generate_valid_token(&signing_key, CAP_READ, &[OP_POLL_CONVERSATION_EVENTS]);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_READ,
+            &[OP_POLL_CONVERSATION_EVENTS],
+            &connector.base.instance_id,
+        );
         let response = connector
             .invoke(base_invoke(
                 connector.id(),

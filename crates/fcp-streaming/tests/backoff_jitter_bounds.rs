@@ -100,7 +100,7 @@ fn jitter_envelope_holds_across_attempts_under_cap() {
         .with_jitter(true);
 
     for attempt in 0..=4u32 {
-        let base_secs = (1u64 << attempt) as f64;
+        let base_secs = f64::from(1_u32 << attempt);
         let lo = Duration::from_secs_f64(base_secs * JITTER_LOW_FACTOR);
         let hi = Duration::from_secs_f64(base_secs * JITTER_HIGH_FACTOR);
         for i in 0..ITERATIONS {

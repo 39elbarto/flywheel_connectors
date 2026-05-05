@@ -23,12 +23,11 @@
 //!      instead of a decimal-seconds delta. `parse_retry_after`
 //!      converts both formats; integration verifies the byte path.
 //!
-//!   3. **503 returns retry_after=None**. The fix preserved
-//!      Retry-After ONLY for 429 (per the documented contract). A
-//!      503 response does not surface `retry_after` even when the
-//!      header is present — operators relying on
-//!      `err.retry_after().is_some()` to disambiguate "we have a
-//!      hint" from "back off by default" must not be misled.
+//!   3. **503 preserves generic Retry-After**. Generic upstream 503
+//!      responses preserve `Retry-After` unless they are FCP terminal
+//!      budget-backpressure responses. This gives reconnect loops a
+//!      server-supplied floor without confusing it with the
+//!      fail-closed budget-exhaustion path.
 //!
 //!   4. **Mid-stream connection drop surfaces as a stream error**,
 //!      not a panic or silent EOF. After a successful 200 response,
@@ -68,8 +67,8 @@ enum StormStep {
     /// pointing `seconds_ahead` in the future.
     HttpStatus429DateRetryAfter { seconds_ahead: i64 },
     /// Reply with `503 Service Unavailable`. The Retry-After header
-    /// is intentionally present to verify the client correctly does
-    /// NOT surface it on non-429 codes (per the fix's contract).
+    /// is intentionally present to verify generic upstream 503 hints
+    /// are preserved for reconnect backoff.
     HttpStatus503WithRetryAfter(u64),
     /// Reply with `200 OK` SSE headers, send one event, then drop
     /// the TCP connection mid-stream.
@@ -103,7 +102,9 @@ fn write_429_numeric(stream: &mut TcpStream, seconds: u64) {
          \r\n",
         body.len(),
     );
-    stream.write_all(response.as_bytes()).expect("write 429 head");
+    stream
+        .write_all(response.as_bytes())
+        .expect("write 429 head");
     stream.write_all(body).expect("write 429 body");
     stream.flush().expect("flush 429");
 }
@@ -140,7 +141,9 @@ fn write_503_with_retry_after(stream: &mut TcpStream, seconds: u64) {
          \r\n",
         body.len(),
     );
-    stream.write_all(response.as_bytes()).expect("write 503 head");
+    stream
+        .write_all(response.as_bytes())
+        .expect("write 503 head");
     stream.write_all(body).expect("write 503 body");
     stream.flush().expect("flush 503");
 }
@@ -188,9 +191,8 @@ fn spawn_storm_server(script: Vec<StormStep>) -> (String, thread::JoinHandle<()>
             let Some(step) = next else {
                 break;
             };
-            let (mut stream, _) = match listener.accept() {
-                Ok(pair) => pair,
-                Err(_) => return,
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
             };
             let _ = read_http_request_head(&mut stream);
             match step {
@@ -238,9 +240,8 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
     );
 
     // ── Phase 1: 429 numeric Retry-After ─────────────────────────
-    let phase1 = match client.connect().await {
-        Ok(_) => panic!("phase 1: connect MUST fail with HttpError(429)"),
-        Err(err) => err,
+    let Err(phase1) = client.connect().await else {
+        panic!("phase 1: connect MUST fail with HttpError(429)");
     };
     match &phase1 {
         StreamError::HttpError {
@@ -260,9 +261,8 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
     }
 
     // ── Phase 2: 429 HTTP-date Retry-After ───────────────────────
-    let phase2 = match client.connect().await {
-        Ok(_) => panic!("phase 2: connect MUST fail with HttpError(429)"),
-        Err(err) => err,
+    let Err(phase2) = client.connect().await else {
+        panic!("phase 2: connect MUST fail with HttpError(429)");
     };
     match &phase2 {
         StreamError::HttpError {
@@ -271,15 +271,16 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
             ..
         } => {
             assert_eq!(*status, 429, "phase 2 must classify as 429");
-            let surfaced = retry_after
-                .expect("phase 2 (HTTP-date Retry-After) MUST surface a duration");
+            let surfaced =
+                retry_after.expect("phase 2 (HTTP-date Retry-After) MUST surface a duration");
             // Wall-clock delta — give a generous lower bound to
             // tolerate the time spent in phase 1, but the upper
             // bound rules out parsing the date as a numeric.
             assert!(
-                surfaced <= Duration::from_secs(
-                    u64::try_from(RETRY_AFTER_DATE_SECONDS_AHEAD).unwrap_or(0) + 5,
-                ),
+                surfaced
+                    <= Duration::from_secs(
+                        u64::try_from(RETRY_AFTER_DATE_SECONDS_AHEAD).unwrap_or(0) + 5,
+                    ),
                 "phase 2: retry_after parsed as too long ({surfaced:?}) — \
                  HTTP-date may be misparsed as decimal seconds",
             );
@@ -287,17 +288,13 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
         other => panic!("phase 2: expected HttpError, got {other:?}"),
     }
 
-    // ── Phase 3: 503 with Retry-After header MUST NOT propagate ──
+    // ── Phase 3: 503 with Retry-After header propagates ──────────
     //
-    // The fix only preserves Retry-After on 429 (matches the
-    // documented contract). A 503 with a Retry-After header must
-    // surface as `retry_after = None` so callers can disambiguate
-    // "we have a hint" (Some) from "back off via default policy"
-    // (None). Pinning this here makes a future "preserve on all
-    // codes" patch a deliberate choice rather than a silent change.
-    let phase3 = match client.connect().await {
-        Ok(_) => panic!("phase 3: connect MUST fail with HttpError(503)"),
-        Err(err) => err,
+    // Generic upstream 503 reconnect hints are useful and distinct
+    // from FCP terminal budget backpressure, which carries the
+    // X-FCP-Backpressure-Reason header and is tested in sse.rs.
+    let Err(phase3) = client.connect().await else {
+        panic!("phase 3: connect MUST fail with HttpError(503)");
     };
     match &phase3 {
         StreamError::HttpError {
@@ -307,9 +304,9 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
         } => {
             assert_eq!(*status, 503, "phase 3 must classify as 503");
             assert_eq!(
-                *retry_after, None,
-                "phase 3: 503 + Retry-After header must surface as None — \
-                 the fix preserves the header only for 429",
+                *retry_after,
+                Some(Duration::from_secs(11)),
+                "phase 3: generic 503 + Retry-After must surface the server hint",
             );
         }
         other => panic!("phase 3: expected HttpError, got {other:?}"),
@@ -341,9 +338,9 @@ async fn sse_reconnect_storm_preserves_retry_after_signals_across_connect_attemp
             // Either is acceptable — the orchestrator treats both
             // as "reconnect needed".
         }
-        Some(Ok(unexpected)) => panic!(
-            "phase 4: stream returned a third event after server drop: {unexpected:?}"
-        ),
+        Some(Ok(unexpected)) => {
+            panic!("phase 4: stream returned a third event after server drop: {unexpected:?}")
+        }
     }
 
     server.join().expect("storm server thread joined");

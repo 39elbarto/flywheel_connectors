@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll, ready};
@@ -15,14 +16,15 @@ use fcp_async_core::bytes::Buf as _;
 use fcp_async_core::http::body::Body as _;
 use fcp_async_core::http::client_io::ClientIo;
 use fcp_async_core::http::{ClientIncomingBody, HttpClient, HttpClientBuilder, Method};
-use fcp_async_core::time;
-use futures_util::stream::Stream;
+use fcp_async_core::time::{self, Sleep, sleep};
+use futures_util::stream::{Stream, StreamExt as _};
 use pin_project_lite::pin_project;
 
 use crate::{
     FCP_BACKPRESSURE_REASON_HEADER, FCP_BACKPRESSURE_RETRY_AFTER_HEADER, HOST_BACKPRESSURE_STATUS,
     HostBackpressureSignal, StreamError, StreamResult,
 };
+use crate::{ReconnectConfig, ReconnectHandler};
 
 const ACCEPT_HEADER: &str = "Accept";
 const CACHE_CONTROL_HEADER: &str = "Cache-Control";
@@ -98,6 +100,12 @@ fn http_error_from_head(status: u16, reason: String, headers: &[(String, String)
         message: reason,
         retry_after,
     }
+}
+
+fn reconnect_delay_for_error(handler: &ReconnectHandler, err: &StreamError) -> Duration {
+    let base = handler.config().delay_for_attempt(handler.attempts());
+    err.retry_after()
+        .map_or(base, |retry_after| base.max(retry_after))
 }
 
 /// SSE event.
@@ -357,6 +365,7 @@ pub mod __fuzz {
     ///
     /// `max_data_bytes` caps the retained `data:` payload for an in-progress
     /// event (matches the production `SseConfig::max_buffer_size` cap path).
+    #[must_use]
     pub fn parse_chunks(chunks: &[&[u8]], max_data_bytes: usize) -> Vec<SseEvent> {
         let mut parser = SseParser::with_max_data_bytes(max_data_bytes);
         let mut events = Vec::new();
@@ -368,9 +377,12 @@ pub mod __fuzz {
     }
 
     /// Number of bytes the parser is currently retaining (in-progress buffer
-    /// plus accumulated `data:` payload). The fuzz target asserts this stays
-    /// bounded by a multiple of `max_data_bytes` so a regression that
-    /// loosens the retention cap surfaces immediately.
+    /// plus accumulated `data:` payload).
+    ///
+    /// The fuzz target asserts this stays bounded by a multiple of
+    /// `max_data_bytes` so a regression that loosens the retention cap
+    /// surfaces immediately.
+    #[must_use]
     pub fn parse_chunks_with_retained(
         chunks: &[&[u8]],
         max_data_bytes: usize,
@@ -652,6 +664,16 @@ impl SseClient {
     pub const fn config(&self) -> &SseConfig {
         &self.config
     }
+
+    /// Create a reconnecting SSE event stream.
+    ///
+    /// This preserves the one-shot [`Self::connect`] API while giving callers
+    /// an explicit boundary that honors `SseConfig` reconnect settings,
+    /// `Last-Event-ID` resumption, `Retry-After` hints, and host backpressure.
+    #[must_use]
+    pub fn stream(&self) -> ReconnectingSseStream {
+        ReconnectingSseStream::new(self.clone())
+    }
 }
 
 pin_project! {
@@ -770,9 +792,191 @@ impl Stream for SseStream {
     }
 }
 
+type ConnectFuture = Pin<Box<dyn Future<Output = StreamResult<SseStream>>>>;
+type ReceiveFuture =
+    Pin<Box<dyn Future<Output = (Box<SseStream>, Option<StreamResult<SseEvent>>)>>>;
+
+/// Reconnecting SSE event stream.
+pub struct ReconnectingSseStream {
+    client: SseClient,
+    handler: ReconnectHandler,
+    state: ReconnectState,
+    last_event_id: Option<String>,
+}
+
+enum ReconnectState {
+    /// Initial state or between attempts.
+    Idle,
+    /// Waiting for backoff delay.
+    Waiting(Pin<Box<Sleep>>),
+    /// Connection attempt in progress.
+    Connecting(ConnectFuture),
+    /// Active SSE stream ready to receive.
+    Connected(Box<SseStream>),
+    /// Event receive in progress.
+    Receiving(ReceiveFuture),
+}
+
+impl ReconnectingSseStream {
+    fn new(client: SseClient) -> Self {
+        let config = ReconnectConfig::new()
+            .with_max_attempts(if client.config.auto_reconnect {
+                client.config.max_reconnect_attempts.unwrap_or(u32::MAX)
+            } else {
+                0
+            })
+            .with_initial_delay(client.config.reconnect_delay);
+
+        Self {
+            client,
+            handler: ReconnectHandler::new(config),
+            state: ReconnectState::Idle,
+            last_event_id: None,
+        }
+    }
+
+    fn note_event_received(&mut self, event: &SseEvent) {
+        if let Some(id) = &event.id {
+            self.last_event_id = Some(id.clone());
+        }
+        self.handler.reset();
+    }
+}
+
+impl Stream for ReconnectingSseStream {
+    type Item = StreamResult<SseEvent>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            match &mut self.state {
+                ReconnectState::Idle => {
+                    let client = self.client.clone();
+                    let last_event_id = self.last_event_id.clone();
+                    self.state = ReconnectState::Connecting(Box::pin(async move {
+                        client.connect_with_last_id(last_event_id.as_deref()).await
+                    }));
+                }
+                ReconnectState::Waiting(delay) => match delay.as_mut().poll(cx) {
+                    Poll::Ready(()) => self.state = ReconnectState::Idle,
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReconnectState::Connecting(future) => match future.as_mut().poll(cx) {
+                    Poll::Ready(Ok(stream)) => {
+                        self.state = ReconnectState::Connected(Box::new(stream));
+                    }
+                    Poll::Ready(Err(err)) => {
+                        if err.is_terminal_backpressure() || !self.handler.can_reconnect() {
+                            return Poll::Ready(Some(Err(err)));
+                        }
+                        let delay = reconnect_delay_for_error(&self.handler, &err);
+                        self.handler.record_failure();
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+                ReconnectState::Connected(_) => {
+                    if let ReconnectState::Connected(stream) =
+                        std::mem::replace(&mut self.state, ReconnectState::Idle)
+                    {
+                        self.state = ReconnectState::Receiving(Box::pin(async move {
+                            let mut stream = stream;
+                            let result = stream.next().await;
+                            (stream, result)
+                        }));
+                    }
+                }
+                ReconnectState::Receiving(future) => match future.as_mut().poll(cx) {
+                    Poll::Ready((stream, Some(Ok(event)))) => {
+                        self.note_event_received(&event);
+                        self.state = ReconnectState::Connected(stream);
+                        return Poll::Ready(Some(Ok(event)));
+                    }
+                    Poll::Ready((stream, Some(Err(err)))) => {
+                        drop(stream);
+                        if err.is_terminal_backpressure() || !self.handler.can_reconnect() {
+                            return Poll::Ready(Some(Err(err)));
+                        }
+                        let delay = reconnect_delay_for_error(&self.handler, &err);
+                        self.handler.record_failure();
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
+                    }
+                    Poll::Ready((stream, None)) => {
+                        drop(stream);
+                        if !self.handler.can_reconnect() {
+                            return Poll::Ready(None);
+                        }
+                        let delay = self
+                            .handler
+                            .config()
+                            .delay_for_attempt(self.handler.attempts());
+                        self.handler.record_failure();
+                        self.state = ReconnectState::Waiting(Box::pin(sleep(delay)));
+                    }
+                    Poll::Pending => return Poll::Pending,
+                },
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread;
+
+    fn read_request_head(stream: &mut TcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 512];
+        while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+            let read = stream.read(&mut buf).expect("read request head");
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buf[..read]);
+        }
+        String::from_utf8_lossy(&request).into_owned()
+    }
+
+    fn write_sse_response(stream: &mut TcpStream, body: &str) {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Type: text/event-stream\r\n\
+             Cache-Control: no-cache\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {body}",
+            body.len(),
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write SSE response");
+        stream.flush().expect("flush SSE response");
+    }
+
+    fn spawn_reconnect_resume_server() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind SSE listener");
+        let address = listener.local_addr().expect("listener address");
+
+        let handle = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("accept first SSE connect");
+            let first_request = read_request_head(&mut first);
+            assert!(!first_request.contains("Last-Event-ID:"));
+            write_sse_response(&mut first, "id: one\ndata: first\n\n");
+
+            let (mut second, _) = listener.accept().expect("accept resumed SSE connect");
+            let second_request = read_request_head(&mut second);
+            assert!(
+                second_request.contains("Last-Event-ID: one\r\n"),
+                "second request did not resume with last event id: {second_request:?}",
+            );
+            write_sse_response(&mut second, "id: two\ndata: second\n\n");
+        });
+
+        (format!("http://{address}/events"), handle)
+    }
 
     #[test]
     fn sse_503_budget_backpressure_refuses_retry() {
@@ -825,6 +1029,75 @@ mod tests {
         // Retry-After on a non-rate-limited 5xx isn't part of the SSE
         // reconnect-budget contract; ignore it.
         assert_eq!(err.retry_after(), None);
+    }
+
+    #[test]
+    fn reconnecting_sse_delay_uses_retry_after_when_server_requests_longer_wait() {
+        let handler = ReconnectHandler::new(
+            ReconnectConfig::new()
+                .with_initial_delay(Duration::from_millis(100))
+                .with_jitter(false),
+        );
+        let err = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".to_string(),
+            retry_after: Some(Duration::from_secs(2)),
+        };
+
+        assert_eq!(
+            reconnect_delay_for_error(&handler, &err),
+            Duration::from_secs(2)
+        );
+    }
+
+    #[test]
+    fn reconnecting_sse_delay_keeps_backoff_when_retry_after_is_shorter() {
+        let handler = ReconnectHandler::new(
+            ReconnectConfig::new()
+                .with_initial_delay(Duration::from_secs(3))
+                .with_jitter(false),
+        );
+        let err = StreamError::HttpError {
+            status: 429,
+            message: "Too Many Requests".to_string(),
+            retry_after: Some(Duration::from_secs(1)),
+        };
+
+        assert_eq!(
+            reconnect_delay_for_error(&handler, &err),
+            Duration::from_secs(3)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn reconnecting_sse_stream_resumes_with_last_event_id_after_eof() {
+        let (url, server) = spawn_reconnect_resume_server();
+        let client = SseClient::with_config(
+            url,
+            SseConfig::new()
+                .with_timeout(Duration::from_secs(5))
+                .with_max_reconnect_attempts(2)
+                .with_reconnect_delay(Duration::from_millis(1)),
+        );
+        let mut stream = client.stream();
+
+        let first = time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("first SSE event timed out")
+            .expect("first SSE event present")
+            .expect("first SSE event ok");
+        assert_eq!(first.id.as_deref(), Some("one"));
+        assert_eq!(first.data, "first");
+
+        let second = time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("second SSE event timed out")
+            .expect("second SSE event present")
+            .expect("second SSE event ok");
+        assert_eq!(second.id.as_deref(), Some("two"));
+        assert_eq!(second.data, "second");
+
+        server.join().expect("SSE resume server thread");
     }
 
     #[test]
@@ -1749,10 +2022,10 @@ mod tests {
 
     #[test]
     fn test_sse_client_url_with_query_params() {
-        let client = SseClient::new("https://example.com/events?token=abc&channel=test");
+        let client = SseClient::new("https://example.com/events?cursor=abc&channel=test");
         assert_eq!(
             client.url(),
-            "https://example.com/events?token=abc&channel=test"
+            "https://example.com/events?cursor=abc&channel=test"
         );
     }
 

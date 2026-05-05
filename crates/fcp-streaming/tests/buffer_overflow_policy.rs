@@ -3,14 +3,14 @@
 //!
 //! ## Documented policy: ERROR RETURNED at the stream level
 //!
-//! When the SseStream's parser-retained byte count plus the next
+//! When the `SseStream`'s parser-retained byte count plus the next
 //! inbound chunk would exceed the configured `max_buffer_size`
 //! (clamped at `MAX_SSE_BUFFER_SIZE = 64 MiB`), `poll_next` yields
 //! `Err(StreamError::BufferOverflow { size, limit })` and the
 //! stream STOPS producing events.
 //!
 //! This is the documented behaviour in
-//! `fcp_streaming::sse::retained_buffer_overflow` and the SseStream
+//! `fcp_streaming::sse::retained_buffer_overflow` and the `SseStream`
 //! poll implementation. The connector observes a structured error
 //! and is expected to disconnect / reset the upstream.
 //!
@@ -29,14 +29,14 @@
 //!    the policy ANCHOR).
 //! 2. **`StreamError::BufferOverflow { size, limit }`** — wire shape
 //!    of the error, payload accessible.
-//! 3. **`Display` for BufferOverflow includes 'Buffer overflow' +
+//! 3. **`Display` for `BufferOverflow` includes 'Buffer overflow' +
 //!    size + limit** — operator log greps depend on the literal.
 //! 4. **`MAX_SSE_BUFFER_SIZE = 64 MiB` ceiling** — `with_max_buffer_size`
-//!    clamps requests above 64 MiB to 64 MiB (DoS protection).
+//!    clamps requests above 64 MiB to 64 MiB (denial-of-service protection).
 //! 5. **`SseConfig::default().max_buffer_size = 1 MiB`** — the
 //!    documented small-but-safe default.
 //! 6. **`std::error::Error::source()` returns None for
-//!    BufferOverflow** — it's a leaf error, no inner cause.
+//!    `BufferOverflow`** — it's a leaf error, no inner cause.
 
 use fcp_streaming::{SseClient, SseConfig, StreamError};
 use futures_util::stream::StreamExt;

@@ -2,25 +2,25 @@
 //! matrix (br-0c790d4c6).
 //!
 //! `e2e_sse_reconnect_storm.rs` (br-87544f4d5) drives a 4-phase
-//! sequence and asserts specific retry_after values per phase.
+//! sequence and asserts specific `retry_after` values per phase.
 //! That harness verifies *behavior* but doesn't pin the *byte
-//! contract* — the rendered shape of the StreamError variant +
-//! its retry_after field that operator tooling reads off
+//! contract* — the rendered shape of the `StreamError` variant +
+//! its `retry_after` field that operator tooling reads off
 //! `err.retry_after()` and `err.is_terminal_backpressure()`.
 //!
 //! This golden walks an 8-cell server-response matrix through a
 //! live `SseClient::connect()` and freezes the resulting
-//! StreamError classification for each cell:
+//! `StreamError` classification for each cell:
 //!
 //!   - 200 OK → connect succeeds (rendered as "<connected>")
 //!   - 429 + numeric Retry-After: 7 → HttpError(429, retry=Some(7s))
 //!   - 429 with no Retry-After → HttpError(429, retry=None)
-//!   - 503 with Retry-After: 11 → HttpError(503, retry=None)
-//!     (the fix preserves Retry-After ONLY for 429; 503 must not lie)
-//!   - 503 + FCP backpressure budget-exhausted → HostBackpressure
-//!     (terminal_backpressure=true)
+//!   - 503 with Retry-After: 11 → HttpError(503, retry=Some(11s))
+//!     (generic upstream hints are preserved for reconnect backoff)
+//!   - 503 + FCP backpressure budget-exhausted → `HostBackpressure`
+//!     (`terminal_backpressure=true`)
 //!   - 503 + FCP backpressure transient + retry-after-30 →
-//!     HostBackpressure (terminal_backpressure=false, retry_after=Some(30s))
+//!     `HostBackpressure` (`terminal_backpressure=false`, `retry_after=Some(30s)`)
 //!   - 404 → HttpError(404, retry=None)
 //!
 //! The golden is hand-rolled (no insta dev-dep on fcp-streaming) so
@@ -151,21 +151,20 @@ fn write_step(stream: &mut TcpStream, step: &ServerStep) {
     }
 }
 
-fn spawn_matrix_server(
-    script: Vec<ServerStep>,
-) -> (String, thread::JoinHandle<()>) {
+fn spawn_matrix_server(script: Vec<ServerStep>) -> (String, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind matrix listener");
     let address = listener.local_addr().expect("addr");
     let scripted = Arc::new(Mutex::new(script.into_iter()));
-    let handle = thread::spawn(move || loop {
-        let next = scripted.lock().expect("script lock").next();
-        let Some(step) = next else { break };
-        let (mut stream, _) = match listener.accept() {
-            Ok(p) => p,
-            Err(_) => return,
-        };
-        read_request_head(&mut stream);
-        write_step(&mut stream, &step);
+    let handle = thread::spawn(move || {
+        loop {
+            let next = scripted.lock().expect("script lock").next();
+            let Some(step) = next else { break };
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            read_request_head(&mut stream);
+            write_step(&mut stream, &step);
+        }
     });
     (format!("http://{address}/events"), handle)
 }
@@ -180,17 +179,11 @@ fn render_outcome(label: &str, result: Result<bool, StreamError>) -> String {
             retry_after,
             ..
         }) => {
-            let r = match retry_after {
-                Some(d) => format!("Some({}s)", d.as_secs()),
-                None => "None".to_string(),
-            };
+            let r = render_retry_after(retry_after);
             format!("{label:<48} | HttpError(status={status}, retry_after={r})")
         }
         Err(StreamError::HostBackpressure { status, signal, .. }) => {
-            let r = match signal.retry_after() {
-                Some(d) => format!("Some({}s)", d.as_secs()),
-                None => "None".to_string(),
-            };
+            let r = render_retry_after(signal.retry_after());
             let budget = signal.is_budget_exhausted();
             format!(
                 "{label:<48} | HostBackpressure(status={status}, retry_after={r}, budget_exhausted={budget})"
@@ -198,6 +191,13 @@ fn render_outcome(label: &str, result: Result<bool, StreamError>) -> String {
         }
         Err(other) => format!("{label:<48} | OtherError({other:?})"),
     }
+}
+
+fn render_retry_after(retry_after: Option<Duration>) -> String {
+    retry_after.map_or_else(
+        || "None".to_string(),
+        |duration| format!("Some({}s)", duration.as_secs()),
+    )
 }
 
 /// Run one cell against a freshly-started single-shot server (so the
@@ -229,8 +229,8 @@ const EXPECTED_GOLDEN: &str = "\
 #   - 200 OK → <connected>
 #   - 429 + numeric Retry-After → HttpError(retry_after=Some)
 #   - 429 without Retry-After → HttpError(retry_after=None)
-#   - 503 with Retry-After header → HttpError(retry_after=None)
-#     (fix preserves Retry-After ONLY for 429)
+#   - 503 with Retry-After header → HttpError(retry_after=Some)
+#     (generic upstream hints are preserved for reconnect backoff)
 #   - 503 + budget-exhausted → HostBackpressure(budget_exhausted=true)
 #   - 503 + transient-backpressure + retry-after → HostBackpressure(retry_after=Some, budget_exhausted=false)
 #   - 404 → HttpError(retry_after=None)
@@ -240,7 +240,7 @@ const EXPECTED_GOLDEN: &str = "\
 200_ok                                           | <connected>
 429_numeric_retry_after_7s                       | HttpError(status=429, retry_after=Some(7s))
 429_no_retry_after_header                        | HttpError(status=429, retry_after=None)
-503_with_retry_after_11s_NOT_PROPAGATED          | HttpError(status=503, retry_after=None)
+503_with_retry_after_11s_propagated              | HttpError(status=503, retry_after=Some(11s))
 503_backpressure_budget_exhausted                | HostBackpressure(status=503, retry_after=None, budget_exhausted=true)
 503_backpressure_transient_retry_after_30s       | HostBackpressure(status=503, retry_after=Some(30s), budget_exhausted=false)
 404_not_found                                    | HttpError(status=404, retry_after=None)
@@ -256,9 +256,12 @@ async fn golden_sse_retry_after_matrix_canonical_cells() {
             "429_numeric_retry_after_7s",
             ServerStep::Status429NumericRetryAfter(7),
         ),
-        ("429_no_retry_after_header", ServerStep::Status429NoRetryAfter),
         (
-            "503_with_retry_after_11s_NOT_PROPAGATED",
+            "429_no_retry_after_header",
+            ServerStep::Status429NoRetryAfter,
+        ),
+        (
+            "503_with_retry_after_11s_propagated",
             ServerStep::Status503WithRetryAfter(11),
         ),
         (
@@ -293,8 +296,8 @@ async fn golden_sse_retry_after_matrix_canonical_cells() {
 #   - 200 OK → <connected>
 #   - 429 + numeric Retry-After → HttpError(retry_after=Some)
 #   - 429 without Retry-After → HttpError(retry_after=None)
-#   - 503 with Retry-After header → HttpError(retry_after=None)
-#     (fix preserves Retry-After ONLY for 429)
+#   - 503 with Retry-After header → HttpError(retry_after=Some)
+#     (generic upstream hints are preserved for reconnect backoff)
 #   - 503 + budget-exhausted → HostBackpressure(budget_exhausted=true)
 #   - 503 + transient-backpressure + retry-after → HostBackpressure(retry_after=Some, budget_exhausted=false)
 #   - 404 → HttpError(retry_after=None)

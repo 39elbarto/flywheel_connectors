@@ -25,7 +25,7 @@ fn record_step(steps: &TraceSteps, step: &'static str) {
 }
 
 fn assert_step_order(steps: &TraceSteps, expected: &[&'static str]) {
-    let observed = steps.lock().expect("trace steps lock");
+    let observed = steps.lock().expect("trace steps lock").clone();
     let mut cursor = 0;
     for expected_step in expected {
         let relative = observed[cursor..]

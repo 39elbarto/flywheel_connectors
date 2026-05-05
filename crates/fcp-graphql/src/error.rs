@@ -214,6 +214,13 @@ pub enum GraphqlLimitExceeded {
         /// Maximum allowed root field count.
         max_root_fields: usize,
     },
+
+    /// Schema introspection field was rejected by policy.
+    #[error("GraphQL introspection field `{field_name}` is disabled by policy")]
+    IntrospectionDisabled {
+        /// Rejected introspection field name.
+        field_name: String,
+    },
 }
 
 /// Error type for GraphQL client operations.

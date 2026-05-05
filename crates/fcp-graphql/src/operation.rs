@@ -19,7 +19,17 @@ pub const DEFAULT_GRAPHQL_QUERY_LIMITS: GraphqlQueryLimits = GraphqlQueryLimits 
     max_depth: DEFAULT_MAX_QUERY_DEPTH,
     max_aliases: DEFAULT_MAX_QUERY_ALIASES,
     max_root_fields: DEFAULT_MAX_QUERY_ROOT_FIELDS,
+    introspection: GraphqlIntrospectionPolicy::Allow,
 };
+
+/// Schema introspection handling for GraphQL query validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GraphqlIntrospectionPolicy {
+    /// Permit `__schema` and `__type` fields.
+    Allow,
+    /// Reject `__schema` and `__type` fields before dispatch.
+    Deny,
+}
 
 /// Resource guardrails applied before GraphQL requests reach transport or resolution.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -32,6 +42,8 @@ pub struct GraphqlQueryLimits {
     pub max_aliases: usize,
     /// Maximum number of root fields in a request.
     pub max_root_fields: usize,
+    /// Schema introspection policy enforced before request dispatch.
+    pub introspection: GraphqlIntrospectionPolicy,
 }
 
 impl GraphqlQueryLimits {
@@ -48,7 +60,18 @@ impl GraphqlQueryLimits {
             max_depth,
             max_aliases,
             max_root_fields,
+            introspection: GraphqlIntrospectionPolicy::Allow,
         }
+    }
+
+    /// Override schema introspection handling.
+    #[must_use]
+    pub const fn with_introspection_policy(
+        mut self,
+        introspection: GraphqlIntrospectionPolicy,
+    ) -> Self {
+        self.introspection = introspection;
+        self
     }
 
     /// Validate a query against this limit set.
@@ -155,6 +178,7 @@ fn validate_query_limits(
                     continue;
                 }
                 if alias_target_pending {
+                    validate_introspection_field(name, limits.introspection)?;
                     alias_target_pending = false;
                     root_field_count = validate_root_field_count(
                         selection_depth,
@@ -174,6 +198,7 @@ fn validate_query_limits(
                     alias_target_pending = true;
                     continue;
                 }
+                validate_introspection_field(name, limits.introspection)?;
                 root_field_count = validate_root_field_count(
                     selection_depth,
                     root_field_count,
@@ -187,7 +212,19 @@ fn validate_query_limits(
     Ok(())
 }
 
-fn validate_root_field_count(
+fn validate_introspection_field(
+    name: &str,
+    introspection: GraphqlIntrospectionPolicy,
+) -> Result<(), GraphqlLimitExceeded> {
+    if introspection == GraphqlIntrospectionPolicy::Deny && matches!(name, "__schema" | "__type") {
+        return Err(GraphqlLimitExceeded::IntrospectionDisabled {
+            field_name: name.to_string(),
+        });
+    }
+    Ok(())
+}
+
+const fn validate_root_field_count(
     selection_depth: usize,
     root_field_count: usize,
     max_root_fields: usize,
@@ -508,6 +545,54 @@ mod tests {
         GraphqlQueryLimits::default()
             .validate("query Viewer { viewer { id } }")
             .unwrap();
+    }
+
+    #[test]
+    fn query_limits_allow_introspection_by_default() {
+        assert!(
+            GraphqlQueryLimits::default()
+                .validate("query Introspection { __schema { types { name } } }")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn query_limits_reject_disabled_direct_introspection() {
+        let result = GraphqlQueryLimits::default()
+            .with_introspection_policy(GraphqlIntrospectionPolicy::Deny)
+            .validate("query Introspection { __schema { types { name } } }");
+        assert_eq!(
+            result,
+            Err(GraphqlLimitExceeded::IntrospectionDisabled {
+                field_name: "__schema".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn query_limits_reject_disabled_aliased_introspection() {
+        let result = GraphqlQueryLimits::default()
+            .with_introspection_policy(GraphqlIntrospectionPolicy::Deny)
+            .validate("query Introspection { schemaAlias: __schema { types { name } } }");
+        assert_eq!(
+            result,
+            Err(GraphqlLimitExceeded::IntrospectionDisabled {
+                field_name: "__schema".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn query_limits_reject_disabled_nested_type_introspection() {
+        let result = GraphqlQueryLimits::default()
+            .with_introspection_policy(GraphqlIntrospectionPolicy::Deny)
+            .validate("query Introspection { viewer { __type(name: \"User\") { name } } }");
+        assert_eq!(
+            result,
+            Err(GraphqlLimitExceeded::IntrospectionDisabled {
+                field_name: "__type".to_string(),
+            })
+        );
     }
 
     #[test]

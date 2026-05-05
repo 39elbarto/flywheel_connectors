@@ -23,10 +23,10 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 use fcp_graphql::{
     CursorPage, CursorPageInfo, GraphqlClientBuilder, GraphqlClientError, GraphqlErrorLocation,
-    GraphqlLimitExceeded, GraphqlOperation, GraphqlPathSegment, GraphqlQuery, GraphqlQueryLimits,
-    GraphqlRequest, GraphqlSubscriptionClient, GraphqlSubscriptionConfig, OffsetPage, PageLimit,
-    PaginationError, RetryDecision, RetryPolicy, RetryStrategy, SchemaValidationMode,
-    paginate_cursor, paginate_offset,
+    GraphqlIntrospectionPolicy, GraphqlLimitExceeded, GraphqlOperation, GraphqlPathSegment,
+    GraphqlQuery, GraphqlQueryLimits, GraphqlRequest, GraphqlSubscriptionClient,
+    GraphqlSubscriptionConfig, OffsetPage, PageLimit, PaginationError, RetryDecision, RetryPolicy,
+    RetryStrategy, SchemaValidationMode, paginate_cursor, paginate_offset,
 };
 use fcp_streaming::WsConfig;
 
@@ -303,6 +303,23 @@ fn root_field_bomb_query(root_field_count: usize) -> String {
     format!("query RootFieldBomb {{ {fields} }}")
 }
 
+fn introspection_policy_cases() -> [(&'static str, &'static str); 3] {
+    [
+        (
+            "query DirectIntrospection { __schema { types { name } } }",
+            "__schema",
+        ),
+        (
+            "query AliasedIntrospection { schemaAlias: __schema { types { name } } }",
+            "__schema",
+        ),
+        (
+            "query NestedIntrospection { viewer { __type(name: \"User\") { name } } }",
+            "__type",
+        ),
+    ]
+}
+
 type TestServerWebSocket = ServerWebSocket<TcpStream>;
 
 async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
@@ -575,6 +592,33 @@ async fn rejects_root_field_bomb_before_http_dispatch() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn rejects_disabled_introspection_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_introspection_policy(GraphqlIntrospectionPolicy::Deny)
+        .build()
+        .expect("client");
+
+    for (query, expected_field) in introspection_policy_cases() {
+        let request = GraphqlRequest::new(GraphqlQuery::new(query), serde_json::json!({}));
+        let result = client
+            .execute_request::<_, serde_json::Value>(request, None, None, true)
+            .await;
+
+        assert!(
+            result.as_ref().is_err_and(|err| matches!(
+                limit_exceeded_kind(err),
+                GraphqlLimitExceeded::IntrospectionDisabled { field_name }
+                    if field_name == expected_field
+            )),
+            "introspection should be rejected before dispatch"
+        );
+    }
+
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
 async fn rejects_batch_query_limit_violation_before_http_dispatch() {
     let server = MockServer::start().await;
     let client = GraphqlClientBuilder::new(server.uri())
@@ -602,6 +646,39 @@ async fn rejects_batch_query_limit_violation_before_http_dispatch() {
         limit_exceeded_kind(&err),
         GraphqlLimitExceeded::AliasLimitExceeded { .. }
     ));
+    assert_no_graphql_http_requests(&server).await;
+}
+
+#[fcp_async_core::runtime::test]
+async fn rejects_disabled_introspection_in_batch_before_http_dispatch() {
+    let server = MockServer::start().await;
+    let client = GraphqlClientBuilder::new(server.uri())
+        .with_introspection_policy(GraphqlIntrospectionPolicy::Deny)
+        .build()
+        .expect("client");
+
+    for (query, expected_field) in introspection_policy_cases() {
+        let items = vec![
+            fcp_graphql::GraphqlBatchItem::new(
+                GraphqlQuery::new(ViewerQuery::QUERY),
+                serde_json::json!({}),
+            ),
+            fcp_graphql::GraphqlBatchItem::new(GraphqlQuery::new(query), serde_json::json!({})),
+        ];
+        let result = client
+            .execute_batch_request::<_, serde_json::Value>(items, None, None, true)
+            .await;
+
+        assert!(
+            result.as_ref().is_err_and(|err| matches!(
+                limit_exceeded_kind(err),
+                GraphqlLimitExceeded::IntrospectionDisabled { field_name }
+                    if field_name == expected_field
+            )),
+            "batch introspection should be rejected before dispatch"
+        );
+    }
+
     assert_no_graphql_http_requests(&server).await;
 }
 

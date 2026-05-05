@@ -134,9 +134,7 @@ fn write_response(stream: &mut TcpStream, body: &[u8]) {
     )
     .into_bytes();
     response.extend_from_slice(body);
-    stream
-        .write_all(&response)
-        .expect("write HTTP response");
+    stream.write_all(&response).expect("write HTTP response");
     stream.flush().expect("flush HTTP response");
 }
 
@@ -162,9 +160,7 @@ fn spawn_batch_server(counters: Arc<ServerCounters>) -> (SocketAddr, thread::Joi
                 Ok(Value::Array(arr)) => arr.len(),
                 _ => 1,
             };
-            counters
-                .requests_received
-                .fetch_add(1, Ordering::Relaxed);
+            counters.requests_received.fetch_add(1, Ordering::Relaxed);
             counters
                 .total_batch_items_received
                 .fetch_add(batch_len, Ordering::Relaxed);
@@ -207,10 +203,7 @@ async fn worker_submit_batch(
 
     match (result, expect_success) {
         (Ok(_), true) => Ok(true),
-        (
-            Err(GraphqlClientError::Protocol { message }),
-            false,
-        ) => {
+        (Err(GraphqlClientError::Protocol { message }), false) => {
             // Protocol error: must mention the configured limit.
             let needle = format!("exceeding limit {cap_for_message}");
             if !message.contains(&needle) {
@@ -295,9 +288,7 @@ async fn batch_limit_holds_under_concurrent_real_server_load() {
     // ── Phase 2: under-cap batches for client A — ALL should succeed
     //              and reach the server.
     let phase2_baseline_requests = counters.requests_received.load(Ordering::SeqCst);
-    let phase2_baseline_items = counters
-        .total_batch_items_received
-        .load(Ordering::SeqCst);
+    let phase2_baseline_items = counters.total_batch_items_received.load(Ordering::SeqCst);
     let phase2_batch_size = CLIENT_A_CAP; // exactly at the cap
     let phase2_iterations = WORKERS_PER_PHASE * ITERATIONS_PER_WORKER;
     let mut phase2_handles = Vec::new();
@@ -324,7 +315,8 @@ async fn batch_limit_holds_under_concurrent_real_server_load() {
         phase2.successes, phase2_iterations,
         "phase 2: every at-cap batch must succeed",
     );
-    let phase2_requests = counters.requests_received.load(Ordering::SeqCst) - phase2_baseline_requests;
+    let phase2_requests =
+        counters.requests_received.load(Ordering::SeqCst) - phase2_baseline_requests;
     let phase2_items =
         counters.total_batch_items_received.load(Ordering::SeqCst) - phase2_baseline_items;
     assert_eq!(
@@ -377,7 +369,8 @@ async fn batch_limit_holds_under_concurrent_real_server_load() {
         phase3_b_accepted, WORKERS_PER_PHASE,
         "phase 3: every client_b worker must succeed — independent cap leaked",
     );
-    let phase3_requests = counters.requests_received.load(Ordering::SeqCst) - phase3_baseline_requests;
+    let phase3_requests =
+        counters.requests_received.load(Ordering::SeqCst) - phase3_baseline_requests;
     assert_eq!(
         phase3_requests, WORKERS_PER_PHASE,
         "phase 3: server should see exactly client_b's requests, not client_a's — \
@@ -411,7 +404,8 @@ async fn batch_limit_holds_under_concurrent_real_server_load() {
             .expect("phase4 worker join")
             .expect("phase4 worker outcome");
     }
-    let phase4_requests = counters.requests_received.load(Ordering::SeqCst) - phase4_baseline_requests;
+    let phase4_requests =
+        counters.requests_received.load(Ordering::SeqCst) - phase4_baseline_requests;
     assert_eq!(
         phase4_requests, 0,
         "phase 4: empty batches must not dispatch — fast path leaked under concurrency",

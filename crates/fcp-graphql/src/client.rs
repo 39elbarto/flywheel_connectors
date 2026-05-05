@@ -17,8 +17,8 @@ use tracing::debug;
 
 use crate::error::{GraphqlClientError, GraphqlError};
 use crate::operation::{
-    GraphqlBatchItem, GraphqlOperation, GraphqlQuery, GraphqlQueryLimits, GraphqlRequest,
-    GraphqlResponse,
+    GraphqlBatchItem, GraphqlIntrospectionPolicy, GraphqlOperation, GraphqlQuery,
+    GraphqlQueryLimits, GraphqlRequest, GraphqlResponse,
 };
 use crate::retry::{RetryDecision, RetryPolicy};
 use crate::schema::SchemaCache;
@@ -498,6 +498,19 @@ impl GraphqlClientBuilder {
     #[must_use]
     pub const fn with_query_limits(mut self, limits: GraphqlQueryLimits) -> Self {
         self.config.query_limits = limits;
+        self
+    }
+
+    /// Set schema introspection handling for query validation.
+    #[must_use]
+    pub const fn with_introspection_policy(
+        mut self,
+        introspection: GraphqlIntrospectionPolicy,
+    ) -> Self {
+        self.config.query_limits = self
+            .config
+            .query_limits
+            .with_introspection_policy(introspection);
         self
     }
 
@@ -1262,6 +1275,16 @@ mod tests {
         let builder =
             GraphqlClientBuilder::new("https://api.test.com/graphql").with_query_limits(limits);
         assert_eq!(builder.config.query_limits, limits);
+    }
+
+    #[test]
+    fn builder_with_introspection_policy() {
+        let builder = GraphqlClientBuilder::new("https://api.test.com/graphql")
+            .with_introspection_policy(GraphqlIntrospectionPolicy::Deny);
+        assert_eq!(
+            builder.config.query_limits.introspection,
+            GraphqlIntrospectionPolicy::Deny
+        );
     }
 
     #[test]

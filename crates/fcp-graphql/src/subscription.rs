@@ -648,7 +648,7 @@ fn decode_ws_message(message: WsMessage) -> Result<GraphqlWsMessage, GraphqlClie
 pub mod __fuzz {
     use super::{GraphqlClientError, WsMessage, decode_ws_message};
 
-    #[derive(Clone, Debug, PartialEq)]
+    #[derive(Clone, Debug, PartialEq, Eq)]
     pub struct DecodedGraphqlWsMessage {
         pub message_type: String,
         pub id: Option<String>,

@@ -34,8 +34,9 @@ pub use error::{
 };
 pub use operation::{
     DEFAULT_GRAPHQL_QUERY_LIMITS, DEFAULT_MAX_QUERY_ALIASES, DEFAULT_MAX_QUERY_BYTES,
-    DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_ROOT_FIELDS, GraphqlBatchItem, GraphqlOperation,
-    GraphqlQuery, GraphqlQueryLimits, GraphqlRequest, GraphqlResponse,
+    DEFAULT_MAX_QUERY_DEPTH, DEFAULT_MAX_QUERY_ROOT_FIELDS, GraphqlBatchItem,
+    GraphqlIntrospectionPolicy, GraphqlOperation, GraphqlQuery, GraphqlQueryLimits, GraphqlRequest,
+    GraphqlResponse,
 };
 pub use pagination::{
     CursorPage, CursorPageInfo, OffsetPage, PageLimit, PaginationError, paginate_cursor,

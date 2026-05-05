@@ -4,6 +4,7 @@
 > Current auditor: GoldenFinch (Codex)
 > Prior baseline: SunnyMoose MOR/C2.4 audit, 2026-04-10
 > Current snapshot date: 2026-05-03 (pre-docs commit `7f0bd5e7b`)
+> Capability-token follow-up: 2026-05-05 (`flywheel_connectors-01yaq`)
 > Quarter note: The date is still Q2, so this report was revised in-place
 > rather than split into a Q3 report.
 
@@ -18,9 +19,12 @@ targets, and open security findings.
 **Result at 2026-05-03:** one status overclaim, eleven status underclaims,
 one connector-inventory underclaim, and one stale evidence path.
 
-- **Overclaim fixed:** `Capability Tokens (CWT/COSE)` is no longer `PROVEN`
-  because open finding `flywheel_connectors-01yaq` shows that
-  `CapabilityToken<BoundVerified>` currently accepts instance-agnostic tokens.
+- **Overclaim fixed at the 2026-05-03 snapshot:** `Capability Tokens (CWT/COSE)`
+  was no longer `PROVEN` because open finding `flywheel_connectors-01yaq` showed
+  that `CapabilityToken<BoundVerified>` accepted instance-agnostic tokens.
+- **2026-05-05 follow-up:** `flywheel_connectors-01yaq` is repaired in code and
+  tests: `BoundVerified` now requires an explicit `INSTANCE_ID` claim, so the
+  README Capability Tokens row has been restored to `PROVEN`.
 - **Underclaims fixed:** rows with direct E2E/conformance/golden proof moved
   from `IMPLEMENTED` to `PROVEN`.
 - **Still intentionally limited:** `Zone Isolation` remains `LIMITED` because
@@ -39,7 +43,7 @@ live multi-node production deployment.
 | Host-First Control Plane | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-host/src/{supervisor,enforcement,health}.rs` | Current operator path has direct conformance and concurrent E2E proof. |
 | Truthful Runtime Resolution | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fwc/src/{truth,catalog}.rs`, `crates/fwc/tests/{cual_integration,readme_status_pinning}.rs` | Truth-source taxonomy and README drift pinning are tested. |
 | Zone Isolation | `LIMITED` | `LIMITED` | Accurate | `crates/fcp-core/src/{zone_keys,pcs,policy}.rs`, `crates/fcp-host/src/bin/fcp-host.rs`, host/e2e capability tests | Remains limited because empty `allowed_zones` is still permissive in the host-backed path. |
-| Capability Tokens (CWT/COSE) | `PROVEN` | `IMPLEMENTED` | Overclaim fixed | `crates/fcp-crypto/src/cose.rs`, `crates/fcp-core/src/capability.rs`, `crates/fcp-conformance/tests/capability_*.rs`, `crates/fcp-host/tests/capability_token_typestate_runtime.rs` | Open `flywheel_connectors-01yaq` means instance-binding proof is not complete. |
+| Capability Tokens (CWT/COSE) | `PROVEN` | `IMPLEMENTED` | Overclaim fixed at 2026-05-03; restored 2026-05-05 | `crates/fcp-crypto/src/cose.rs`, `crates/fcp-core/src/capability.rs`, `crates/fcp-core/tests/capability_verifier_predicate_matrix.rs`, `crates/fcp-conformance/tests/capability_*.rs`, `crates/fcp-host/tests/capability_token_typestate_runtime.rs` | Historical May 3 result was blocked by open `flywheel_connectors-01yaq`; the follow-up fix now rejects missing `INSTANCE_ID` for `BoundVerified`. |
 | Tamper-Evident Audit | `PROVEN` | `PROVEN` | Accurate | `crates/fcp-audit/`, `crates/fcp-core/src/audit.rs`, audit golden/vector tests | Hash-linked chain and checkpoints remain directly proven. |
 | Revocation | `IMPLEMENTED` | `PROVEN` | Underclaim fixed | `crates/fcp-e2e/tests/revocation_cascade_e2e.rs`, `crates/fcp-e2e/tests/capability_enforcement_concurrent_e2e.rs`, `crates/fcp-conformance/tests/host_invoke_loop_conformance.rs` | Revocation freshness and rejection are now in E2E/conformance paths. |
 | Egress Proxy | `IMPLEMENTED` | `PROVEN` | Underclaim + stale path fixed | `crates/fcp-sandbox/src/egress.rs`, `crates/fcp-e2e/tests/egress_proxy_e2e.rs` | README previously pointed at removed `fcp-host/src/egress.rs`. |
@@ -70,8 +74,11 @@ live multi-node production deployment.
 
 1. **Capability Tokens (CWT/COSE): `PROVEN` -> `IMPLEMENTED`**
    - Concrete issue: `flywheel_connectors-01yaq`.
-   - Why it matters: the docs and typestate ADRs describe `BoundVerified` as full instance-binding proof, but live code/tests still allow promotion of instance-agnostic tokens.
+   - Why it matters: the docs and typestate ADRs describe `BoundVerified` as full instance-binding proof, but the 2026-05-03 live code/tests allowed promotion of instance-agnostic tokens.
    - README action: downgraded the row and made the caveat explicit while preserving the COSE/CWT evidence.
+   - 2026-05-05 follow-up: repaired. `verify_bound` and
+     `promote_with_instance` now require a text `INSTANCE_ID` claim before
+     producing `BoundVerified`, and the README row is back to `PROVEN`.
 
 ## Underclaims Found
 
@@ -103,7 +110,8 @@ live multi-node production deployment.
   The README lagged behind new E2E/conformance evidence in 11 rows.
 - The single overclaim was important: status labels must incorporate known
   open security findings, not just count tests. `flywheel_connectors-01yaq`
-  prevents the capability-token row from staying `PROVEN`.
+  prevented the capability-token row from staying `PROVEN` at the 2026-05-03
+  snapshot; the 2026-05-05 follow-up repaired that blocker.
 - `PROVEN` should remain an evidence label, not a production-deployment label.
   The Mesh-Native row stays explicitly non-operational even though many mesh
   components are implemented and tested.
@@ -122,8 +130,9 @@ live multi-node production deployment.
 
 ## Next Quarter Focus
 
-- Resolve `flywheel_connectors-01yaq`; if instance-binding semantics are
-  repaired or split into distinct typestates, re-evaluate Capability Tokens.
+- Resolved 2026-05-05: `flywheel_connectors-01yaq` repaired instance-binding
+  semantics for `BoundVerified`; Capability Tokens were re-evaluated to
+  `PROVEN`.
 - Decide what proof would let Secretless Connectors graduate from
   `IMPLEMENTED` to `PROVEN`.
 - Keep Mesh-Native non-operational wording pinned until ordinary `fwc invoke`

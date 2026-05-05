@@ -4056,9 +4056,7 @@ mod tests {
             .expect("unbound verification may defer missing instance binding");
 
         let any_instance = InstanceId::new();
-        let err = unbound
-            .promote_with_instance(&any_instance)
-            .unwrap_err();
+        let err = unbound.promote_with_instance(&any_instance).unwrap_err();
         assert!(
             matches!(err, FcpError::MissingField { ref field } if field.contains("instance_id")),
             "expected MissingField(instance_id) when promoting token without instance claim, got {err:?}"

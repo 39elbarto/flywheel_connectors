@@ -63,8 +63,53 @@ impl BrowserControlOperation {
             "max_response_bytes": self.max_response_bytes,
             "timeout_ms": self.timeout_ms,
             "target_policy": self.target_policy.descriptor(),
+            "request_headers": self.request_headers_descriptor(),
             "implementation": self.implementation.descriptor(),
         })
+    }
+
+    fn request_headers_descriptor(self) -> serde_json::Value {
+        serde_json::json!([
+            { "name": CONTROL_OPERATION_HEADER, "value": self.id },
+            { "name": CONTROL_RESPONSE_BUDGET_HEADER, "value": self.max_response_bytes.to_string() },
+            { "name": CONTROL_TIMEOUT_BUDGET_HEADER, "value": self.timeout_ms.to_string() },
+            { "name": CONTROL_TARGET_SCOPE_HEADER, "value": self.target_policy.scope },
+            { "name": CONTROL_TARGET_SELECTION_HEADER, "value": self.target_policy.selection },
+            {
+                "name": CONTROL_STALE_TARGET_RECOVERY_HEADER,
+                "value": self.target_policy.stale_target_recovery.to_string()
+            },
+            {
+                "name": CONTROL_CURRENT_TAB_GUARD_HEADER,
+                "value": self.target_policy.current_tab_guard.to_string()
+            },
+            {
+                "name": CONTROL_EXPORT_GUARD_HEADER,
+                "value": self.target_policy.export_guard.to_string()
+            },
+        ])
+    }
+
+    fn request_headers_summary(self) -> String {
+        format!(
+            "{}={}, {}={}, {}={}, {}={}, {}={}, {}={}, {}={}, {}={}",
+            CONTROL_OPERATION_HEADER,
+            self.id,
+            CONTROL_RESPONSE_BUDGET_HEADER,
+            self.max_response_bytes,
+            CONTROL_TIMEOUT_BUDGET_HEADER,
+            self.timeout_ms,
+            CONTROL_TARGET_SCOPE_HEADER,
+            self.target_policy.scope,
+            CONTROL_TARGET_SELECTION_HEADER,
+            self.target_policy.selection,
+            CONTROL_STALE_TARGET_RECOVERY_HEADER,
+            self.target_policy.stale_target_recovery,
+            CONTROL_CURRENT_TAB_GUARD_HEADER,
+            self.target_policy.current_tab_guard,
+            CONTROL_EXPORT_GUARD_HEADER,
+            self.target_policy.export_guard
+        )
     }
 }
 
@@ -1177,18 +1222,24 @@ fn validate_browser_control_operation(
         && operation
             .get("target_policy")
             .is_some_and(|target_policy| target_policy == &required.target_policy.descriptor())
+        && operation
+            .get("request_headers")
+            .is_some_and(|request_headers| {
+                request_headers == &required.request_headers_descriptor()
+            })
         && browser_control_implementation_matches(operation, required)
     {
         Ok(())
     } else {
         Err(format!(
-            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {}, timeout_ms {}, target_policy {}, and implementation {}",
+            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {}, timeout_ms {}, target_policy {}, request_headers [{}], and implementation {}",
             required.id,
             required.method,
             required.path,
             required.max_response_bytes,
             required.timeout_ms,
             required.target_policy.summary(),
+            required.request_headers_summary(),
             required.implementation.summary()
         ))
     }
@@ -1280,6 +1331,7 @@ mod tests {
                             == serde_json::json!(required.max_response_bytes)
                         && operation["timeout_ms"] == serde_json::json!(required.timeout_ms)
                         && operation["target_policy"] == required.target_policy.descriptor()
+                        && operation["request_headers"] == required.request_headers_descriptor()
                 }),
                 "missing {} {} {}",
                 required.method,
@@ -1394,6 +1446,7 @@ mod tests {
             let max_response_bytes = operation["max_response_bytes"].as_u64().unwrap();
             let timeout_ms = operation["timeout_ms"].as_u64().unwrap();
             let target_policy = &operation["target_policy"];
+            let request_headers = operation["request_headers"].as_array().unwrap();
             assert!(max_response_bytes > 0, "{id} must expose a response cap");
             assert!(timeout_ms > 0, "{id} must expose a timeout budget");
             assert!(
@@ -1415,6 +1468,18 @@ mod tests {
             assert!(
                 target_policy["export_guard"].as_bool().is_some(),
                 "{id} must expose export guard policy"
+            );
+            assert!(
+                request_headers
+                    .iter()
+                    .any(|header| header["name"] == CONTROL_OPERATION_HEADER),
+                "{id} must advertise operation metadata header"
+            );
+            assert!(
+                request_headers
+                    .iter()
+                    .any(|header| header["name"] == CONTROL_TARGET_SCOPE_HEADER),
+                "{id} must advertise target-scope metadata header"
             );
 
             assert!(
@@ -1552,6 +1617,19 @@ mod tests {
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("target_policy"));
         assert!(err.contains("create_or_reuse_active_page"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_request_header_contract() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["request_headers"][0]["value"] =
+            serde_json::Value::String("browser.screenshot".into());
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("request_headers"));
+        assert!(err.contains(CONTROL_OPERATION_HEADER));
     }
 
     #[test]

@@ -34,6 +34,9 @@ const CONTROL_RESPONSE_BYTES_CAPTURE: usize = 52_428_800;
 const CONTROL_TIMEOUT_MS_SHORT: u64 = 10_000;
 const CONTROL_TIMEOUT_MS_STANDARD: u64 = 30_000;
 const CONTROL_TIMEOUT_MS_CAPTURE: u64 = 60_000;
+const CONTROL_OPERATION_HEADER: &str = "X-FCP-Browser-Operation";
+const CONTROL_RESPONSE_BUDGET_HEADER: &str = "X-FCP-Browser-Max-Response-Bytes";
+const CONTROL_TIMEOUT_BUDGET_HEADER: &str = "X-FCP-Browser-Timeout-Ms";
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -752,7 +755,19 @@ impl BrowserClient {
         let url = self.worker_endpoint(operation);
         let timeout = Duration::from_millis(operation.timeout_ms);
         self.execute(operation.max_response_bytes, || {
-            self.http.post(&url).timeout(timeout).json(body)
+            self.http
+                .post(&url)
+                .timeout(timeout)
+                .header(CONTROL_OPERATION_HEADER, operation.id)
+                .header(
+                    CONTROL_RESPONSE_BUDGET_HEADER,
+                    operation.max_response_bytes.to_string(),
+                )
+                .header(
+                    CONTROL_TIMEOUT_BUDGET_HEADER,
+                    operation.timeout_ms.to_string(),
+                )
+                .json(body)
         })
         .await
     }
@@ -1119,7 +1134,7 @@ mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path},
+        matchers::{header, method, path},
     };
 
     #[fcp_async_core::runtime::test]
@@ -1472,6 +1487,15 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/navigate"))
+            .and(header(CONTROL_OPERATION_HEADER, "browser.navigate"))
+            .and(header(
+                CONTROL_RESPONSE_BUDGET_HEADER,
+                CONTROL_RESPONSE_BYTES_CAPTURE.to_string(),
+            ))
+            .and(header(
+                CONTROL_TIMEOUT_BUDGET_HEADER,
+                CONTROL_TIMEOUT_MS_CAPTURE.to_string(),
+            ))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "url": "https://example.com",
                 "status": 200,

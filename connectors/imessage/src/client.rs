@@ -7,8 +7,10 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::{Client, Method};
+use reqwest::{Client, Method, Url, multipart};
 use serde_json::{Value, json};
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -36,11 +38,12 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&
 }
 
 use crate::types::{
-    BlueBubblesConfig, BlueBubblesSendTarget, BlueBubblesTargetResolution,
-    BlueBubblesTargetService, Chat, Message, PaginatedResponse, QueryParams,
-    SEND_METHOD_APPLE_SCRIPT, SEND_METHOD_PRIVATE_API, SendMessageOptions, SendMessageRequest,
-    SendMessageResponse, ServerInfo, WebhookRegistration, WebhookRegistrationRequest,
-    normalize_bluebubbles_handle, normalize_bluebubbles_tapback_reaction,
+    BlueBubblesConfig, BlueBubblesMediaSendConfig, BlueBubblesSendTarget,
+    BlueBubblesTargetResolution, BlueBubblesTargetService, Chat, Message, PaginatedResponse,
+    QueryParams, SEND_METHOD_APPLE_SCRIPT, SEND_METHOD_PRIVATE_API, SendMediaOptions,
+    SendMessageOptions, SendMessageRequest, SendMessageResponse, ServerInfo, WebhookRegistration,
+    WebhookRegistrationRequest, normalize_bluebubbles_handle,
+    normalize_bluebubbles_tapback_reaction,
 };
 
 const TARGET_RESOLUTION_PAGE_LIMIT: u64 = 500;
@@ -288,6 +291,241 @@ fn extract_created_chat_guid(value: &Value) -> Option<String> {
     })
 }
 
+fn expand_home_path(value: &str) -> PathBuf {
+    if value == "~" {
+        return std::env::var_os("HOME").map_or_else(|| PathBuf::from(value), PathBuf::from);
+    }
+    if let Some(rest) = value.strip_prefix("~/") {
+        if let Some(home) = std::env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+    PathBuf::from(value)
+}
+
+fn local_path_from_input(value: &str, field: &str) -> BlueBubblesResult<PathBuf> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(BlueBubblesError::Validation(format!(
+            "{field} must not be empty"
+        )));
+    }
+
+    if value.contains("://") {
+        let url = Url::parse(value).map_err(|error| {
+            BlueBubblesError::Validation(format!("{field} URL is invalid: {error}"))
+        })?;
+        if url.scheme() != "file" {
+            return Err(BlueBubblesError::Validation(format!(
+                "{field} must be a local filesystem path or file:// URL"
+            )));
+        }
+        return url.to_file_path().map_err(|()| {
+            BlueBubblesError::Validation(format!("{field} file:// URL is not a local path"))
+        });
+    }
+
+    let path = expand_home_path(value);
+    if !path.is_absolute() {
+        return Err(BlueBubblesError::Validation(format!(
+            "{field} must be absolute or file://"
+        )));
+    }
+    Ok(path)
+}
+
+fn sanitize_media_filename(raw: Option<&str>, source_path: &Path) -> BlueBubblesResult<String> {
+    let source_name = source_path.file_name().and_then(|name| name.to_str());
+    let raw = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(source_name)
+        .unwrap_or("attachment");
+    let raw = raw.rsplit(['/', '\\']).next().unwrap_or(raw).trim();
+    let filename: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_control() || matches!(ch, '"' | '\\' | '/' | '\r' | '\n') {
+                '_'
+            } else {
+                ch
+            }
+        })
+        .take(255)
+        .collect();
+    let filename = filename.trim();
+    if filename.is_empty() || matches!(filename, "." | "..") {
+        return Err(BlueBubblesError::Validation(
+            "media filename must not be empty".into(),
+        ));
+    }
+    Ok(filename.to_string())
+}
+
+fn sanitize_media_content_type(raw: &str) -> BlueBubblesResult<String> {
+    let content_type = raw.trim().to_ascii_lowercase();
+    if content_type.is_empty()
+        || content_type.contains(';')
+        || content_type.matches('/').count() != 1
+        || content_type
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_whitespace() || matches!(ch, '"' | '\\'))
+    {
+        return Err(BlueBubblesError::Validation(
+            "media content_type must be a plain MIME type".into(),
+        ));
+    }
+    Ok(content_type)
+}
+
+fn infer_media_content_type(path: &Path) -> String {
+    match path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("heic") => "image/heic",
+        Some("mp4") => "video/mp4",
+        Some("mov") => "video/quicktime",
+        Some("m4v") => "video/x-m4v",
+        Some("mp3") => "audio/mpeg",
+        Some("caf") => "audio/x-caf",
+        Some("m4a") => "audio/mp4",
+        Some("pdf") => "application/pdf",
+        Some("txt") => "text/plain",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
+fn media_content_type_allowed(config: &BlueBubblesMediaSendConfig, content_type: &str) -> bool {
+    let content_type = content_type.to_ascii_lowercase();
+    config
+        .allowed_mime_types
+        .iter()
+        .any(|allowed| allowed == &content_type)
+        || config
+            .allowed_mime_prefixes
+            .iter()
+            .any(|prefix| content_type.starts_with(prefix))
+}
+
+fn validate_voice_media(content_type: &str, path: &Path) -> BlueBubblesResult<()> {
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    if matches!(
+        (content_type, extension.as_deref()),
+        ("audio/mpeg" | "audio/mp3" | "audio/x-caf" | "audio/caf", _) | (_, Some("mp3" | "caf"))
+    ) {
+        return Ok(());
+    }
+    Err(BlueBubblesError::Validation(
+        "as_voice requires an mp3 or caf audio file".into(),
+    ))
+}
+
+#[derive(Debug, Clone)]
+struct PreparedMediaUpload {
+    bytes: Vec<u8>,
+    filename: String,
+    content_type: String,
+    byte_len: u64,
+}
+
+fn prepare_media_upload(
+    config: &BlueBubblesMediaSendConfig,
+    local_path: &str,
+    options: &SendMediaOptions,
+) -> BlueBubblesResult<PreparedMediaUpload> {
+    if config.local_roots.is_empty() {
+        return Err(BlueBubblesError::Config(
+            "media_send.local_roots must be configured before sending local media".into(),
+        ));
+    }
+
+    let requested_path = local_path_from_input(local_path, "local_path")?;
+    let canonical_path = fs::canonicalize(&requested_path).map_err(|error| {
+        BlueBubblesError::Validation(format!(
+            "local_path must resolve to a readable file: {error}"
+        ))
+    })?;
+
+    let mut inside_allowed_root = false;
+    for root in &config.local_roots {
+        let root_path = expand_home_path(root);
+        let canonical_root = fs::canonicalize(&root_path).map_err(|error| {
+            BlueBubblesError::Config(format!(
+                "media_send.local_roots contains an unreadable root: {error}"
+            ))
+        })?;
+        if canonical_path.starts_with(&canonical_root) && canonical_path != canonical_root {
+            inside_allowed_root = true;
+            break;
+        }
+    }
+    if !inside_allowed_root {
+        return Err(BlueBubblesError::Validation(
+            "local_path is outside configured media_send.local_roots".into(),
+        ));
+    }
+
+    let metadata = fs::metadata(&canonical_path).map_err(|error| {
+        BlueBubblesError::Validation(format!("local_path metadata is unavailable: {error}"))
+    })?;
+    if !metadata.is_file() {
+        return Err(BlueBubblesError::Validation(
+            "local_path must resolve to a regular file".into(),
+        ));
+    }
+    if metadata.len() > config.max_bytes {
+        return Err(BlueBubblesError::AttachmentTooLarge {
+            size_bytes: metadata.len(),
+            max_bytes: config.max_bytes,
+        });
+    }
+
+    let filename = sanitize_media_filename(options.filename.as_deref(), &canonical_path)?;
+    let content_type = options
+        .content_type
+        .as_deref()
+        .map(sanitize_media_content_type)
+        .transpose()?
+        .unwrap_or_else(|| infer_media_content_type(&canonical_path));
+    if options.as_voice {
+        validate_voice_media(&content_type, &canonical_path)?;
+    }
+    if !media_content_type_allowed(config, &content_type) {
+        return Err(BlueBubblesError::Validation(format!(
+            "media content_type {content_type} is not allowed by media_send"
+        )));
+    }
+
+    let bytes = fs::read(&canonical_path).map_err(|error| {
+        BlueBubblesError::Validation(format!("local_path must be readable: {error}"))
+    })?;
+    let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+    if byte_len > config.max_bytes {
+        return Err(BlueBubblesError::AttachmentTooLarge {
+            size_bytes: byte_len,
+            max_bytes: config.max_bytes,
+        });
+    }
+
+    Ok(PreparedMediaUpload {
+        bytes,
+        filename,
+        content_type,
+        byte_len,
+    })
+}
+
 /// Send-method decision used for `BlueBubbles` text sends.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct SendMethodDecision {
@@ -370,6 +608,97 @@ impl SendMethodDecision {
     fn unavailable_for_options(
         error: BlueBubblesError,
         options: &SendMessageOptions,
+    ) -> BlueBubblesResult<Self> {
+        if options.requires_private_api() {
+            if matches!(
+                &error,
+                BlueBubblesError::Unauthorized { .. } | BlueBubblesError::RateLimited { .. }
+            ) {
+                return Err(error);
+            }
+            return Err(BlueBubblesError::PrivateApiRequired {
+                feature: format!(
+                    "{} (server info unavailable: {error})",
+                    options.private_api_feature_label()
+                ),
+            });
+        }
+        Ok(Self::unavailable(&error))
+    }
+}
+
+/// Multipart media-send decision derived from `BlueBubbles` server capabilities.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MediaSendDecision {
+    /// Optional multipart `method` field sent to `BlueBubbles`.
+    pub request_method: Option<String>,
+    /// Stable reason code for logs/tests/operator diagnostics.
+    pub reason: &'static str,
+    /// Whether `/server/info` was available before sending.
+    pub server_info_available: bool,
+    /// Reported Private API state when known.
+    pub private_api: Option<bool>,
+    /// Reported macOS version when known.
+    pub os_version: Option<String>,
+    /// Optional warning for degraded-but-preserved fallback sends.
+    pub warning: Option<String>,
+}
+
+impl MediaSendDecision {
+    fn for_options(info: &ServerInfo, options: &SendMediaOptions) -> BlueBubblesResult<Self> {
+        if options.requires_private_api() {
+            if !info.private_api {
+                return Err(BlueBubblesError::PrivateApiRequired {
+                    feature: options.private_api_feature_label(),
+                });
+            }
+            return Ok(Self {
+                request_method: Some(SEND_METHOD_PRIVATE_API.to_string()),
+                reason: "media_reply_private_api_available",
+                server_info_available: true,
+                private_api: Some(true),
+                os_version: info.os_version.clone(),
+                warning: None,
+            });
+        }
+
+        if info.private_api {
+            return Ok(Self {
+                request_method: Some(SEND_METHOD_PRIVATE_API.to_string()),
+                reason: "media_send_private_api_available",
+                server_info_available: true,
+                private_api: Some(true),
+                os_version: info.os_version.clone(),
+                warning: None,
+            });
+        }
+
+        Ok(Self {
+            request_method: None,
+            reason: "media_send_default_api_private_api_disabled",
+            server_info_available: true,
+            private_api: Some(false),
+            os_version: info.os_version.clone(),
+            warning: None,
+        })
+    }
+
+    fn unavailable(error: &BlueBubblesError) -> Self {
+        Self {
+            request_method: None,
+            reason: "server_info_unavailable_media_default_api",
+            server_info_available: false,
+            private_api: None,
+            os_version: None,
+            warning: Some(format!(
+                "BlueBubbles server info unavailable; using default media upload API: {error}"
+            )),
+        }
+    }
+
+    fn unavailable_for_options(
+        error: BlueBubblesError,
+        options: &SendMediaOptions,
     ) -> BlueBubblesResult<Self> {
         if options.requires_private_api() {
             if matches!(
@@ -552,6 +881,23 @@ pub struct SendMessageOutcome {
     pub response: SendMessageResponse,
     /// Send method decision used for the request body.
     pub decision: SendMethodDecision,
+}
+
+/// Result of a `BlueBubbles` media upload plus the decision that shaped multipart fields.
+#[derive(Debug, Clone)]
+pub struct SendMediaOutcome {
+    /// Raw `BlueBubbles` response.
+    pub response: Value,
+    /// Multipart method decision used for the request.
+    pub decision: MediaSendDecision,
+    /// Message GUID extracted from the response when present.
+    pub message_id: Option<String>,
+    /// Sanitized uploaded filename.
+    pub filename: String,
+    /// Validated uploaded MIME type.
+    pub content_type: String,
+    /// Uploaded byte count.
+    pub byte_len: u64,
 }
 
 /// Result of creating a new `BlueBubbles` DM chat.
@@ -1241,6 +1587,158 @@ impl BlueBubblesClient {
                 match decode_json::<SendMessageResponse>(resp).await {
                     Ok(response) => {
                         AttemptOutcome::Success(SendMessageOutcome { response, decision })
+                    }
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Send a local media file to a chat through the `BlueBubbles` multipart endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if local-root validation, file bounds, Private API gating, or upload fails.
+    #[allow(clippy::too_many_lines)]
+    pub async fn send_media(
+        &self,
+        runtime: &ConnectorRuntime,
+        chat_guid: &str,
+        local_path: &str,
+        media_config: &BlueBubblesMediaSendConfig,
+        options: SendMediaOptions,
+    ) -> BlueBubblesResult<SendMediaOutcome> {
+        let prepared = prepare_media_upload(media_config, local_path, &options)?;
+        let url = format!("{}/api/v1/message/attachment", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+        let decision = match self.server_info(runtime).await {
+            Ok(info) => MediaSendDecision::for_options(&info, &options)?,
+            Err(error) => MediaSendDecision::unavailable_for_options(error, &options)?,
+        };
+        let temp_guid = uuid::Uuid::new_v4().to_string();
+        let upload_timeout = Duration::from_millis(media_config.upload_timeout_ms);
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let chat_guid = chat_guid.to_string();
+            let prepared = prepared.clone();
+            let decision = decision.clone();
+            let temp_guid = temp_guid.clone();
+            let caption = options.caption.clone();
+            let reply_to_message_guid = options.reply_to_message_guid.clone();
+            let reply_to_part_index = options.reply_to_part_index.unwrap_or(0);
+            let as_voice = options.as_voice;
+            async move {
+                debug!(
+                    attempt,
+                    upload_bytes = prepared.byte_len,
+                    content_type = %prepared.content_type,
+                    method = %decision.request_method.as_deref().unwrap_or("default"),
+                    decision = decision.reason,
+                    as_voice,
+                    "Sending iMessage media via BlueBubbles"
+                );
+
+                let part = match multipart::Part::bytes(prepared.bytes.clone())
+                    .file_name(prepared.filename.clone())
+                    .mime_str(&prepared.content_type)
+                {
+                    Ok(part) => part,
+                    Err(error) => {
+                        return AttemptOutcome::Terminal(BlueBubblesError::Validation(format!(
+                            "invalid media content_type: {error}"
+                        )));
+                    }
+                };
+
+                let mut form = multipart::Form::new()
+                    .text("chatGuid", chat_guid)
+                    .text("name", prepared.filename.clone())
+                    .text("tempGuid", temp_guid)
+                    .part("attachment", part);
+                if let Some(method) = decision.request_method.clone() {
+                    form = form.text("method", method);
+                }
+                if as_voice {
+                    form = form.text("isAudioMessage", "true");
+                }
+                if let Some(reply_guid) = reply_to_message_guid {
+                    form = form
+                        .text("selectedMessageGuid", reply_guid)
+                        .text("partIndex", reply_to_part_index.to_string());
+                }
+                if let Some(caption) = caption {
+                    form = form
+                        .text("message", caption.clone())
+                        .text("text", caption.clone())
+                        .text("caption", caption);
+                }
+
+                let resp = match client
+                    .post(&url)
+                    .query(&[("password", &server_passcode)])
+                    .multipart(form)
+                    .timeout(upload_timeout)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_optional_json_value(resp).await {
+                    Ok(response) => {
+                        let message_id = extract_bluebubbles_message_id(&response);
+                        AttemptOutcome::Success(SendMediaOutcome {
+                            response,
+                            decision,
+                            message_id,
+                            filename: prepared.filename,
+                            content_type: prepared.content_type,
+                            byte_len: prepared.byte_len,
+                        })
                     }
                     Err(error) => AttemptOutcome::Terminal(error),
                 }

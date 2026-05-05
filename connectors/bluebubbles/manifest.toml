@@ -38,6 +38,23 @@ max_redirects = 0
 [provides.operations.send_message.ai_hints]
 when_to_use = "When you need to send an iMessage through a local BlueBubbles bridge to a known chat GUID. The shared implementation refreshes server info and explicitly selects private-api for macOS 26+ hosts when Private API is enabled; otherwise it uses an observable apple-script fallback. Optional reply_to_message_guid, reply_to_part_index, and effect_id fields require known enabled Private API support and fail closed when unavailable."
 
+[provides.operations.send_media]
+summary = "Send a local media attachment through BlueBubbles"
+capability = "imessage.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.send_media.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.send_media.ai_hints]
+when_to_use = "When you need to upload an image, video, audio file, or allowed document from configured media_send.local_roots only. Reply threading is included only when BlueBubbles Private API is known enabled; local files outside configured roots or outside size/MIME bounds are rejected before upload."
+
 [provides.operations.resolve_send_target]
 summary = "Resolve a BlueBubbles send target"
 capability = "imessage.read"

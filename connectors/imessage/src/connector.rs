@@ -26,7 +26,7 @@ use crate::client::BlueBubblesClient;
 use crate::types::{
     BlueBubblesConfig, BlueBubblesContactsEnrichmentConfig, BlueBubblesReplyContext,
     BlueBubblesSendTarget, BlueBubblesTargetService, BlueBubblesWebhookCoalescingConfig, Message,
-    NormalizedBlueBubblesWebhookMessage, QueryParams, SendMessageOptions,
+    NormalizedBlueBubblesWebhookMessage, QueryParams, SendMediaOptions, SendMessageOptions,
     bluebubbles_webhook_source_dedupe_ids, default_webhook_events,
     normalize_bluebubbles_contact_phone_key, normalize_bluebubbles_message_effect,
     normalize_bluebubbles_tapback_reaction, normalize_bluebubbles_webhook_payload,
@@ -36,6 +36,7 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 // Operation IDs
 const OP_SEND_MESSAGE: &str = "imessage.send_message";
+const OP_SEND_MEDIA: &str = "imessage.send_media";
 const OP_RESOLVE_SEND_TARGET: &str = "imessage.resolve_send_target";
 const OP_CREATE_CHAT: &str = "imessage.create_chat";
 const OP_GET_ACTION_AVAILABILITY: &str = "imessage.get_action_availability";
@@ -1593,8 +1594,8 @@ impl BlueBubblesConnector {
 
     fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         let capability = match operation {
-            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_EDIT_MESSAGE | OP_UNSEND_MESSAGE
-            | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
+            OP_SEND_MESSAGE | OP_SEND_MEDIA | OP_CREATE_CHAT | OP_EDIT_MESSAGE
+            | OP_UNSEND_MESSAGE | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
             OP_GET_CHATS
             | OP_GET_CHAT
             | OP_GET_MESSAGES
@@ -1901,6 +1902,47 @@ fn parse_send_message_options(input: &Value) -> FcpResult<SendMessageOptions> {
     })
 }
 
+fn parse_send_media_options(input: &Value) -> FcpResult<SendMediaOptions> {
+    let reply_to_message_guid = optional_string_field(
+        input,
+        &[
+            "reply_to_message_guid",
+            "replyToMessageGuid",
+            "selectedMessageGuid",
+        ],
+        "reply_to_message_guid",
+    )?;
+    let reply_to_part_index = optional_u64_field(
+        input,
+        &["reply_to_part_index", "replyToPartIndex", "partIndex"],
+        "reply_to_part_index",
+    )?;
+    if reply_to_message_guid.is_none() && reply_to_part_index.is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "reply_to_part_index requires reply_to_message_guid".into(),
+        });
+    }
+
+    Ok(SendMediaOptions {
+        reply_to_message_guid,
+        reply_to_part_index,
+        caption: optional_string_field(input, &["caption"], "caption")?,
+        filename: optional_string_field(input, &["filename", "name"], "filename")?,
+        content_type: optional_string_field(
+            input,
+            &["content_type", "contentType", "mime_type", "mimeType"],
+            "content_type",
+        )?,
+        as_voice: optional_bool_field(
+            input,
+            &["as_voice", "asVoice", "is_audio_message", "isAudioMessage"],
+            "as_voice",
+        )?
+        .unwrap_or(false),
+    })
+}
+
 fn parse_target_service(input: &Value) -> FcpResult<BlueBubblesTargetService> {
     let Some(raw) = optional_string_field(input, &["service"], "service")? else {
         return Ok(BlueBubblesTargetService::Auto);
@@ -2023,6 +2065,107 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static(OP_GET_CHATS),
                     CapabilityId::from_static(OP_RESOLVE_SEND_TARGET),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_SEND_MEDIA),
+            summary: "Send a local media attachment through BlueBubbles".into(),
+            description: Some(
+                "Uploads a configured-local-root media file through BlueBubbles multipart attachment send. The connector canonicalizes the local path under media_send.local_roots, enforces file size and MIME bounds before reading, sanitizes multipart filename metadata, and only includes reply threading fields when Private API is known enabled.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["local_path"],
+                "oneOf": [
+                    { "required": ["chat_guid"] },
+                    { "required": ["chat_id"] },
+                    { "required": ["chat_identifier"] },
+                    { "required": ["handle"] }
+                ],
+                "properties": {
+                    "chat_guid": {
+                        "type": "string",
+                        "description": "Target chat GUID (e.g. iMessage;-;+15551234567)"
+                    },
+                    "chat_id": { "type": "integer", "minimum": 0 },
+                    "chat_identifier": { "type": "string" },
+                    "handle": { "type": "string", "description": "Phone number or email handle to resolve before upload" },
+                    "service": {
+                        "type": "string",
+                        "enum": ["imessage", "sms", "auto"],
+                        "description": "Handle service preference; sms preserves explicit SMS intent"
+                    },
+                    "scan_limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 5000,
+                        "description": "Maximum chat records to inspect when resolving non-chat_guid targets"
+                    },
+                    "local_path": {
+                        "type": "string",
+                        "description": "Absolute local filesystem path or file:// URL under a configured media_send.local_roots entry"
+                    },
+                    "filename": {
+                        "type": "string",
+                        "description": "Optional multipart filename override; sanitized before upload"
+                    },
+                    "content_type": {
+                        "type": "string",
+                        "description": "Optional MIME type override; validated against media_send bounds"
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional caption included in multipart text fields"
+                    },
+                    "reply_to_message_guid": {
+                        "type": "string",
+                        "description": "Optional message GUID for Private API reply threading"
+                    },
+                    "reply_to_part_index": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Optional message part index for reply threading; defaults to 0"
+                    },
+                    "as_voice": {
+                        "type": "boolean",
+                        "description": "Send as a BlueBubbles audio message; only mp3/caf media are accepted"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "action": { "type": "string" },
+                    "chat_guid": { "type": "string" },
+                    "message_id": { "type": ["string", "null"] },
+                    "filename": { "type": "string" },
+                    "content_type": { "type": "string" },
+                    "byte_len": { "type": "integer" },
+                    "media_send_decision": { "type": "object" },
+                    "target_resolution": { "type": "object" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When you need to send a local image, video, audio file, or allowed document through BlueBubbles without granting arbitrary filesystem access".into(),
+                common_mistakes: vec![
+                    "Configure media_send.local_roots before invoking; uploads outside those roots are rejected".into(),
+                    "Do not pass remote URLs; this operation intentionally accepts local files only".into(),
+                    "Reply threading fails closed unless BlueBubbles server info proves Private API is enabled".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![
+                    CapabilityId::from_static(OP_RESOLVE_SEND_TARGET),
+                    CapabilityId::from_static(OP_GET_ACTION_AVAILABILITY),
+                    CapabilityId::from_static(OP_DOWNLOAD_ATTACHMENT),
                 ],
             },
             rate_limit: None,
@@ -3205,6 +3348,48 @@ impl BlueBubblesConnector {
                 }
                 output
             }
+            OP_SEND_MEDIA => {
+                let target = parse_send_target(&req.input)?;
+                let scan_limit = req
+                    .input
+                    .get("scan_limit")
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or(5_000);
+                let target_resolution = client
+                    .resolve_send_target(runtime, &target, scan_limit)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let chat_guid = target_resolution.chat_guid.clone().ok_or_else(|| {
+                    FcpError::InvalidRequest {
+                        code: 1004,
+                        message: "send_media target did not resolve to a chat_guid".into(),
+                    }
+                })?;
+                let local_path = required_string(&req.input, "local_path")?;
+                let options = parse_send_media_options(&req.input)?;
+                let outcome = client
+                    .send_media(
+                        runtime,
+                        &chat_guid,
+                        local_path,
+                        &state.config.media_send,
+                        options,
+                    )
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "sent",
+                    "action": "send_media",
+                    "chat_guid": chat_guid,
+                    "message_id": outcome.message_id,
+                    "filename": outcome.filename,
+                    "content_type": outcome.content_type,
+                    "byte_len": outcome.byte_len,
+                    "media_send_decision": outcome.decision,
+                    "target_resolution": target_resolution,
+                    "response": outcome.response,
+                })
+            }
             OP_RESOLVE_SEND_TARGET => {
                 let target = parse_send_target(&req.input)?;
                 let scan_limit = req
@@ -3932,8 +4117,8 @@ mod tests {
         op: &str,
     ) -> CapabilityToken {
         let capability = match op {
-            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_EDIT_MESSAGE | OP_UNSEND_MESSAGE
-            | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
+            OP_SEND_MESSAGE | OP_SEND_MEDIA | OP_CREATE_CHAT | OP_EDIT_MESSAGE
+            | OP_UNSEND_MESSAGE | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
             OP_GET_SERVER_INFO
             | OP_GET_ACTION_AVAILABILITY
             | OP_REGISTER_WEBHOOK
@@ -3973,6 +4158,7 @@ mod tests {
     struct LoopbackRequest {
         method: String,
         target: String,
+        headers: HashMap<String, String>,
         body: Vec<u8>,
     }
 
@@ -4138,6 +4324,7 @@ mod tests {
         LoopbackRequest {
             method,
             target,
+            headers,
             body,
         }
     }
@@ -4170,17 +4357,45 @@ mod tests {
         })
     }
 
-    async fn invoke_against_loopback(
-        server_url: &str,
+    fn loopback_media_config(server_url: &str, root: &Path, max_bytes: u64) -> Value {
+        let mut config = loopback_config(server_url);
+        config["media_send"] = json!({
+            "local_roots": [root.to_string_lossy()],
+            "max_bytes": max_bytes,
+            "allowed_mime_types": ["application/pdf", "text/plain"],
+            "allowed_mime_prefixes": ["audio/", "image/", "video/"],
+            "upload_timeout_ms": 60_000
+        });
+        config
+    }
+
+    fn unique_media_root() -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("fcp-imessage-media-send-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&root).expect("create media test root");
+        root
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum MediaFixtureName {
+        Photo,
+        Large,
+    }
+
+    fn write_media_fixture(root: &Path, name: MediaFixtureName, bytes: &[u8]) -> PathBuf {
+        let path = match name {
+            MediaFixtureName::Photo => root.join("photo.png"),
+            MediaFixtureName::Large => root.join("large.png"),
+        };
+        fs::write(&path, bytes).expect("write media fixture");
+        path
+    }
+
+    async fn invoke_against_loopback_with_config(
+        config: Value,
         operation: &'static str,
         input: Value,
-        request_timeout_ms: Option<u64>,
     ) -> FcpResult<Value> {
-        let mut config = loopback_config(server_url);
-        if let Some(timeout) = request_timeout_ms {
-            config["request_timeout_ms"] = json!(timeout);
-        }
-
         let mut connector = BlueBubblesConnector::new();
         connector.configure(config).await?;
         let signing_key = Ed25519SigningKey::generate();
@@ -4196,6 +4411,20 @@ mod tests {
         response.result.ok_or_else(|| FcpError::Internal {
             message: "invoke response should include a result".into(),
         })
+    }
+
+    async fn invoke_against_loopback(
+        server_url: &str,
+        operation: &'static str,
+        input: Value,
+        request_timeout_ms: Option<u64>,
+    ) -> FcpResult<Value> {
+        let mut config = loopback_config(server_url);
+        if let Some(timeout) = request_timeout_ms {
+            config["request_timeout_ms"] = json!(timeout);
+        }
+
+        invoke_against_loopback_with_config(config, operation, input).await
     }
 
     async fn invoke_send_against_loopback(
@@ -4379,9 +4608,10 @@ mod tests {
     fn test_introspection_operations() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 19);
+        assert_eq!(intro.operations.len(), 20);
         for operation in [
             OP_SEND_MESSAGE,
+            OP_SEND_MEDIA,
             OP_RESOLVE_SEND_TARGET,
             OP_CREATE_CHAT,
             OP_GET_ACTION_AVAILABILITY,
@@ -4763,6 +4993,187 @@ mod tests {
                 .is_some_and(|target| !target.contains("test-password-123"))),
             "rich-send loopback transcript must redact the passcode"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_media_loopback_uploads_sanitized_multipart_with_private_api_reply() {
+        let root = unique_media_root();
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let server = BlueBubblesLoopback::spawn(
+            "media-private-api",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "os_version": "15.7",
+                            "server_version": "1.9.0",
+                            "private_api": true
+                        }
+                    }),
+                ),
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "guid": "media-msg-1"
+                        }
+                    }),
+                ),
+            ],
+        );
+
+        let result = invoke_against_loopback_with_config(
+            loopback_media_config(server.uri(), &root, 1024),
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": media_path.to_string_lossy().to_string(),
+                "filename": "../bad\"\nname.png",
+                "caption": "caption for media",
+                "reply_to_message_guid": "reply-guid-123",
+                "reply_to_part_index": 2
+            }),
+        )
+        .await
+        .expect("media send should succeed with configured root and Private API");
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["action"], "send_media");
+        assert_eq!(result["message_id"], "media-msg-1");
+        assert_eq!(result["filename"], "bad__name.png");
+        assert_eq!(result["content_type"], "image/png");
+        assert_eq!(result["byte_len"], 14);
+        assert_eq!(
+            result["media_send_decision"]["request_method"],
+            "private-api"
+        );
+        assert_eq!(
+            result["media_send_decision"]["reason"],
+            "media_reply_private_api_available"
+        );
+
+        let (requests, logs) = server.finish();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/attachment")
+        );
+        assert!(target_has_query_key(&requests[1].target, "password"));
+        assert!(
+            requests[1]
+                .headers
+                .get("content-type")
+                .is_some_and(|value| value.starts_with("multipart/form-data; boundary="))
+        );
+        let multipart_body = String::from_utf8_lossy(&requests[1].body);
+        assert!(multipart_body.contains("name=\"attachment\""));
+        assert!(multipart_body.contains("filename=\"bad__name.png\""));
+        assert!(multipart_body.contains("name=\"chatGuid\""));
+        assert!(multipart_body.contains("iMessage;-;+15551234567"));
+        assert!(multipart_body.contains("name=\"method\""));
+        assert!(multipart_body.contains("private-api"));
+        assert!(multipart_body.contains("name=\"selectedMessageGuid\""));
+        assert!(multipart_body.contains("reply-guid-123"));
+        assert!(multipart_body.contains("name=\"partIndex\""));
+        assert!(multipart_body.contains("\r\n2\r\n"));
+        assert!(multipart_body.contains("name=\"caption\""));
+        assert!(multipart_body.contains("caption for media"));
+        assert!(!multipart_body.contains("test-password-123"));
+        assert!(
+            logs.iter().all(|entry| entry["target"]
+                .as_str()
+                .is_some_and(|target| !target.contains("test-password-123"))),
+            "media loopback transcript must redact the passcode"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_media_loopback_denies_reply_when_private_api_disabled() {
+        let root = unique_media_root();
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let server = BlueBubblesLoopback::spawn(
+            "media-private-api-disabled",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "15.7",
+                        "server_version": "1.9.0",
+                        "private_api": false
+                    }
+                }),
+            )],
+        );
+
+        let error = invoke_against_loopback_with_config(
+            loopback_media_config(server.uri(), &root, 1024),
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": media_path.to_string_lossy().to_string(),
+                "reply_to_message_guid": "reply-guid-123"
+            }),
+        )
+        .await
+        .expect_err("reply media send should fail closed when Private API is disabled");
+        assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].target.starts_with("/api/v1/server/info?"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_media_rejects_unconfigured_outside_and_oversized_before_network() {
+        let root = unique_media_root();
+        let media_path = write_media_fixture(&root, MediaFixtureName::Photo, b"fake-png-media");
+        let no_roots = BlueBubblesLoopback::spawn("media-no-roots", Vec::new());
+        let no_roots_error = invoke_against_loopback_with_config(
+            loopback_config(no_roots.uri()),
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": media_path.to_string_lossy().to_string()
+            }),
+        )
+        .await
+        .expect_err("media send should require configured local roots");
+        assert!(matches!(no_roots_error, FcpError::InvalidRequest { .. }));
+        let (requests, _) = no_roots.finish();
+        assert!(requests.is_empty());
+
+        let allowed_root = unique_media_root();
+        let outside_root = unique_media_root();
+        let outside_path =
+            write_media_fixture(&outside_root, MediaFixtureName::Photo, b"fake-png-media");
+        let outside = BlueBubblesLoopback::spawn("media-outside-root", Vec::new());
+        let outside_error = invoke_against_loopback_with_config(
+            loopback_media_config(outside.uri(), &allowed_root, 1024),
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": outside_path.to_string_lossy().to_string()
+            }),
+        )
+        .await
+        .expect_err("media send should reject files outside configured roots");
+        assert!(matches!(outside_error, FcpError::InvalidRequest { .. }));
+        let (requests, _) = outside.finish();
+        assert!(requests.is_empty());
+
+        let small = BlueBubblesLoopback::spawn("media-too-large", Vec::new());
+        let too_large_error = invoke_against_loopback_with_config(
+            loopback_media_config(small.uri(), &root, 4),
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": write_media_fixture(&root, MediaFixtureName::Large, b"fake-png-media").to_string_lossy().to_string()
+            }),
+        )
+        .await
+        .expect_err("media send should reject oversized files before upload");
+        assert!(matches!(too_large_error, FcpError::InvalidRequest { .. }));
+        let (requests, _) = small.finish();
+        assert!(requests.is_empty());
     }
 
     #[fcp_async_core::runtime::test]
@@ -5321,7 +5732,7 @@ mod tests {
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 19);
+        assert_eq!(ops.len(), 20);
     }
 
     #[test]
@@ -5365,6 +5776,28 @@ mod tests {
         assert!(send.input_schema["properties"]["reply_to_message_guid"].is_object());
         assert!(send.input_schema["properties"]["reply_to_part_index"].is_object());
         assert!(send.input_schema["properties"]["effect_id"].is_object());
+    }
+
+    #[test]
+    fn test_send_media_is_bounded_risky_send_operation() {
+        let ops = operations_info();
+        let send_media = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_MEDIA)
+            .unwrap();
+        assert_eq!(send_media.capability, CapabilityId::from_static(CAP_SEND));
+        assert_eq!(send_media.safety_tier, SafetyTier::Risky);
+        assert_eq!(send_media.idempotency, IdempotencyClass::None);
+        assert!(send_media.input_schema["properties"]["local_path"].is_object());
+        assert!(send_media.input_schema["properties"]["content_type"].is_object());
+        assert!(send_media.input_schema["properties"]["reply_to_message_guid"].is_object());
+        assert!(
+            send_media
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| hint.contains("media_send.local_roots"))
+        );
     }
 
     #[test]

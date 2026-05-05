@@ -3,6 +3,7 @@
 //! Covers the `BlueBubbles` REST API types for `iMessage` bridging.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
 
 use fcp_prelude::FcpError;
 use reqwest::Url;
@@ -31,6 +32,10 @@ pub struct BlueBubblesConfig {
     /// Directory for storing downloaded attachments.
     #[serde(default)]
     pub attachment_dir: Option<String>,
+
+    /// Local-file media upload policy for outbound attachment sends.
+    #[serde(default, alias = "mediaSend")]
+    pub media_send: BlueBubblesMediaSendConfig,
 
     /// HTTP retry configuration.
     #[serde(default)]
@@ -75,6 +80,101 @@ pub struct BlueBubblesConfig {
         deserialize_with = "deserialize_contacts_enrichment_config"
     )]
     pub contacts_enrichment: BlueBubblesContactsEnrichmentConfig,
+}
+
+/// Local-root and media-type bounds for outbound `BlueBubbles` media sends.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesMediaSendConfig {
+    /// Absolute local roots from which outbound media may be read.
+    #[serde(default)]
+    pub local_roots: Vec<String>,
+
+    /// Maximum file bytes read and uploaded for one media send.
+    #[serde(default = "default_media_send_max_bytes", alias = "max_file_bytes")]
+    pub max_bytes: u64,
+
+    /// Exact MIME types allowed for upload.
+    #[serde(default = "default_media_send_allowed_mime_types")]
+    pub allowed_mime_types: Vec<String>,
+
+    /// MIME type prefixes allowed for upload, such as `image/`.
+    #[serde(default = "default_media_send_allowed_mime_prefixes")]
+    pub allowed_mime_prefixes: Vec<String>,
+
+    /// Per-upload timeout in milliseconds.
+    #[serde(default = "default_media_send_upload_timeout_ms")]
+    pub upload_timeout_ms: u64,
+}
+
+impl Default for BlueBubblesMediaSendConfig {
+    fn default() -> Self {
+        Self {
+            local_roots: Vec::new(),
+            max_bytes: default_media_send_max_bytes(),
+            allowed_mime_types: default_media_send_allowed_mime_types(),
+            allowed_mime_prefixes: default_media_send_allowed_mime_prefixes(),
+            upload_timeout_ms: default_media_send_upload_timeout_ms(),
+        }
+    }
+}
+
+impl BlueBubblesMediaSendConfig {
+    fn validate(mut self) -> Result<Self, FcpError> {
+        self.local_roots = normalize_policy_list(self.local_roots);
+        self.allowed_mime_types = normalize_mime_types(self.allowed_mime_types)?;
+        self.allowed_mime_prefixes = normalize_mime_prefixes(self.allowed_mime_prefixes)?;
+
+        if self.max_bytes == 0 {
+            return Err(invalid_config(
+                "media_send.max_bytes must be greater than zero",
+            ));
+        }
+        if self.upload_timeout_ms == 0 {
+            return Err(invalid_config(
+                "media_send.upload_timeout_ms must be greater than zero",
+            ));
+        }
+        if self.allowed_mime_types.is_empty() && self.allowed_mime_prefixes.is_empty() {
+            return Err(invalid_config(
+                "media_send must allow at least one MIME type or prefix",
+            ));
+        }
+        if let Some(root) = self
+            .local_roots
+            .iter()
+            .find(|root| !media_root_looks_absolute(root))
+        {
+            return Err(invalid_config(format!(
+                "media_send.local_roots entries must be absolute local paths: {root}"
+            )));
+        }
+
+        Ok(self)
+    }
+
+    /// Return a PII-safe summary suitable for diagnostics.
+    #[must_use]
+    pub fn summary(&self) -> BlueBubblesMediaSendSummary {
+        BlueBubblesMediaSendSummary {
+            enabled: !self.local_roots.is_empty(),
+            local_root_count: self.local_roots.len(),
+            max_bytes: self.max_bytes,
+            allowed_mime_type_count: self.allowed_mime_types.len(),
+            allowed_mime_prefix_count: self.allowed_mime_prefixes.len(),
+            upload_timeout_ms: self.upload_timeout_ms,
+        }
+    }
+}
+
+/// PII-safe outbound media-send summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesMediaSendSummary {
+    pub enabled: bool,
+    pub local_root_count: usize,
+    pub max_bytes: u64,
+    pub allowed_mime_type_count: usize,
+    pub allowed_mime_prefix_count: usize,
+    pub upload_timeout_ms: u64,
 }
 
 /// Policy and persistence config for accepted inbound `BlueBubbles` webhook events.
@@ -746,6 +846,7 @@ impl BlueBubblesConfig {
         self.webhook_coalescing = self.webhook_coalescing.validate()?;
         self.reply_context_api_fallback = self.reply_context_api_fallback.validate()?;
         self.contacts_enrichment = self.contacts_enrichment.validate()?;
+        self.media_send = self.media_send.validate()?;
 
         if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
@@ -831,6 +932,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("server_passcode", &"[REDACTED]")
             .field("poll_interval_ms", &self.poll_interval_ms)
             .field("attachment_dir", &self.attachment_dir)
+            .field("media_send", &self.media_send.summary())
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("webhook_host", &self.webhook_host)
@@ -858,6 +960,26 @@ const fn default_poll_interval_ms() -> u64 {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+const fn default_media_send_max_bytes() -> u64 {
+    25 * 1024 * 1024
+}
+
+const fn default_media_send_upload_timeout_ms() -> u64 {
+    60_000
+}
+
+fn default_media_send_allowed_mime_types() -> Vec<String> {
+    vec!["application/pdf".to_string(), "text/plain".to_string()]
+}
+
+fn default_media_send_allowed_mime_prefixes() -> Vec<String> {
+    vec![
+        "audio/".to_string(),
+        "image/".to_string(),
+        "video/".to_string(),
+    ]
 }
 
 fn default_webhook_host() -> String {
@@ -948,6 +1070,58 @@ fn normalize_policy_list(values: Vec<String>) -> Vec<String> {
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect()
+}
+
+fn normalize_mime_types(values: Vec<String>) -> Result<Vec<String>, FcpError> {
+    values
+        .into_iter()
+        .filter_map(|value| nonempty_string(&value))
+        .map(|value| {
+            let value = value.to_ascii_lowercase();
+            if value.contains(';')
+                || value.chars().any(char::is_whitespace)
+                || value.matches('/').count() != 1
+            {
+                return Err(invalid_config(format!(
+                    "invalid media_send.allowed_mime_types entry: {value}"
+                )));
+            }
+            Ok(value)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|values| values.into_iter().collect())
+}
+
+fn normalize_mime_prefixes(values: Vec<String>) -> Result<Vec<String>, FcpError> {
+    values
+        .into_iter()
+        .filter_map(|value| nonempty_string(&value))
+        .map(|value| {
+            let mut value = value.to_ascii_lowercase();
+            if let Some(prefix) = value.strip_suffix('*') {
+                value = prefix.to_string();
+            }
+            if !value.ends_with('/')
+                || value.contains(';')
+                || value.chars().any(char::is_whitespace)
+            {
+                return Err(invalid_config(format!(
+                    "invalid media_send.allowed_mime_prefixes entry: {value}"
+                )));
+            }
+            Ok(value)
+        })
+        .collect::<Result<BTreeSet<_>, _>>()
+        .map(|values| values.into_iter().collect())
+}
+
+fn media_root_looks_absolute(root: &str) -> bool {
+    let bytes = root.as_bytes();
+    root == "~"
+        || root.starts_with("~/")
+        || Path::new(root).is_absolute()
+        || matches!(bytes, [drive, b':', b'/' | b'\\', ..] if drive.is_ascii_alphabetic())
+        || root.starts_with("\\\\")
 }
 
 fn invalid_config(message: impl Into<String>) -> FcpError {
@@ -1367,6 +1541,52 @@ impl SendMessageOptions {
             (true, false) => "reply threading".to_string(),
             (false, true) => "message effects".to_string(),
             (false, false) => "plain text send".to_string(),
+        }
+    }
+}
+
+/// Rich media options accepted by `imessage.send_media`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SendMediaOptions {
+    /// Message GUID to thread the uploaded attachment under.
+    #[serde(default)]
+    pub reply_to_message_guid: Option<String>,
+
+    /// Message part index to thread under. Defaults to `0` when a reply GUID is present.
+    #[serde(default)]
+    pub reply_to_part_index: Option<u64>,
+
+    /// Optional caption to include in the multipart upload.
+    #[serde(default)]
+    pub caption: Option<String>,
+
+    /// Optional operator-provided filename. The client sanitizes this for multipart headers.
+    #[serde(default)]
+    pub filename: Option<String>,
+
+    /// Optional operator-provided MIME type. The client validates this against config bounds.
+    #[serde(default)]
+    pub content_type: Option<String>,
+
+    /// Whether to send the attachment as a `BlueBubbles` audio message.
+    #[serde(default)]
+    pub as_voice: bool,
+}
+
+impl SendMediaOptions {
+    /// Whether this request needs `BlueBubbles` Private API support.
+    #[must_use]
+    pub const fn requires_private_api(&self) -> bool {
+        self.reply_to_message_guid.is_some()
+    }
+
+    /// Stable operator-facing feature label for deterministic Private API errors.
+    #[must_use]
+    pub fn private_api_feature_label(&self) -> String {
+        if self.reply_to_message_guid.is_some() {
+            "media reply threading".to_string()
+        } else {
+            "media send".to_string()
         }
     }
 }
@@ -2390,6 +2610,16 @@ mod tests {
         assert_eq!(config.contacts_enrichment.negative_cache_ttl_seconds, 300);
         assert_eq!(config.contacts_enrichment.max_cache_entries, 2048);
         assert!(config.attachment_dir.is_none());
+        assert!(config.media_send.local_roots.is_empty());
+        assert_eq!(config.media_send.max_bytes, 25 * 1024 * 1024);
+        assert_eq!(config.media_send.upload_timeout_ms, 60_000);
+        assert!(
+            config
+                .media_send
+                .allowed_mime_prefixes
+                .iter()
+                .any(|prefix| prefix == "image/")
+        );
     }
 
     #[test]
@@ -2470,6 +2700,13 @@ mod tests {
                     { "chat_guid": " iMessage;+;family ", "enabled": true },
                     { "account_id": " ", "chat_guid": " ", "enabled": true }
                 ]
+            },
+            "media_send": {
+                "local_roots": [" /tmp/fcp-imessage-media ", "", "/tmp/fcp-imessage-media"],
+                "max_bytes": 1234,
+                "allowed_mime_types": [" IMAGE/PNG ", "", "image/png"],
+                "allowed_mime_prefixes": [" video/* ", " audio/ "],
+                "upload_timeout_ms": 120_000
             }
         }))
         .unwrap();
@@ -2538,6 +2775,20 @@ mod tests {
                 .contacts_enrichment
                 .enabled_for("acct-a", &["iMessage;+;family".to_string()])
         );
+        assert_eq!(
+            config.media_send.local_roots,
+            vec!["/tmp/fcp-imessage-media"]
+        );
+        assert_eq!(config.media_send.max_bytes, 1234);
+        assert_eq!(config.media_send.allowed_mime_types, vec!["image/png"]);
+        assert_eq!(
+            config.media_send.allowed_mime_prefixes,
+            vec!["audio/", "video/"]
+        );
+        assert_eq!(config.media_send.upload_timeout_ms, 120_000);
+        let media_summary = config.media_send.summary();
+        assert!(media_summary.enabled);
+        assert_eq!(media_summary.local_root_count, 1);
     }
 
     #[test]
@@ -2670,6 +2921,29 @@ mod tests {
             serde_json::json!({
                 "password": "secret",
                 "contacts_enrichment": { "max_cache_entries": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "media_send": { "local_roots": ["relative/path"] }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "media_send": { "max_bytes": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "media_send": { "upload_timeout_ms": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "media_send": {
+                    "allowed_mime_types": [],
+                    "allowed_mime_prefixes": []
+                }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "media_send": { "allowed_mime_types": ["image/png; charset=utf-8"] }
             }),
         ];
 

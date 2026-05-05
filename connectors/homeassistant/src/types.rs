@@ -1,6 +1,174 @@
 //! `Home Assistant` API types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+const DEFAULT_SUBSCRIBE_TIMEOUT_MS: u64 = 30_000;
+const MAX_SUBSCRIBE_TIMEOUT_MS: u64 = 600_000;
+const DEFAULT_MAX_SUBSCRIBE_EVENTS: usize = 1;
+const MAX_SUBSCRIBE_EVENTS: usize = 100;
+const DEFAULT_RECONNECT_ATTEMPTS: u32 = 1;
+const MAX_RECONNECT_ATTEMPTS: u32 = 5;
+
+const fn default_timeout_ms() -> u64 {
+    DEFAULT_SUBSCRIBE_TIMEOUT_MS
+}
+
+const fn default_max_events() -> usize {
+    DEFAULT_MAX_SUBSCRIBE_EVENTS
+}
+
+const fn default_reconnect_attempts() -> u32 {
+    DEFAULT_RECONNECT_ATTEMPTS
+}
+
+fn normalize_string_list(values: &mut Vec<String>, field: &str) -> Result<(), String> {
+    for value in values.iter_mut() {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return Err(format!("{field} cannot contain empty strings"));
+        }
+        if trimmed != value {
+            *value = trimmed.to_string();
+        }
+    }
+    values.sort();
+    values.dedup();
+    Ok(())
+}
+
+/// Request body for `homeassistant.subscribe_events`.
+///
+/// The operation is intentionally filter-first. A caller must opt into all
+/// events with `watch_all` or specify entities/domains to keep busy Home
+/// Assistant installs from flooding the host by accident.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HomeAssistantEventSubscriptionRequest {
+    /// Event type passed to the Home Assistant WebSocket `subscribe_events`
+    /// command. The default mirrors Hermes and subscribes to state changes.
+    /// Set this to null to ask Home Assistant for all event types.
+    pub event_type: Option<String>,
+    /// Entity domains to forward, for example `light` or `sensor`.
+    pub watch_domains: Vec<String>,
+    /// Fully qualified entity IDs to forward.
+    pub watch_entities: Vec<String>,
+    /// Fully qualified entity IDs to suppress before other filters run.
+    pub ignore_entities: Vec<String>,
+    /// Forward every event that is not ignored.
+    pub watch_all: bool,
+    /// Minimum delay between emitted events for the same entity.
+    pub cooldown_ms: u64,
+    /// Maximum events to collect before this invoke returns.
+    pub max_events: usize,
+    /// Per-connection receive timeout.
+    pub timeout_ms: u64,
+    /// Reconnects attempted if the WebSocket closes before enough events arrive.
+    pub max_reconnect_attempts: u32,
+}
+
+impl Default for HomeAssistantEventSubscriptionRequest {
+    fn default() -> Self {
+        Self {
+            event_type: Some("state_changed".to_string()),
+            watch_domains: Vec::new(),
+            watch_entities: Vec::new(),
+            ignore_entities: Vec::new(),
+            watch_all: false,
+            cooldown_ms: 0,
+            max_events: default_max_events(),
+            timeout_ms: default_timeout_ms(),
+            max_reconnect_attempts: default_reconnect_attempts(),
+        }
+    }
+}
+
+impl HomeAssistantEventSubscriptionRequest {
+    /// Validate and normalize caller input.
+    pub fn validate(&mut self) -> Result<(), String> {
+        if let Some(event_type) = &mut self.event_type {
+            let trimmed = event_type.trim();
+            if trimmed.is_empty() {
+                return Err("event_type cannot be empty; use null for all events".into());
+            }
+            if trimmed != event_type {
+                *event_type = trimmed.to_string();
+            }
+        }
+
+        normalize_string_list(&mut self.watch_domains, "watch_domains")?;
+        normalize_string_list(&mut self.watch_entities, "watch_entities")?;
+        normalize_string_list(&mut self.ignore_entities, "ignore_entities")?;
+
+        if !self.watch_all && self.watch_domains.is_empty() && self.watch_entities.is_empty() {
+            return Err(
+                "subscribe_events requires watch_all=true or at least one watch_domains/watch_entities filter"
+                    .into(),
+            );
+        }
+        if self.max_events == 0 || self.max_events > MAX_SUBSCRIBE_EVENTS {
+            return Err(format!(
+                "max_events must be between 1 and {MAX_SUBSCRIBE_EVENTS}"
+            ));
+        }
+        if self.timeout_ms == 0 || self.timeout_ms > MAX_SUBSCRIBE_TIMEOUT_MS {
+            return Err(format!(
+                "timeout_ms must be between 1 and {MAX_SUBSCRIBE_TIMEOUT_MS}"
+            ));
+        }
+        if self.max_reconnect_attempts > MAX_RECONNECT_ATTEMPTS {
+            return Err(format!(
+                "max_reconnect_attempts must be at most {MAX_RECONNECT_ATTEMPTS}"
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Parsed, redacted event emitted by a Home Assistant WebSocket subscription.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeAssistantEvent {
+    pub event_type: String,
+    pub entity_id: Option<String>,
+    pub domain: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_state: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_state: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_fired: Option<String>,
+    #[serde(default)]
+    pub data: Value,
+    pub raw: Value,
+}
+
+/// Drop counters for a bounded Home Assistant event subscription invoke.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HomeAssistantSubscriptionStats {
+    pub received: u64,
+    pub emitted: u64,
+    pub dropped_ignored: u64,
+    pub dropped_filter: u64,
+    pub dropped_cooldown: u64,
+    pub malformed: u64,
+    pub reconnects: u64,
+}
+
+/// Return value for `homeassistant.subscribe_events`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HomeAssistantEventSubscription {
+    pub subscription_id: u64,
+    pub event_type: Option<String>,
+    pub event: HomeAssistantEvent,
+    pub events: Vec<HomeAssistantEvent>,
+    pub stats: HomeAssistantSubscriptionStats,
+    pub replay_supported: bool,
+    pub persistent: bool,
+}
 
 /// An entity state from `Home Assistant`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

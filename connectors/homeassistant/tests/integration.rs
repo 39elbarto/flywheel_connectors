@@ -11,7 +11,17 @@
     clippy::unused_async
 )]
 
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
+use fcp_async_core::net::{TcpListener, TcpStream};
 use serde_json::json;
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -26,6 +36,74 @@ async fn setup_connector(mock_url: &str) -> HomeAssistantConnector {
         .await
         .unwrap();
     c
+}
+
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
+
+async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_test_websocket(mut stream: TcpStream) -> TestServerWebSocket {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket")
+}
+
+async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<String> {
+    match ws.recv(&Cx::for_testing()).await {
+        Ok(Some(ServerWsMessage::Text(text))) => Some(text),
+        Ok(Some(other)) => panic!("expected text frame for {context}, got {other:?}"),
+        Ok(None) => None,
+        Err(err) => panic!("{context}: {err}"),
+    }
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
 }
 
 // -- Lifecycle --
@@ -85,6 +163,8 @@ async fn lifecycle_introspect() {
     let c = setup_connector(&server.uri()).await;
     let intro = c.handle_introspect().await.unwrap();
     assert_eq!(intro["operations"].as_array().unwrap().len(), 15);
+    assert_eq!(intro["event_caps"]["streaming"], true);
+    assert_eq!(intro["events"].as_array().unwrap().len(), 1);
 }
 
 #[fcp_async_core::runtime::test]
@@ -650,20 +730,160 @@ async fn get_statistics_missing_statistic_ids() {
     );
 }
 
-// -- Subscribe Events (unsupported via REST) --
+// -- Subscribe Events --
 
 #[fcp_async_core::runtime::test]
-async fn subscribe_events_unsupported() {
-    let server = MockServer::start().await;
-    let c = setup_connector(&server.uri()).await;
+async fn subscribe_events_websocket_filters_and_redacts() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = accept_test_websocket(tcp_stream).await;
+
+        send_json_frame(
+            &mut ws,
+            json!({"type": "auth_required"}),
+            "send auth_required",
+        )
+        .await;
+        let auth = recv_text_frame(&mut ws, "receive auth frame")
+            .await
+            .expect("auth frame");
+        let auth: serde_json::Value = serde_json::from_str(&auth).expect("auth json");
+        assert_eq!(auth["type"], "auth");
+        assert_eq!(auth["access_token"], "test-token");
+
+        send_json_frame(&mut ws, json!({"type": "auth_ok"}), "send auth_ok").await;
+        let subscribe = recv_text_frame(&mut ws, "receive subscribe frame")
+            .await
+            .expect("subscribe frame");
+        let subscribe: serde_json::Value =
+            serde_json::from_str(&subscribe).expect("subscribe json");
+        assert_eq!(subscribe["type"], "subscribe_events");
+        assert_eq!(subscribe["event_type"], "state_changed");
+
+        send_json_frame(
+            &mut ws,
+            json!({"id": 1, "type": "result", "success": true}),
+            "send subscribe ack",
+        )
+        .await;
+        send_json_frame(
+            &mut ws,
+            json!({"type": "event", "event": {"data": {"entity_id": "light.secret"}, "event_type": "state_changed"}}),
+            "send ignored event",
+        )
+        .await;
+        send_json_frame(
+            &mut ws,
+            json!({"type": "event", "event": {"data": {"entity_id": "sensor.temp"}, "event_type": "state_changed"}}),
+            "send filtered event",
+        )
+        .await;
+        send_json_frame(
+            &mut ws,
+            json!({
+                "type": "event",
+                "event": {
+                    "event_type": "state_changed",
+                    "data": {
+                        "entity_id": "light.kitchen",
+                        "old_state": {"state": "off"},
+                        "new_state": {
+                            "state": "on",
+                            "attributes": {"access_token": "should-not-leak"}
+                        }
+                    },
+                    "origin": "LOCAL",
+                    "time_fired": "2026-05-05T12:00:00Z",
+                    "context": {"id": "ctx-1"}
+                }
+            }),
+            "send matching event",
+        )
+        .await;
+        close_test_websocket(&mut ws).await;
+    });
+
+    let c = setup_connector(&base_url).await;
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "homeassistant.subscribe_events",
+            "input": {
+                "watch_domains": ["light"],
+                "ignore_entities": ["light.secret"],
+                "max_events": 1,
+                "timeout_ms": 500,
+                "max_reconnect_attempts": 0
+            }
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["event"]["entity_id"], "light.kitchen");
+    assert_eq!(result["event"]["domain"], "light");
+    assert_eq!(result["events"].as_array().unwrap().len(), 1);
+    assert_eq!(result["stats"]["received"], 3);
+    assert_eq!(result["stats"]["dropped_ignored"], 1);
+    assert_eq!(result["stats"]["dropped_filter"], 1);
+    assert_eq!(
+        result["event"]["new_state"]["attributes"]["access_token"],
+        "[REDACTED]"
+    );
+    ws_task.await.expect("websocket task");
+}
+
+#[fcp_async_core::runtime::test]
+async fn subscribe_events_ack_failure_is_reported() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws = accept_test_websocket(tcp_stream).await;
+        send_json_frame(
+            &mut ws,
+            json!({"type": "auth_required"}),
+            "send auth_required",
+        )
+        .await;
+        let _ = recv_text_frame(&mut ws, "receive auth frame").await;
+        send_json_frame(&mut ws, json!({"type": "auth_ok"}), "send auth_ok").await;
+        let _ = recv_text_frame(&mut ws, "receive subscribe frame").await;
+        send_json_frame(
+            &mut ws,
+            json!({"id": 1, "type": "result", "success": false, "error": {"message": "bad event type"}}),
+            "send subscribe nack",
+        )
+        .await;
+        close_test_websocket(&mut ws).await;
+    });
+
+    let c = setup_connector(&base_url).await;
     assert!(
         c.handle_invoke(json!({
             "operation_id": "homeassistant.subscribe_events",
-            "input": {"event_type": "state_changed"}
+            "input": {
+                "watch_all": true,
+                "timeout_ms": 500,
+                "max_reconnect_attempts": 0
+            }
         }))
         .await
         .is_err()
     );
+    ws_task.await.expect("websocket task");
 }
 
 // -- Error handling --

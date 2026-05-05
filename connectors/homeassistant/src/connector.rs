@@ -4,9 +4,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport,
+    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, EventCaps, EventInfo,
+    FcpError, FcpResult, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -16,6 +16,7 @@ use tracing::{info, instrument};
 use crate::{
     client::{DEFAULT_BASE_URL, HomeAssistantAuth, HomeAssistantClient},
     error::HomeAssistantError,
+    types::HomeAssistantEventSubscriptionRequest,
 };
 
 /// Parsed and validated `Home Assistant` connector configuration.
@@ -266,7 +267,8 @@ impl HomeAssistantConnector {
                 "homeassistant.read",
                 "homeassistant.write",
                 "homeassistant.control"
-            ]
+            ],
+            "event_caps": homeassistant_event_caps()
         }))
     }
 
@@ -365,10 +367,10 @@ impl HomeAssistantConnector {
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
             operations: typed_operations(),
-            events: vec![],
+            events: event_info(),
             resource_types: vec![],
             auth_caps: None,
-            event_caps: None,
+            event_caps: Some(homeassistant_event_caps()),
         };
         serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),
@@ -415,13 +417,7 @@ impl HomeAssistantConnector {
             "homeassistant.activate_scene" => self.invoke_activate_scene(client, &input).await,
             "homeassistant.get_history" => self.invoke_get_history(client, &input).await,
             "homeassistant.get_statistics" => self.invoke_get_statistics(client, &input).await,
-            "homeassistant.subscribe_events" => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1005,
-                    message: "subscribe_events requires WebSocket and is not supported via REST"
-                        .into(),
-                });
-            }
+            "homeassistant.subscribe_events" => self.invoke_subscribe_events(client, &input).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -705,6 +701,22 @@ impl HomeAssistantConnector {
         Ok(result)
     }
 
+    async fn invoke_subscribe_events(
+        &self,
+        client: &HomeAssistantClient,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, HomeAssistantError> {
+        let request =
+            serde_json::from_value::<HomeAssistantEventSubscriptionRequest>(input.clone())
+                .map_err(|error| {
+                    HomeAssistantError::InvalidInput(format!(
+                        "invalid subscribe_events input: {error}"
+                    ))
+                })?;
+        let subscription = client.subscribe_events(request).await?;
+        serde_json::to_value(subscription).map_err(HomeAssistantError::Json)
+    }
+
     fn build_doctor_result(&self) -> DoctorResult {
         let mut checks = Vec::new();
 
@@ -849,6 +861,36 @@ fn base_url_policy(base_url: &str) -> (bool, String) {
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
+}
+
+const fn homeassistant_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: true,
+        replay: false,
+        min_buffer_events: 200,
+        requires_ack: false,
+    }
+}
+
+fn event_info() -> Vec<EventInfo> {
+    vec![EventInfo {
+        topic: "homeassistant.state_changed".into(),
+        schema: json!({
+            "type": "object",
+            "required": ["event_type", "data"],
+            "properties": {
+                "event_type": {"type": "string"},
+                "entity_id": {"type": ["string", "null"]},
+                "domain": {"type": ["string", "null"]},
+                "old_state": {"type": ["object", "null"]},
+                "new_state": {"type": ["object", "null"]},
+                "context": {"type": ["object", "null"]},
+                "time_fired": {"type": ["string", "null"]},
+                "data": {"type": "object"}
+            }
+        }),
+        requires_ack: false,
+    }]
 }
 
 /// Build typed operation info for introspection with full `AgentHint` metadata.
@@ -1212,25 +1254,77 @@ fn typed_operations() -> Vec<OperationInfo> {
         },
         OperationInfo {
             id: OperationId::from_static("homeassistant.subscribe_events"),
-            summary: "Subscribe to Home Assistant events via WebSocket (state changes, service calls, automations)".into(),
+            summary: "Open a bounded Home Assistant WebSocket subscription and return matching events".into(),
             description: None,
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "event_type": {
-                        "type": "string",
-                        "description": "Filter to specific event type (e.g., 'state_changed', 'call_service', 'automation_triggered'). Omit to receive all events."
+                        "type": ["string", "null"],
+                        "description": "Home Assistant event type. Defaults to 'state_changed'; set null to subscribe to all event types."
+                    },
+                    "watch_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Entity domains to forward, e.g. ['light', 'sensor']."
+                    },
+                    "watch_entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact entity IDs to forward."
+                    },
+                    "ignore_entities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Exact entity IDs to drop before other filters."
+                    },
+                    "watch_all": {
+                        "type": "boolean",
+                        "description": "Explicitly forward every non-ignored event."
+                    },
+                    "cooldown_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Per-entity cooldown between emitted events."
+                    },
+                    "max_events": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Bounded number of matching events to return."
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 600000,
+                        "description": "Per-connection receive timeout."
+                    },
+                    "max_reconnect_attempts": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 5,
+                        "description": "Reconnect attempts if the WebSocket closes before enough events arrive."
                     }
                 }
             }),
             output_schema: json!({
                 "type": "object",
-                "required": ["event"],
+                "required": ["event", "events", "stats"],
                 "properties": {
+                    "subscription_id": {"type": "integer"},
+                    "event_type": {"type": ["string", "null"]},
                     "event": {
                         "type": "object",
-                        "description": "Event payload with event_type, data, origin, time_fired, context"
-                    }
+                        "description": "First matching redacted event payload with event_type, entity_id, old/new state, origin, time_fired, and context"
+                    },
+                    "events": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "All matching redacted events returned by this bounded invoke"
+                    },
+                    "stats": {"type": "object"},
+                    "replay_supported": {"type": "boolean"},
+                    "persistent": {"type": "boolean"}
                 }
             }),
             capability: CapabilityId::from_static("homeassistant.read"),
@@ -1238,14 +1332,14 @@ fn typed_operations() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::Strict,
             ai_hints: AgentHint {
-                when_to_use: "Stream real-time events from Home Assistant via WebSocket. Use event_type filter to reduce volume.".into(),
+                when_to_use: "Capture real-time Home Assistant events via WebSocket. Provide watch_domains, watch_entities, or watch_all to make event volume explicit.".into(),
                 common_mistakes: vec![
-                    "Subscribing to all events on a busy installation (can be thousands per minute).".into(),
-                    "Not handling WebSocket reconnection and subscription ID reuse.".into(),
+                    "Calling without watch_all or filters; the connector requires an explicit event selection.".into(),
+                    "Subscribing to all events on a busy installation unless you really need the full firehose.".into(),
                 ],
                 examples: vec![
-                    r#"{"event_type": "state_changed"}"#.into(),
-                    r#"{"event_type": "automation_triggered"}"#.into(),
+                    r#"{"watch_domains": ["light"], "max_events": 1}"#.into(),
+                    r#"{"watch_entities": ["sensor.temperature"], "cooldown_ms": 5000}"#.into(),
                 ],
                 related: vec![
                     CapabilityId::from_static("homeassistant.get_state"),

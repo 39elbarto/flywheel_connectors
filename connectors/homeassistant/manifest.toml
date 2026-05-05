@@ -780,7 +780,7 @@ related = [
 ]
 
 [provides.operations."homeassistant.subscribe_events"]
-description = "Subscribe to Home Assistant events via WebSocket (state changes, service calls, automations)"
+description = "Open a bounded Home Assistant WebSocket subscription and return matching events"
 capability = "homeassistant.read"
 risk_level = "low"
 safety_tier = "safe"
@@ -791,16 +791,84 @@ idempotency = "strict"
 type = "object"
 
 [provides.operations."homeassistant.subscribe_events".input_schema.properties.event_type]
-description = "Filter to specific event type (e.g., 'state_changed', 'call_service', 'automation_triggered'). Omit to receive all events."
+description = "Home Assistant event type. Defaults to 'state_changed'; set null to subscribe to all event types."
+type = ["string", "null"]
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.watch_domains]
+description = "Entity domains to forward, e.g. ['light', 'sensor']."
+type = "array"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.watch_domains.items]
 type = "string"
 
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.watch_entities]
+description = "Exact entity IDs to forward."
+type = "array"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.watch_entities.items]
+type = "string"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.ignore_entities]
+description = "Exact entity IDs to drop before other filters."
+type = "array"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.ignore_entities.items]
+type = "string"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.watch_all]
+description = "Explicitly forward every non-ignored event."
+type = "boolean"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.cooldown_ms]
+description = "Per-entity cooldown between emitted events."
+minimum = 0
+type = "integer"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.max_events]
+description = "Bounded number of matching events to return."
+maximum = 100
+minimum = 1
+type = "integer"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.timeout_ms]
+description = "Per-connection receive timeout."
+maximum = 600000
+minimum = 1
+type = "integer"
+
+[provides.operations."homeassistant.subscribe_events".input_schema.properties.max_reconnect_attempts]
+description = "Reconnect attempts if the WebSocket closes before enough events arrive."
+maximum = 5
+minimum = 0
+type = "integer"
+
 [provides.operations."homeassistant.subscribe_events".output_schema]
-required = ["event"]
+required = [
+    "event",
+    "events",
+    "stats",
+]
 type = "object"
 
 [provides.operations."homeassistant.subscribe_events".output_schema.properties.event]
-description = "Event payload with event_type, data, origin, time_fired, context"
+description = "First matching redacted event payload with event_type, entity_id, old/new state, origin, time_fired, and context"
 type = "object"
+
+[provides.operations."homeassistant.subscribe_events".output_schema.properties.events]
+description = "All matching redacted events returned by this bounded invoke"
+type = "array"
+
+[provides.operations."homeassistant.subscribe_events".output_schema.properties.events.items]
+type = "object"
+
+[provides.operations."homeassistant.subscribe_events".output_schema.properties.stats]
+type = "object"
+
+[provides.operations."homeassistant.subscribe_events".output_schema.properties.replay_supported]
+type = "boolean"
+
+[provides.operations."homeassistant.subscribe_events".output_schema.properties.persistent]
+type = "boolean"
 
 [provides.operations."homeassistant.subscribe_events".network_constraints]
 host_allow = ["$ha_host"]

@@ -46,6 +46,10 @@ pub enum HomeAssistantError {
     /// Invalid input (missing field, path traversal, etc.).
     #[error("Invalid input: {0}")]
     InvalidInput(String),
+
+    /// WebSocket transport or protocol failure.
+    #[error("WebSocket error: {message}")]
+    WebSocket { message: String, retryable: bool },
 }
 
 impl HomeAssistantError {
@@ -54,6 +58,7 @@ impl HomeAssistantError {
         match self {
             Self::Http(_) | Self::RateLimited { .. } | Self::Unavailable => true,
             Self::Api { status_code, .. } => matches!(status_code, 500..=599 | 429),
+            Self::WebSocket { retryable, .. } => *retryable,
             _ => false,
         }
     }
@@ -127,6 +132,13 @@ impl HomeAssistantError {
             Self::InvalidInput(msg) => FcpError::InvalidRequest {
                 code: 1005,
                 message: format!("Invalid input: {msg}"),
+            },
+            Self::WebSocket { message, .. } => FcpError::External {
+                service: "homeassistant".into(),
+                message: message.clone(),
+                status_code: None,
+                retryable: self.is_retryable(),
+                retry_after: None,
             },
         }
     }

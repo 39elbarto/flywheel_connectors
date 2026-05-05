@@ -4074,11 +4074,13 @@ name = "fcp-homeassistant"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asupersync",
  "async-trait",
  "fcp-async-core",
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-streaming",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

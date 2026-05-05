@@ -213,6 +213,10 @@ pub mod runtime {
         CURRENT_RUNTIME.with(|slot| slot.borrow().last().cloned())
     }
 
+    pub(crate) fn worker_runtime_context(flavor: RuntimeFlavor) -> Option<RuntimeContext> {
+        AsupersyncRuntime::current_handle().map(|handle| RuntimeContext { handle, flavor })
+    }
+
     /// Runtime builder abstraction owned by async-core.
     pub struct Builder {
         inner: AsupersyncRuntimeBuilder,
@@ -2101,6 +2105,7 @@ pub mod task {
                 message: SPAWN_OUTSIDE_RUNTIME_MESSAGE.to_string(),
             })?;
         let runtime = runtime_context.handle.clone();
+        let runtime_flavor = runtime_context.flavor;
 
         // Capture the Tokio compat handle from the calling thread so the
         // spawned task can enter the Tokio runtime context on whatever
@@ -2120,7 +2125,8 @@ pub mod task {
         };
 
         std::mem::drop(runtime.spawn(async move {
-            let _guard = crate::runtime::RuntimeGuard::enter(runtime_context);
+            let _guard = crate::runtime::worker_runtime_context(runtime_flavor)
+                .map(crate::runtime::RuntimeGuard::enter);
             let result = match wrapped.await {
                 Ok(Ok(output)) => Ok(output),
                 Ok(Err(payload)) => Err(JoinError::panicked(payload.as_ref())),
@@ -2624,14 +2630,16 @@ mod tests {
     use std::task::Poll;
     use std::time::{Duration, Instant};
     use std::{
-        sync::Arc,
         sync::atomic::{AtomicBool, AtomicUsize, Ordering},
+        sync::{Arc, Mutex},
     };
 
     use super::{
         AsyncError, CancellationToken, ContextScope, ExecutionContext, Instrumentation, TaskGroup,
         channel, io, runtime, task, time, tls, websocket,
     };
+
+    static PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
 
     fn overflowing_duration_for(now: Instant) -> Option<Duration> {
         let mut candidate = Duration::from_secs(1);
@@ -4458,6 +4466,79 @@ mod tests {
         });
         let result = handle.await.expect("spawned task should join");
         assert_eq!(result, 7);
+    }
+
+    #[runtime::test]
+    async fn spawned_task_inherits_fcp_runtime_context_for_nested_spawn() {
+        let handle = task::spawn(async {
+            let nested = task::spawn(async { 11_u32 });
+            nested.await.expect("nested task should join")
+        });
+
+        let result = handle.await.expect("outer task should join");
+        assert_eq!(result, 11);
+    }
+
+    #[test]
+    fn detached_task_shutdown_does_not_drop_final_runtime_reference_on_worker() {
+        let _panic_hook_guard = PANIC_HOOK_LOCK.lock().expect("panic hook lock");
+        let worker_join_panics = Arc::new(AtomicUsize::new(0));
+        let previous_hook = Arc::new(Mutex::new(Some(std::panic::take_hook())));
+        let hook_previous = Arc::clone(&previous_hook);
+        let hook_panics = Arc::clone(&worker_join_panics);
+
+        std::panic::set_hook(Box::new(move |info| {
+            let payload = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
+                .unwrap_or_default();
+            let is_worker_join_panic = std::thread::current()
+                .name()
+                .is_some_and(|name| name.starts_with("asupersync-worker"))
+                && payload.contains("failed to join thread");
+
+            if is_worker_join_panic {
+                hook_panics.fetch_add(1, Ordering::SeqCst);
+            } else if let Some(previous) = hook_previous
+                .lock()
+                .expect("panic hook previous lock")
+                .as_ref()
+            {
+                previous(info);
+            }
+        }));
+
+        {
+            let runtime = runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            runtime.block_on(async {
+                let (started_tx, started_rx) = channel::oneshot::channel::<()>();
+                task::spawn(async move {
+                    let _ = started_tx.send(());
+                    future::pending::<()>().await;
+                })
+                .detach();
+                started_rx.await.expect("detached task should start");
+            });
+        }
+
+        let _installed_hook = std::panic::take_hook();
+        let previous = previous_hook
+            .lock()
+            .expect("panic hook previous lock")
+            .take()
+            .expect("previous panic hook should be available");
+        std::panic::set_hook(previous);
+
+        assert_eq!(
+            worker_join_panics.load(Ordering::SeqCst),
+            0,
+            "worker-local runtime context must not own the final asupersync runtime reference"
+        );
     }
 
     #[runtime::test]

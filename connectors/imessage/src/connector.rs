@@ -4731,7 +4731,7 @@ mod tests {
     use fcp_prelude::{CapabilityConstraints, CorrelationId};
     use std::collections::HashMap;
     use std::io::{Read, Write};
-    use std::net::{TcpListener as StdTcpListener, TcpStream};
+    use std::net::{Shutdown, SocketAddr, TcpListener as StdTcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use wiremock::matchers::{method, path, query_param};
@@ -4908,6 +4908,24 @@ mod tests {
             .unwrap()
     }
 
+    async fn invoke_operation_result(
+        connector: &BlueBubblesConnector,
+        signing_key: &Ed25519SigningKey,
+        operation: &'static str,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        connector
+            .invoke(InvokeRequest {
+                input,
+                capability_token: generate_valid_token(connector, signing_key, operation),
+                ..base_invoke(connector.id(), operation)
+            })
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+    }
+
     fn generate_valid_token(
         connector: &BlueBubblesConnector,
         signing_key: &Ed25519SigningKey,
@@ -5076,6 +5094,8 @@ mod tests {
     const fn status_reason(status: u16) -> &'static str {
         match status {
             401 => "Unauthorized",
+            403 => "Forbidden",
+            409 => "Conflict",
             429 => "Too Many Requests",
             500 => "Internal Server Error",
             _ => "OK",
@@ -5139,6 +5159,116 @@ mod tests {
         stream.write_all(head.as_bytes())?;
         stream.write_all(&response.body)?;
         stream.flush()
+    }
+
+    #[derive(Debug)]
+    struct LoopbackHttpResponse {
+        status: u16,
+        body: Value,
+    }
+
+    fn send_loopback_json_post(
+        addr: SocketAddr,
+        target: &str,
+        headers: &[(String, String)],
+        body: &[u8],
+    ) -> LoopbackHttpResponse {
+        let mut stream = TcpStream::connect(addr).expect("connect ingress loopback");
+        let mut request = format!(
+            "POST {target} HTTP/1.1\r\nhost: {addr}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n",
+            body.len()
+        );
+        for (name, value) in headers {
+            request.push_str(name);
+            request.push_str(": ");
+            request.push_str(value);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        stream
+            .write_all(request.as_bytes())
+            .expect("write ingress request headers");
+        stream.write_all(body).expect("write ingress request body");
+        stream.flush().expect("flush ingress request");
+        stream
+            .shutdown(Shutdown::Write)
+            .expect("close ingress request write side");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .expect("read ingress response");
+        let header_end = response
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .map(|index| index + 4)
+            .expect("ingress response header terminator");
+        let header_text =
+            std::str::from_utf8(&response[..header_end]).expect("response headers are UTF-8");
+        let status = header_text
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|code| code.parse::<u16>().ok())
+            .expect("parse ingress response status");
+        let body = serde_json::from_slice(&response[header_end..]).expect("parse response JSON");
+        LoopbackHttpResponse { status, body }
+    }
+
+    fn webhook_callback_url_for_base(base_url: &str, auth_value: &str) -> String {
+        format!("{base_url}/bluebubbles-webhook?{}={auth_value}", "password")
+    }
+
+    fn callback_target(callback_url: &str) -> String {
+        let url = reqwest::Url::parse(callback_url).expect("callback URL should parse");
+        url.query().map_or_else(
+            || url.path().to_string(),
+            |query| format!("{}?{query}", url.path()),
+        )
+    }
+
+    async fn drive_ingress_loopback_post(
+        listener: &StdTcpListener,
+        connector: &BlueBubblesConnector,
+        signing_key: &Ed25519SigningKey,
+        target: String,
+        body: Value,
+    ) -> (LoopbackRequest, LoopbackHttpResponse, Value) {
+        let addr = listener.local_addr().expect("ingress loopback addr");
+        let body_bytes = body.to_string().into_bytes();
+        let client = thread::spawn(move || {
+            let headers = vec![("x-bluebubbles-event".to_string(), "new-message".to_string())];
+            send_loopback_json_post(addr, &target, &headers, &body_bytes)
+        });
+
+        let (mut stream, _) = listener.accept().expect("accept FCP ingress loopback POST");
+        let request = read_loopback_request(&mut stream);
+        let request_body = request.json_body();
+        let result = invoke_webhook_request_result(
+            connector,
+            signing_key,
+            json!({
+                "method": request.method,
+                "url": format!("http://{addr}{}", request.target),
+                "headers": request.headers,
+                "request_region": {
+                    "source": "socket_loopback_harness"
+                },
+                "account_id": "acct-a",
+                "observed_at_ms": 1_700_000_000_000_i64,
+                "body": request_body
+            }),
+        )
+        .await;
+        let status_code = result["status_code"]
+            .as_u64()
+            .and_then(|code| u16::try_from(code).ok())
+            .unwrap_or(500);
+        write_loopback_response(&mut stream, &LoopbackResponse::json(status_code, &result))
+            .expect("write FCP ingress response");
+        drop(stream);
+        let client_response = client.join().expect("ingress client thread should exit");
+        (request, client_response, result)
     }
 
     fn loopback_config(server_url: &str) -> Value {
@@ -7210,6 +7340,264 @@ mod tests {
             "conversation_not_bound"
         );
         assert_eq!(rejected["ingest"]["event_envelopes"], json!([]));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn no_mock_bluebubbles_ingress_loopback_registers_callback_and_exercises_actions() {
+        let ingress_listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("bind FCP ingress loopback");
+        let ingress_base = format!(
+            "http://{}",
+            ingress_listener
+                .local_addr()
+                .expect("FCP ingress loopback addr")
+        );
+        let callback_url = webhook_callback_url_for_base(&ingress_base, "test-password-123");
+        let callback_target = callback_target(&callback_url);
+
+        let media_root = unique_media_root();
+        let media_path =
+            write_media_fixture(&media_root, MediaFixtureName::Photo, b"loopback-media");
+        let server_info = || {
+            LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "15.7",
+                        "server_version": "1.9.0",
+                        "private_api": true,
+                        "helper_connected": true
+                    }
+                }),
+            )
+        };
+        let action_ok = || LoopbackResponse::json(200, &json!({ "ok": true }));
+        let bluebubbles = BlueBubblesLoopback::spawn(
+            "ingress-loopback-e2e",
+            vec![
+                LoopbackResponse::json(
+                    200,
+                    &json!({
+                        "data": {
+                            "id": "webhook-1",
+                            "url": callback_url
+                        }
+                    }),
+                ),
+                server_info(),
+                action_ok(),
+                server_info(),
+                LoopbackResponse::json(200, &json!({ "data": { "guid": "media-loopback-1" } })),
+                server_info(),
+                action_ok(),
+                server_info(),
+                action_ok(),
+            ],
+        );
+
+        let mut config = loopback_media_config(bluebubbles.uri(), &media_root, 1024);
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567"]
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let registration = invoke_operation_result(
+            &connector,
+            &signing_key,
+            OP_REGISTER_WEBHOOK,
+            json!({
+                "url": callback_url,
+                "events": ["new-message"],
+                "skip_if_existing": false
+            }),
+        )
+        .await;
+        assert_eq!(registration["registration_status"], "registered");
+
+        let unauthorized_body = json!({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-loopback-unauthorized",
+                "text": "blocked",
+                "handle": { "address": "+15557654321" },
+                "chats": [{ "guid": "iMessage;-;+15557654321" }],
+                "isFromMe": false
+            }
+        });
+        let (unauthorized_request, unauthorized_http, unauthorized_result) =
+            drive_ingress_loopback_post(
+                &ingress_listener,
+                &connector,
+                &signing_key,
+                callback_target.clone(),
+                unauthorized_body,
+            )
+            .await;
+        assert_eq!(unauthorized_http.status, 403);
+        assert_eq!(unauthorized_http.body["reason_code"], "policy_rejected");
+        assert_eq!(unauthorized_result["ingest"]["event_envelopes"], json!([]));
+
+        let authorized_body = json!({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-loopback-authorized",
+                "text": "authorized",
+                "handle": { "address": "+15551234567" },
+                "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                "isFromMe": false,
+                "attachments": [{ "guid": "att-loopback-1", "mimeType": "image/png" }]
+            }
+        });
+        let (authorized_request, authorized_http, authorized_result) = drive_ingress_loopback_post(
+            &ingress_listener,
+            &connector,
+            &signing_key,
+            callback_target.clone(),
+            authorized_body.clone(),
+        )
+        .await;
+        assert_eq!(authorized_http.status, 200);
+        assert_eq!(authorized_http.body["reason_code"], "event_accepted");
+        assert_eq!(
+            authorized_result["ingest"]["event_envelopes"][0]["topic"],
+            "imessage.message.inbound"
+        );
+
+        let (duplicate_request, duplicate_http, duplicate_result) = drive_ingress_loopback_post(
+            &ingress_listener,
+            &connector,
+            &signing_key,
+            callback_target,
+            authorized_body,
+        )
+        .await;
+        assert_eq!(duplicate_http.status, 409);
+        assert_eq!(duplicate_http.body["reason_code"], "replay_suppressed");
+        assert_eq!(duplicate_result["ingest"]["event_envelopes"], json!([]));
+
+        let reaction = invoke_operation_result(
+            &connector,
+            &signing_key,
+            OP_SEND_REACTION,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message_guid": "msg-loopback-authorized",
+                "reaction": "like"
+            }),
+        )
+        .await;
+        assert_eq!(reaction["status"], "reacted");
+
+        let media = invoke_operation_result(
+            &connector,
+            &signing_key,
+            OP_SEND_MEDIA,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "local_path": media_path.to_string_lossy().to_string(),
+                "caption": "loopback media"
+            }),
+        )
+        .await;
+        assert_eq!(media["status"], "sent");
+        assert_eq!(media["message_id"], "media-loopback-1");
+
+        let typing = invoke_operation_result(
+            &connector,
+            &signing_key,
+            OP_SET_TYPING,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "typing": true
+            }),
+        )
+        .await;
+        assert_eq!(typing["status"], "typing_started");
+
+        let mark_read = invoke_operation_result(
+            &connector,
+            &signing_key,
+            OP_MARK_READ,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567"
+            }),
+        )
+        .await;
+        assert_eq!(mark_read["status"], "marked_read");
+
+        let (server_requests, server_logs) = bluebubbles.finish();
+        assert_eq!(server_requests.len(), 9);
+        assert_eq!(
+            server_requests[0]
+                .target
+                .split_once('?')
+                .map(|(path, _)| path),
+            Some("/api/v1/webhook")
+        );
+        assert_eq!(server_requests[0].json_body()["url"], callback_url);
+        assert_eq!(
+            server_requests[2]
+                .target
+                .split_once('?')
+                .map(|(path, _)| path),
+            Some("/api/v1/message/react")
+        );
+        assert_eq!(
+            server_requests[4]
+                .target
+                .split_once('?')
+                .map(|(path, _)| path),
+            Some("/api/v1/message/attachment")
+        );
+        assert_eq!(
+            server_requests[6]
+                .target
+                .split_once('?')
+                .map(|(path, _)| path),
+            Some("/api/v1/chat/iMessage;-;+15551234567/typing")
+        );
+        assert_eq!(
+            server_requests[8]
+                .target
+                .split_once('?')
+                .map(|(path, _)| path),
+            Some("/api/v1/chat/iMessage;-;+15551234567/read")
+        );
+
+        let transcript = json!({
+            "event": "bluebubbles-ingress-loopback-e2e",
+            "registration_status": registration["registration_status"],
+            "ingress_requests": [
+                {
+                    "target": redacted_target(&unauthorized_request.target),
+                    "status": unauthorized_http.status,
+                    "reason_code": unauthorized_http.body["reason_code"]
+                },
+                {
+                    "target": redacted_target(&authorized_request.target),
+                    "status": authorized_http.status,
+                    "reason_code": authorized_http.body["reason_code"]
+                },
+                {
+                    "target": redacted_target(&duplicate_request.target),
+                    "status": duplicate_http.status,
+                    "reason_code": duplicate_http.body["reason_code"]
+                }
+            ],
+            "outbound_request_count": server_requests.len(),
+            "server_logs": server_logs
+        });
+        let transcript_text = serde_json::to_string(&transcript).unwrap();
+        assert!(transcript_text.contains("bluebubbles-ingress-loopback-e2e"));
+        assert!(!transcript_text.contains("test-password-123"));
     }
 
     #[fcp_async_core::runtime::test]

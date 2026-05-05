@@ -89,9 +89,8 @@ enum = ["cost", "latency", "capability", "fallback"]
 default = "cost"
 
 [provides.operations."llm-router.route".input_schema.properties.preferred_provider]
-description = "Preferred provider name (anthropic, openai, google-ai); used as hint, not guarantee"
+description = "Preferred configured provider name; used as hint, not guarantee"
 type = "string"
-enum = ["anthropic", "openai", "google-ai"]
 
 [provides.operations."llm-router.route".input_schema.properties.preferred_model]
 description = "Preferred model name; used as hint unless provider is unavailable"
@@ -214,6 +213,15 @@ host_allow = [
     "api.anthropic.com",
     "api.openai.com",
     "generativelanguage.googleapis.com",
+    "gateway.ai.cloudflare.com",
+    "ai-gateway.vercel.sh",
+    "api.deepseek.com",
+    "api.groq.com",
+    "api.x.ai",
+    "openrouter.ai",
+    "api.moonshot.ai",
+    "dashscope-intl.aliyuncs.com",
+    "api.together.xyz",
 ]
 port_allow = [443]
 ip_allow = []
@@ -407,6 +415,15 @@ host_allow = [
     "api.anthropic.com",
     "api.openai.com",
     "generativelanguage.googleapis.com",
+    "gateway.ai.cloudflare.com",
+    "ai-gateway.vercel.sh",
+    "api.deepseek.com",
+    "api.groq.com",
+    "api.x.ai",
+    "openrouter.ai",
+    "api.moonshot.ai",
+    "dashscope-intl.aliyuncs.com",
+    "api.together.xyz",
 ]
 port_allow = [443]
 ip_allow = []

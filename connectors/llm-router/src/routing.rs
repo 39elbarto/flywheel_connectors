@@ -397,8 +397,12 @@ mod tests {
             name: "empty".into(),
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![],
             priority: 1,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         }];
         let candidates = build_candidates(&providers, &[], 100, 50);
         assert!(candidates.is_empty());
@@ -410,8 +414,12 @@ mod tests {
             name: "openai".into(),
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![test_model("gpt-4", 0.001, 0.002, &[])],
             priority: 1,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         }];
         let statuses = vec![("openai".to_string(), ProviderStatus::Degraded, 300_u64)];
         let candidates = build_candidates(&providers, &statuses, 100, 50);
@@ -426,8 +434,12 @@ mod tests {
             name: "new-provider".into(),
             base_url: "http://localhost".into(),
             auth: crate::types::ProviderAuth::ApiKey("key123456789".into()),
+            api_path_mode: crate::types::ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![test_model("m1", 0.001, 0.002, &[])],
             priority: 5,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         }];
         let candidates = build_candidates(&providers, &[], 100, 50);
         assert_eq!(candidates.len(), 1);

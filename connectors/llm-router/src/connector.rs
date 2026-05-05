@@ -11,13 +11,15 @@ use fcp_prelude::{
 };
 use serde_json::json;
 use tracing::{info, instrument};
-use url::Url;
+use url::{Host, Url};
 
 use crate::error::RouterError;
 use crate::routing;
 use crate::types::{
-    BudgetConfig, BudgetEnforcement, ModelCapability, ModelInfo, ProviderAuth, ProviderConfig,
-    ProviderReadiness, ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
+    BudgetConfig, BudgetEnforcement, GatewayEndpoint, ModelCapability, ModelInfo,
+    ProviderApiPathMode, ProviderAuth, ProviderConfig, ProviderHttpHeader, ProviderReadiness,
+    ProviderStatus, ProviderUsage, RoutingDecision, RoutingStrategy,
+    built_in_gateway_provider_descriptors, gateway_provider_descriptor, llm_router_host_is_allowed,
 };
 
 /// Router configuration parsed from `configure` params.
@@ -390,7 +392,7 @@ impl LlmRouterConnector {
 
         // Check 3: Per-provider auth + network + status
         for p in &config.providers {
-            let network_ok = Self::host_allowed(&p.base_url);
+            let network_ok = Self::provider_host_allowed(p);
             let (status, _) = self
                 .provider_status
                 .iter()
@@ -414,10 +416,7 @@ impl LlmRouterConnector {
         }
 
         // Check 4: Network constraints (CRITICAL)
-        let all_hosts_ok = config
-            .providers
-            .iter()
-            .all(|p| Self::host_allowed(&p.base_url));
+        let all_hosts_ok = config.providers.iter().all(Self::provider_host_allowed);
         checks.push(json!({
             "name": "network_constraints",
             "passed": all_hosts_ok,
@@ -426,7 +425,7 @@ impl LlmRouterConnector {
                 "All provider base_urls within NetworkConstraints".to_string()
             } else {
                 let violators: Vec<_> = config.providers.iter()
-                    .filter(|p| !Self::host_allowed(&p.base_url))
+                    .filter(|p| !Self::provider_host_allowed(p))
                     .map(|p| format!("{}={}", p.name, p.base_url))
                     .collect();
                 format!("NetworkConstraints violated: {}", violators.join(", "))
@@ -527,7 +526,7 @@ impl LlmRouterConnector {
         let network_violations: Vec<_> = config
             .providers
             .iter()
-            .filter(|p| !Self::host_allowed(&p.base_url))
+            .filter(|p| !Self::provider_host_allowed(p))
             .map(|p| p.name.clone())
             .collect();
 
@@ -1038,6 +1037,8 @@ impl LlmRouterConnector {
                     "status": status,
                     "capabilities": capabilities,
                     "latency_p50_ms": latency,
+                    "passthrough_provider_models": p.passthrough_provider_models,
+                    "image_generation_provider": p.image_generation_provider,
                 });
 
                 if include_models {
@@ -1049,6 +1050,8 @@ impl LlmRouterConnector {
                                 "id": m.id,
                                 "context_window": m.context_window,
                                 "capabilities": m.capabilities,
+                                "cost_per_input_token": m.cost_per_input_token,
+                                "cost_per_output_token": m.cost_per_output_token,
                             })
                         })
                         .collect();
@@ -1142,12 +1145,7 @@ impl LlmRouterConnector {
                     message: format!("providers[{idx}]: missing name"),
                 })?
                 .to_string();
-
-            let base_url = pv
-                .get("base_url")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
+            let descriptor = gateway_provider_descriptor(&name);
 
             let credential_id = pv
                 .get("credential_id")
@@ -1164,7 +1162,18 @@ impl LlmRouterConnector {
                 .map(String::from);
 
             let auth = match (direct_auth, credential_id) {
-                (Some(key), None) => ProviderAuth::ApiKey(key),
+                (Some(key), None) => {
+                    let auth = ProviderAuth::ApiKey(key);
+                    auth.bearer_authorization_header().map_err(|error| {
+                        FcpError::InvalidRequest {
+                            code: 1003,
+                            message: format!(
+                                "providers[{idx}] ({name}): api_key must be a valid HTTP Authorization header value: {error}"
+                            ),
+                        }
+                    })?;
+                    auth
+                }
                 (None, Some(cid)) => ProviderAuth::CredentialId(cid),
                 (Some(_), Some(_)) => {
                     return Err(FcpError::InvalidRequest {
@@ -1184,13 +1193,133 @@ impl LlmRouterConnector {
                 }
             };
 
+            let (
+                base_url,
+                api_path_mode,
+                extra_headers,
+                passthrough_provider_models,
+                image_generation_provider,
+            ) = match descriptor.map(|d| d.endpoint) {
+                Some(GatewayEndpoint::CloudflareAiGateway { provider_path, .. }) => {
+                    if pv
+                        .get("base_url")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|url| !url.trim().is_empty())
+                    {
+                        return Err(Self::provider_config_error(
+                            idx,
+                            &name,
+                            "Cloudflare AI Gateway base_url is built from account_id and gateway_id; omit base_url",
+                        ));
+                    }
+
+                    let configured_provider_path = pv
+                        .get("provider_path")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or(provider_path);
+                    if configured_provider_path != provider_path {
+                        return Err(Self::provider_config_error(
+                            idx,
+                            &name,
+                            format!("provider_path must be '{provider_path}'"),
+                        ));
+                    }
+
+                    let account_id = Self::required_provider_string(pv, idx, &name, "account_id")?;
+                    let gateway_id = Self::required_provider_string(pv, idx, &name, "gateway_id")?;
+                    let descriptor = descriptor.expect("descriptor present for endpoint match");
+                    let base_url = descriptor
+                        .endpoint
+                        .cloudflare_base_url(account_id, gateway_id)
+                        .map_err(|error| {
+                            Self::provider_config_error(
+                                idx,
+                                &name,
+                                format!(
+                                    "invalid account_id/gateway_id for Cloudflare AI Gateway: {error}"
+                                ),
+                            )
+                        })?;
+                    (
+                        base_url,
+                        ProviderApiPathMode::OpenAiCompatibleBase,
+                        Self::cloudflare_gateway_headers(pv, idx, &name)?,
+                        descriptor.passthrough_provider_models,
+                        descriptor.image_generation_provider,
+                    )
+                }
+                Some(GatewayEndpoint::FixedOpenAiCompatible {
+                    base_url,
+                    api_path_mode,
+                    ..
+                }) => {
+                    if let Some(provided_base_url) = pv
+                        .get("base_url")
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|url| !url.is_empty())
+                    {
+                        let normalized = provided_base_url.trim_end_matches('/');
+                        if normalized != base_url.trim_end_matches('/') {
+                            return Err(Self::provider_config_error(
+                                idx,
+                                &name,
+                                "fixed gateway-provider descriptors do not accept base_url overrides",
+                            ));
+                        }
+                    }
+                    let descriptor = descriptor.expect("descriptor present for endpoint match");
+                    (
+                        base_url.to_string(),
+                        api_path_mode,
+                        Vec::new(),
+                        descriptor.passthrough_provider_models,
+                        descriptor.image_generation_provider,
+                    )
+                }
+                Some(GatewayEndpoint::OperatorConfiguredOpenAiCompatible) => {
+                    let descriptor = descriptor.expect("descriptor present for endpoint match");
+                    let (base_url, api_path_mode) =
+                        Self::operator_configured_gateway_base_url(pv, idx, &name)?;
+                    (
+                        base_url,
+                        api_path_mode,
+                        Vec::new(),
+                        descriptor.passthrough_provider_models,
+                        descriptor.image_generation_provider,
+                    )
+                }
+                None => {
+                    let descriptor_metadata = descriptor
+                        .map(|descriptor| {
+                            (
+                                descriptor.passthrough_provider_models,
+                                descriptor.image_generation_provider,
+                            )
+                        })
+                        .unwrap_or((false, false));
+                    (
+                        pv.get("base_url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_string(),
+                        ProviderApiPathMode::AppendV1,
+                        Vec::new(),
+                        descriptor_metadata.0,
+                        descriptor_metadata.1,
+                    )
+                }
+            };
+
             let priority = pv
                 .get("priority")
                 .and_then(|v| v.as_u64())
                 .and_then(|v| u32::try_from(v).ok())
                 .unwrap_or_else(|| u32::try_from(idx + 1).unwrap_or(u32::MAX));
 
-            let models = pv
+            let mut models: Vec<ModelInfo> = pv
                 .get("models")
                 .and_then(|v| v.as_array())
                 .map(|arr| {
@@ -1199,17 +1328,157 @@ impl LlmRouterConnector {
                         .collect()
                 })
                 .unwrap_or_default();
+            if let Some(descriptor) = descriptor {
+                for model in &mut models {
+                    model.id = descriptor.normalize_model_id(&model.id);
+                }
+            }
 
             providers.push(ProviderConfig {
                 name,
                 base_url,
                 auth,
+                api_path_mode,
+                extra_headers,
                 models,
                 priority,
+                passthrough_provider_models,
+                image_generation_provider,
             });
         }
 
         Ok(providers)
+    }
+
+    fn provider_config_error(idx: usize, name: &str, message: impl Into<String>) -> FcpError {
+        FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("providers[{idx}] ({name}): {}", message.into()),
+        }
+    }
+
+    fn required_provider_string<'a>(
+        provider: &'a serde_json::Value,
+        idx: usize,
+        name: &str,
+        field: &'static str,
+    ) -> FcpResult<&'a str> {
+        provider
+            .get(field)
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| Self::provider_config_error(idx, name, format!("missing {field}")))
+    }
+
+    fn cloudflare_gateway_headers(
+        provider: &serde_json::Value,
+        idx: usize,
+        name: &str,
+    ) -> FcpResult<Vec<ProviderHttpHeader>> {
+        let Some(secret) = provider
+            .get("cloudflare_gateway_api_key")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Ok(Vec::new());
+        };
+
+        let header =
+            ProviderHttpHeader::cloudflare_ai_gateway_authorization(secret).map_err(|error| {
+                Self::provider_config_error(
+                    idx,
+                    name,
+                    format!(
+                        "cloudflare_gateway_api_key must be a valid HTTP header value: {error}"
+                    ),
+                )
+            })?;
+        Ok(vec![header])
+    }
+
+    fn operator_configured_gateway_base_url(
+        provider: &serde_json::Value,
+        idx: usize,
+        name: &str,
+    ) -> FcpResult<(String, ProviderApiPathMode)> {
+        let raw_base_url = Self::required_provider_string(provider, idx, name, "base_url")?;
+        let normalized = raw_base_url.trim_end_matches('/');
+        let parsed = Url::parse(normalized).map_err(|error| {
+            Self::provider_config_error(
+                idx,
+                name,
+                format!("operator-configured gateway base_url is not a valid URL: {error}"),
+            )
+        })?;
+
+        if !Self::operator_configured_gateway_url_allowed(&parsed) {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "operator-configured gateway base_url must be an HTTPS public DNS URL on port 443 with no userinfo, IP literal, query, or fragment",
+            ));
+        }
+
+        let Some(api_path_mode) = Self::operator_gateway_path_mode(&parsed) else {
+            return Err(Self::provider_config_error(
+                idx,
+                name,
+                "operator-configured gateway base_url path must be empty or /v1",
+            ));
+        };
+
+        Ok((normalized.to_string(), api_path_mode))
+    }
+
+    fn operator_gateway_path_mode(parsed: &Url) -> Option<ProviderApiPathMode> {
+        match parsed.path().trim_end_matches('/') {
+            "" => Some(ProviderApiPathMode::AppendV1),
+            "/v1" => Some(ProviderApiPathMode::OpenAiCompatibleBase),
+            _ => None,
+        }
+    }
+
+    fn operator_configured_gateway_url_allowed(parsed: &Url) -> bool {
+        if parsed.scheme() != "https"
+            || parsed.port_or_known_default() != Some(443)
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return false;
+        }
+
+        let Some(Host::Domain(host)) = parsed.host() else {
+            return false;
+        };
+        Self::public_dns_host_allowed(host)
+    }
+
+    fn public_dns_host_allowed(host: &str) -> bool {
+        let host = host.trim_end_matches('.').to_ascii_lowercase();
+        let labels: Vec<&str> = host.split('.').collect();
+        if host.is_empty()
+            || labels
+                .last()
+                .is_some_and(|label| matches!(*label, "localhost" | "local"))
+        {
+            return false;
+        }
+
+        labels.len() >= 2
+            && labels.iter().all(|label| {
+                let bytes = label.as_bytes();
+                !bytes.is_empty()
+                    && bytes.len() <= 63
+                    && bytes[0].is_ascii_alphanumeric()
+                    && bytes[bytes.len() - 1].is_ascii_alphanumeric()
+                    && bytes
+                        .iter()
+                        .all(|byte| byte.is_ascii_alphanumeric() || *byte == b'-')
+            })
     }
 
     fn parse_budget(params: &serde_json::Value) -> BudgetConfig {
@@ -1241,13 +1510,6 @@ impl LlmRouterConnector {
 
     /// Check if a provider's `base_url` is within the LLM Router's allowed hosts.
     fn host_allowed(base_url: &str) -> bool {
-        // Allowed hosts from manifest.toml NetworkConstraints
-        const ALLOWED_HOSTS: &[&str] = &[
-            "api.anthropic.com",
-            "api.openai.com",
-            "generativelanguage.googleapis.com",
-        ];
-
         let Ok(parsed) = Url::parse(base_url.trim()) else {
             return false;
         };
@@ -1274,7 +1536,44 @@ impl LlmRouterConnector {
 
         parsed.scheme() == "https"
             && parsed.port_or_known_default() == Some(443)
-            && ALLOWED_HOSTS.contains(&host.as_str())
+            && llm_router_host_is_allowed(host.as_str())
+    }
+
+    fn provider_host_allowed(provider: &ProviderConfig) -> bool {
+        if gateway_provider_descriptor(&provider.name).is_some_and(|descriptor| {
+            matches!(
+                descriptor.endpoint,
+                GatewayEndpoint::OperatorConfiguredOpenAiCompatible
+            )
+        }) {
+            let Ok(parsed) = Url::parse(provider.base_url.trim()) else {
+                return false;
+            };
+            return Self::operator_configured_gateway_url_allowed(&parsed)
+                && Self::operator_gateway_path_mode(&parsed).is_some();
+        }
+
+        Self::host_allowed(&provider.base_url)
+    }
+
+    fn reserved_gateway_host_owners(base_url: &str) -> Vec<&'static str> {
+        let Some(host) = Url::parse(base_url.trim()).ok().and_then(|parsed| {
+            parsed
+                .host_str()
+                .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        }) else {
+            return Vec::new();
+        };
+        built_in_gateway_provider_descriptors()
+            .iter()
+            .filter(|descriptor| {
+                descriptor
+                    .endpoint
+                    .static_host()
+                    .is_some_and(|allowed| allowed == host.as_str())
+            })
+            .map(|descriptor| descriptor.id)
+            .collect()
     }
 
     /// Build per-provider provisioning readiness.
@@ -1290,7 +1589,7 @@ impl LlmRouterConnector {
                     ProviderAuth::ApiKey(_) => "api_key",
                     ProviderAuth::CredentialId(_) => "credential_id",
                 };
-                let network_ok = Self::host_allowed(&p.base_url);
+                let network_ok = Self::provider_host_allowed(p);
                 let models_ok = !p.models.is_empty();
 
                 ProviderReadiness {
@@ -1308,12 +1607,24 @@ impl LlmRouterConnector {
     /// Validate all providers pass network constraint checks.
     fn validate_network_constraints(providers: &[ProviderConfig]) -> FcpResult<()> {
         for p in providers {
-            if !Self::host_allowed(&p.base_url) {
+            if !Self::provider_host_allowed(p) {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
                     message: format!(
                         "Provider '{}' base_url '{}' violates NetworkConstraints",
                         p.name, p.base_url
+                    ),
+                });
+            }
+            let owners = Self::reserved_gateway_host_owners(&p.base_url);
+            if !owners.is_empty() && !owners.iter().any(|owner| *owner == p.name) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1004,
+                    message: format!(
+                        "Provider '{}' base_url '{}' uses gateway host reserved for descriptor(s) '{}'",
+                        p.name,
+                        p.base_url,
+                        owners.join(", ")
                     ),
                 });
             }
@@ -1824,9 +2135,9 @@ mod tests {
     async fn auth_redacted_label() {
         let api_key_auth = ProviderAuth::ApiKey("sk-1234567890abcdef".into());
         let label = api_key_auth.redacted_label();
-        assert!(label.starts_with("api_key:"));
-        assert!(label.contains("..."));
-        assert!(!label.contains("1234567890abcdef"));
+        assert_eq!(label, "api_key:[redacted]");
+        assert!(!label.contains("sk-1234"));
+        assert!(!label.contains("cdef"));
 
         let cred_auth = ProviderAuth::CredentialId("my-uuid".into());
         assert_eq!(cred_auth.redacted_label(), "credential_id:my-uuid");
@@ -1994,6 +2305,65 @@ mod tests {
         assert!(LlmRouterConnector::host_allowed("http://[::1]:3000"));
     }
 
+    fn litellm_provider_for_url(base_url: &str) -> ProviderConfig {
+        ProviderConfig {
+            name: "litellm".into(),
+            base_url: base_url.into(),
+            auth: ProviderAuth::ApiKey("key".into()),
+            api_path_mode: ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
+            models: vec![ModelInfo {
+                id: "openai/gpt-4o".into(),
+                capabilities: vec![ModelCapability::Code],
+                context_window: 128000,
+                cost_per_input_token: 0.000005,
+                cost_per_output_token: 0.000015,
+            }],
+            priority: 1,
+            passthrough_provider_models: true,
+            image_generation_provider: true,
+        }
+    }
+
+    #[test]
+    fn provider_host_allowed_accepts_litellm_public_https_root_and_v1() {
+        for base_url in [
+            "https://litellm.flywheel.dev",
+            "https://litellm.flywheel.dev/v1",
+            "https://gateway.operator.example.com/v1/",
+        ] {
+            let provider = litellm_provider_for_url(base_url);
+            assert!(
+                LlmRouterConnector::provider_host_allowed(&provider),
+                "expected LiteLLM operator URL to pass: {base_url}"
+            );
+        }
+    }
+
+    #[test]
+    fn provider_host_allowed_rejects_litellm_private_or_ambiguous_hosts() {
+        for base_url in [
+            "http://litellm.flywheel.dev",
+            "https://localhost",
+            "https://127.0.0.1",
+            "https://10.0.0.1",
+            "https://[fd00::1]",
+            "https://litellm",
+            "https://litellm.local",
+            "https://user@litellm.flywheel.dev",
+            "https://litellm.flywheel.dev:444",
+            "https://litellm.flywheel.dev/proxy",
+            "https://litellm.flywheel.dev/v1?proxy=1",
+            "https://litellm.flywheel.dev/v1#fragment",
+        ] {
+            let provider = litellm_provider_for_url(base_url);
+            assert!(
+                !LlmRouterConnector::provider_host_allowed(&provider),
+                "expected LiteLLM operator URL to fail: {base_url}"
+            );
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn configure_rejects_network_constraint_violation() {
         let mut connector = LlmRouterConnector::new();
@@ -2145,6 +2515,25 @@ mod tests {
             .await;
         // Whitespace-only key should be treated as missing
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_header_unsafe_api_key_rejected() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "test",
+                    "base_url": "https://api.anthropic.com",
+                    "api_key": "sk-valid\r\nx-injected: bad",
+                    "models": []
+                }]
+            }))
+            .await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("valid HTTP Authorization header value"));
+        assert!(!err.contains("sk-valid"));
+        assert!(!err.contains("x-injected"));
     }
 
     // ---- Invoke edge cases ----

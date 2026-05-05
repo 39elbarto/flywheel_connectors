@@ -1,6 +1,11 @@
 //! LLM Router types.
 
+use std::fmt;
+
+use reqwest::header::{HeaderName, HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
+use url::Url;
 
 /// Routing strategy for provider selection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -85,12 +90,21 @@ impl Default for BudgetEnforcement {
 }
 
 /// Provider authentication mode.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub enum ProviderAuth {
     /// Direct API key (secrets in memory).
     ApiKey(String),
     /// Secretless via egress proxy credential injection.
     CredentialId(String),
+}
+
+impl fmt::Debug for ProviderAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
+        }
+    }
 }
 
 impl ProviderAuth {
@@ -100,19 +114,582 @@ impl ProviderAuth {
 
     pub fn redacted_label(&self) -> String {
         match self {
-            Self::ApiKey(key) => {
-                let chars: Vec<char> = key.chars().collect();
-                if chars.len() > 8 {
-                    let prefix: String = chars[..4].iter().collect();
-                    let suffix: String = chars[chars.len() - 4..].iter().collect();
-                    format!("api_key:{prefix}...{suffix}")
-                } else {
-                    "api_key:****".into()
-                }
-            }
+            Self::ApiKey(_) => "api_key:[redacted]".into(),
             Self::CredentialId(id) => format!("credential_id:{id}"),
         }
     }
+
+    pub fn bearer_authorization_header(&self) -> Result<Option<HeaderValue>, InvalidHeaderValue> {
+        match self {
+            Self::ApiKey(key) => HeaderValue::from_str(&format!("Bearer {key}")).map(Some),
+            Self::CredentialId(_) => Ok(None),
+        }
+    }
+}
+
+/// Cloudflare AI Gateway header for authenticated gateway/BYOK traffic.
+pub const CLOUDFLARE_AI_GATEWAY_AUTH_HEADER_NAME: &str = "cf-aig-authorization";
+
+/// How an OpenAI-compatible API path is resolved against a provider base URL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderApiPathMode {
+    /// Append `/v1/<endpoint>` to a provider origin such as `https://api.openai.com`.
+    AppendV1,
+    /// Append `<endpoint>` directly because the base URL already includes `/v1/...`.
+    OpenAiCompatibleBase,
+}
+
+/// Provider HTTP header containing secret material.
+#[derive(Clone)]
+pub struct ProviderHttpHeader {
+    name: HeaderName,
+    value: HeaderValue,
+}
+
+impl fmt::Debug for ProviderHttpHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProviderHttpHeader")
+            .field("name", &self.name.as_str())
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl ProviderHttpHeader {
+    pub fn bearer_secret(name: HeaderName, secret: &str) -> Result<Self, InvalidHeaderValue> {
+        let value = HeaderValue::from_str(&format!("Bearer {secret}"))?;
+        Ok(Self { name, value })
+    }
+
+    pub fn cloudflare_ai_gateway_authorization(secret: &str) -> Result<Self, InvalidHeaderValue> {
+        Self::bearer_secret(
+            HeaderName::from_static(CLOUDFLARE_AI_GATEWAY_AUTH_HEADER_NAME),
+            secret,
+        )
+    }
+
+    pub fn name(&self) -> &HeaderName {
+        &self.name
+    }
+
+    pub fn value(&self) -> &HeaderValue {
+        &self.value
+    }
+
+    pub fn redacted_label(&self) -> String {
+        format!("{}:[redacted]", self.name.as_str())
+    }
+}
+
+/// Authentication header a gateway provider may require beyond provider auth.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GatewayAuthHeader {
+    /// Standard OpenAI-compatible bearer token in the `Authorization` header.
+    AuthorizationBearer,
+    /// Cloudflare AI Gateway bearer token in the `cf-aig-authorization` header.
+    CloudflareAiGatewayAuthorization,
+}
+
+/// Base URL strategy for an OpenAI-compatible gateway provider.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GatewayEndpoint {
+    /// Fixed OpenAI-compatible base URL owned by the gateway provider.
+    FixedOpenAiCompatible {
+        base_url: &'static str,
+        host: &'static str,
+        api_path_mode: ProviderApiPathMode,
+    },
+    /// Cloudflare AI Gateway URL built from account and gateway identifiers.
+    CloudflareAiGateway {
+        host: &'static str,
+        provider_path: &'static str,
+    },
+    /// Operator-configured OpenAI-compatible gateway with no static host admission.
+    OperatorConfiguredOpenAiCompatible,
+}
+
+impl GatewayEndpoint {
+    pub const fn static_host(self) -> Option<&'static str> {
+        match self {
+            Self::FixedOpenAiCompatible { host, .. } | Self::CloudflareAiGateway { host, .. } => {
+                Some(host)
+            }
+            Self::OperatorConfiguredOpenAiCompatible => None,
+        }
+    }
+
+    pub const fn fixed_base_url(self) -> Option<&'static str> {
+        match self {
+            Self::FixedOpenAiCompatible { base_url, .. } => Some(base_url),
+            Self::CloudflareAiGateway { .. } | Self::OperatorConfiguredOpenAiCompatible => None,
+        }
+    }
+
+    pub const fn api_path_mode(self) -> ProviderApiPathMode {
+        match self {
+            Self::FixedOpenAiCompatible { api_path_mode, .. } => api_path_mode,
+            Self::CloudflareAiGateway { .. } | Self::OperatorConfiguredOpenAiCompatible => {
+                ProviderApiPathMode::OpenAiCompatibleBase
+            }
+        }
+    }
+
+    pub fn cloudflare_base_url(
+        self,
+        account_id: &str,
+        gateway_id: &str,
+    ) -> Result<String, GatewayDescriptorError> {
+        let Self::CloudflareAiGateway {
+            host,
+            provider_path,
+        } = self
+        else {
+            return Err(GatewayDescriptorError::WrongEndpointKind);
+        };
+        validate_gateway_path_segment("account_id", account_id)?;
+        validate_gateway_path_segment("gateway_id", gateway_id)?;
+        Ok(format!(
+            "https://{host}/v1/{}/{}/{}",
+            account_id.trim(),
+            gateway_id.trim(),
+            provider_path.trim_matches('/')
+        ))
+    }
+}
+
+/// Alias rewrite for gateway model identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayModelAlias {
+    pub alias: &'static str,
+    pub canonical: &'static str,
+}
+
+/// Metadata for one OpenAI-compatible gateway provider admitted by llm-router.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GatewayProviderDescriptor {
+    pub id: &'static str,
+    pub display_name: &'static str,
+    pub auth_env_vars: &'static [&'static str],
+    pub auth_choice_id: &'static str,
+    pub endpoint: GatewayEndpoint,
+    pub auth_headers: &'static [GatewayAuthHeader],
+    pub aliases: &'static [GatewayModelAlias],
+    pub passthrough_provider_models: bool,
+    pub image_generation_provider: bool,
+}
+
+impl GatewayProviderDescriptor {
+    pub fn normalize_model_id(&self, model_id: &str) -> String {
+        let trimmed = model_id.trim();
+        if trimmed.contains('/') {
+            return trimmed.to_string();
+        }
+
+        let canonical = self
+            .aliases
+            .iter()
+            .find(|alias| alias.alias == trimmed)
+            .map_or(trimmed, |alias| alias.canonical);
+
+        if canonical.starts_with("claude-") {
+            format!("anthropic/{canonical}")
+        } else {
+            canonical.to_string()
+        }
+    }
+}
+
+/// Errors raised while validating gateway-provider descriptors.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum GatewayDescriptorError {
+    #[error("gateway provider descriptor has an empty id")]
+    EmptyProviderId,
+    #[error("duplicate gateway provider id: {0}")]
+    DuplicateProviderId(String),
+    #[error("gateway provider {provider_id} has no auth env vars")]
+    MissingAuthEnvVars { provider_id: String },
+    #[error("gateway provider {provider_id} has an empty auth env var")]
+    EmptyAuthEnvVar { provider_id: String },
+    #[error("gateway provider {provider_id} has an invalid fixed base URL: {reason}")]
+    InvalidFixedBaseUrl { provider_id: String, reason: String },
+    #[error("gateway provider {provider_id} has an empty alias")]
+    EmptyAlias { provider_id: String },
+    #[error("duplicate gateway model alias for {provider_id}: {alias}")]
+    DuplicateAlias { provider_id: String, alias: String },
+    #[error("{field} must contain only ASCII letters, digits, underscore, or dash")]
+    InvalidPathSegment { field: &'static str },
+    #[error("endpoint is not Cloudflare AI Gateway")]
+    WrongEndpointKind,
+}
+
+const VERCEL_AI_GATEWAY_ALIASES: &[GatewayModelAlias] = &[
+    GatewayModelAlias {
+        alias: "opus-4.6",
+        canonical: "claude-opus-4-6",
+    },
+    GatewayModelAlias {
+        alias: "opus-4.5",
+        canonical: "claude-opus-4-5",
+    },
+    GatewayModelAlias {
+        alias: "sonnet-4.6",
+        canonical: "claude-sonnet-4-6",
+    },
+    GatewayModelAlias {
+        alias: "sonnet-4.5",
+        canonical: "claude-sonnet-4-5",
+    },
+];
+
+const XAI_ALIASES: &[GatewayModelAlias] = &[
+    GatewayModelAlias {
+        alias: "grok-4-fast-reasoning",
+        canonical: "grok-4-fast",
+    },
+    GatewayModelAlias {
+        alias: "grok-4-1-fast-reasoning",
+        canonical: "grok-4-1-fast",
+    },
+    GatewayModelAlias {
+        alias: "grok-4.20-experimental-beta-0304-reasoning",
+        canonical: "grok-4.20-beta-latest-reasoning",
+    },
+    GatewayModelAlias {
+        alias: "grok-4.20-experimental-beta-0304-non-reasoning",
+        canonical: "grok-4.20-beta-latest-non-reasoning",
+    },
+    GatewayModelAlias {
+        alias: "grok-4.20-reasoning",
+        canonical: "grok-4.20-beta-latest-reasoning",
+    },
+    GatewayModelAlias {
+        alias: "grok-4.20-non-reasoning",
+        canonical: "grok-4.20-beta-latest-non-reasoning",
+    },
+];
+
+const CLOUDFLARE_GATEWAY_AUTH_HEADERS: &[GatewayAuthHeader] = &[
+    GatewayAuthHeader::AuthorizationBearer,
+    GatewayAuthHeader::CloudflareAiGatewayAuthorization,
+];
+
+const STANDARD_BEARER_AUTH_HEADERS: &[GatewayAuthHeader] =
+    &[GatewayAuthHeader::AuthorizationBearer];
+
+const BUILT_IN_GATEWAY_PROVIDER_DESCRIPTORS: &[GatewayProviderDescriptor] = &[
+    GatewayProviderDescriptor {
+        id: "cloudflare-ai-gateway",
+        display_name: "Cloudflare AI Gateway",
+        auth_env_vars: &["CLOUDFLARE_AI_GATEWAY_API_KEY"],
+        auth_choice_id: "cloudflare-ai-gateway-api-key",
+        endpoint: GatewayEndpoint::CloudflareAiGateway {
+            host: "gateway.ai.cloudflare.com",
+            provider_path: "openai",
+        },
+        auth_headers: CLOUDFLARE_GATEWAY_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: true,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "vercel-ai-gateway",
+        display_name: "Vercel AI Gateway",
+        auth_env_vars: &["AI_GATEWAY_API_KEY"],
+        auth_choice_id: "ai-gateway-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://ai-gateway.vercel.sh/v1",
+            host: "ai-gateway.vercel.sh",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: VERCEL_AI_GATEWAY_ALIASES,
+        passthrough_provider_models: true,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "litellm",
+        display_name: "LiteLLM",
+        auth_env_vars: &["LITELLM_API_KEY"],
+        auth_choice_id: "litellm-api-key",
+        endpoint: GatewayEndpoint::OperatorConfiguredOpenAiCompatible,
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: true,
+        image_generation_provider: true,
+    },
+    GatewayProviderDescriptor {
+        id: "deepseek",
+        display_name: "DeepSeek",
+        auth_env_vars: &["DEEPSEEK_API_KEY"],
+        auth_choice_id: "deepseek-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.deepseek.com",
+            host: "api.deepseek.com",
+            api_path_mode: ProviderApiPathMode::AppendV1,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "groq",
+        display_name: "Groq",
+        auth_env_vars: &["GROQ_API_KEY"],
+        auth_choice_id: "groq-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.groq.com/openai/v1",
+            host: "api.groq.com",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "xai",
+        display_name: "xAI",
+        auth_env_vars: &["XAI_API_KEY"],
+        auth_choice_id: "xai-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.x.ai/v1",
+            host: "api.x.ai",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: XAI_ALIASES,
+        passthrough_provider_models: false,
+        image_generation_provider: true,
+    },
+    GatewayProviderDescriptor {
+        id: "openrouter",
+        display_name: "OpenRouter",
+        auth_env_vars: &["OPENROUTER_API_KEY"],
+        auth_choice_id: "openrouter-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://openrouter.ai/api/v1",
+            host: "openrouter.ai",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: true,
+        image_generation_provider: true,
+    },
+    GatewayProviderDescriptor {
+        id: "moonshot",
+        display_name: "Moonshot AI",
+        auth_env_vars: &["MOONSHOT_API_KEY", "KIMI_API_KEY"],
+        auth_choice_id: "moonshot-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.moonshot.ai/v1",
+            host: "api.moonshot.ai",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "kimi",
+        display_name: "Kimi",
+        auth_env_vars: &["KIMI_API_KEY", "KIMICODE_API_KEY"],
+        auth_choice_id: "kimi-code-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.moonshot.ai/v1",
+            host: "api.moonshot.ai",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "kimi-coding",
+        display_name: "Kimi Coding",
+        auth_env_vars: &["KIMI_API_KEY", "KIMICODE_API_KEY"],
+        auth_choice_id: "kimi-code-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.moonshot.ai/v1",
+            host: "api.moonshot.ai",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "qwen",
+        display_name: "Qwen",
+        auth_env_vars: &["QWEN_API_KEY", "MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"],
+        auth_choice_id: "qwen-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+            host: "dashscope-intl.aliyuncs.com",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+    GatewayProviderDescriptor {
+        id: "together",
+        display_name: "Together AI",
+        auth_env_vars: &["TOGETHER_API_KEY"],
+        auth_choice_id: "together-api-key",
+        endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+            base_url: "https://api.together.xyz/v1",
+            host: "api.together.xyz",
+            api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+        },
+        auth_headers: STANDARD_BEARER_AUTH_HEADERS,
+        aliases: &[],
+        passthrough_provider_models: false,
+        image_generation_provider: false,
+    },
+];
+
+const BASE_LLM_ROUTER_ALLOWED_HOSTS: &[&str] = &[
+    "api.anthropic.com",
+    "api.openai.com",
+    "generativelanguage.googleapis.com",
+];
+
+pub const fn built_in_gateway_provider_descriptors() -> &'static [GatewayProviderDescriptor] {
+    BUILT_IN_GATEWAY_PROVIDER_DESCRIPTORS
+}
+
+pub fn gateway_provider_descriptor(
+    provider_id: &str,
+) -> Option<&'static GatewayProviderDescriptor> {
+    BUILT_IN_GATEWAY_PROVIDER_DESCRIPTORS
+        .iter()
+        .find(|descriptor| descriptor.id == provider_id)
+}
+
+pub fn llm_router_host_is_allowed(host: &str) -> bool {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    BASE_LLM_ROUTER_ALLOWED_HOSTS.contains(&normalized.as_str())
+        || BUILT_IN_GATEWAY_PROVIDER_DESCRIPTORS
+            .iter()
+            .filter_map(|descriptor| descriptor.endpoint.static_host())
+            .any(|allowed| allowed == normalized)
+}
+
+pub fn validate_gateway_provider_catalog(
+    descriptors: &[GatewayProviderDescriptor],
+) -> Result<(), GatewayDescriptorError> {
+    for (idx, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.id.trim().is_empty() {
+            return Err(GatewayDescriptorError::EmptyProviderId);
+        }
+        if descriptors
+            .iter()
+            .take(idx)
+            .any(|seen| seen.id == descriptor.id)
+        {
+            return Err(GatewayDescriptorError::DuplicateProviderId(
+                descriptor.id.into(),
+            ));
+        }
+        if descriptor.auth_env_vars.is_empty() {
+            return Err(GatewayDescriptorError::MissingAuthEnvVars {
+                provider_id: descriptor.id.into(),
+            });
+        }
+        if descriptor
+            .auth_env_vars
+            .iter()
+            .any(|env| env.trim().is_empty())
+        {
+            return Err(GatewayDescriptorError::EmptyAuthEnvVar {
+                provider_id: descriptor.id.into(),
+            });
+        }
+        validate_fixed_endpoint(descriptor)?;
+        validate_aliases(descriptor)?;
+    }
+    Ok(())
+}
+
+fn validate_fixed_endpoint(
+    descriptor: &GatewayProviderDescriptor,
+) -> Result<(), GatewayDescriptorError> {
+    let Some(base_url) = descriptor.endpoint.fixed_base_url() else {
+        return Ok(());
+    };
+    let parsed =
+        Url::parse(base_url).map_err(|error| GatewayDescriptorError::InvalidFixedBaseUrl {
+            provider_id: descriptor.id.into(),
+            reason: error.to_string(),
+        })?;
+    let host = parsed
+        .host_str()
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        .ok_or_else(|| GatewayDescriptorError::InvalidFixedBaseUrl {
+            provider_id: descriptor.id.into(),
+            reason: "missing host".into(),
+        })?;
+    let expected_host = descriptor.endpoint.static_host().unwrap_or_default();
+    if parsed.scheme() != "https"
+        || parsed.port_or_known_default() != Some(443)
+        || host != expected_host
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        return Err(GatewayDescriptorError::InvalidFixedBaseUrl {
+            provider_id: descriptor.id.into(),
+            reason:
+                "must be an https URL on the descriptor host with no userinfo, query, or fragment"
+                    .into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_aliases(descriptor: &GatewayProviderDescriptor) -> Result<(), GatewayDescriptorError> {
+    for (idx, alias) in descriptor.aliases.iter().enumerate() {
+        if alias.alias.trim().is_empty() || alias.canonical.trim().is_empty() {
+            return Err(GatewayDescriptorError::EmptyAlias {
+                provider_id: descriptor.id.into(),
+            });
+        }
+        if descriptor
+            .aliases
+            .iter()
+            .take(idx)
+            .any(|seen| seen.alias == alias.alias)
+        {
+            return Err(GatewayDescriptorError::DuplicateAlias {
+                provider_id: descriptor.id.into(),
+                alias: alias.alias.into(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn validate_gateway_path_segment(
+    field: &'static str,
+    value: &str,
+) -> Result<(), GatewayDescriptorError> {
+    let trimmed = value.trim();
+    if trimmed.is_empty()
+        || !trimmed
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+    {
+        return Err(GatewayDescriptorError::InvalidPathSegment { field });
+    }
+    Ok(())
 }
 
 /// Configuration for a single provider backend.
@@ -121,8 +698,12 @@ pub struct ProviderConfig {
     pub name: String,
     pub base_url: String,
     pub auth: ProviderAuth,
+    pub api_path_mode: ProviderApiPathMode,
+    pub extra_headers: Vec<ProviderHttpHeader>,
     pub models: Vec<ModelInfo>,
     pub priority: u32,
+    pub passthrough_provider_models: bool,
+    pub image_generation_provider: bool,
 }
 
 /// Per-provider provisioning readiness.
@@ -187,6 +768,314 @@ pub struct ProviderUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TEST_AUTH_ENV_VARS: &[&str] = &["TEST_API_KEY"];
+    const TEST_AUTH_HEADERS: &[GatewayAuthHeader] = &[GatewayAuthHeader::AuthorizationBearer];
+    const TEST_ALIASES: &[GatewayModelAlias] = &[];
+
+    fn test_gateway_descriptor(id: &'static str) -> GatewayProviderDescriptor {
+        GatewayProviderDescriptor {
+            id,
+            display_name: "Test Gateway",
+            auth_env_vars: TEST_AUTH_ENV_VARS,
+            auth_choice_id: "test-api-key",
+            endpoint: GatewayEndpoint::FixedOpenAiCompatible {
+                base_url: "https://gateway.test.example/v1",
+                host: "gateway.test.example",
+                api_path_mode: ProviderApiPathMode::OpenAiCompatibleBase,
+            },
+            auth_headers: TEST_AUTH_HEADERS,
+            aliases: TEST_ALIASES,
+            passthrough_provider_models: true,
+            image_generation_provider: false,
+        }
+    }
+
+    #[test]
+    fn built_in_gateway_provider_catalog_is_valid() {
+        validate_gateway_provider_catalog(built_in_gateway_provider_descriptors()).unwrap();
+    }
+
+    #[test]
+    fn gateway_host_policy_admits_existing_and_static_gateway_hosts() {
+        assert!(llm_router_host_is_allowed("api.anthropic.com"));
+        assert!(llm_router_host_is_allowed("api.openai.com."));
+        assert!(llm_router_host_is_allowed(
+            "GENerativelanguage.googleapis.com"
+        ));
+        assert!(llm_router_host_is_allowed("gateway.ai.cloudflare.com"));
+        assert!(llm_router_host_is_allowed("ai-gateway.vercel.sh"));
+        assert!(llm_router_host_is_allowed("api.deepseek.com"));
+        assert!(llm_router_host_is_allowed("api.groq.com"));
+        assert!(llm_router_host_is_allowed("api.x.ai"));
+        assert!(llm_router_host_is_allowed("openrouter.ai"));
+        assert!(llm_router_host_is_allowed("api.moonshot.ai"));
+        assert!(llm_router_host_is_allowed("dashscope-intl.aliyuncs.com"));
+        assert!(llm_router_host_is_allowed("api.together.xyz"));
+        assert!(!llm_router_host_is_allowed("api.cloudflare.com"));
+        assert!(!llm_router_host_is_allowed("api.vercel.com"));
+        assert!(!llm_router_host_is_allowed("localhost"));
+    }
+
+    #[test]
+    fn cloudflare_gateway_base_url_is_built_from_segments() {
+        let descriptor = gateway_provider_descriptor("cloudflare-ai-gateway").unwrap();
+        let base_url = descriptor
+            .endpoint
+            .cloudflare_base_url(" account_123 ", "gateway-prod")
+            .unwrap();
+        assert_eq!(
+            base_url,
+            "https://gateway.ai.cloudflare.com/v1/account_123/gateway-prod/openai"
+        );
+
+        let err = descriptor
+            .endpoint
+            .cloudflare_base_url("account/123", "gateway-prod")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            GatewayDescriptorError::InvalidPathSegment {
+                field: "account_id"
+            }
+        ));
+    }
+
+    #[test]
+    fn cloudflare_gateway_base_url_rejects_path_query_and_fragment_input() {
+        let descriptor = gateway_provider_descriptor("cloudflare-ai-gateway").unwrap();
+        for (account_id, gateway_id, field) in [
+            ("account/123", "gateway-prod", "account_id"),
+            ("account?123", "gateway-prod", "account_id"),
+            ("account_123", "gateway#prod", "gateway_id"),
+            ("account_123", "gateway.prod", "gateway_id"),
+        ] {
+            let err = descriptor
+                .endpoint
+                .cloudflare_base_url(account_id, gateway_id)
+                .unwrap_err();
+            assert!(
+                matches!(err, GatewayDescriptorError::InvalidPathSegment { field: actual } if actual == field),
+                "expected invalid {field}, got {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cloudflare_gateway_auth_header_validates_and_redacts_secret() {
+        let header =
+            ProviderHttpHeader::cloudflare_ai_gateway_authorization("cf-gateway-secret").unwrap();
+        assert_eq!(
+            header.name().as_str(),
+            CLOUDFLARE_AI_GATEWAY_AUTH_HEADER_NAME
+        );
+        assert_eq!(header.value().to_str().unwrap(), "Bearer cf-gateway-secret");
+
+        let debug = format!("{header:?}");
+        assert!(debug.contains(CLOUDFLARE_AI_GATEWAY_AUTH_HEADER_NAME));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("cf-gateway-secret"));
+        assert_eq!(header.redacted_label(), "cf-aig-authorization:[redacted]");
+    }
+
+    #[test]
+    fn cloudflare_gateway_auth_header_rejects_header_injection() {
+        let err =
+            ProviderHttpHeader::cloudflare_ai_gateway_authorization("cf-good\r\nx-injected: bad")
+                .unwrap_err();
+        let message = err.to_string();
+        assert!(!message.contains("cf-good"));
+        assert!(!message.contains("x-injected"));
+    }
+
+    #[test]
+    fn cloudflare_base_url_rejects_wrong_endpoint_kind() {
+        let descriptor = gateway_provider_descriptor("vercel-ai-gateway").unwrap();
+        let err = descriptor
+            .endpoint
+            .cloudflare_base_url("account", "gateway")
+            .unwrap_err();
+        assert_eq!(err, GatewayDescriptorError::WrongEndpointKind);
+    }
+
+    #[test]
+    fn vercel_gateway_aliases_normalize_bare_claude_names() {
+        let descriptor = gateway_provider_descriptor("vercel-ai-gateway").unwrap();
+        assert_eq!(
+            descriptor.normalize_model_id("opus-4.6"),
+            "anthropic/claude-opus-4-6"
+        );
+        assert_eq!(
+            descriptor.normalize_model_id("sonnet-4.5"),
+            "anthropic/claude-sonnet-4-5"
+        );
+        assert_eq!(
+            descriptor.normalize_model_id("anthropic/claude-opus-4.6"),
+            "anthropic/claude-opus-4.6"
+        );
+    }
+
+    #[test]
+    fn vercel_gateway_descriptor_has_fixed_base_url_and_auth_metadata() {
+        let descriptor = gateway_provider_descriptor("vercel-ai-gateway").unwrap();
+        assert_eq!(
+            descriptor.endpoint.fixed_base_url(),
+            Some("https://ai-gateway.vercel.sh/v1")
+        );
+        assert_eq!(
+            descriptor.endpoint.api_path_mode(),
+            ProviderApiPathMode::OpenAiCompatibleBase
+        );
+        assert_eq!(
+            descriptor.endpoint.static_host(),
+            Some("ai-gateway.vercel.sh")
+        );
+        assert_eq!(descriptor.auth_env_vars, &["AI_GATEWAY_API_KEY"]);
+        assert_eq!(descriptor.auth_choice_id, "ai-gateway-api-key");
+        assert_eq!(descriptor.auth_headers, STANDARD_BEARER_AUTH_HEADERS);
+        assert!(descriptor.passthrough_provider_models);
+        assert!(!descriptor.image_generation_provider);
+    }
+
+    #[test]
+    fn fixed_long_tail_descriptors_preserve_openai_compatible_path_modes() {
+        for (id, base_url, path_mode, env_vars) in [
+            (
+                "deepseek",
+                "https://api.deepseek.com",
+                ProviderApiPathMode::AppendV1,
+                &["DEEPSEEK_API_KEY"][..],
+            ),
+            (
+                "groq",
+                "https://api.groq.com/openai/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["GROQ_API_KEY"][..],
+            ),
+            (
+                "xai",
+                "https://api.x.ai/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["XAI_API_KEY"][..],
+            ),
+            (
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["OPENROUTER_API_KEY"][..],
+            ),
+            (
+                "moonshot",
+                "https://api.moonshot.ai/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["MOONSHOT_API_KEY", "KIMI_API_KEY"][..],
+            ),
+            (
+                "kimi-coding",
+                "https://api.moonshot.ai/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["KIMI_API_KEY", "KIMICODE_API_KEY"][..],
+            ),
+            (
+                "qwen",
+                "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["QWEN_API_KEY", "MODELSTUDIO_API_KEY", "DASHSCOPE_API_KEY"][..],
+            ),
+            (
+                "together",
+                "https://api.together.xyz/v1",
+                ProviderApiPathMode::OpenAiCompatibleBase,
+                &["TOGETHER_API_KEY"][..],
+            ),
+        ] {
+            let descriptor = gateway_provider_descriptor(id).unwrap();
+            assert_eq!(descriptor.endpoint.fixed_base_url(), Some(base_url));
+            assert_eq!(descriptor.endpoint.api_path_mode(), path_mode);
+            assert_eq!(descriptor.auth_env_vars, env_vars);
+            assert_eq!(descriptor.auth_headers, STANDARD_BEARER_AUTH_HEADERS);
+        }
+    }
+
+    #[test]
+    fn xai_aliases_normalize_openclaw_reasoning_names() {
+        let descriptor = gateway_provider_descriptor("xai").unwrap();
+        assert_eq!(
+            descriptor.normalize_model_id("grok-4-fast-reasoning"),
+            "grok-4-fast"
+        );
+        assert_eq!(
+            descriptor.normalize_model_id("grok-4.20-non-reasoning"),
+            "grok-4.20-beta-latest-non-reasoning"
+        );
+    }
+
+    #[test]
+    fn litellm_descriptor_is_operator_configured_and_image_capable() {
+        let descriptor = gateway_provider_descriptor("litellm").unwrap();
+        assert_eq!(descriptor.endpoint.static_host(), None);
+        assert_eq!(descriptor.endpoint.fixed_base_url(), None);
+        assert!(descriptor.passthrough_provider_models);
+        assert!(descriptor.image_generation_provider);
+        assert_eq!(descriptor.auth_env_vars, &["LITELLM_API_KEY"]);
+        assert_eq!(descriptor.auth_choice_id, "litellm-api-key");
+        assert_eq!(descriptor.auth_headers, STANDARD_BEARER_AUTH_HEADERS);
+        assert!(descriptor.aliases.is_empty());
+    }
+
+    #[test]
+    fn gateway_catalog_validation_rejects_duplicate_provider_ids() {
+        let descriptors = [
+            test_gateway_descriptor("duplicate"),
+            test_gateway_descriptor("duplicate"),
+        ];
+        let err = validate_gateway_provider_catalog(&descriptors).unwrap_err();
+        assert_eq!(
+            err,
+            GatewayDescriptorError::DuplicateProviderId("duplicate".into())
+        );
+    }
+
+    #[test]
+    fn gateway_catalog_validation_rejects_missing_auth_env_vars() {
+        let descriptor = GatewayProviderDescriptor {
+            auth_env_vars: &[],
+            ..test_gateway_descriptor("missing-auth")
+        };
+        let err = validate_gateway_provider_catalog(&[descriptor]).unwrap_err();
+        assert_eq!(
+            err,
+            GatewayDescriptorError::MissingAuthEnvVars {
+                provider_id: "missing-auth".into()
+            }
+        );
+    }
+
+    #[test]
+    fn gateway_catalog_validation_rejects_duplicate_aliases() {
+        const DUP_ALIASES: &[GatewayModelAlias] = &[
+            GatewayModelAlias {
+                alias: "mini",
+                canonical: "model-a",
+            },
+            GatewayModelAlias {
+                alias: "mini",
+                canonical: "model-b",
+            },
+        ];
+        let descriptor = GatewayProviderDescriptor {
+            aliases: DUP_ALIASES,
+            ..test_gateway_descriptor("aliases")
+        };
+        let err = validate_gateway_provider_catalog(&[descriptor]).unwrap_err();
+        assert_eq!(
+            err,
+            GatewayDescriptorError::DuplicateAlias {
+                provider_id: "aliases".into(),
+                alias: "mini".into()
+            }
+        );
+    }
 
     // ---- RoutingStrategy ----
 
@@ -386,24 +1275,41 @@ mod tests {
     fn provider_auth_redacted_label_long_key() {
         let auth = ProviderAuth::ApiKey("sk-1234567890abcdef".into());
         let label = auth.redacted_label();
-        assert!(label.starts_with("api_key:sk-1"));
-        assert!(label.contains("..."));
-        assert!(label.ends_with("cdef"));
-        // Must not contain the full key
-        assert!(!label.contains("1234567890abcdef"));
+        assert_eq!(label, "api_key:[redacted]");
+        assert!(!label.contains("sk-1234"));
+        assert!(!label.contains("cdef"));
     }
 
     #[test]
     fn provider_auth_redacted_label_short_key() {
         let auth = ProviderAuth::ApiKey("short".into());
         let label = auth.redacted_label();
-        assert_eq!(label, "api_key:****");
+        assert_eq!(label, "api_key:[redacted]");
     }
 
     #[test]
     fn provider_auth_redacted_label_credential_id() {
         let auth = ProviderAuth::CredentialId("my-uuid-123".into());
         assert_eq!(auth.redacted_label(), "credential_id:my-uuid-123");
+    }
+
+    #[test]
+    fn provider_auth_api_key_builds_bearer_header() {
+        let auth = ProviderAuth::ApiKey("sk-header-safe".into());
+        let header = auth.bearer_authorization_header().unwrap().unwrap();
+        assert_eq!(header.to_str().unwrap(), "Bearer sk-header-safe");
+    }
+
+    #[test]
+    fn provider_auth_rejects_header_unsafe_api_key() {
+        let auth = ProviderAuth::ApiKey("sk-good\r\nsk-bad".into());
+        assert!(auth.bearer_authorization_header().is_err());
+    }
+
+    #[test]
+    fn provider_auth_credential_id_has_no_direct_header() {
+        let auth = ProviderAuth::CredentialId("cred-123".into());
+        assert!(auth.bearer_authorization_header().unwrap().is_none());
     }
 
     // ---- BudgetConfig ----
@@ -658,31 +1564,31 @@ mod tests {
     }
 
     #[test]
-    fn provider_auth_debug_does_not_hide_key() {
-        // Debug derive shows internal data (not redacted)
+    fn provider_auth_debug_hides_key() {
         let auth = ProviderAuth::ApiKey("sk-mysecretkey".into());
         let dbg = format!("{auth:?}");
         assert!(dbg.contains("ApiKey"));
+        assert!(dbg.contains("[REDACTED]"));
+        assert!(!dbg.contains("sk-my"));
+        assert!(!dbg.contains("secretkey"));
     }
 
     #[test]
     fn provider_auth_redacted_label_exact_8_char_key() {
-        // Exactly 8 chars: not > 8, so should be masked
         let auth = ProviderAuth::ApiKey("12345678".into());
-        assert_eq!(auth.redacted_label(), "api_key:****");
+        assert_eq!(auth.redacted_label(), "api_key:[redacted]");
     }
 
     #[test]
     fn provider_auth_redacted_label_9_char_key() {
-        // 9 chars: > 8, so should show first 4 and last 4
         let auth = ProviderAuth::ApiKey("123456789".into());
-        assert_eq!(auth.redacted_label(), "api_key:1234...6789");
+        assert_eq!(auth.redacted_label(), "api_key:[redacted]");
     }
 
     #[test]
     fn provider_auth_redacted_label_empty_key() {
         let auth = ProviderAuth::ApiKey(String::new());
-        assert_eq!(auth.redacted_label(), "api_key:****");
+        assert_eq!(auth.redacted_label(), "api_key:[redacted]");
     }
 
     #[test]
@@ -700,8 +1606,12 @@ mod tests {
             name: "openai".into(),
             base_url: "https://api.openai.com".into(),
             auth: ProviderAuth::ApiKey("sk-test-123456789".into()),
+            api_path_mode: ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![],
             priority: 1,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         };
         let cloned = config.clone();
         assert_eq!(cloned.name, "openai");
@@ -714,8 +1624,12 @@ mod tests {
             name: "anthropic".into(),
             base_url: "https://api.anthropic.com".into(),
             auth: ProviderAuth::CredentialId("cred-1".into()),
+            api_path_mode: ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![],
             priority: 2,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         };
         let dbg = format!("{config:?}");
         assert!(dbg.contains("ProviderConfig"));
@@ -729,8 +1643,12 @@ mod tests {
             name: "test".into(),
             base_url: "http://localhost".into(),
             auth: ProviderAuth::ApiKey("key123456789".into()),
+            api_path_mode: ProviderApiPathMode::AppendV1,
+            extra_headers: Vec::new(),
             models: vec![],
             priority: 0,
+            passthrough_provider_models: false,
+            image_generation_provider: false,
         };
         assert!(config.models.is_empty());
         assert_eq!(config.priority, 0);
@@ -1062,14 +1980,14 @@ mod tests {
     #[test]
     fn provider_auth_api_key_1_char() {
         let auth = ProviderAuth::ApiKey("x".into());
-        assert_eq!(auth.redacted_label(), "api_key:****");
+        assert_eq!(auth.redacted_label(), "api_key:[redacted]");
     }
 
     #[test]
     fn provider_auth_api_key_unicode() {
         let auth = ProviderAuth::ApiKey("sk-日本語テストキーです".into());
         let label = auth.redacted_label();
-        assert!(label.starts_with("api_key:"));
+        assert_eq!(label, "api_key:[redacted]");
     }
 
     #[test]

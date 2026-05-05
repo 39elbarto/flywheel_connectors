@@ -606,6 +606,25 @@ async fn configure_rejects_empty_api_key() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn configure_rejects_header_unsafe_api_key_without_leaking_it() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": "sk-valid\r\nx-injected: bad",
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("valid HTTP Authorization header value"));
+    assert!(!err.contains("sk-valid"));
+    assert!(!err.contains("x-injected"));
+}
+
+#[fcp_async_core::runtime::test]
 async fn configure_with_credential_id_reports_secretless() {
     let mut connector = LlmRouterConnector::new();
     let result = connector
@@ -639,6 +658,588 @@ async fn configure_with_credential_id_reports_secretless() {
             .iter()
             .any(|r| r["code"] == "credential_injection_required")
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_cloudflare_ai_gateway_builds_descriptor_url_and_preserves_passthrough_models() {
+    let mut connector = LlmRouterConnector::new();
+    let provider_key = "provider-openai-secret";
+    let gateway_key = "cloudflare-gateway-secret";
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "cloudflare-ai-gateway",
+                "account_id": "account_123",
+                "gateway_id": "gateway-prod",
+                "api_key": provider_key,
+                "cloudflare_gateway_api_key": gateway_key,
+                "models": [{
+                    "id": "openrouter/openai/gpt-4o",
+                    "capabilities": ["vision", "tool_use"],
+                    "context_window": 128000,
+                    "cost_per_input_token": 0.000005,
+                    "cost_per_output_token": 0.000015
+                }]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning[0]["name"], "cloudflare-ai-gateway");
+    assert_eq!(provisioning[0]["network_ok"], true);
+    assert_eq!(provisioning[0]["models_ok"], true);
+
+    let providers = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.list_providers",
+            "capability_token": "test",
+            "input": {"include_models": true}
+        }))
+        .await
+        .unwrap();
+    let provider = &providers["providers"].as_array().unwrap()[0];
+    assert_eq!(provider["name"], "cloudflare-ai-gateway");
+    assert_eq!(provider["passthrough_provider_models"], true);
+    assert_eq!(provider["models"][0]["id"], "openrouter/openai/gpt-4o");
+    assert_eq!(provider["models"][0]["cost_per_input_token"], 0.000005);
+
+    let doctor = connector.handle_doctor().await.unwrap();
+    let self_check = connector.handle_self_check().await.unwrap();
+    let output = format!(
+        "{}{}{}",
+        serde_json::to_string(&result).unwrap(),
+        serde_json::to_string(&doctor).unwrap(),
+        serde_json::to_string(&self_check).unwrap()
+    );
+    assert!(!output.contains(provider_key));
+    assert!(!output.contains(gateway_key));
+    assert!(output.contains("api_key:[redacted]") || output.contains("\"auth_mode\":\"api_key\""));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_cloudflare_base_url_override() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "cloudflare-ai-gateway",
+                "base_url": "https://gateway.ai.cloudflare.com/v1/other/path/openai",
+                "account_id": "account_123",
+                "gateway_id": "gateway-prod",
+                "api_key": "provider-key",
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("base_url is built from account_id and gateway_id"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_cloudflare_path_query_fragment_inputs() {
+    for (field, account_id, gateway_id) in [
+        ("account_id", "account/123", "gateway-prod"),
+        ("account_id", "account?123", "gateway-prod"),
+        ("gateway_id", "account_123", "gateway#prod"),
+    ] {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "cloudflare-ai-gateway",
+                    "account_id": account_id,
+                    "gateway_id": gateway_id,
+                    "api_key": "provider-key",
+                    "models": []
+                }]
+            }))
+            .await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains(field), "error should name {field}: {err}");
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_cloudflare_gateway_header_injection_without_leaking_secret() {
+    let mut connector = LlmRouterConnector::new();
+    let gateway_key = "cf-good\r\nx-injected: bad";
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "cloudflare-ai-gateway",
+                "account_id": "account_123",
+                "gateway_id": "gateway-prod",
+                "api_key": "provider-key",
+                "cloudflare_gateway_api_key": gateway_key,
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("cloudflare_gateway_api_key must be a valid HTTP header value"));
+    assert!(!err.contains("cf-good"));
+    assert!(!err.contains("x-injected"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_gateway_host_reserved_for_wrong_provider_descriptor() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "evil",
+                "base_url": "https://gateway.ai.cloudflare.com",
+                "api_key": "provider-key",
+                "models": [{
+                    "id": "evil-model",
+                    "capabilities": [],
+                    "context_window": 4096,
+                    "cost_per_input_token": 0.0001,
+                    "cost_per_output_token": 0.0001
+                }]
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("reserved for descriptor(s) 'cloudflare-ai-gateway'"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_vercel_ai_gateway_uses_fixed_descriptor_and_aliases() {
+    let mut connector = LlmRouterConnector::new();
+    let secret_key = "vercel-gateway-secret";
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "vercel-ai-gateway",
+                "api_key": secret_key,
+                "models": [
+                    {
+                        "id": "sonnet-4.6",
+                        "capabilities": ["code", "tool_use"],
+                        "context_window": 200000,
+                        "cost_per_input_token": 0.000003,
+                        "cost_per_output_token": 0.000015
+                    },
+                    {
+                        "id": "openai/gpt-4o",
+                        "capabilities": ["vision"],
+                        "context_window": 128000,
+                        "cost_per_input_token": 0.000005,
+                        "cost_per_output_token": 0.000015
+                    }
+                ]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning[0]["name"], "vercel-ai-gateway");
+    assert_eq!(provisioning[0]["network_ok"], true);
+    assert_eq!(provisioning[0]["auth_mode"], "api_key");
+
+    let providers = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.list_providers",
+            "capability_token": "test",
+            "input": {"include_models": true}
+        }))
+        .await
+        .unwrap();
+    let provider = &providers["providers"].as_array().unwrap()[0];
+    assert_eq!(provider["name"], "vercel-ai-gateway");
+    assert_eq!(provider["passthrough_provider_models"], true);
+    assert_eq!(provider["models"][0]["id"], "anthropic/claude-sonnet-4-6");
+    assert_eq!(provider["models"][1]["id"], "openai/gpt-4o");
+    assert_eq!(provider["models"][0]["cost_per_output_token"], 0.000015);
+
+    let result_str = serde_json::to_string(&result).unwrap();
+    assert!(!result_str.contains(secret_key));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_vercel_ai_gateway_accepts_credential_id_secretless() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "vercel-ai-gateway",
+                "credential_id": "vercel-oidc-or-secret-ref",
+                "models": [{
+                    "id": "opus-4.6",
+                    "capabilities": ["code"],
+                    "context_window": 200000,
+                    "cost_per_input_token": 0.000003,
+                    "cost_per_output_token": 0.000015
+                }]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning[0]["auth_mode"], "credential_id");
+    assert_eq!(provisioning[0]["network_ok"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_vercel_base_url_override() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "vercel-ai-gateway",
+                "base_url": "https://evil.example.com/v1",
+                "api_key": "provider-key",
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("fixed gateway-provider descriptors do not accept base_url overrides"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_vercel_gateway_host_reserved_for_wrong_provider_descriptor() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "evil",
+                "base_url": "https://ai-gateway.vercel.sh/v1",
+                "api_key": "provider-key",
+                "models": [{
+                    "id": "evil-model",
+                    "capabilities": [],
+                    "context_window": 4096,
+                    "cost_per_input_token": 0.0001,
+                    "cost_per_output_token": 0.0001
+                }]
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("reserved for descriptor(s) 'vercel-ai-gateway'"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_litellm_gateway_uses_operator_base_url_and_image_contract() {
+    let mut connector = LlmRouterConnector::new();
+    let secret_key = "litellm-gateway-secret";
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "litellm",
+                "base_url": "https://litellm.flywheel.dev/v1",
+                "api_key": secret_key,
+                "models": [
+                    {
+                        "id": "openrouter/openai/gpt-4o",
+                        "capabilities": ["vision", "tool_use"],
+                        "context_window": 128000,
+                        "cost_per_input_token": 0.000005,
+                        "cost_per_output_token": 0.000015
+                    },
+                    {
+                        "id": "openai/gpt-image-1",
+                        "capabilities": ["vision"],
+                        "context_window": 64000,
+                        "cost_per_input_token": 0.00001,
+                        "cost_per_output_token": 0.00004
+                    }
+                ]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning[0]["name"], "litellm");
+    assert_eq!(provisioning[0]["network_ok"], true);
+    assert_eq!(provisioning[0]["auth_mode"], "api_key");
+    assert_eq!(provisioning[0]["models_ok"], true);
+
+    let providers = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.list_providers",
+            "capability_token": "test",
+            "input": {"include_models": true}
+        }))
+        .await
+        .unwrap();
+    let provider = &providers["providers"].as_array().unwrap()[0];
+    assert_eq!(provider["name"], "litellm");
+    assert_eq!(provider["passthrough_provider_models"], true);
+    assert_eq!(provider["image_generation_provider"], true);
+    assert_eq!(provider["models"][0]["id"], "openrouter/openai/gpt-4o");
+    assert_eq!(provider["models"][1]["id"], "openai/gpt-image-1");
+    assert_eq!(provider["models"][1]["cost_per_output_token"], 0.00004);
+
+    let output = format!(
+        "{}{}{}",
+        serde_json::to_string(&result).unwrap(),
+        serde_json::to_string(&providers).unwrap(),
+        serde_json::to_string(&connector.handle_self_check().await.unwrap()).unwrap()
+    );
+    assert!(!output.contains(secret_key));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_litellm_gateway_accepts_credential_id_secretless() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "litellm",
+                "base_url": "https://litellm.flywheel.dev",
+                "credential_id": "litellm-egress-credential",
+                "models": [{
+                    "id": "openrouter/openai/gpt-4o",
+                    "capabilities": ["vision"],
+                    "context_window": 128000,
+                    "cost_per_input_token": 0.000005,
+                    "cost_per_output_token": 0.000015
+                }]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning[0]["auth_mode"], "credential_id");
+    assert_eq!(provisioning[0]["network_ok"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_litellm_missing_base_url() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "litellm",
+                "api_key": "provider-key",
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("missing base_url"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_litellm_unsafe_operator_base_urls() {
+    for base_url in [
+        "http://litellm.flywheel.dev",
+        "https://localhost",
+        "https://127.0.0.1",
+        "https://10.0.0.1",
+        "https://[fd00::1]",
+        "https://litellm",
+        "https://litellm.local",
+        "https://user@litellm.flywheel.dev",
+        "https://litellm.flywheel.dev:444",
+        "https://litellm.flywheel.dev/proxy",
+        "https://litellm.flywheel.dev/v1?proxy=1",
+        "https://litellm.flywheel.dev/v1#fragment",
+    ] {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "litellm",
+                    "base_url": base_url,
+                    "api_key": "provider-key",
+                    "models": [{
+                        "id": "openrouter/openai/gpt-4o",
+                        "capabilities": [],
+                        "context_window": 128000,
+                        "cost_per_input_token": 0.000005,
+                        "cost_per_output_token": 0.000015
+                    }]
+                }]
+            }))
+            .await;
+        assert!(
+            result.is_err(),
+            "expected unsafe LiteLLM base_url to be rejected: {base_url}"
+        );
+    }
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_litellm_gateway_host_reserved_for_wrong_descriptor() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "litellm",
+                "base_url": "https://ai-gateway.vercel.sh/v1",
+                "api_key": "provider-key",
+                "models": [{
+                    "id": "openai/gpt-4o",
+                    "capabilities": [],
+                    "context_window": 128000,
+                    "cost_per_input_token": 0.000005,
+                    "cost_per_output_token": 0.000015
+                }]
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("reserved for descriptor(s) 'vercel-ai-gateway'"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_long_tail_fixed_provider_catalog_entries() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [
+                {
+                    "name": "deepseek",
+                    "api_key": "deepseek-key",
+                    "models": [{
+                        "id": "deepseek-chat",
+                        "capabilities": ["code"],
+                        "context_window": 131072,
+                        "cost_per_input_token": 0.00000028,
+                        "cost_per_output_token": 0.00000042
+                    }]
+                },
+                {
+                    "name": "groq",
+                    "api_key": "groq-key",
+                    "models": [{
+                        "id": "llama-3.3-70b-versatile",
+                        "capabilities": ["code"],
+                        "context_window": 131072,
+                        "cost_per_input_token": 0.00000059,
+                        "cost_per_output_token": 0.00000079
+                    }]
+                },
+                {
+                    "name": "xai",
+                    "api_key": "xai-key",
+                    "models": [{
+                        "id": "grok-4-fast-reasoning",
+                        "capabilities": ["vision"],
+                        "context_window": 256000,
+                        "cost_per_input_token": 0.000001,
+                        "cost_per_output_token": 0.000005
+                    }]
+                },
+                {
+                    "name": "openrouter",
+                    "api_key": "openrouter-key",
+                    "models": [{
+                        "id": "anthropic/claude-sonnet-4",
+                        "capabilities": ["vision", "tool_use"],
+                        "context_window": 200000,
+                        "cost_per_input_token": 0.000003,
+                        "cost_per_output_token": 0.000015
+                    }]
+                },
+                {
+                    "name": "moonshot",
+                    "api_key": "moonshot-key",
+                    "models": [{
+                        "id": "kimi-k2.6",
+                        "capabilities": ["code"],
+                        "context_window": 262144,
+                        "cost_per_input_token": 0.000001,
+                        "cost_per_output_token": 0.000003
+                    }]
+                },
+                {
+                    "name": "kimi-coding",
+                    "api_key": "kimi-key",
+                    "models": [{
+                        "id": "kimi-k2.5",
+                        "capabilities": ["code"],
+                        "context_window": 262144,
+                        "cost_per_input_token": 0.000001,
+                        "cost_per_output_token": 0.000003
+                    }]
+                },
+                {
+                    "name": "qwen",
+                    "api_key": "qwen-key",
+                    "models": [{
+                        "id": "qwen3.5-plus",
+                        "capabilities": ["vision"],
+                        "context_window": 131072,
+                        "cost_per_input_token": 0.000001,
+                        "cost_per_output_token": 0.000004
+                    }]
+                },
+                {
+                    "name": "together",
+                    "api_key": "together-key",
+                    "models": [{
+                        "id": "moonshotai/Kimi-K2.5",
+                        "capabilities": ["vision"],
+                        "context_window": 262144,
+                        "cost_per_input_token": 0.0000005,
+                        "cost_per_output_token": 0.0000028
+                    }]
+                }
+            ]
+        }))
+        .await
+        .unwrap();
+
+    let provisioning = result["provisioning"].as_array().unwrap();
+    assert_eq!(provisioning.len(), 8);
+    for provider in provisioning {
+        assert_eq!(provider["network_ok"], true);
+        assert_eq!(provider["auth_mode"], "api_key");
+    }
+
+    let providers = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.list_providers",
+            "capability_token": "test",
+            "input": {"include_models": true}
+        }))
+        .await
+        .unwrap();
+    let providers = providers["providers"].as_array().unwrap();
+    let xai = providers.iter().find(|p| p["name"] == "xai").unwrap();
+    assert_eq!(xai["models"][0]["id"], "grok-4-fast");
+    assert_eq!(xai["image_generation_provider"], true);
+
+    let openrouter = providers
+        .iter()
+        .find(|p| p["name"] == "openrouter")
+        .unwrap();
+    assert_eq!(openrouter["passthrough_provider_models"], true);
+    assert_eq!(openrouter["image_generation_provider"], true);
+    assert_eq!(openrouter["models"][0]["id"], "anthropic/claude-sonnet-4");
+
+    let kimi = providers
+        .iter()
+        .find(|p| p["name"] == "kimi-coding")
+        .unwrap();
+    assert_eq!(kimi["models"][0]["id"], "kimi-k2.5");
+}
+
+#[fcp_async_core::runtime::test]
+async fn configure_rejects_fixed_long_tail_base_url_override() {
+    let mut connector = LlmRouterConnector::new();
+    let result = connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "groq",
+                "base_url": "https://api.groq.com/v1",
+                "api_key": "groq-key",
+                "models": []
+            }]
+        }))
+        .await;
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("fixed gateway-provider descriptors do not accept base_url overrides"));
 }
 
 #[fcp_async_core::runtime::test]
@@ -704,6 +1305,9 @@ async fn configure_response_does_not_leak_api_keys() {
         !response_str.contains(secret_key),
         "API key leaked in configure response"
     );
+    assert!(!response_str.contains("sk-secret"));
+    assert!(!response_str.contains("cdef"));
+    assert!(response_str.contains("\"auth_mode\":\"api_key\""));
 }
 
 #[fcp_async_core::runtime::test]
@@ -777,9 +1381,39 @@ async fn doctor_does_not_leak_full_api_keys() {
         !doctor_str.contains(secret_key),
         "Full API key leaked in doctor output"
     );
-    // Should contain redacted form
-    assert!(doctor_str.contains("api_key:"));
-    assert!(doctor_str.contains("..."));
+    assert!(!doctor_str.contains("sk-my"));
+    assert!(!doctor_str.contains("9999"));
+    assert!(doctor_str.contains("api_key:[redacted]"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn self_check_does_not_leak_api_keys() {
+    let mut connector = LlmRouterConnector::new();
+    let secret_key = "sk-self-check-secret-314159";
+    connector
+        .handle_configure(json!({
+            "providers": [{
+                "name": "anthropic",
+                "base_url": "https://api.anthropic.com",
+                "api_key": secret_key,
+                "models": [{
+                    "id": "claude-sonnet-4",
+                    "capabilities": ["code"],
+                    "context_window": 200000,
+                    "cost_per_input_token": 0.000003,
+                    "cost_per_output_token": 0.000015
+                }]
+            }]
+        }))
+        .await
+        .unwrap();
+
+    let self_check = connector.handle_self_check().await.unwrap();
+    let self_check_str = serde_json::to_string(&self_check).unwrap();
+    assert!(!self_check_str.contains(secret_key));
+    assert!(!self_check_str.contains("sk-self"));
+    assert!(!self_check_str.contains("314159"));
+    assert!(self_check_str.contains("\"auth_mode\":\"api_key\""));
 }
 
 // ─── Error taxonomy + retry semantics ────────────────────────────────────────

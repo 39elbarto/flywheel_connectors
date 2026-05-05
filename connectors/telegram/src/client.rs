@@ -6,7 +6,8 @@
 use std::time::Duration;
 
 use fcp_sdk::migration::{
-    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+    AttemptOutcome, ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig,
+    HttpRetryConfig, RetryLoop,
 };
 use reqwest::{Client, StatusCode};
 use serde::{Serialize, de::DeserializeOwned};
@@ -95,102 +96,122 @@ impl TelegramClient {
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
             let url = &url;
+            let ctx = ctx.clone();
             async move {
-                let mut req = match method {
-                    "POST" => self.client.post(url.as_str()),
-                    _ => self.client.get(url.as_str()),
-                };
+                match ctx
+                    .run(async move {
+                        let mut req = match method {
+                            "POST" => self.client.post(url.as_str()),
+                            _ => self.client.get(url.as_str()),
+                        };
 
-                if let Some(b) = body {
-                    req = req.json(b);
-                }
+                        if let Some(b) = body {
+                            req = req.json(b);
+                        }
 
-                if let Some(t) = timeout {
-                    req = req.timeout(t);
-                }
+                        if let Some(t) = timeout {
+                            req = req.timeout(t);
+                        }
 
-                let result = req.send().await;
+                        let result = req.send().await;
 
-                match result {
-                    Ok(response) => {
-                        let status = response.status();
+                        match result {
+                            Ok(response) => {
+                                let status = response.status();
 
-                        if status == StatusCode::TOO_MANY_REQUESTS {
-                            // Try HTTP header first
-                            let header_val = response
-                                .headers()
-                                .get("retry-after")
-                                .and_then(|v| v.to_str().ok())
-                                .and_then(|v| v.parse::<u64>().ok());
+                                if status == StatusCode::TOO_MANY_REQUESTS {
+                                    // Try HTTP header first
+                                    let header_val = response
+                                        .headers()
+                                        .get("retry-after")
+                                        .and_then(|v| v.to_str().ok())
+                                        .and_then(|v| v.parse::<u64>().ok());
 
-                            // If no header, parse the JSON body for
-                            // parameters.retry_after (Telegram's native format)
-                            let retry_after_secs =
-                                if let Some(s) = header_val {
-                                    s
-                                } else {
-                                    let body_val =
-                                        response.json::<serde_json::Value>().await.ok().and_then(
-                                            |v| v.get("parameters")?.get("retry_after")?.as_u64(),
-                                        );
-                                    body_val.unwrap_or(5)
+                                    // If no header, parse the JSON body for
+                                    // parameters.retry_after (Telegram's native format)
+                                    let retry_after_secs = if let Some(s) = header_val {
+                                        s
+                                    } else {
+                                        let body_val = response
+                                            .json::<serde_json::Value>()
+                                            .await
+                                            .ok()
+                                            .and_then(|v| {
+                                                v.get("parameters")?.get("retry_after")?.as_u64()
+                                            });
+                                        body_val.unwrap_or(5)
+                                    };
+
+                                    return AttemptOutcome::Retryable {
+                                        error: TelegramError::Api {
+                                            code: 429,
+                                            description: "Too Many Requests".into(),
+                                        },
+                                        retry_after: Some(Duration::from_secs(retry_after_secs)),
+                                    };
+                                }
+
+                                if status.is_server_error() {
+                                    return AttemptOutcome::Retryable {
+                                        error: TelegramError::Api {
+                                            code: i32::from(status.as_u16()),
+                                            description: format!("Server error: {status}"),
+                                        },
+                                        retry_after: None,
+                                    };
+                                }
+
+                                // Parse the Telegram response wrapper
+                                let tg_response: TelegramResponse<T> = match response.json().await {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        return AttemptOutcome::Terminal(TelegramError::Http(e));
+                                    }
                                 };
 
-                            return AttemptOutcome::Retryable {
-                                error: TelegramError::Api {
-                                    code: 429,
-                                    description: "Too Many Requests".into(),
-                                },
-                                retry_after: Some(Duration::from_secs(retry_after_secs)),
-                            };
-                        }
+                                if tg_response.ok {
+                                    return match tg_response.result {
+                                        Some(data) => AttemptOutcome::Success(data),
+                                        None => AttemptOutcome::Terminal(TelegramError::Api {
+                                            code: 0,
+                                            description: "Empty result".into(),
+                                        }),
+                                    };
+                                }
 
-                        if status.is_server_error() {
-                            return AttemptOutcome::Retryable {
-                                error: TelegramError::Api {
-                                    code: i32::from(status.as_u16()),
-                                    description: format!("Server error: {status}"),
-                                },
-                                retry_after: None,
-                            };
-                        }
+                                // Handle logical API errors
+                                let err = TelegramError::Api {
+                                    code: tg_response.error_code.unwrap_or(0),
+                                    description: tg_response
+                                        .description
+                                        .clone()
+                                        .unwrap_or_default(),
+                                };
 
-                        // Parse the Telegram response wrapper
-                        let tg_response: TelegramResponse<T> = match response.json().await {
-                            Ok(r) => r,
-                            Err(e) => return AttemptOutcome::Terminal(TelegramError::Http(e)),
-                        };
-
-                        if tg_response.ok {
-                            return match tg_response.result {
-                                Some(data) => AttemptOutcome::Success(data),
-                                None => AttemptOutcome::Terminal(TelegramError::Api {
-                                    code: 0,
-                                    description: "Empty result".into(),
-                                }),
-                            };
-                        }
-
-                        // Handle logical API errors
-                        let err = TelegramError::Api {
-                            code: tg_response.error_code.unwrap_or(0),
-                            description: tg_response.description.clone().unwrap_or_default(),
-                        };
-
-                        if err.is_retryable() {
-                            AttemptOutcome::Retryable {
-                                retry_after: err.retry_after(),
-                                error: err,
+                                if err.is_retryable() {
+                                    AttemptOutcome::Retryable {
+                                        retry_after: err.retry_after(),
+                                        error: err,
+                                    }
+                                } else {
+                                    AttemptOutcome::Terminal(err)
+                                }
                             }
-                        } else {
-                            AttemptOutcome::Terminal(err)
+                            Err(e) if e.is_timeout() || e.is_connect() => {
+                                AttemptOutcome::Retryable {
+                                    retry_after: None,
+                                    error: TelegramError::Http(e),
+                                }
+                            }
+                            Err(e) => AttemptOutcome::Terminal(TelegramError::Http(e)),
                         }
+                    })
+                    .await
+                {
+                    Ok(outcome) => outcome,
+                    Err(async_err) => {
+                        AttemptOutcome::Terminal(TelegramError::from_async_error(async_err))
                     }
-                    Err(e) if e.is_timeout() || e.is_connect() => AttemptOutcome::Retryable {
-                        retry_after: None,
-                        error: TelegramError::Http(e),
-                    },
-                    Err(e) => AttemptOutcome::Terminal(TelegramError::Http(e)),
                 }
             }
         })

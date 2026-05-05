@@ -1895,6 +1895,9 @@ impl TelegramConnector {
         if let Some(shutdown_tx) = self.poll_shutdown_tx.take() {
             let _ = shutdown_tx.send(true);
         }
+        if let Some(client) = &self.client {
+            client.shutdown();
+        }
         *self.poll_running.write().await = false;
 
         if let Some(mut task) = self.poll_task.take() {
@@ -1905,10 +1908,6 @@ impl TelegramConnector {
                 warn!("Polling task did not stop within timeout, aborting");
                 task.abort();
             }
-        }
-
-        if let Some(client) = &self.client {
-            client.shutdown();
         }
 
         self.client = None;
@@ -2705,18 +2704,35 @@ mod tests {
         stop: Arc<AtomicBool>,
         handle: thread::JoinHandle<()>,
         request_log: Arc<Mutex<Vec<serde_json::Value>>>,
+        get_updates_started: Arc<AtomicBool>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum LoopbackTelegramBehavior {
+        TopicFixture,
+        BlockGetUpdates,
     }
 
     impl LoopbackTelegramServer {
         fn start() -> Self {
+            Self::start_with_behavior(LoopbackTelegramBehavior::TopicFixture)
+        }
+
+        fn start_blocking_get_updates() -> Self {
+            Self::start_with_behavior(LoopbackTelegramBehavior::BlockGetUpdates)
+        }
+
+        fn start_with_behavior(behavior: LoopbackTelegramBehavior) -> Self {
             let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback telegram server");
             let addr = listener.local_addr().expect("loopback local addr");
             let stop = Arc::new(AtomicBool::new(false));
             let request_log = Arc::new(Mutex::new(Vec::new()));
             let get_updates_calls = Arc::new(AtomicUsize::new(0));
+            let get_updates_started = Arc::new(AtomicBool::new(false));
             let thread_stop = Arc::clone(&stop);
             let thread_log = Arc::clone(&request_log);
             let thread_calls = Arc::clone(&get_updates_calls);
+            let thread_updates_started = Arc::clone(&get_updates_started);
             let handle = thread::spawn(move || {
                 for stream in listener.incoming() {
                     if thread_stop.load(Ordering::SeqCst) {
@@ -2728,6 +2744,9 @@ mod tests {
                                 &mut stream,
                                 &thread_log,
                                 &thread_calls,
+                                &thread_stop,
+                                &thread_updates_started,
+                                behavior,
                             );
                         }
                         Err(_) => break,
@@ -2740,7 +2759,16 @@ mod tests {
                 stop,
                 handle,
                 request_log,
+                get_updates_started,
             }
+        }
+
+        fn get_updates_started(&self) -> bool {
+            self.get_updates_started.load(Ordering::SeqCst)
+        }
+
+        fn request_log_snapshot(&self) -> Vec<serde_json::Value> {
+            self.request_log.lock().expect("request log lock").clone()
         }
 
         fn shutdown(self) -> Vec<serde_json::Value> {
@@ -2755,14 +2783,18 @@ mod tests {
         stream: &mut TcpStream,
         request_log: &Arc<Mutex<Vec<serde_json::Value>>>,
         get_updates_calls: &Arc<AtomicUsize>,
+        stop: &Arc<AtomicBool>,
+        get_updates_started: &Arc<AtomicBool>,
+        behavior: LoopbackTelegramBehavior,
     ) {
-        let Some((method, path)) = read_loopback_http_request(stream) else {
+        let Some((method, path, body_payload)) = read_loopback_http_request(stream) else {
             return;
         };
         request_log.lock().expect("request log lock").push(json!({
             "phase": "request",
             "method": method,
             "path": path,
+            "body": body_payload,
         }));
 
         let body = if method == "GET" && path == token_path("getMe") {
@@ -2776,6 +2808,16 @@ mod tests {
                 }
             })
         } else if method == "POST" && path == token_path("getUpdates") {
+            get_updates_started.store(true, Ordering::SeqCst);
+            if behavior == LoopbackTelegramBehavior::BlockGetUpdates {
+                while !stop.load(Ordering::SeqCst) {
+                    thread::sleep(StdDuration::from_millis(10));
+                }
+                let body = json!({ "ok": true, "result": [] });
+                let _ = try_write_loopback_http_response(stream, &body);
+                return;
+            }
+
             let call = get_updates_calls.fetch_add(1, Ordering::SeqCst);
             if call == 0 {
                 json!({
@@ -2874,7 +2916,7 @@ mod tests {
         write_loopback_http_response(stream, &body);
     }
 
-    fn read_loopback_http_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    fn read_loopback_http_request(stream: &mut TcpStream) -> Option<(String, String, String)> {
         stream
             .set_read_timeout(Some(StdDuration::from_secs(2)))
             .ok();
@@ -2894,11 +2936,13 @@ mod tests {
             }
         }
         let request = String::from_utf8_lossy(&bytes);
+        let header_end = bytes.windows(4).position(|window| window == b"\r\n\r\n")?;
         let request_line = request.lines().next()?;
         let mut parts = request_line.split_whitespace();
         let method = parts.next()?.to_owned();
         let path = parts.next()?.to_owned();
-        Some((method, path))
+        let body = String::from_utf8_lossy(&bytes[header_end + 4..]).into_owned();
+        Some((method, path, body))
     }
 
     fn loopback_http_request_complete(bytes: &[u8]) -> bool {
@@ -2916,16 +2960,50 @@ mod tests {
     }
 
     fn write_loopback_http_response(stream: &mut TcpStream, body: &serde_json::Value) {
+        try_write_loopback_http_response(stream, body).expect("write loopback response");
+    }
+
+    fn try_write_loopback_http_response(
+        stream: &mut TcpStream,
+        body: &serde_json::Value,
+    ) -> std::io::Result<()> {
         let body = serde_json::to_string(body).expect("loopback response serializes");
         let response = format!(
             "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
             body.len(),
             body
         );
-        stream
-            .write_all(response.as_bytes())
-            .expect("write loopback response");
-        stream.flush().expect("flush loopback response");
+        stream.write_all(response.as_bytes())?;
+        stream.flush()
+    }
+
+    async fn wait_for_loopback_get_updates(server: &LoopbackTelegramServer) -> bool {
+        let started_at = Instant::now();
+        while started_at.elapsed() < StdDuration::from_secs(3) {
+            if server.get_updates_started() {
+                return true;
+            }
+            fcp_async_core::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        false
+    }
+
+    async fn wait_for_get_updates_log_after(
+        server: &LoopbackTelegramServer,
+        baseline_len: usize,
+    ) -> Option<serde_json::Value> {
+        let started_at = Instant::now();
+        while started_at.elapsed() < StdDuration::from_secs(3) {
+            let snapshot = server.request_log_snapshot();
+            if let Some(entry) = snapshot.into_iter().skip(baseline_len).find(|entry| {
+                entry.get("path").and_then(serde_json::Value::as_str)
+                    == Some(token_path("getUpdates").as_str())
+            }) {
+                return Some(entry);
+            }
+            fcp_async_core::time::sleep(StdDuration::from_millis(10)).await;
+        }
+        None
     }
 
     async fn setup_connector_with_token(
@@ -3991,6 +4069,178 @@ mod tests {
             ),
             "loopback getUpdates route should be exercised"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_shutdown_cancels_blocked_poll_and_releases_lease() {
+        let loopback = LoopbackTelegramServer::start_blocking_get_updates();
+        let mut connector = TelegramConnector::new();
+
+        connector
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": loopback.base_url.clone(),
+                "poll_timeout": 30
+            }))
+            .await
+            .expect("configure should hit loopback getMe");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("shutdown-cancels-blocked-poll");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("handshake should start blocked polling task");
+
+        assert!(
+            wait_for_loopback_get_updates(&loopback).await,
+            "loopback getUpdates request should start before shutdown"
+        );
+
+        let shutdown_started = Instant::now();
+        fcp_async_core::time::timeout(
+            StdDuration::from_millis(1_500),
+            connector.handle_shutdown(json!({})),
+        )
+        .await
+        .expect("shutdown should not wait for the 2s abort fallback")
+        .expect("shutdown should succeed");
+
+        assert!(
+            shutdown_started.elapsed() < StdDuration::from_secs(2),
+            "shutdown should cancel the in-flight long poll instead of timing out into abort"
+        );
+        assert!(connector.poll_task.is_none());
+        assert!(!*connector.poll_running.read().await);
+
+        let lease_path = Path::new(&zone_dir).join(TELEGRAM_POLL_LEASE_FILE);
+        assert!(
+            !lease_path.exists(),
+            "graceful cancellation should release the singleton polling lease"
+        );
+
+        let request_log = loopback.shutdown();
+        assert!(
+            request_log.iter().any(
+                |entry| entry.get("path").and_then(serde_json::Value::as_str)
+                    == Some(token_path("getUpdates").as_str())
+            ),
+            "blocked long-poll path should have been exercised"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_polling_restart_reuses_cursor_and_reacquires_lease() {
+        let loopback = LoopbackTelegramServer::start();
+        let zone_dir = unique_zone_dir("polling-restart-cursor");
+
+        let mut first = TelegramConnector::new();
+        let mut event_rx = first.event_tx.subscribe();
+        first
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": loopback.base_url.clone(),
+                "poll_timeout": 1,
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [208214988]
+                }
+            }))
+            .await
+            .expect("first configure should hit loopback getMe");
+
+        let first_signing_key = Ed25519SigningKey::generate();
+        let first_verifying_key = first_signing_key.verifying_key();
+        first
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir.clone(),
+                "host_public_key": first_verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("first handshake should start polling");
+
+        for _ in 0..3 {
+            fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+                .await
+                .expect("timed out waiting for first-run polling event")
+                .expect("broadcast receive should succeed")
+                .expect("event payload should be ok");
+        }
+
+        first
+            .handle_shutdown(json!({}))
+            .await
+            .expect("first shutdown should stop polling");
+
+        let cursor_path = Path::new(&zone_dir).join(TELEGRAM_POLL_CURSOR_FILE);
+        let cursor_state = read_json_file_if_exists::<TelegramPollingCursorState>(&cursor_path)
+            .expect("cursor state should be readable")
+            .expect("cursor state should persist after first run");
+        assert_eq!(cursor_state.offset, Some(2003));
+
+        let first_log_len = loopback.request_log_snapshot().len();
+        let mut second = TelegramConnector::new();
+        second
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": loopback.base_url.clone(),
+                "poll_timeout": 1,
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [208214988]
+                }
+            }))
+            .await
+            .expect("second configure should hit loopback getMe");
+
+        let second_signing_key = Ed25519SigningKey::generate();
+        let second_verifying_key = second_signing_key.verifying_key();
+        second
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir.clone(),
+                "host_public_key": second_verifying_key.to_bytes(),
+                "nonce": vec![1u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("second handshake should reacquire released polling lease");
+
+        let restarted_get_updates = wait_for_get_updates_log_after(&loopback, first_log_len)
+            .await
+            .expect("restart should issue a getUpdates request");
+        assert!(
+            restarted_get_updates
+                .get("body")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|body| body.contains("\"offset\":2003")),
+            "restart should restore the persisted polling cursor"
+        );
+
+        second
+            .handle_shutdown(json!({}))
+            .await
+            .expect("second shutdown should stop polling");
+
+        let lease_path = Path::new(&zone_dir).join(TELEGRAM_POLL_LEASE_FILE);
+        assert!(
+            !lease_path.exists(),
+            "restart shutdown should release the reacquired polling lease"
+        );
+        let _request_log = loopback.shutdown();
     }
 
     #[fcp_async_core::runtime::test]

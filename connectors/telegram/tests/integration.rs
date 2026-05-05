@@ -478,7 +478,8 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"telegram.send_media"));
     assert!(op_ids.contains(&"telegram.get_file"));
     assert!(op_ids.contains(&"telegram.answer_callback_query"));
-    assert_eq!(ops.len(), 4);
+    assert!(op_ids.contains(&"telegram.ingest_webhook_update"));
+    assert_eq!(ops.len(), 5);
 }
 
 #[fcp_async_core::test]

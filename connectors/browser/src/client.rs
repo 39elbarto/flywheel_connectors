@@ -11,6 +11,7 @@ use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
 
 use crate::{
@@ -26,6 +27,11 @@ pub const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
 
 /// Required FCP browser-control contract version.
 pub const BROWSER_CONTROL_PROTOCOL_VERSION: u64 = 1;
+
+#[cfg(not(test))]
+const MAX_BROWSER_CONTROL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+#[cfg(test)]
+const MAX_BROWSER_CONTROL_RESPONSE_BYTES: usize = 8 * 1024;
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -745,7 +751,10 @@ impl BrowserClient {
                         }
 
                         if status.is_server_error() {
-                            let body = response.text().await.unwrap_or_default();
+                            let body = match read_limited_response_text(response).await {
+                                Ok(body) => body,
+                                Err(err) => return AttemptOutcome::Terminal(err),
+                            };
                             let err = BrowserError::Api {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
@@ -757,7 +766,10 @@ impl BrowserClient {
                         }
 
                         if !status.is_success() {
-                            let body = response.text().await.unwrap_or_default();
+                            let body = match read_limited_response_text(response).await {
+                                Ok(body) => body,
+                                Err(err) => return AttemptOutcome::Terminal(err),
+                            };
                             let api_err: Option<ApiErrorResponse> =
                                 serde_json::from_str(&body).ok();
                             let message = api_err
@@ -771,12 +783,12 @@ impl BrowserClient {
                             });
                         }
 
-                        match response.text().await {
+                        match read_limited_response_text(response).await {
                             Ok(body) => match serde_json::from_str(&body) {
                                 Ok(data) => AttemptOutcome::Success(data),
                                 Err(e) => AttemptOutcome::Terminal(BrowserError::Serialization(e)),
                             },
-                            Err(e) => AttemptOutcome::Terminal(BrowserError::Http(e)),
+                            Err(e) => AttemptOutcome::Terminal(e),
                         }
                     }
                     Err(e) => {
@@ -802,6 +814,50 @@ impl BrowserClient {
             Ok(body) => looks_like_chrome_cdp_version(&body),
             Err(_) => false,
         }
+    }
+}
+
+async fn read_limited_response_text(response: reqwest::Response) -> BrowserResult<String> {
+    let status = response.status();
+    if let Some(content_length) = response.content_length() {
+        if usize::try_from(content_length)
+            .map_or(true, |length| length > MAX_BROWSER_CONTROL_RESPONSE_BYTES)
+        {
+            return Err(response_size_limit_error(status, Some(content_length)));
+        }
+    }
+
+    let mut body = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.map_err(BrowserError::Http)?;
+        if body.len().saturating_add(chunk.len()) > MAX_BROWSER_CONTROL_RESPONSE_BYTES {
+            return Err(response_size_limit_error(status, None));
+        }
+        body.extend_from_slice(&chunk);
+    }
+
+    String::from_utf8(body).map_err(|e| BrowserError::Api {
+        message: format!("browser control response is not valid UTF-8 JSON: {e}"),
+        status_code: Some(status.as_u16()),
+    })
+}
+
+fn response_size_limit_error(status: StatusCode, content_length: Option<u64>) -> BrowserError {
+    let message = match content_length {
+        Some(content_length) => format!(
+            "browser control response exceeds {MAX_BROWSER_CONTROL_RESPONSE_BYTES} byte limit: content-length {content_length}"
+        ),
+        None => {
+            format!(
+                "browser control response exceeds {MAX_BROWSER_CONTROL_RESPONSE_BYTES} byte limit"
+            )
+        }
+    };
+
+    BrowserError::Api {
+        message,
+        status_code: Some(status.as_u16()),
     }
 }
 
@@ -1510,6 +1566,32 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.is_retryable());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_oversized_browser_control_response_is_rejected() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/navigate"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
+                b'x';
+                MAX_BROWSER_CONTROL_RESPONSE_BYTES
+                    + 1
+            ]))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let result = client
+            .navigate("https://example.com", None, None, None)
+            .await;
+        let err = result.unwrap_err();
+        assert!(format!("{err}").contains("browser control response exceeds"));
     }
 
     #[fcp_async_core::runtime::test]

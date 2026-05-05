@@ -63,6 +63,10 @@ pub struct BlueBubblesConfig {
     /// Optional DM split-send coalescing posture for accepted inbound webhooks.
     #[serde(default)]
     pub webhook_coalescing: BlueBubblesWebhookCoalescingConfig,
+
+    /// Optional API fallback for resolving missing inbound reply context.
+    #[serde(default)]
+    pub reply_context_api_fallback: BlueBubblesReplyContextApiFallbackConfig,
 }
 
 /// Policy and persistence config for accepted inbound `BlueBubbles` webhook events.
@@ -327,6 +331,145 @@ pub struct BlueBubblesWebhookCoalescingSummary {
     pub max_pending_buffers: usize,
 }
 
+/// Per-account or per-chat override for reply-context fallback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesReplyContextFallbackOverride {
+    /// Account namespace this override applies to.
+    #[serde(default)]
+    pub account_id: Option<String>,
+
+    /// Chat GUID or identifier this override applies to.
+    #[serde(default)]
+    pub chat_guid: Option<String>,
+
+    /// Override value. Chat-scoped overrides take precedence over account-scoped overrides.
+    pub enabled: bool,
+}
+
+/// Config for best-effort reply context fetches on accepted inbound webhooks.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesReplyContextApiFallbackConfig {
+    /// Global default. Defaults to false for privacy and network minimization.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Account/chat-specific overrides. Chat-scoped matches win over account matches.
+    #[serde(default)]
+    pub overrides: Vec<BlueBubblesReplyContextFallbackOverride>,
+
+    /// Maximum sanitized reply ID length accepted before path construction.
+    #[serde(default = "default_reply_context_max_reply_id_chars")]
+    pub max_reply_id_chars: usize,
+
+    /// Maximum bytes read from the `BlueBubbles` message lookup response.
+    #[serde(default = "default_reply_context_max_response_bytes")]
+    pub max_response_bytes: usize,
+}
+
+impl Default for BlueBubblesReplyContextApiFallbackConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            overrides: Vec::new(),
+            max_reply_id_chars: default_reply_context_max_reply_id_chars(),
+            max_response_bytes: default_reply_context_max_response_bytes(),
+        }
+    }
+}
+
+impl BlueBubblesReplyContextApiFallbackConfig {
+    fn validate(mut self) -> Result<Self, FcpError> {
+        for override_config in &mut self.overrides {
+            override_config.account_id = override_config
+                .account_id
+                .as_deref()
+                .and_then(nonempty_string);
+            override_config.chat_guid = override_config
+                .chat_guid
+                .as_deref()
+                .and_then(nonempty_string);
+        }
+        self.overrides.retain(|override_config| {
+            override_config.account_id.is_some() || override_config.chat_guid.is_some()
+        });
+
+        if self.max_reply_id_chars == 0 {
+            return Err(invalid_config(
+                "reply_context_api_fallback.max_reply_id_chars must be greater than zero",
+            ));
+        }
+        if self.max_reply_id_chars > MAX_WEBHOOK_GUID_CHARS {
+            return Err(invalid_config(format!(
+                "reply_context_api_fallback.max_reply_id_chars must not exceed {MAX_WEBHOOK_GUID_CHARS}"
+            )));
+        }
+        if self.max_response_bytes == 0 {
+            return Err(invalid_config(
+                "reply_context_api_fallback.max_response_bytes must be greater than zero",
+            ));
+        }
+
+        Ok(self)
+    }
+
+    /// Return a PII-safe summary suitable for doctor/introspection surfaces.
+    #[must_use]
+    pub fn summary(&self) -> BlueBubblesReplyContextApiFallbackSummary {
+        BlueBubblesReplyContextApiFallbackSummary {
+            enabled: self.enabled,
+            account_override_count: self
+                .overrides
+                .iter()
+                .filter(|override_config| {
+                    override_config.account_id.is_some() && override_config.chat_guid.is_none()
+                })
+                .count(),
+            chat_override_count: self
+                .overrides
+                .iter()
+                .filter(|override_config| override_config.chat_guid.is_some())
+                .count(),
+            max_reply_id_chars: self.max_reply_id_chars,
+            max_response_bytes: self.max_response_bytes,
+        }
+    }
+
+    /// Resolve fallback enablement for one accepted inbound event.
+    #[must_use]
+    pub fn enabled_for(&self, account_id: &str, chat_keys: &[String]) -> bool {
+        for chat_key in chat_keys {
+            if let Some(override_config) = self.overrides.iter().find(|override_config| {
+                override_config.chat_guid.as_deref() == Some(chat_key.as_str())
+                    && override_config
+                        .account_id
+                        .as_deref()
+                        .is_none_or(|configured| configured == account_id)
+            }) {
+                return override_config.enabled;
+            }
+        }
+
+        if let Some(override_config) = self.overrides.iter().find(|override_config| {
+            override_config.chat_guid.is_none()
+                && override_config.account_id.as_deref() == Some(account_id)
+        }) {
+            return override_config.enabled;
+        }
+
+        self.enabled
+    }
+}
+
+/// PII-safe reply-context fallback summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesReplyContextApiFallbackSummary {
+    pub enabled: bool,
+    pub account_override_count: usize,
+    pub chat_override_count: usize,
+    pub max_reply_id_chars: usize,
+    pub max_response_bytes: usize,
+}
+
 /// Result of applying inbound sender/conversation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlueBubblesInboundDecision {
@@ -384,6 +527,7 @@ impl BlueBubblesConfig {
         self.webhook_account_id = self.webhook_account_id.trim().to_string();
         self.webhook_inbound = self.webhook_inbound.validate()?;
         self.webhook_coalescing = self.webhook_coalescing.validate()?;
+        self.reply_context_api_fallback = self.reply_context_api_fallback.validate()?;
 
         if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
@@ -477,6 +621,10 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("webhook_account_id", &self.webhook_account_id)
             .field("webhook_inbound", &self.webhook_inbound.summary())
             .field("webhook_coalescing", &self.webhook_coalescing.summary())
+            .field(
+                "reply_context_api_fallback",
+                &self.reply_context_api_fallback.summary(),
+            )
             .finish()
     }
 }
@@ -543,6 +691,14 @@ const fn default_webhook_coalescing_max_source_messages() -> usize {
 
 const fn default_webhook_coalescing_max_pending_buffers() -> usize {
     256
+}
+
+const fn default_reply_context_max_reply_id_chars() -> usize {
+    MAX_WEBHOOK_GUID_CHARS
+}
+
+const fn default_reply_context_max_response_bytes() -> usize {
+    256 * 1024
 }
 
 fn normalize_webhook_path(path: &str) -> String {
@@ -650,6 +806,32 @@ pub struct Message {
     #[serde(default)]
     pub handle: Option<MessageHandle>,
 
+    /// Chat GUID included by single-message lookup responses when available.
+    #[serde(
+        default,
+        rename = "chatGuid",
+        alias = "chat_guid",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_guid: Option<String>,
+
+    /// Chat identifier included by single-message lookup responses when available.
+    #[serde(
+        default,
+        rename = "chatIdentifier",
+        alias = "chat_identifier",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_identifier: Option<String>,
+
+    /// Embedded chat metadata included by some `BlueBubbles` responses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat: Option<MessageChatReference>,
+
+    /// Embedded chat list included by webhook-like or expanded responses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chats: Vec<MessageChatReference>,
+
     /// Attachments on this message.
     #[serde(default)]
     pub attachments: Vec<Attachment>,
@@ -665,6 +847,57 @@ pub struct Message {
     /// Group action type (member added/removed, name change, etc.).
     #[serde(default)]
     pub group_action_type: Option<i32>,
+}
+
+impl Message {
+    /// Return non-empty chat identifiers exposed by this message without leaking participant data.
+    #[must_use]
+    pub fn conversation_keys(&self) -> Vec<String> {
+        let mut keys = Vec::new();
+        push_optional_key(&mut keys, self.chat_guid.as_deref());
+        push_optional_key(&mut keys, self.chat_identifier.as_deref());
+        if let Some(chat) = &self.chat {
+            chat.push_conversation_keys(&mut keys);
+        }
+        for chat in &self.chats {
+            chat.push_conversation_keys(&mut keys);
+        }
+        keys
+    }
+}
+
+/// Lightweight chat reference embedded in message lookup responses.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MessageChatReference {
+    /// `BlueBubbles` chat GUID, when exposed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guid: Option<String>,
+
+    /// Alternate chat GUID spelling used by some response shapes.
+    #[serde(
+        default,
+        rename = "chatGuid",
+        alias = "chat_guid",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_guid: Option<String>,
+
+    /// Alternate chat identifier spelling used by some response shapes.
+    #[serde(
+        default,
+        rename = "chatIdentifier",
+        alias = "chat_identifier",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub chat_identifier: Option<String>,
+}
+
+impl MessageChatReference {
+    fn push_conversation_keys(&self, keys: &mut Vec<String>) {
+        push_optional_key(keys, self.guid.as_deref());
+        push_optional_key(keys, self.chat_guid.as_deref());
+        push_optional_key(keys, self.chat_identifier.as_deref());
+    }
 }
 
 /// Handle (sender) information for a message.
@@ -938,6 +1171,10 @@ pub struct NormalizedBlueBubblesWebhookMessage {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to_message_guid: Option<String>,
 
+    /// Best-effort reply context resolved from cache or the `BlueBubbles` API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_context: Option<BlueBubblesReplyContext>,
+
     /// Associated message GUID used by tapbacks, replies, stickers, and previews.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub associated_message_guid: Option<String>,
@@ -971,12 +1208,34 @@ pub struct NormalizedBlueBubblesWebhookMessage {
 }
 
 impl NormalizedBlueBubblesWebhookMessage {
-    fn conversation_keys(&self) -> Vec<String> {
+    /// Return non-empty chat identifiers that scope caches and policy.
+    #[must_use]
+    pub fn conversation_keys(&self) -> Vec<String> {
         [&self.chat_guid, &self.chat_identifier]
             .into_iter()
             .filter_map(|value| value.as_deref().and_then(nonempty_string))
             .collect()
     }
+}
+
+/// Reply context intentionally omits reply text and sender names.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlueBubblesReplyContext {
+    /// Canonical message GUID fetched from `BlueBubbles`.
+    pub message_guid: String,
+
+    /// Whether the reply body exists; body text is not serialized.
+    pub text_present: bool,
+
+    /// Whether this reply was sent by the local account.
+    pub is_from_me: bool,
+
+    /// Number of attachments on the referenced reply.
+    pub attachment_count: usize,
+
+    /// Reply creation timestamp in epoch milliseconds, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_created_ms: Option<i64>,
 }
 
 const MAX_WEBHOOK_GUID_CHARS: usize = 512;
@@ -1059,6 +1318,15 @@ fn read_string_array(record: Option<&Map<String, Value>>, keys: &[&str]) -> Vec<
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn push_optional_key(keys: &mut Vec<String>, value: Option<&str>) {
+    let Some(value) = value.and_then(nonempty_string) else {
+        return;
+    };
+    if !keys.iter().any(|existing| existing == &value) {
+        keys.push(value);
+    }
 }
 
 fn read_record<'a>(
@@ -1284,6 +1552,7 @@ pub fn normalize_bluebubbles_webhook_payload(
         is_group,
         attachments: normalize_attachments(record),
         reply_to_message_guid,
+        reply_context: None,
         associated_message_guid,
         associated_message_type,
         balloon_bundle_id,
@@ -1391,6 +1660,13 @@ mod tests {
         assert_eq!(config.webhook_coalescing.max_attachments, 20);
         assert_eq!(config.webhook_coalescing.max_source_messages, 10);
         assert_eq!(config.webhook_coalescing.max_pending_buffers, 256);
+        assert!(!config.reply_context_api_fallback.enabled);
+        assert!(config.reply_context_api_fallback.overrides.is_empty());
+        assert_eq!(config.reply_context_api_fallback.max_reply_id_chars, 512);
+        assert_eq!(
+            config.reply_context_api_fallback.max_response_bytes,
+            256 * 1024
+        );
         assert!(config.attachment_dir.is_none());
     }
 
@@ -1443,6 +1719,16 @@ mod tests {
                 "max_attachments": 4,
                 "max_source_messages": 3,
                 "max_pending_buffers": 8
+            },
+            "reply_context_api_fallback": {
+                "enabled": false,
+                "max_reply_id_chars": 128,
+                "max_response_bytes": 4096,
+                "overrides": [
+                    { "account_id": " acct-a ", "enabled": false },
+                    { "chat_guid": " iMessage;-;+15551234567 ", "enabled": true },
+                    { "account_id": " ", "chat_guid": " ", "enabled": true }
+                ]
             }
         }))
         .unwrap();
@@ -1473,6 +1759,16 @@ mod tests {
         assert_eq!(config.webhook_coalescing.max_attachments, 4);
         assert_eq!(config.webhook_coalescing.max_source_messages, 3);
         assert_eq!(config.webhook_coalescing.max_pending_buffers, 8);
+        assert!(!config.reply_context_api_fallback.enabled);
+        assert_eq!(config.reply_context_api_fallback.max_reply_id_chars, 128);
+        assert_eq!(config.reply_context_api_fallback.max_response_bytes, 4096);
+        assert_eq!(config.reply_context_api_fallback.overrides.len(), 2);
+        assert!(!config.reply_context_api_fallback.enabled_for("acct-a", &[]));
+        assert!(
+            config
+                .reply_context_api_fallback
+                .enabled_for("acct-a", &["iMessage;-;+15551234567".to_string()])
+        );
     }
 
     #[test]
@@ -1556,6 +1852,18 @@ mod tests {
             serde_json::json!({
                 "password": "secret",
                 "webhook_coalescing": { "max_pending_buffers": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "reply_context_api_fallback": { "max_reply_id_chars": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "reply_context_api_fallback": { "max_reply_id_chars": 513 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "reply_context_api_fallback": { "max_response_bytes": 0 }
             }),
         ];
 

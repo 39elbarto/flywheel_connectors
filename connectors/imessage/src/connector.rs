@@ -1,6 +1,6 @@
 //! `BlueBubbles` `iMessage` connector implementation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -23,7 +23,7 @@ use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
 use crate::types::{
-    BlueBubblesConfig, BlueBubblesWebhookCoalescingConfig, Message,
+    BlueBubblesConfig, BlueBubblesReplyContext, BlueBubblesWebhookCoalescingConfig, Message,
     NormalizedBlueBubblesWebhookMessage, QueryParams, bluebubbles_webhook_source_dedupe_ids,
     default_webhook_events, normalize_bluebubbles_webhook_payload,
 };
@@ -613,6 +613,10 @@ fn combine_coalesced_messages(
         .iter()
         .find_map(|entry| entry.reply_to_message_guid.clone())
         .or(first.reply_to_message_guid);
+    first.reply_context = bounded_entries
+        .iter()
+        .find_map(|entry| entry.reply_context.clone())
+        .or(first.reply_context);
     first.associated_message_guid = bounded_entries
         .iter()
         .find_map(|entry| entry.associated_message_guid.clone())
@@ -669,6 +673,217 @@ impl DoctorResult {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct BlueBubblesReplyContextCacheKey {
+    account_id: String,
+    chat_key: String,
+    reply_id: String,
+}
+
+impl BlueBubblesReplyContextCacheKey {
+    fn new(account_id: &str, chat_key: &str, reply_id: &str) -> Self {
+        Self {
+            account_id: normalized_reply_account_id(account_id).to_string(),
+            chat_key: chat_key.to_string(),
+            reply_id: reply_id.to_string(),
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct BlueBubblesReplyContextCache {
+    entries: Mutex<BTreeMap<BlueBubblesReplyContextCacheKey, BlueBubblesReplyContext>>,
+    in_flight: Mutex<BTreeSet<BlueBubblesReplyContextCacheKey>>,
+}
+
+impl BlueBubblesReplyContextCache {
+    fn get(
+        &self,
+        key: &BlueBubblesReplyContextCacheKey,
+    ) -> FcpResult<Option<BlueBubblesReplyContext>> {
+        let entries = self.entries.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles reply context cache lock was poisoned".into(),
+        })?;
+        Ok(entries.get(key).cloned())
+    }
+
+    fn insert(
+        &self,
+        key: BlueBubblesReplyContextCacheKey,
+        context: BlueBubblesReplyContext,
+    ) -> FcpResult<()> {
+        self.entries
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "BlueBubbles reply context cache lock was poisoned".into(),
+            })?
+            .insert(key, context);
+        Ok(())
+    }
+
+    fn begin_fetch(&self, key: &BlueBubblesReplyContextCacheKey) -> FcpResult<bool> {
+        let mut in_flight = self.in_flight.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles reply context in-flight lock was poisoned".into(),
+        })?;
+        Ok(in_flight.insert(key.clone()))
+    }
+
+    fn finish_fetch(&self, key: &BlueBubblesReplyContextCacheKey) -> FcpResult<()> {
+        self.in_flight
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "BlueBubbles reply context in-flight lock was poisoned".into(),
+            })?
+            .remove(key);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BlueBubblesReplyContextLookup {
+    enabled: bool,
+    status: &'static str,
+    reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reply_id: Option<String>,
+    cache_hit: bool,
+    fetched: bool,
+}
+
+impl BlueBubblesReplyContextLookup {
+    const fn disabled(reason: &'static str) -> Self {
+        Self {
+            enabled: false,
+            status: "disabled",
+            reason,
+            reply_id: None,
+            cache_hit: false,
+            fetched: false,
+        }
+    }
+
+    const fn skipped(reason: &'static str, reply_id: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            status: "skipped",
+            reason,
+            reply_id,
+            cache_hit: false,
+            fetched: false,
+        }
+    }
+
+    const fn cache_hit(reply_id: String) -> Self {
+        Self {
+            enabled: true,
+            status: "cache_hit",
+            reason: "reply_context_cached",
+            reply_id: Some(reply_id),
+            cache_hit: true,
+            fetched: false,
+        }
+    }
+
+    const fn fetched(reply_id: String) -> Self {
+        Self {
+            enabled: true,
+            status: "fetched",
+            reason: "reply_context_fetched",
+            reply_id: Some(reply_id),
+            cache_hit: false,
+            fetched: true,
+        }
+    }
+
+    const fn degraded(reason: &'static str, reply_id: Option<String>) -> Self {
+        Self {
+            enabled: true,
+            status: "degraded",
+            reason,
+            reply_id,
+            cache_hit: false,
+            fetched: false,
+        }
+    }
+}
+
+fn normalized_reply_account_id(account_id: &str) -> &str {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        "default"
+    } else {
+        account_id
+    }
+}
+
+fn canonical_reply_message_id(raw_id: &str, max_chars: usize) -> Result<String, &'static str> {
+    let raw_id = raw_id.trim();
+    if raw_id.is_empty() {
+        return Err("reply_id_missing");
+    }
+
+    let id = if let Some(alias) = raw_id.strip_prefix("p:") {
+        let Some((part_index, guid)) = alias.split_once('/') else {
+            return Err("reply_id_part_alias_malformed");
+        };
+        if part_index.is_empty() || !part_index.chars().all(|ch| ch.is_ascii_digit()) {
+            return Err("reply_id_part_alias_malformed");
+        }
+        guid.trim()
+    } else {
+        raw_id
+    };
+
+    if id.is_empty() {
+        return Err("reply_id_missing");
+    }
+    if id.chars().count() > max_chars {
+        return Err("reply_id_too_long");
+    }
+    let lower = id.to_ascii_lowercase();
+    if id.contains('/')
+        || id.contains('\\')
+        || id.contains("..")
+        || lower.contains("%2f")
+        || lower.contains("%5c")
+        || id
+            .chars()
+            .any(|ch| ch.is_ascii_control() || ch.is_ascii_whitespace())
+    {
+        return Err("reply_id_path_unsafe");
+    }
+    if !id
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.' | ':' | '+'))
+    {
+        return Err("reply_id_unsupported_characters");
+    }
+
+    Ok(id.to_string())
+}
+
+fn reply_context_from_message(message: &Message) -> BlueBubblesReplyContext {
+    BlueBubblesReplyContext {
+        message_guid: message.guid.clone(),
+        text_present: message
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty()),
+        is_from_me: message.is_from_me,
+        attachment_count: message.attachments.len(),
+        date_created_ms: message.date_created,
+    }
+}
+
+fn reply_message_scope_matches(event_chat_keys: &[String], message_chat_keys: &[String]) -> bool {
+    message_chat_keys.is_empty()
+        || event_chat_keys.iter().any(|event_key| {
+            message_chat_keys
+                .iter()
+                .any(|message_key| message_key == event_key)
+        })
+}
+
 /// `BlueBubbles` `iMessage` connector state.
 #[derive(Debug)]
 struct BlueBubblesState {
@@ -677,6 +892,7 @@ struct BlueBubblesState {
     runtime: ConnectorRuntime,
     webhook_dedupe: BlueBubblesInboundDedupeStore,
     webhook_coalescer: BlueBubblesWebhookCoalescer,
+    reply_context_cache: BlueBubblesReplyContextCache,
 }
 
 impl BlueBubblesState {
@@ -691,6 +907,7 @@ impl BlueBubblesState {
             })?;
         let webhook_dedupe = BlueBubblesInboundDedupeStore::from_config(&config)?;
         let webhook_coalescer = BlueBubblesWebhookCoalescer::default();
+        let reply_context_cache = BlueBubblesReplyContextCache::default();
 
         Ok(Self {
             config,
@@ -698,7 +915,121 @@ impl BlueBubblesState {
             runtime,
             webhook_dedupe,
             webhook_coalescer,
+            reply_context_cache,
         })
+    }
+
+    async fn resolve_reply_context(
+        &self,
+        account_id: &str,
+        event: &mut NormalizedBlueBubblesWebhookMessage,
+    ) -> BlueBubblesReplyContextLookup {
+        let Some(raw_reply_id) = event.reply_to_message_guid.as_deref() else {
+            return BlueBubblesReplyContextLookup::disabled("event_has_no_reply_id");
+        };
+
+        let chat_keys = event.conversation_keys();
+        let normalized_account_id = normalized_reply_account_id(account_id);
+        if !self
+            .config
+            .reply_context_api_fallback
+            .enabled_for(normalized_account_id, &chat_keys)
+        {
+            return BlueBubblesReplyContextLookup::disabled("config_disabled_for_scope");
+        }
+
+        let reply_id = match canonical_reply_message_id(
+            raw_reply_id,
+            self.config.reply_context_api_fallback.max_reply_id_chars,
+        ) {
+            Ok(reply_id) => reply_id,
+            Err(reason) => return BlueBubblesReplyContextLookup::degraded(reason, None),
+        };
+
+        let Some(chat_key) = chat_keys.first() else {
+            return BlueBubblesReplyContextLookup::skipped("missing_chat_scope", Some(reply_id));
+        };
+        let key = BlueBubblesReplyContextCacheKey::new(normalized_account_id, chat_key, &reply_id);
+
+        match self.reply_context_cache.get(&key) {
+            Ok(Some(context)) => {
+                event.reply_context = Some(context);
+                return BlueBubblesReplyContextLookup::cache_hit(reply_id);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "BlueBubbles reply context cache read failed; degrading to missing context"
+                );
+                return BlueBubblesReplyContextLookup::degraded(
+                    "cache_read_failed",
+                    Some(reply_id),
+                );
+            }
+        }
+
+        match self.reply_context_cache.begin_fetch(&key) {
+            Ok(true) => {}
+            Ok(false) => {
+                return BlueBubblesReplyContextLookup::degraded(
+                    "concurrent_fetch_in_progress",
+                    Some(reply_id),
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "BlueBubbles reply context in-flight mark failed; degrading to missing context"
+                );
+                return BlueBubblesReplyContextLookup::degraded(
+                    "in_flight_lock_failed",
+                    Some(reply_id),
+                );
+            }
+        }
+
+        let fetch_result = self
+            .client
+            .get_message_by_guid(
+                &self.runtime,
+                &reply_id,
+                self.config.reply_context_api_fallback.max_response_bytes,
+            )
+            .await;
+        let finish_result = self.reply_context_cache.finish_fetch(&key);
+        if let Err(error) = finish_result {
+            tracing::warn!(
+                error = %error,
+                "BlueBubbles reply context in-flight release failed"
+            );
+        }
+
+        let message = match fetch_result {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "BlueBubbles reply context fetch failed; preserving inbound event without context"
+                );
+                return BlueBubblesReplyContextLookup::degraded("fetch_failed", Some(reply_id));
+            }
+        };
+
+        let message_chat_keys = message.conversation_keys();
+        if !reply_message_scope_matches(&chat_keys, &message_chat_keys) {
+            return BlueBubblesReplyContextLookup::degraded("chat_scope_mismatch", Some(reply_id));
+        }
+
+        let context = reply_context_from_message(&message);
+        if let Err(error) = self.reply_context_cache.insert(key, context.clone()) {
+            tracing::warn!(
+                error = %error,
+                "BlueBubbles reply context cache insert failed; preserving fetched context on event"
+            );
+        }
+        event.reply_context = Some(context);
+        BlueBubblesReplyContextLookup::fetched(reply_id)
     }
 }
 
@@ -851,6 +1182,7 @@ impl BlueBubblesConnector {
 
             push_webhook_inbound_doctor_checks(&mut checks, config);
             push_webhook_coalescing_doctor_checks(&mut checks, config);
+            push_reply_context_api_fallback_doctor_checks(&mut checks, config);
         }
 
         DoctorResult::from_checks(checks)
@@ -909,6 +1241,26 @@ fn push_webhook_coalescing_doctor_checks(
             coalescing.max_source_messages,
             coalescing.max_pending_buffers,
             coalescing.immediate_command_prefix_count
+        )),
+        critical: false,
+    });
+}
+
+fn push_reply_context_api_fallback_doctor_checks(
+    checks: &mut Vec<DoctorCheck>,
+    config: &BlueBubblesConfig,
+) {
+    let fallback = config.reply_context_api_fallback.summary();
+    checks.push(DoctorCheck {
+        name: "reply_context_api_fallback".into(),
+        passed: true,
+        message: Some(format!(
+            "Reply-context API fallback: enabled={}, account_overrides={}, chat_overrides={}, id_cap={}, response_cap={} bytes",
+            fallback.enabled,
+            fallback.account_override_count,
+            fallback.chat_override_count,
+            fallback.max_reply_id_chars,
+            fallback.max_response_bytes
         )),
         critical: false,
     });
@@ -1380,7 +1732,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_INGEST_WEBHOOK_EVENT),
             summary: "Accept and normalize a BlueBubbles webhook event".into(),
             description: Some(
-                "Normalizes a host-delivered BlueBubbles webhook payload, applies connector-local sender/conversation policy, and atomically claims all account-scoped source replay-dedupe keys".into(),
+                "Normalizes a host-delivered BlueBubbles webhook payload, applies connector-local sender/conversation policy, optionally resolves scoped reply context, and atomically claims all account-scoped source replay-dedupe keys".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -1421,6 +1773,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "acceptance": { "type": "object" },
                     "policy": { "type": "object" },
                     "coalescing": { "type": "object" },
+                    "reply_context_lookup": { "type": "object" },
                     "event": { "type": "object" },
                     "events": { "type": "array", "items": { "type": "object" } }
                 }
@@ -1430,10 +1783,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, optional DM split-send coalescing, and duplicate replay suppression".into(),
+                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, optional reply-context fallback, optional DM split-send coalescing, and duplicate replay suppression".into(),
                 common_mistakes: vec![
                     "Leaving webhook_inbound sender/chat policy empty and expecting external senders to be accepted".into(),
                     "Assuming memory-only dedupe survives connector restart; configure webhook_inbound.dedupe_state_path when restart replay suppression is required".into(),
+                    "Expecting reply-context API fallback to be enabled by default; it is opt-in and scoped by account/chat overrides".into(),
                     "Enabling webhook_coalescing without arranging a host-side flush after debounce_ms; buffered events are emitted on later ingest or explicit flush".into(),
                 ],
                 examples: vec![
@@ -2103,6 +2457,7 @@ impl BlueBubblesConnector {
                             "acceptance": null,
                             "policy": state.config.webhook_inbound.summary(),
                             "coalescing": outcome.summary,
+                            "reply_context_lookup": null,
                             "event": first_event,
                             "events": outcome.events,
                         }),
@@ -2119,7 +2474,7 @@ impl BlueBubblesConnector {
                 let account_id = optional_string(&req.input, "account_id")
                     .unwrap_or(state.config.webhook_account_id.as_str());
                 let event_type = optional_string(&req.input, "event_type");
-                let event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
+                let mut event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
                 let dedupe_ids = bluebubbles_webhook_source_dedupe_ids(account_id, &event);
                 let dedupe_id =
                     dedupe_ids
@@ -2137,28 +2492,37 @@ impl BlueBubblesConnector {
                     .and_then(Value::as_i64)
                     .or(event.date_created_ms)
                     .unwrap_or_else(|| Utc::now().timestamp_millis());
-                let (status, duplicate_id, coalescing, events) = if acceptance.accepted {
-                    match state.webhook_dedupe.claim(&dedupe_ids)? {
-                        BlueBubblesDedupeClaim::Claimed => {
-                            if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
-                                let _ = state.webhook_dedupe.release(&dedupe_ids);
-                                return Err(error);
+                let (status, duplicate_id, coalescing, reply_context_lookup, events) =
+                    if acceptance.accepted {
+                        match state.webhook_dedupe.claim(&dedupe_ids)? {
+                            BlueBubblesDedupeClaim::Claimed => {
+                                if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
+                                    let _ = state.webhook_dedupe.release(&dedupe_ids);
+                                    return Err(error);
+                                }
+                                let reply_context_lookup =
+                                    state.resolve_reply_context(account_id, &mut event).await;
+                                let outcome = state.webhook_coalescer.ingest(
+                                    &state.config.webhook_coalescing,
+                                    account_id,
+                                    event.clone(),
+                                    observed_at_ms,
+                                )?;
+                                (
+                                    outcome.status,
+                                    None,
+                                    Some(outcome.summary),
+                                    Some(reply_context_lookup),
+                                    outcome.events,
+                                )
                             }
-                            let outcome = state.webhook_coalescer.ingest(
-                                &state.config.webhook_coalescing,
-                                account_id,
-                                event.clone(),
-                                observed_at_ms,
-                            )?;
-                            (outcome.status, None, Some(outcome.summary), outcome.events)
+                            BlueBubblesDedupeClaim::Duplicate { matched_id } => {
+                                ("duplicate", Some(matched_id), None, None, Vec::new())
+                            }
                         }
-                        BlueBubblesDedupeClaim::Duplicate { matched_id } => {
-                            ("duplicate", Some(matched_id), None, Vec::new())
-                        }
-                    }
-                } else {
-                    ("rejected", None, None, Vec::new())
-                };
+                    } else {
+                        ("rejected", None, None, None, Vec::new())
+                    };
                 let emitted_event = events.first().cloned();
                 let correlation_id = req
                     .correlation_id
@@ -2175,6 +2539,8 @@ impl BlueBubblesConnector {
                     dedupe_decision = %status,
                     duplicate_id = %duplicate_id.as_deref().unwrap_or("none"),
                     inbound_acceptance = %acceptance.reason,
+                    reply_context_status = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.status),
+                    reply_context_reason = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.reason),
                     coalescing_decision = %coalescing.as_ref().map_or("none", |summary| summary.decision),
                     coalescing_emitted_count = coalescing.as_ref().map_or(0, |summary| summary.emitted_count),
                     coalescing_buffered_count = coalescing.as_ref().map_or(0, |summary| summary.buffered_count),
@@ -2195,6 +2561,7 @@ impl BlueBubblesConnector {
                     "acceptance": acceptance,
                     "policy": policy,
                     "coalescing": coalescing,
+                    "reply_context_lookup": reply_context_lookup,
                     "event": emitted_event,
                     "events": events,
                 })
@@ -2313,6 +2680,20 @@ mod tests {
                 config["webhook_coalescing"][key] = value.clone();
             }
         }
+        config
+    }
+
+    fn test_config_with_reply_context(server_url: &str) -> serde_json::Value {
+        let mut config = test_config_with_url(server_url);
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567", "iMessage;-;+15557654321"]
+        });
+        config["reply_context_api_fallback"] = json!({
+            "enabled": true,
+            "max_reply_id_chars": 128,
+            "max_response_bytes": 4096
+        });
         config
     }
 
@@ -3685,6 +4066,291 @@ mod tests {
             replay.result.as_ref().unwrap()["duplicate_id"],
             "acct-a:msg-secondary"
         );
+    }
+
+    #[test]
+    fn canonical_reply_message_id_accepts_part_alias_and_rejects_path_inputs() {
+        assert_eq!(
+            canonical_reply_message_id(" p:0/root-1 ", 128).unwrap(),
+            "root-1"
+        );
+        assert_eq!(
+            canonical_reply_message_id("message.GUID-1:+", 128).unwrap(),
+            "message.GUID-1:+"
+        );
+        assert_eq!(
+            canonical_reply_message_id("p:x/root-1", 128).unwrap_err(),
+            "reply_id_part_alias_malformed"
+        );
+        assert_eq!(
+            canonical_reply_message_id("../root-1", 128).unwrap_err(),
+            "reply_id_path_unsafe"
+        );
+        assert_eq!(
+            canonical_reply_message_id("root/1", 128).unwrap_err(),
+            "reply_id_path_unsafe"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_fetches_and_caches_reply_context() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/message/root-1"))
+            .and(query_param("password", "test-password-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "guid": "root-1",
+                    "text": "secret reply body",
+                    "date_created": 1_700_000_000_000_i64,
+                    "is_from_me": true,
+                    "chatGuid": "iMessage;-;+15551234567",
+                    "handle": { "address": "+15551234567", "display_name": "Alice" },
+                    "attachments": [{ "guid": "reply-att-1" }]
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-reply-1",
+                        "text": "new message",
+                        "threadOriginatorGuid": "p:0/root-1",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first["status"], "accepted");
+        assert_eq!(first["reply_context_lookup"]["status"], "fetched");
+        assert_eq!(first["reply_context_lookup"]["reply_id"], "root-1");
+        assert_eq!(first["event"]["reply_to_message_guid"], "p:0/root-1");
+        assert_eq!(first["event"]["reply_context"]["message_guid"], "root-1");
+        assert_eq!(first["event"]["reply_context"]["text_present"], true);
+        assert_eq!(first["event"]["reply_context"]["attachment_count"], 1);
+        assert!(
+            !serde_json::to_string(&first)
+                .unwrap()
+                .contains("secret reply body")
+        );
+
+        let second = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-reply-2",
+                        "threadOriginatorGuid": "root-1",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(second["reply_context_lookup"]["status"], "cache_hit");
+        assert_eq!(second["event"]["reply_context"]["message_guid"], "root-1");
+        mock_server.verify().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_coalesces_concurrent_reply_context_fetches() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/message/root-1"))
+            .and(query_param("password", "test-password-123"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({
+                        "data": {
+                            "guid": "root-1",
+                            "text": "secret reply body",
+                            "is_from_me": true,
+                            "chatGuid": "iMessage;-;+15551234567",
+                            "attachments": []
+                        }
+                    })),
+            )
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let connector = Arc::new(connector);
+        let signing_key = Arc::new(signing_key);
+
+        let first_connector = Arc::clone(&connector);
+        let first_signing_key = Arc::clone(&signing_key);
+        let first_task = fcp_async_core::task::spawn(async move {
+            invoke_webhook_result(
+                &first_connector,
+                &first_signing_key,
+                json!({
+                    "account_id": "acct-a",
+                    "payload": {
+                        "type": "new-message",
+                        "data": {
+                            "guid": "msg-concurrent-1",
+                            "threadOriginatorGuid": "root-1",
+                            "handle": { "address": "+15551234567" },
+                            "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                            "isFromMe": false
+                        }
+                    }
+                }),
+            )
+            .await
+        });
+
+        let second_connector = Arc::clone(&connector);
+        let second_signing_key = Arc::clone(&signing_key);
+        let second_task = fcp_async_core::task::spawn(async move {
+            invoke_webhook_result(
+                &second_connector,
+                &second_signing_key,
+                json!({
+                    "account_id": "acct-a",
+                    "payload": {
+                        "type": "new-message",
+                        "data": {
+                            "guid": "msg-concurrent-2",
+                            "threadOriginatorGuid": "root-1",
+                            "handle": { "address": "+15551234567" },
+                            "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                            "isFromMe": false
+                        }
+                    }
+                }),
+            )
+            .await
+        });
+
+        let first = first_task.await.unwrap();
+        let second = second_task.await.unwrap();
+        let results = [&first, &second];
+        let fetched = results
+            .iter()
+            .find(|result| result["reply_context_lookup"]["status"].as_str() == Some("fetched"))
+            .expect("one concurrent event should fetch reply context");
+        let degraded = results
+            .iter()
+            .find(|result| result["reply_context_lookup"]["status"].as_str() == Some("degraded"))
+            .expect("one concurrent event should coalesce behind the in-flight fetch");
+
+        assert_eq!(fetched["event"]["reply_context"]["message_guid"], "root-1");
+        assert_eq!(
+            degraded["reply_context_lookup"]["reason"],
+            "concurrent_fetch_in_progress"
+        );
+        assert!(degraded["event"]["reply_context"].is_null());
+        for result in results {
+            assert!(
+                !serde_json::to_string(result)
+                    .unwrap()
+                    .contains("secret reply body")
+            );
+        }
+        mock_server.verify().await;
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_rejects_cross_chat_reply_context() {
+        let mock_server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/message/root-1"))
+            .and(query_param("password", "test-password-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": {
+                    "guid": "root-1",
+                    "text": "secret reply body",
+                    "is_from_me": false,
+                    "chatGuid": "iMessage;-;+15551234567",
+                    "attachments": []
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_reply_context(&mock_server.uri()))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let result = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-wrong-chat",
+                        "threadOriginatorGuid": "root-1",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15557654321" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(result["status"], "accepted");
+        assert_eq!(result["reply_context_lookup"]["status"], "degraded");
+        assert_eq!(
+            result["reply_context_lookup"]["reason"],
+            "chat_scope_mismatch"
+        );
+        assert!(result["event"]["reply_context"].is_null());
+        assert!(
+            !serde_json::to_string(&result)
+                .unwrap()
+                .contains("secret reply body")
+        );
+        mock_server.verify().await;
     }
 
     #[fcp_async_core::runtime::test]

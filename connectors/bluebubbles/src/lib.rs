@@ -50,7 +50,7 @@ mod tests {
     }
 
     #[test]
-    fn introspect_includes_all_eight_operations() {
+    fn introspect_includes_all_shared_operations() {
         let connector = new_connector();
         let introspection = connector.introspect();
         let expected_ops = [
@@ -61,6 +61,10 @@ mod tests {
             "imessage.sync_events",
             "imessage.download_attachment",
             "imessage.mark_read",
+            "imessage.register_webhook",
+            "imessage.list_webhooks",
+            "imessage.unregister_webhook",
+            "imessage.ingest_webhook_event",
             "imessage.get_server_info",
         ];
         for op in &expected_ops {
@@ -188,7 +192,7 @@ mod tests {
                 .operations
                 .iter()
                 .find(|o| o.id.as_str() == *op_id)
-                .unwrap_or_else(|| panic!("missing operation {op_id}"));
+                .expect("read operation should exist");
             assert_eq!(
                 op.safety_tier,
                 fcp_core::SafetyTier::Safe,

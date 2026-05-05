@@ -75,6 +75,33 @@ async fn decode_json_value(resp: reqwest::Response) -> Result<Value, BlueBubbles
     resp.json::<Value>().await.map_err(BlueBubblesError::Http)
 }
 
+async fn decode_bounded_message(
+    resp: reqwest::Response,
+    max_response_bytes: usize,
+) -> Result<Message, BlueBubblesError> {
+    if let Some(content_length) = resp.content_length() {
+        let max_response_bytes = u64::try_from(max_response_bytes).unwrap_or(u64::MAX);
+        if content_length > max_response_bytes {
+            return Err(BlueBubblesError::Validation(format!(
+                "message lookup response exceeds {max_response_bytes} bytes"
+            )));
+        }
+    }
+
+    let bytes = resp.bytes().await.map_err(BlueBubblesError::Http)?;
+    if bytes.len() > max_response_bytes {
+        return Err(BlueBubblesError::Validation(format!(
+            "message lookup response exceeds {max_response_bytes} bytes"
+        )));
+    }
+    let value: Value = serde_json::from_slice(&bytes).map_err(BlueBubblesError::Json)?;
+    let message = value
+        .get("data")
+        .filter(|data| data.is_object())
+        .unwrap_or(&value);
+    serde_json::from_value(message.clone()).map_err(BlueBubblesError::Json)
+}
+
 fn parse_webhook_registrations(
     value: &Value,
 ) -> Result<Vec<WebhookRegistration>, BlueBubblesError> {
@@ -991,6 +1018,94 @@ impl BlueBubblesClient {
                 }
 
                 match decode_json::<PaginatedResponse<Message>>(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Get a single message by GUID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails or the bounded response cannot be decoded.
+    pub async fn get_message_by_guid(
+        &self,
+        runtime: &ConnectorRuntime,
+        message_guid: &str,
+        max_response_bytes: usize,
+    ) -> BlueBubblesResult<Message> {
+        let message_guid = sanitize_path_segment(message_guid, "message_guid")?;
+        let url = format!("{}/api/v1/message/{message_guid}", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+        let message_guid = message_guid.to_string();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let message_guid = message_guid.clone();
+            async move {
+                debug!(attempt, "Fetching BlueBubbles reply context");
+                let resp = match client
+                    .get(&url)
+                    .query(&[("password", &server_passcode)])
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 404 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Api {
+                        status_code: 404,
+                        message: format!("Message not found: {message_guid}"),
+                    });
+                }
+
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_bounded_message(resp, max_response_bytes).await {
                     Ok(value) => AttemptOutcome::Success(value),
                     Err(error) => AttemptOutcome::Terminal(error),
                 }

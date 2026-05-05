@@ -7,7 +7,7 @@ use std::sync::{
 };
 use std::time::{Duration, Instant};
 
-use fcp_async_core::channel::{broadcast, watch};
+use fcp_async_core::channel::{broadcast, mpsc, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_prelude::{
     AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityId, CapabilityVerifier,
@@ -19,6 +19,10 @@ use fcp_prelude::{
     ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::runtime::{
+    InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
+    StreamingSupervisor, SupervisorConfig,
+};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -60,6 +64,16 @@ async fn connect_mattermost_websocket(
     config: fcp_streaming::WsConfig,
 ) -> Result<WsConnection, fcp_streaming::StreamError> {
     WsClient::with_config(url, config).connect().await
+}
+
+enum MattermostSocketSupervisorEvent {
+    Resume {
+        connection_id: String,
+        expected_server_seq: u64,
+    },
+    AuthRejected {
+        error: Value,
+    },
 }
 
 /// Mattermost connector state.
@@ -659,7 +673,7 @@ impl MattermostConnector {
                 message: "connector ready state missing Mattermost client".into(),
             })?
             .clone();
-        let auth_token = client.auth_token().map(str::to_owned);
+        let websocket_auth_value = client.auth_token().map(str::to_owned);
         let ws_config = client.websocket_config().map_err(map_mm_err)?;
 
         let event_tx = self.event_tx.clone();
@@ -673,220 +687,122 @@ impl MattermostConnector {
         let monitor_policy = self.monitor_policy.clone();
         let monitor_policy_audit = self.monitor_policy_audit.clone();
 
-        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-        self.socket_shutdown_tx = Some(shutdown_tx);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        self.socket_shutdown_tx = Some(shutdown_tx.clone());
         *self.socket_running.write().await = true;
         *self.socket_connected.write().await = false;
 
         let task = fcp_async_core::task::spawn(async move {
-            info!("Starting Mattermost websocket event loop");
+            info!("Starting supervised Mattermost websocket event loop");
 
-            let mut reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
-            let mut connection_id = String::new();
-            let mut expected_server_seq = 0_u64;
+            let mut supervisor = StreamingSupervisor::new(
+                SupervisorConfig {
+                    base_backoff_ms: SOCKET_RECONNECT_MIN_MS,
+                    max_backoff_ms: SOCKET_RECONNECT_MAX_MS,
+                    heartbeat_interval_ms: 0,
+                    ..SupervisorConfig::default()
+                },
+                InMemoryStreamingSession::new(),
+            );
 
-            'reconnect: loop {
-                if *shutdown_rx.borrow() {
-                    break;
-                }
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    |session| {
+                        let client = client.clone();
+                        let websocket_auth_value = websocket_auth_value.clone();
+                        let ws_config = ws_config.clone();
+                        let socket_connected = socket_connected.clone();
+                        let subscribed_topics = subscribed_topics.clone();
+                        let monitor_policy = monitor_policy.clone();
+                        let monitor_policy_audit = monitor_policy_audit.clone();
+                        let connector_id = connector_id.clone();
+                        let instance_id = instance_id.clone();
+                        let next_event_seq = next_event_seq.clone();
+                        let event_tx = event_tx.clone();
+                        let base = base.clone();
 
-                let ws_url = match client
-                    .websocket_url(Some(connection_id.as_str()), Some(expected_server_seq))
-                {
-                    Ok(url) => url,
-                    Err(err) => {
-                        warn!("Failed to build Mattermost websocket URL: {err}");
-                        break;
-                    }
-                };
+                        let connection_id = session.resume_token().unwrap_or_default();
+                        let expected_server_seq = session.sequence();
 
-                match connect_mattermost_websocket(&ws_url, ws_config.clone()).await {
-                    Ok(mut ws_stream) => {
-                        *socket_connected.write().await = true;
-                        reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
-                        let mut request_seq = 1_u64;
+                        async move {
+                            let ws_url = client
+                                .websocket_url(
+                                    Some(connection_id.as_str()),
+                                    Some(expected_server_seq),
+                                )
+                                .map_err(|err| -> StreamingError { Box::new(err) })?;
+                            let mut ws_stream = connect_mattermost_websocket(&ws_url, ws_config)
+                                .await
+                                .map_err(|err| -> StreamingError { Box::new(err) })?;
+                            *socket_connected.write().await = true;
 
-                        let mut auth_request_seq = None;
-                        if let Some(token) = auth_token.as_deref() {
-                            let challenge_seq = request_seq;
-                            if let Err(err) = send_socket_action(
-                                &mut ws_stream,
-                                "authentication_challenge",
-                                challenge_seq,
-                                json!({"token": token}),
-                            )
-                            .await
-                            {
-                                warn!("Mattermost websocket auth challenge failed: {err}");
-                            } else {
-                                auth_request_seq = Some(challenge_seq);
-                                request_seq = request_seq.saturating_add(1);
-                            }
-                        }
-
-                        let mut ping_interval =
-                            fcp_async_core::time::interval(SOCKET_PING_INTERVAL);
-                        ping_interval.tick().await;
-
-                        loop {
-                            fcp_async_core::select! {
-                                changed = shutdown_rx.changed() => {
-                                    if changed.is_ok() && *shutdown_rx.borrow() {
-                                        let _ = ws_stream.close().await;
-                                        break;
+                            let (events_tx, events_rx) =
+                                mpsc::channel(SOCKET_EVENT_BUFFER_CAPACITY);
+                            let join_socket_connected = socket_connected.clone();
+                            let join_handle = fcp_async_core::task::spawn(async move {
+                                let result = drain_mattermost_socket_connection(
+                                    &mut ws_stream,
+                                    websocket_auth_value.as_deref(),
+                                    connection_id,
+                                    expected_server_seq,
+                                    events_tx,
+                                    subscribed_topics,
+                                    monitor_policy,
+                                    monitor_policy_audit,
+                                    connector_id,
+                                    instance_id,
+                                    next_event_seq,
+                                    event_tx,
+                                    base,
+                                )
+                                .await;
+                                *join_socket_connected.write().await = false;
+                                match result {
+                                    Ok(()) => {
+                                        std::future::pending::<Result<(), StreamingError>>().await
                                     }
-                                    if changed.is_err() {
-                                        break;
-                                    }
-                                },
-                                _ = ping_interval.tick() => {
-                                    if let Err(err) = send_socket_action(&mut ws_stream, "ping", request_seq, json!({})).await {
-                                        warn!("Mattermost websocket ping failed: {err}");
-                                        break;
-                                    }
-                                    request_seq = request_seq.saturating_add(1);
-                                },
-                                inbound = ws_stream.recv() => {
-                                    let frame = match inbound {
-                                        Ok(Some(frame)) => frame,
-                                        Ok(None) => break,
-                                        Err(err) => {
-                                            warn!("Mattermost websocket receive error: {err}");
-                                            break;
-                                        }
-                                    };
-
-                                    match frame {
-                                        WsMessage::Text(text) => {
-                                            let message: MattermostWebSocketMessage = match serde_json::from_str(&text) {
-                                                Ok(message) => message,
-                                                Err(err) => {
-                                                    warn!("Failed to parse Mattermost websocket frame: {err}");
-                                                    continue;
-                                                }
-                                            };
-
-                                            if message.seq_reply.is_some() {
-                                                let request_failed =
-                                                    socket_request_reply_failed(&message);
-                                                if request_failed {
-                                                    warn!(
-                                                        seq_reply = ?message.seq_reply,
-                                                        error = ?message.error,
-                                                        "Mattermost websocket request returned an error"
-                                                    );
-                                                }
-                                                if auth_request_seq == message.seq_reply {
-                                                    auth_request_seq = None;
-                                                    if request_failed {
-                                                        warn!(
-                                                            error = ?message.error,
-                                                            "Mattermost websocket authentication rejected; stopping reconnect loop"
-                                                        );
-                                                        break 'reconnect;
-                                                    }
-                                                }
-                                                continue;
-                                            }
-
-                                            let Some(event_name) = message.event.as_deref() else {
-                                                continue;
-                                            };
-
-                                            if !apply_socket_resume_state(
-                                                &message,
-                                                &mut connection_id,
-                                                &mut expected_server_seq,
-                                            ) {
-                                                warn!(
-                                                    expected_server_seq,
-                                                    received_seq = ?message.seq,
-                                                    "Mattermost websocket sequence mismatch; reconnecting"
-                                                );
-                                                break;
-                                            }
-
-                                            if event_name == "hello" {
-                                                continue;
-                                            }
-
-                                            let topic = mattermost_event_topic(event_name);
-                                            let allowed = {
-                                                let subscribed = subscribed_topics.read().await;
-                                                topic_allowed(&topic, subscribed.as_slice())
-                                            };
-                                            if !allowed {
-                                                continue;
-                                            }
-
-                                            let policy_decision =
-                                                monitor_policy.evaluate_socket_message(&message);
-                                            if let MattermostMonitorPolicyDecision::Denied(reason) =
-                                                policy_decision
-                                            {
-                                                monitor_policy_audit.record_denial(reason);
-                                                let audit_receipt =
-                                                    mattermost_monitor_policy_denial_receipt(
-                                                        &topic, reason, &message,
-                                                    );
-                                                info!(
-                                                    %topic,
-                                                    reason,
-                                                    audit_receipt = %audit_receipt,
-                                                    channel_id = ?mattermost_socket_channel_id(&message),
-                                                    user_id = ?mattermost_socket_user_id(&message),
-                                                    "Mattermost websocket event suppressed by monitor policy"
-                                                );
-                                                continue;
-                                            }
-
-                                            if let Some(event) = websocket_message_to_event(
-                                                &message,
-                                                &connector_id,
-                                                &instance_id,
-                                                next_event_seq.as_ref(),
-                                            ) {
-                                                base.record_event();
-                                                if event_tx.send(Ok(event)).is_err() {
-                                                    warn!("Mattermost event dropped: no active subscribers");
-                                                }
-                                            }
-                                        }
-                                        WsMessage::Ping(data) => {
-                                            if let Err(err) = ws_stream.send(WsMessage::Pong(data)).await {
-                                                warn!("Mattermost websocket pong failed: {err}");
-                                                break;
-                                            }
-                                        }
-                                        WsMessage::Close(_) => break,
-                                        WsMessage::Binary(_) | WsMessage::Pong(_) => {}
-                                    }
+                                    Err(err) => Err(err),
                                 }
-                            }
-                        }
-                        *socket_connected.write().await = false;
-                    }
-                    Err(err) => {
-                        *socket_connected.write().await = false;
-                        warn!("Mattermost websocket connect failed: {err}");
-                    }
-                }
+                            });
 
-                if fcp_async_core::shutdown::sleep_or_shutdown(
-                    Duration::from_millis(reconnect_delay_ms),
-                    &mut shutdown_rx,
+                            Ok(StreamingConnection {
+                                events: events_rx,
+                                join_handle,
+                            })
+                        }
+                    },
+                    |socket_event, session| {
+                        let fatal_error = match socket_event {
+                            MattermostSocketSupervisorEvent::Resume {
+                                connection_id,
+                                expected_server_seq,
+                            } => {
+                                session.set_resume_token(connection_id);
+                                session.set_sequence(expected_server_seq);
+                                None
+                            }
+                            MattermostSocketSupervisorEvent::AuthRejected { error } => Some(
+                                format!("Mattermost websocket authentication rejected: {error}"),
+                            ),
+                        };
+
+                        async move {
+                            if let Some(message) = fatal_error {
+                                return Err(Box::new(std::io::Error::new(
+                                    std::io::ErrorKind::PermissionDenied,
+                                    message,
+                                )) as StreamingError);
+                            }
+                            Ok(())
+                        }
+                    },
                 )
-                .await
-                .is_err()
-                {
-                    break;
-                }
-                reconnect_delay_ms = (reconnect_delay_ms * 2).min(SOCKET_RECONNECT_MAX_MS);
-            }
+                .await;
 
             *socket_running.write().await = false;
             *socket_connected.write().await = false;
-            info!("Mattermost websocket event loop stopped");
+            info!(?outcome, "Mattermost websocket supervisor stopped");
         });
 
         self.socket_task = Some(task);
@@ -3290,6 +3206,199 @@ async fn send_socket_action(
 
 fn socket_request_reply_failed(message: &MattermostWebSocketMessage) -> bool {
     message.status.as_deref() != Some("OK") || message.error.is_some()
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn drain_mattermost_socket_connection(
+    ws_stream: &mut WsConnection,
+    websocket_auth_value: Option<&str>,
+    mut connection_id: String,
+    mut expected_server_seq: u64,
+    events_tx: mpsc::Sender<MattermostSocketSupervisorEvent>,
+    subscribed_topics: Arc<RwLock<Vec<String>>>,
+    monitor_policy: MattermostMonitorPolicy,
+    monitor_policy_audit: Arc<MattermostMonitorPolicyAudit>,
+    connector_id: ConnectorId,
+    instance_id: InstanceId,
+    next_event_seq: Arc<AtomicU64>,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    base: Arc<BaseConnector>,
+) -> Result<(), StreamingError> {
+    let mut request_seq = 1_u64;
+    let mut auth_request_seq = None;
+    if let Some(value) = websocket_auth_value {
+        let challenge_seq = request_seq;
+        if let Err(err) = send_socket_action(
+            ws_stream,
+            "authentication_challenge",
+            challenge_seq,
+            json!({"token": value}),
+        )
+        .await
+        {
+            warn!("Mattermost websocket auth challenge failed: {err}");
+        } else {
+            auth_request_seq = Some(challenge_seq);
+            request_seq = request_seq.saturating_add(1);
+        }
+    }
+
+    let mut ping_interval = fcp_async_core::time::interval(SOCKET_PING_INTERVAL);
+    ping_interval.tick().await;
+
+    loop {
+        fcp_async_core::select! {
+            _ = ping_interval.tick() => {
+                send_socket_action(ws_stream, "ping", request_seq, json!({}))
+                    .await
+                    .map_err(|err| -> StreamingError { Box::new(err) })?;
+                request_seq = request_seq.saturating_add(1);
+            },
+            inbound = ws_stream.recv() => {
+                let frame = match inbound {
+                    Ok(Some(frame)) => frame,
+                    Ok(None) => {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "Mattermost websocket stream ended",
+                        )));
+                    }
+                    Err(err) => {
+                        warn!("Mattermost websocket receive error: {err}");
+                        return Err(Box::new(err));
+                    }
+                };
+
+                match frame {
+                    WsMessage::Text(text) => {
+                        let message: MattermostWebSocketMessage = match serde_json::from_str(&text) {
+                            Ok(message) => message,
+                            Err(err) => {
+                                warn!("Failed to parse Mattermost websocket frame: {err}");
+                                continue;
+                            }
+                        };
+
+                        if message.seq_reply.is_some() {
+                            let request_failed = socket_request_reply_failed(&message);
+                            if request_failed {
+                                warn!(
+                                    seq_reply = ?message.seq_reply,
+                                    error = ?message.error,
+                                    "Mattermost websocket request returned an error"
+                                );
+                            }
+                            if auth_request_seq == message.seq_reply {
+                                auth_request_seq = None;
+                                if request_failed {
+                                    warn!(
+                                        error = ?message.error,
+                                        "Mattermost websocket authentication rejected; stopping supervised reconnect loop"
+                                    );
+                                    if events_tx
+                                        .send(MattermostSocketSupervisorEvent::AuthRejected {
+                                            error: message.error.clone().unwrap_or(Value::Null),
+                                        })
+                                        .await
+                                        .is_err()
+                                    {
+                                        return Ok(());
+                                    }
+                                    return Ok(());
+                                }
+                            }
+                            continue;
+                        }
+
+                        let Some(event_name) = message.event.as_deref() else {
+                            continue;
+                        };
+
+                        if !apply_socket_resume_state(
+                            &message,
+                            &mut connection_id,
+                            &mut expected_server_seq,
+                        ) {
+                            warn!(
+                                expected_server_seq,
+                                received_seq = ?message.seq,
+                                "Mattermost websocket sequence mismatch; reconnecting"
+                            );
+                            return Err(Box::new(std::io::Error::new(
+                                std::io::ErrorKind::InvalidData,
+                                "Mattermost websocket sequence mismatch",
+                            )));
+                        }
+                        if events_tx
+                            .send(MattermostSocketSupervisorEvent::Resume {
+                                connection_id: connection_id.clone(),
+                                expected_server_seq,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            return Ok(());
+                        }
+
+                        if event_name == "hello" {
+                            continue;
+                        }
+
+                        let topic = mattermost_event_topic(event_name);
+                        let allowed = {
+                            let subscribed = subscribed_topics.read().await;
+                            topic_allowed(&topic, subscribed.as_slice())
+                        };
+                        if !allowed {
+                            continue;
+                        }
+
+                        let policy_decision = monitor_policy.evaluate_socket_message(&message);
+                        if let MattermostMonitorPolicyDecision::Denied(reason) = policy_decision {
+                            monitor_policy_audit.record_denial(reason);
+                            let audit_receipt =
+                                mattermost_monitor_policy_denial_receipt(&topic, reason, &message);
+                            info!(
+                                %topic,
+                                reason,
+                                audit_receipt = %audit_receipt,
+                                channel_id = ?mattermost_socket_channel_id(&message),
+                                user_id = ?mattermost_socket_user_id(&message),
+                                "Mattermost websocket event suppressed by monitor policy"
+                            );
+                            continue;
+                        }
+
+                        if let Some(event) = websocket_message_to_event(
+                            &message,
+                            &connector_id,
+                            &instance_id,
+                            next_event_seq.as_ref(),
+                        )
+                        {
+                            base.record_event();
+                            if event_tx.send(Ok(event)).is_err() {
+                                warn!("Mattermost event dropped: no active subscribers");
+                            }
+                        }
+                    }
+                    WsMessage::Ping(data) => {
+                        if let Err(err) = ws_stream.send(WsMessage::Pong(data)).await {
+                            warn!("Mattermost websocket pong failed: {err}");
+                            return Err(Box::new(err));
+                        }
+                    }
+                    WsMessage::Close(_) => {
+                        return Err(Box::new(std::io::Error::new(
+                            std::io::ErrorKind::ConnectionAborted,
+                            "Mattermost websocket stream closed",
+                        )));
+                    }
+                    WsMessage::Binary(_) | WsMessage::Pong(_) => {}
+                }
+            }
+        }
+    }
 }
 
 fn mattermost_event_topic(event_name: &str) -> String {

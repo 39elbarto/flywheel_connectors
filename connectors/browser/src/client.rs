@@ -238,6 +238,51 @@ impl CdpCommand {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CdpNavigateResponse {
+    frame_id: String,
+    loader_id: Option<String>,
+}
+
+impl CdpNavigateResponse {
+    fn from_result(result: &serde_json::Value) -> BrowserResult<Self> {
+        if let Some(error_text) = result
+            .get("errorText")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+        {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol navigation failed: {}",
+                    redact_browser_control_error_text(error_text)
+                ),
+                status_code: None,
+            });
+        }
+
+        let frame_id = result
+            .get("frameId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.navigate response is missing frameId"
+                    .into(),
+                status_code: None,
+            })?
+            .to_string();
+        let loader_id = result
+            .get("loaderId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string);
+
+        Ok(Self {
+            frame_id,
+            loader_id,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 trait CdpCommandTransport {
     async fn send_cdp_message(&mut self, cx: &Cx, message: WebSocketMessage) -> BrowserResult<()>;
@@ -332,6 +377,30 @@ where
     ) -> BrowserResult<serde_json::Value> {
         let command = self.next_command(method, params)?;
         execute_cdp_command(cx, &mut self.transport, command).await
+    }
+
+    async fn navigate_page(
+        &mut self,
+        cx: &Cx,
+        url: &str,
+        user_agent: Option<&str>,
+    ) -> BrowserResult<CdpNavigateResponse> {
+        self.call_method(cx, "Page.enable", None).await?;
+        self.call_method(cx, "Network.enable", None).await?;
+
+        if let Some(user_agent) = user_agent {
+            self.call_method(
+                cx,
+                "Network.setUserAgentOverride",
+                Some(serde_json::json!({ "userAgent": user_agent })),
+            )
+            .await?;
+        }
+
+        let result = self
+            .call_method(cx, "Page.navigate", Some(serde_json::json!({ "url": url })))
+            .await?;
+        CdpNavigateResponse::from_result(&result)
     }
 
     fn next_command(
@@ -1946,6 +2015,67 @@ mod tests {
             WebSocketMessage::Text(text)
                 if text == r#"{"id":2,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
         ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_navigate_page_issues_documented_cdp_sequence() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":3,"result":{}}"#.into()),
+            WebSocketMessage::Text(
+                r#"{"id":4,"result":{"frameId":"frame-1","loaderId":"loader-1"}}"#.into(),
+            ),
+        ]));
+
+        let response = session
+            .navigate_page(&cx, "https://example.com", Some("FCP Browser/1.0"))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            response,
+            CdpNavigateResponse {
+                frame_id: "frame-1".to_string(),
+                loader_id: Some("loader-1".to_string()),
+            }
+        );
+        assert_eq!(transport.sent.len(), 4);
+        assert!(matches!(
+            &transport.sent[0],
+            WebSocketMessage::Text(text) if text == r#"{"id":1,"method":"Page.enable"}"#
+        ));
+        assert!(matches!(
+            &transport.sent[1],
+            WebSocketMessage::Text(text) if text == r#"{"id":2,"method":"Network.enable"}"#
+        ));
+        assert!(matches!(
+            &transport.sent[2],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":3,"method":"Network.setUserAgentOverride","params":{"userAgent":"FCP Browser/1.0"}}"#
+        ));
+        assert!(matches!(
+            &transport.sent[3],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":4,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+        ));
+    }
+
+    #[test]
+    fn test_cdp_navigate_response_rejects_error_text_and_missing_frame() {
+        let error = CdpNavigateResponse::from_result(&serde_json::json!({
+            "errorText": "Authorization failed for Bearer browser-token",
+            "frameId": "frame-1",
+        }))
+        .unwrap_err();
+        let error_message = format!("{error}");
+        assert!(!error_message.contains("browser-token"));
+        assert!(error_message.contains("[redacted browser-control error body]"));
+
+        let missing_frame = CdpNavigateResponse::from_result(&serde_json::json!({})).unwrap_err();
+        assert!(format!("{missing_frame}").contains("missing frameId"));
     }
 
     #[test]

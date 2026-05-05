@@ -304,8 +304,8 @@ impl AppleNotesClient {
 /// of truth for what counts as a timeout vs a process-launch error.
 fn map_subprocess_error(err: bounded_subprocess::SubprocessError) -> AppleNotesError {
     match err {
-        bounded_subprocess::SubprocessError::Spawn(msg) => AppleNotesError::Process(msg),
-        bounded_subprocess::SubprocessError::Wait(msg) => AppleNotesError::Process(msg),
+        bounded_subprocess::SubprocessError::Spawn(msg)
+        | bounded_subprocess::SubprocessError::Wait(msg) => AppleNotesError::Process(msg),
         bounded_subprocess::SubprocessError::Timeout { timeout_secs } => {
             AppleNotesError::Timeout { timeout_secs }
         }
@@ -368,7 +368,7 @@ mod tests {
         correlation_id: &str,
         phase: &str,
         result: &str,
-        details: Value,
+        details: &Value,
     ) -> Value {
         let payload = json!({
             "test_name": "apple_notes_osascript_e2e",
@@ -544,7 +544,7 @@ esac
             &correlation_id,
             "configure",
             "pass",
-            json!({ "rejected_paths": rejected }),
+            &json!({ "rejected_paths": rejected }),
         );
         assert_eq!(log["correlation_id"], correlation_id);
         assert!(
@@ -564,7 +564,7 @@ esac
                 &correlation_id,
                 "health",
                 "skip",
-                json!({ "reason": "live Apple Notes access requires explicit live flag" }),
+                &json!({ "reason": "live Apple Notes access requires explicit live flag" }),
             );
             return;
         }
@@ -578,7 +578,7 @@ esac
             &correlation_id,
             "health",
             "skip",
-            json!({ "reason": "unsupported platform", "os": std::env::consts::OS }),
+            &json!({ "reason": "unsupported platform", "os": std::env::consts::OS }),
         );
     }
 
@@ -595,7 +595,7 @@ esac
             &correlation_id,
             "configure",
             "pass",
-            json!({ "osascript_path": config.osascript_path }),
+            &json!({ "osascript_path": config.osascript_path }),
         );
 
         let title = "Title; exec -a alias python3 -c 'oops'";
@@ -618,7 +618,7 @@ esac
             &correlation_id,
             "invoke",
             "pass",
-            json!({
+            &json!({
                 "argv_log": argv_log.display().to_string(),
                 "stdout": stdout,
                 "malicious_payload_inert": true,
@@ -629,14 +629,14 @@ esac
             &correlation_id,
             "simulate",
             "skip",
-            json!({ "reason": "client-level fake osascript harness exercises subprocess argv directly" }),
+            &json!({ "reason": "client-level fake osascript harness exercises subprocess argv directly" }),
         );
         emit_e2e_log(
             "fake-success",
             &correlation_id,
             "shutdown",
             "pass",
-            json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
         );
     }
 
@@ -662,7 +662,7 @@ esac
             &correlation_id,
             "stderr",
             "pass",
-            json!({ "nonzero_error": nonzero.to_string() }),
+            &json!({ "nonzero_error": nonzero.to_string() }),
         );
 
         let large_stderr = client
@@ -679,7 +679,7 @@ esac
                     &correlation_id,
                     "stderr_truncation",
                     "pass",
-                    json!({ "stderr_len": message.len(), "cap": crate::bounded_subprocess::MAX_OUTPUT_BYTES }),
+                    &json!({ "stderr_len": message.len(), "cap": crate::bounded_subprocess::MAX_OUTPUT_BYTES }),
                 );
             }
             other => {
@@ -707,14 +707,14 @@ esac
             &correlation_id,
             "timeout",
             "pass",
-            json!({ "timeout_secs": 1, "elapsed_ms": started.elapsed().as_millis() }),
+            &json!({ "timeout_secs": 1, "elapsed_ms": started.elapsed().as_millis() }),
         );
         emit_e2e_log(
             "fake-errors",
             &correlation_id,
             "shutdown",
             "pass",
-            json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
         );
     }
 

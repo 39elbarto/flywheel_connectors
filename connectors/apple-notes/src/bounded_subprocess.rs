@@ -3,7 +3,7 @@
 //! Bead: `flywheel_connectors-krxpn` (H.1 production hardening). The
 //! Apple Notes connector historically called
 //! `Command::new(...).output()` with no kill/timeout boundary — a
-//! hung Notes AppleEvent could pin the connector indefinitely. This
+//! hung Notes `AppleEvent` could pin the connector indefinitely. This
 //! module ships the bounded runner that:
 //!
 //!   * Spawns the child with `stdin = null` (the script cannot block
@@ -23,7 +23,7 @@
 //! `wait_with_output()` is the one-shot blocking call but offers no
 //! deadline. Adding the `wait_timeout` crate would solve this, but
 //! introduces a workspace-level dep for two connectors. The 50 ms
-//! polling cadence is empirically fine for human-interactive AppleEvents
+//! polling cadence is empirically fine for human-interactive `AppleEvents`
 //! (osascript invocations are typically 10-200 ms). For sub-millisecond-
 //! latency-sensitive use this would matter; for desktop-automation it
 //! does not.

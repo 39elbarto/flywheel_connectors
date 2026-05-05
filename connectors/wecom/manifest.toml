@@ -17,6 +17,8 @@ homepage = "https://developer.work.weixin.qq.com/"
 #   tenant permissions needed for outbound messaging and directory reads.
 # - Optional callback verification uses a host-forwarded HTTP callback model with
 #   `callback_token` and `callback_encoding_aes_key`; the connector never owns a listener socket.
+# - Host-forwarded callback ingest enforces timestamp skew, nonce/MsgId replay,
+#   sender/room policy, and redaction-safe decision evidence before emitting events.
 # - The connector acts as the configured enterprise application; user impersonation and
 #   websocket delivery remain out of scope.
 
@@ -95,7 +97,7 @@ safety_tier = "safe"
 idempotency = "strict"
 
 [provides.operations.callback_ingest_event]
-summary = "Verify, decrypt, and normalize one host-forwarded WeCom callback event"
+summary = "Verify, decrypt, replay-check, policy-gate, and normalize one host-forwarded WeCom callback event"
 capability = "wecom.events.read"
 risk = "low"
 safety_tier = "safe"

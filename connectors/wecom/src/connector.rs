@@ -1,6 +1,9 @@
 //! `WeCom` enterprise messaging connector.
 
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
 
@@ -15,6 +18,7 @@ use fcp_prelude::{
     SimulateResponse, SubscribeRequest, SubscribeResponse, TrustLevel, UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
@@ -53,6 +57,8 @@ const WECOM_BINDING_MODEL: &str = "single_enterprise_app";
 const WECOM_AUTH_MODEL: &str = "corp_id_agent_secret";
 const WECOM_TENANT_APP_BOUNDARY: &str = "This connector acts as one installed WeCom enterprise app for one tenant; it does not impersonate arbitrary users or cross tenant boundaries.";
 const WECOM_CALLBACK_DELIVERY_MODEL: &str = "host_forwarded_http_callback";
+const WECOM_CALLBACK_POLICY_MODEL: &str = "host_forwarded_callback_replay_and_policy";
+const CALLBACK_REPLAY_STATE_FILE: &str = "wecom_callback_replay_state.json";
 const WECOM_TOKEN_PROBE: &str = "GET /cgi-bin/gettoken";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/wecom_connector/<timestamp>";
 const VERIFY_COMMANDS: [&str; 5] = [
@@ -74,6 +80,262 @@ struct WeComConversation {
 #[derive(Debug)]
 struct WeComState {
     client: WeComClient,
+    callback_security: Mutex<WeComCallbackSecurityState>,
+}
+
+impl WeComState {
+    fn new(client: WeComClient) -> Self {
+        let receive_id = client.config().callback_receive_id().to_string();
+        Self {
+            client,
+            callback_security: Mutex::new(WeComCallbackSecurityState::new(receive_id, None)),
+        }
+    }
+
+    fn configure_callback_replay_persistence(&mut self, zone_dir: Option<&str>) -> FcpResult<()> {
+        let Some(zone_dir) = zone_dir else {
+            return Ok(());
+        };
+        let path = Path::new(zone_dir).join(CALLBACK_REPLAY_STATE_FILE);
+        let receive_id = self.client.config().callback_receive_id().to_string();
+        let replay_state =
+            WeComCallbackSecurityState::load(path.as_path(), &receive_id, self.client.config())?;
+        let state = self
+            .callback_security
+            .get_mut()
+            .map_err(|_| FcpError::Internal {
+                message: "WeCom callback replay state lock is poisoned".into(),
+            })?;
+        *state = replay_state;
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+struct WeComCallbackSecurityState {
+    receive_id: String,
+    state_path: Option<PathBuf>,
+    seen_nonces: BTreeMap<String, i64>,
+    seen_messages: BTreeMap<String, i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedReplayState {
+    version: u32,
+    receive_id: String,
+    nonces: Vec<PersistedReplayEntry>,
+    messages: Vec<PersistedReplayEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedReplayEntry {
+    key: String,
+    seen_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct CallbackSecurityOutcome {
+    decision: &'static str,
+    reason: String,
+    replay: bool,
+    emit_event: bool,
+    timestamp_skew_secs: i64,
+    nonce_key_hash: String,
+    message_key_hash: Option<String>,
+    sender_user_hash: Option<String>,
+    external_user_hash: Option<String>,
+    room_hash: Option<String>,
+    persisted_replay_state: bool,
+}
+
+impl WeComCallbackSecurityState {
+    const fn new(receive_id: String, state_path: Option<PathBuf>) -> Self {
+        Self {
+            receive_id,
+            state_path,
+            seen_nonces: BTreeMap::new(),
+            seen_messages: BTreeMap::new(),
+        }
+    }
+
+    fn load(path: &Path, receive_id: &str, config: &WeComConfig) -> FcpResult<Self> {
+        let mut state = Self::new(receive_id.to_string(), Some(path.to_path_buf()));
+        if !path.exists() {
+            return Ok(state);
+        }
+
+        let raw = fs::read_to_string(path).map_err(|error| FcpError::Internal {
+            message: format!("failed to read WeCom callback replay state: {error}"),
+        })?;
+        let persisted: PersistedReplayState =
+            serde_json::from_str(&raw).map_err(|error| FcpError::Internal {
+                message: format!("failed to parse WeCom callback replay state: {error}"),
+            })?;
+        if persisted.version != 1 || persisted.receive_id != receive_id {
+            return Ok(state);
+        }
+
+        state.seen_nonces = persisted
+            .nonces
+            .into_iter()
+            .map(|entry| (entry.key, entry.seen_at))
+            .collect();
+        state.seen_messages = persisted
+            .messages
+            .into_iter()
+            .map(|entry| (entry.key, entry.seen_at))
+            .collect();
+        state.prune(Utc::now().timestamp(), config);
+        Ok(state)
+    }
+
+    fn evaluate(
+        &mut self,
+        config: &WeComConfig,
+        request: &WeComCallbackIngestRequest,
+        callback: &WeComCallbackEnvelope,
+    ) -> FcpResult<CallbackSecurityOutcome> {
+        let callback_timestamp = parse_callback_timestamp(request.timestamp())?;
+        let now = Utc::now().timestamp();
+        let timestamp_skew_secs = now.saturating_sub(callback_timestamp).abs();
+        if timestamp_skew_secs
+            > i64::try_from(config.callback_timestamp_skew_secs()).unwrap_or(i64::MAX)
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1006,
+                message: format!(
+                    "WeCom callback timestamp skew {timestamp_skew_secs}s exceeds configured limit of {}s",
+                    config.callback_timestamp_skew_secs()
+                ),
+            });
+        }
+
+        self.prune(now, config);
+        let nonce_key = callback_nonce_key(&self.receive_id, request.timestamp(), request.nonce());
+        let message_key = callback_message_key(callback);
+        let nonce_key_hash = redacted_hash(&nonce_key);
+        let message_key_hash = message_key.as_deref().map(redacted_hash);
+        let sender_user_hash = callback_sender_user(callback).map(redacted_hash);
+        let external_user_hash = xml_field(&callback.message, "ExternalUserID").map(redacted_hash);
+        let room_hash = callback_room_id(callback).map(redacted_hash);
+
+        if self.seen_nonces.contains_key(&nonce_key) {
+            return Ok(CallbackSecurityOutcome {
+                decision: "duplicate",
+                reason: "nonce_replay".into(),
+                replay: true,
+                emit_event: false,
+                timestamp_skew_secs,
+                nonce_key_hash,
+                message_key_hash,
+                sender_user_hash,
+                external_user_hash,
+                room_hash,
+                persisted_replay_state: false,
+            });
+        }
+        if let Some(message_key) = message_key.as_deref()
+            && self.seen_messages.contains_key(message_key)
+        {
+            return Ok(CallbackSecurityOutcome {
+                decision: "duplicate",
+                reason: "message_replay".into(),
+                replay: true,
+                emit_event: false,
+                timestamp_skew_secs,
+                nonce_key_hash,
+                message_key_hash,
+                sender_user_hash,
+                external_user_hash,
+                room_hash,
+                persisted_replay_state: false,
+            });
+        }
+
+        let (accepted, reason) = callback_policy_accepts(config, callback);
+        self.record(nonce_key, message_key, now, config);
+        let persisted_replay_state = self.persist()?;
+
+        Ok(CallbackSecurityOutcome {
+            decision: if accepted { "accepted" } else { "rejected" },
+            reason,
+            replay: false,
+            emit_event: accepted,
+            timestamp_skew_secs,
+            nonce_key_hash,
+            message_key_hash,
+            sender_user_hash,
+            external_user_hash,
+            room_hash,
+            persisted_replay_state,
+        })
+    }
+
+    fn record(
+        &mut self,
+        nonce_key: String,
+        message_key: Option<String>,
+        now: i64,
+        config: &WeComConfig,
+    ) {
+        self.seen_nonces.insert(nonce_key, now);
+        if let Some(message_key) = message_key {
+            self.seen_messages.insert(message_key, now);
+        }
+        self.enforce_capacity(config.callback_replay_cache_entries());
+    }
+
+    fn prune(&mut self, now: i64, config: &WeComConfig) {
+        let cutoff = now.saturating_sub(
+            i64::try_from(config.callback_replay_window_secs()).unwrap_or(i64::MAX),
+        );
+        self.seen_nonces.retain(|_, seen_at| *seen_at >= cutoff);
+        self.seen_messages.retain(|_, seen_at| *seen_at >= cutoff);
+        self.enforce_capacity(config.callback_replay_cache_entries());
+    }
+
+    fn enforce_capacity(&mut self, max_entries: usize) {
+        prune_oldest(&mut self.seen_nonces, max_entries);
+        prune_oldest(&mut self.seen_messages, max_entries);
+    }
+
+    fn persist(&self) -> FcpResult<bool> {
+        let Some(path) = &self.state_path else {
+            return Ok(false);
+        };
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).map_err(|error| FcpError::Internal {
+                message: format!("failed to create WeCom callback replay state directory: {error}"),
+            })?;
+        }
+        let persisted = PersistedReplayState {
+            version: 1,
+            receive_id: self.receive_id.clone(),
+            nonces: self
+                .seen_nonces
+                .iter()
+                .map(|(key, seen_at)| PersistedReplayEntry {
+                    key: key.clone(),
+                    seen_at: *seen_at,
+                })
+                .collect(),
+            messages: self
+                .seen_messages
+                .iter()
+                .map(|(key, seen_at)| PersistedReplayEntry {
+                    key: key.clone(),
+                    seen_at: *seen_at,
+                })
+                .collect(),
+        };
+        let raw = serde_json::to_vec_pretty(&persisted).map_err(|error| FcpError::Internal {
+            message: format!("failed to serialize WeCom callback replay state: {error}"),
+        })?;
+        fs::write(path, raw).map_err(|error| FcpError::Internal {
+            message: format!("failed to write WeCom callback replay state: {error}"),
+        })?;
+        Ok(true)
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -120,6 +382,7 @@ struct ProvisioningReadiness {
     callback_receive_id_mode: &'static str,
     token_issuance_probe: &'static str,
     inbound_delivery_model: &'static str,
+    callback_policy_model: &'static str,
     risky_mutations: Vec<&'static str>,
     supported_hosts: Vec<&'static str>,
     tenant_app_boundary: &'static str,
@@ -218,6 +481,19 @@ fn contract_details(config: Option<&WeComConfig>) -> Value {
             "callback_hosting_included": false,
             "websocket_events_included": false,
         },
+        "callback_security": {
+            "delivery_model": WECOM_CALLBACK_DELIVERY_MODEL,
+            "policy_model": WECOM_CALLBACK_POLICY_MODEL,
+            "timestamp_skew_secs": config.map(WeComConfig::callback_timestamp_skew_secs),
+            "replay_window_secs": config.map(WeComConfig::callback_replay_window_secs),
+            "replay_cache_entries": config.map(WeComConfig::callback_replay_cache_entries),
+            "dm_allowed": config.map(WeComConfig::callback_dm_allowed),
+            "room_allowed": config.map(WeComConfig::callback_room_allowed),
+            "room_mention_required": config.map(WeComConfig::callback_require_room_mention),
+            "allowed_user_count": config.map(|cfg| cfg.callback_allowed_user_ids().len()),
+            "allowed_external_user_count": config.map(|cfg| cfg.callback_allowed_external_user_ids().len()),
+            "allowed_room_count": config.map(|cfg| cfg.callback_allowed_room_ids().len()),
+        },
         "service_inventory": {
             "messages": [OP_SEND_TEXT, OP_SEND_MARKDOWN, OP_SEND_IMAGE, OP_SEND_FILE],
             "media": [OP_UPLOAD_MEDIA, OP_DOWNLOAD_MEDIA],
@@ -273,6 +549,7 @@ impl WeComConnector {
                 callback_receive_id_mode: config.callback_receive_id_mode(),
                 token_issuance_probe: WECOM_TOKEN_PROBE,
                 inbound_delivery_model: WECOM_CALLBACK_DELIVERY_MODEL,
+                callback_policy_model: WECOM_CALLBACK_POLICY_MODEL,
                 risky_mutations: vec![
                     OP_SEND_TEXT,
                     OP_SEND_MARKDOWN,
@@ -296,6 +573,7 @@ impl WeComConnector {
             "handshaken": self.base.handshaken.load(Ordering::Acquire),
             "manifest_hash": Self::manifest_hash(),
             "inbound_delivery_model": WECOM_CALLBACK_DELIVERY_MODEL,
+            "callback_policy_model": WECOM_CALLBACK_POLICY_MODEL,
             "state": model,
         })
     }
@@ -757,30 +1035,49 @@ impl WeComConnector {
                     .client
                     .ingest_callback_event(&request)
                     .map_err(|error| error.to_fcp_error())?;
-                let event = normalize_callback_event(
-                    &callback,
-                    verifier,
-                    &self.base.id,
-                    &self.base.instance_id,
-                    state.client.config().agent_id(),
-                );
-                let resource_uris = event.data.resource_uris.clone();
+                let security = evaluate_callback_security(state, &request, &callback)?;
+                let event = security.emit_event.then(|| {
+                    normalize_callback_event(
+                        &callback,
+                        verifier,
+                        &self.base.id,
+                        &self.base.instance_id,
+                        state.client.config().agent_id(),
+                    )
+                });
+                let resource_uris = event
+                    .as_ref()
+                    .map_or_else(Vec::new, |event| event.data.resource_uris.clone());
                 let output = json!({
                     "delivery": {
                         "id": callback_delivery_id(&callback),
                         "transport": "callback_http",
                         "verified": true,
-                        "msg_signature": request.msg_signature(),
+                        "msg_signature_hash": redacted_hash(request.msg_signature()),
                         "timestamp": request.timestamp(),
-                        "nonce": request.nonce(),
-                        "receive_id": &callback.receive_id,
+                        "timestamp_skew_secs": security.timestamp_skew_secs,
+                        "nonce_hash": redacted_hash(request.nonce()),
+                        "nonce_key_hash": security.nonce_key_hash,
+                        "message_key_hash": security.message_key_hash,
+                        "receive_id_hash": redacted_hash(&callback.receive_id),
+                        "replay": security.replay,
                     },
                     "callback": {
-                        "outer": &callback.wrapper,
-                        "message": &callback.message,
-                        "plaintext_xml": &callback.plaintext_xml,
+                        "outer": if security.emit_event { json!(&callback.wrapper) } else { json!(null) },
+                        "message": if security.emit_event { json!(&callback.message) } else { json!(null) },
+                        "plaintext_xml": if security.emit_event { json!(&callback.plaintext_xml) } else { json!(null) },
                     },
-                    "event": &event,
+                    "policy": {
+                        "model": WECOM_CALLBACK_POLICY_MODEL,
+                        "decision": security.decision,
+                        "reason": security.reason,
+                        "sender_user_hash": security.sender_user_hash,
+                        "external_user_hash": security.external_user_hash,
+                        "room_hash": security.room_hash,
+                        "persisted_replay_state": security.persisted_replay_state,
+                        "redaction_status": "tenant_and_callback_metadata_hashed_or_omitted",
+                    },
+                    "event": event,
                 });
                 (output, resource_uris)
             }
@@ -829,7 +1126,7 @@ impl FcpConnector for WeComConnector {
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
         let config = WeComConfig::from_value(config)?;
         let client = WeComClient::new(config).map_err(|error| error.to_fcp_error())?;
-        self.state = Some(WeComState { client });
+        self.state = Some(WeComState::new(client));
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
@@ -837,6 +1134,9 @@ impl FcpConnector for WeComConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(state) = self.state.as_mut() {
+            state.configure_callback_replay_persistence(req.zone_dir.as_deref())?;
+        }
         if let Some(requested_instance_id) = req.requested_instance_id.clone() {
             self.base.instance_id = requested_instance_id;
         }
@@ -854,7 +1154,7 @@ impl FcpConnector for WeComConnector {
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
-                replay: false,
+                replay: true,
                 min_buffer_events: 0,
                 requires_ack: false,
             }),
@@ -949,7 +1249,7 @@ impl FcpConnector for WeComConnector {
             auth_caps: None,
             event_caps: Some(EventCaps {
                 streaming: false,
-                replay: false,
+                replay: true,
                 min_buffer_events: 0,
                 requires_ack: false,
             }),
@@ -1342,6 +1642,143 @@ fn push_unique(values: &mut Vec<String>, candidate: String) {
     }
 }
 
+fn evaluate_callback_security(
+    state: &WeComState,
+    request: &WeComCallbackIngestRequest,
+    callback: &WeComCallbackEnvelope,
+) -> FcpResult<CallbackSecurityOutcome> {
+    let config = state.client.config();
+    let mut security = state
+        .callback_security
+        .lock()
+        .map_err(|_| FcpError::Internal {
+            message: "WeCom callback replay state lock is poisoned".into(),
+        })?;
+    security.evaluate(config, request, callback)
+}
+
+fn parse_callback_timestamp(timestamp: &str) -> FcpResult<i64> {
+    timestamp
+        .trim()
+        .parse::<i64>()
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1006,
+            message: format!("WeCom callback timestamp must be an integer: {error}"),
+        })
+}
+
+fn callback_nonce_key(receive_id: &str, timestamp: &str, nonce: &str) -> String {
+    format!(
+        "receive:{receive_id}:timestamp:{}:nonce:{}",
+        timestamp.trim(),
+        nonce.trim()
+    )
+}
+
+fn callback_message_key(callback: &WeComCallbackEnvelope) -> Option<String> {
+    xml_field(&callback.message, "MsgId")
+        .map(|message_id| format!("receive:{}:msg:{message_id}", callback.receive_id))
+}
+
+fn callback_sender_user(callback: &WeComCallbackEnvelope) -> Option<&str> {
+    xml_field(&callback.message, "FromUserName").or_else(|| xml_field(&callback.message, "UserID"))
+}
+
+fn callback_room_id(callback: &WeComCallbackEnvelope) -> Option<&str> {
+    xml_field(&callback.message, "OpenChatId").or_else(|| xml_field(&callback.message, "ChatId"))
+}
+
+fn callback_policy_accepts(
+    config: &WeComConfig,
+    callback: &WeComCallbackEnvelope,
+) -> (bool, String) {
+    if let Some(user_id) = callback_sender_user(callback)
+        && !config.callback_allowed_user_ids().is_empty()
+        && !contains(config.callback_allowed_user_ids(), user_id)
+    {
+        return (false, "sender_user_not_allowed".into());
+    }
+
+    if let Some(external_user_id) = xml_field(&callback.message, "ExternalUserID")
+        && !config.callback_allowed_external_user_ids().is_empty()
+        && !contains(
+            config.callback_allowed_external_user_ids(),
+            external_user_id,
+        )
+    {
+        return (false, "external_user_not_allowed".into());
+    }
+
+    if let Some(room_id) = callback_room_id(callback) {
+        if !config.callback_room_allowed() {
+            return (false, "room_callbacks_disabled".into());
+        }
+        if !config.callback_allowed_room_ids().is_empty()
+            && !contains(config.callback_allowed_room_ids(), room_id)
+        {
+            return (false, "room_not_allowed".into());
+        }
+        if config.callback_require_room_mention()
+            && !callback_contains_mention(callback, config.callback_mention_patterns())
+        {
+            return (false, "room_mention_required".into());
+        }
+    } else if callback_conversation(&callback.message, &callback_agent_id(callback, 0))
+        .is_some_and(|conversation| conversation.kind == "dm")
+        && !config.callback_dm_allowed()
+    {
+        return (false, "dm_callbacks_disabled".into());
+    }
+
+    if callback_media_field_too_large(callback) {
+        return (false, "media_field_too_large".into());
+    }
+
+    (true, "accepted".into())
+}
+
+fn callback_contains_mention(
+    callback: &WeComCallbackEnvelope,
+    mention_patterns: &[String],
+) -> bool {
+    let Some(content) = xml_field(&callback.message, "Content") else {
+        return false;
+    };
+    mention_patterns
+        .iter()
+        .any(|pattern| content.contains(pattern))
+}
+
+fn callback_media_field_too_large(callback: &WeComCallbackEnvelope) -> bool {
+    ["MediaId", "ThumbMediaId", "FileName", "PicUrl", "Url"]
+        .iter()
+        .filter_map(|field| xml_field(&callback.message, field))
+        .any(|value| value.len() > 2_048)
+}
+
+fn contains(values: &[String], candidate: &str) -> bool {
+    values.iter().any(|value| value == candidate)
+}
+
+fn prune_oldest(values: &mut BTreeMap<String, i64>, max_entries: usize) {
+    while values.len() > max_entries {
+        let Some(key) = values
+            .iter()
+            .min_by_key(|(_, seen_at)| *seen_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        values.remove(&key);
+    }
+}
+
+fn redacted_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let encoded = hex::encode(digest);
+    format!("sha256:{}", &encoded[..16])
+}
+
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         OP_SEND_TEXT | OP_SEND_MARKDOWN | OP_SEND_IMAGE | OP_SEND_FILE => CAP_MESSAGES_WRITE,
@@ -1421,6 +1858,7 @@ fn operation(
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::fs;
 
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
     use chrono::{Duration as ChronoDuration, Utc};
@@ -1486,6 +1924,58 @@ mod tests {
 
     fn sample_callback_key() -> String {
         BASE64.encode([7_u8; 32]).trim_end_matches('=').to_string()
+    }
+
+    fn callback_policy_config(extra: &Value) -> WeComConfig {
+        let mut config = json!({
+            "base_url": "https://qyapi.weixin.qq.com",
+            "corp_id": "corp",
+            "agent_id": 1_000_002_u64,
+            "agent_secret": "secret",
+            "request_timeout_ms": DEFAULT_TIMEOUT_MS,
+            "callback_token": "token-123",
+            "callback_encoding_aes_key": sample_callback_key(),
+        });
+        if let Some(map) = extra.as_object() {
+            for (key, value) in map {
+                config[key.as_str()] = value.clone();
+            }
+        }
+        WeComConfig::from_value(config).expect("policy config should parse")
+    }
+
+    fn callback_ingest_request(timestamp: i64, nonce: &str) -> WeComCallbackIngestRequest {
+        WeComCallbackIngestRequest::from_value(&json!({
+            "msg_signature": "unused-in-policy-test",
+            "timestamp": timestamp.to_string(),
+            "nonce": nonce,
+            "body": "<xml />",
+        }))
+        .expect("callback request should parse")
+    }
+
+    fn callback_envelope(
+        from_user: &str,
+        room_id: Option<&str>,
+        msg_id: &str,
+        content: &str,
+    ) -> WeComCallbackEnvelope {
+        let mut message = BTreeMap::from([
+            ("FromUserName".into(), from_user.into()),
+            ("CreateTime".into(), "1710000000".into()),
+            ("MsgType".into(), "text".into()),
+            ("Content".into(), content.into()),
+            ("MsgId".into(), msg_id.into()),
+        ]);
+        if let Some(room_id) = room_id {
+            message.insert("OpenChatId".into(), room_id.into());
+        }
+        WeComCallbackEnvelope {
+            receive_id: "corp".into(),
+            wrapper: BTreeMap::from([("Encrypt".into(), "ciphertext".into())]),
+            message,
+            plaintext_xml: "<xml />".into(),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1886,5 +2376,185 @@ mod tests {
                 .iter()
                 .any(|uri| uri == "wecom:user:bob")
         );
+    }
+
+    #[test]
+    fn callback_security_rejects_disallowed_sender_without_event() {
+        let config = callback_policy_config(&json!({
+            "callback_allowed_user_ids": ["alice"],
+        }));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let request = callback_ingest_request(Utc::now().timestamp(), "nonce-policy-1");
+        let callback = callback_envelope("bob", None, "msg-policy-1", "hello");
+
+        let outcome = evaluate_callback_security(&state, &request, &callback)
+            .expect("policy evaluation should return a deny outcome");
+
+        assert_eq!(outcome.decision, "rejected");
+        assert_eq!(outcome.reason, "sender_user_not_allowed");
+        assert!(!outcome.emit_event);
+        assert!(!outcome.replay);
+        assert!(outcome.sender_user_hash.is_some());
+    }
+
+    #[test]
+    fn callback_security_enforces_room_mention_policy() {
+        let config = callback_policy_config(&json!({
+            "callback_require_room_mention": true,
+            "callback_mention_patterns": ["@opsbot"],
+            "callback_allowed_room_ids": ["room-1"],
+        }));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let request = callback_ingest_request(Utc::now().timestamp(), "nonce-policy-2");
+        let callback = callback_envelope("alice", Some("room-1"), "msg-policy-2", "no wake word");
+
+        let outcome = evaluate_callback_security(&state, &request, &callback)
+            .expect("policy evaluation should return a deny outcome");
+
+        assert_eq!(outcome.decision, "rejected");
+        assert_eq!(outcome.reason, "room_mention_required");
+        assert!(!outcome.emit_event);
+        assert!(outcome.room_hash.is_some());
+    }
+
+    #[test]
+    fn callback_security_detects_nonce_and_msgid_replay() {
+        let config = callback_policy_config(&json!({}));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let timestamp = Utc::now().timestamp();
+        let request = callback_ingest_request(timestamp, "nonce-replay-1");
+        let callback = callback_envelope("alice", None, "msg-replay-1", "hello");
+
+        let first = evaluate_callback_security(&state, &request, &callback)
+            .expect("first delivery should be accepted");
+        let second = evaluate_callback_security(&state, &request, &callback)
+            .expect("second delivery should be duplicate");
+
+        assert_eq!(first.decision, "accepted");
+        assert!(first.emit_event);
+        assert_eq!(second.decision, "duplicate");
+        assert_eq!(second.reason, "nonce_replay");
+        assert!(second.replay);
+        assert!(!second.emit_event);
+    }
+
+    #[test]
+    fn callback_security_detects_msgid_replay_with_fresh_nonce() {
+        let config = callback_policy_config(&json!({}));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let timestamp = Utc::now().timestamp();
+        let first_request = callback_ingest_request(timestamp, "nonce-replay-msgid-1");
+        let second_request = callback_ingest_request(timestamp, "nonce-replay-msgid-2");
+        let callback = callback_envelope("alice", None, "msg-replay-2", "hello");
+
+        let first = evaluate_callback_security(&state, &first_request, &callback)
+            .expect("first delivery should be accepted");
+        let second = evaluate_callback_security(&state, &second_request, &callback)
+            .expect("second delivery should be duplicate by MsgId");
+
+        assert_eq!(first.decision, "accepted");
+        assert_eq!(second.decision, "duplicate");
+        assert_eq!(second.reason, "message_replay");
+        assert!(second.replay);
+        assert!(!second.emit_event);
+    }
+
+    #[test]
+    fn callback_security_rejects_expired_timestamp() {
+        let config = callback_policy_config(&json!({
+            "callback_timestamp_skew_secs": 5,
+        }));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let request = callback_ingest_request(Utc::now().timestamp() - 30, "nonce-skew-1");
+        let callback = callback_envelope("alice", None, "msg-skew-1", "hello");
+
+        let error = evaluate_callback_security(&state, &request, &callback)
+            .expect_err("expired callback timestamp should fail closed");
+
+        assert!(matches!(error, FcpError::InvalidRequest { code: 1006, .. }));
+    }
+
+    #[test]
+    fn callback_security_enforces_dm_and_room_disable_policy() {
+        let dm_config = callback_policy_config(&json!({
+            "callback_dm_allowed": false,
+        }));
+        let dm_state = WeComState::new(WeComClient::new(dm_config).expect("client should build"));
+        let dm_request = callback_ingest_request(Utc::now().timestamp(), "nonce-dm-disabled");
+        let dm_callback = callback_envelope("alice", None, "msg-dm-disabled", "hello");
+        let dm_outcome = evaluate_callback_security(&dm_state, &dm_request, &dm_callback)
+            .expect("DM-disabled policy should return a deny outcome");
+
+        assert_eq!(dm_outcome.decision, "rejected");
+        assert_eq!(dm_outcome.reason, "dm_callbacks_disabled");
+        assert!(!dm_outcome.emit_event);
+
+        let room_config = callback_policy_config(&json!({
+            "callback_room_allowed": false,
+        }));
+        let room_state =
+            WeComState::new(WeComClient::new(room_config).expect("client should build"));
+        let room_request = callback_ingest_request(Utc::now().timestamp(), "nonce-room-disabled");
+        let room_callback = callback_envelope(
+            "alice",
+            Some("room-1"),
+            "msg-room-disabled",
+            "@opsbot hello",
+        );
+        let room_outcome = evaluate_callback_security(&room_state, &room_request, &room_callback)
+            .expect("room-disabled policy should return a deny outcome");
+
+        assert_eq!(room_outcome.decision, "rejected");
+        assert_eq!(room_outcome.reason, "room_callbacks_disabled");
+        assert!(!room_outcome.emit_event);
+    }
+
+    #[test]
+    fn callback_security_rejects_oversized_media_fields() {
+        let config = callback_policy_config(&json!({}));
+        let client = WeComClient::new(config).expect("client should build");
+        let state = WeComState::new(client);
+        let request = callback_ingest_request(Utc::now().timestamp(), "nonce-media-bound");
+        let mut callback = callback_envelope("alice", None, "msg-media-bound", "hello");
+        callback.message.insert("MediaId".into(), "m".repeat(2_049));
+
+        let outcome = evaluate_callback_security(&state, &request, &callback)
+            .expect("oversized media metadata should return a deny outcome");
+
+        assert_eq!(outcome.decision, "rejected");
+        assert_eq!(outcome.reason, "media_field_too_large");
+        assert!(!outcome.emit_event);
+    }
+
+    #[test]
+    fn callback_security_persists_replay_state_when_zone_dir_is_available() {
+        let config = callback_policy_config(&json!({}));
+        let client = WeComClient::new(config).expect("client should build");
+        let mut state = WeComState::new(client);
+        let zone_dir = std::env::temp_dir().join(format!(
+            "fcp-wecom-callback-replay-state-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or_default()
+        ));
+        fs::create_dir_all(&zone_dir).expect("test zone dir should be creatable");
+        state
+            .configure_callback_replay_persistence(Some(zone_dir.to_str().expect("utf-8 zone dir")))
+            .expect("replay persistence should configure");
+
+        let request = callback_ingest_request(Utc::now().timestamp(), "nonce-persist-1");
+        let callback = callback_envelope("alice", None, "msg-persist-1", "hello");
+        let outcome = evaluate_callback_security(&state, &request, &callback)
+            .expect("first delivery should persist replay state");
+
+        assert!(outcome.persisted_replay_state);
+        let state_path = zone_dir.join(CALLBACK_REPLAY_STATE_FILE);
+        let raw = fs::read_to_string(state_path).expect("replay state should be written");
+        assert!(raw.contains("nonce-persist-1"));
+        assert!(raw.contains("msg-persist-1"));
     }
 }

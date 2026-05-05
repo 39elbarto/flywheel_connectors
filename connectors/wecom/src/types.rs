@@ -13,6 +13,9 @@ use serde_json::{Value, json};
 pub const DEFAULT_BASE_URL: &str = "https://qyapi.weixin.qq.com";
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const TOKEN_REFRESH_SAFETY_MARGIN_SECS: u64 = 60;
+pub const DEFAULT_CALLBACK_TIMESTAMP_SKEW_SECS: u64 = 300;
+pub const DEFAULT_CALLBACK_REPLAY_WINDOW_SECS: u64 = 600;
+pub const DEFAULT_CALLBACK_REPLAY_CACHE_ENTRIES: usize = 2_048;
 
 fn is_local_wecom_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1")
@@ -74,14 +77,41 @@ pub struct WeComConfig {
     callback_encoding_aes_key: String,
     #[serde(default)]
     callback_receive_id: String,
+    #[serde(default = "default_callback_timestamp_skew_secs")]
+    callback_timestamp_skew_secs: u64,
+    #[serde(default = "default_callback_replay_window_secs")]
+    callback_replay_window_secs: u64,
+    #[serde(default = "default_callback_replay_cache_entries")]
+    callback_replay_cache_entries: usize,
+    #[serde(default = "default_true")]
+    callback_dm_allowed: bool,
+    #[serde(default = "default_true")]
+    callback_room_allowed: bool,
+    #[serde(default)]
+    callback_require_room_mention: bool,
+    #[serde(default)]
+    callback_mention_patterns: Vec<String>,
+    #[serde(default)]
+    callback_allowed_user_ids: Vec<String>,
+    #[serde(default)]
+    callback_allowed_external_user_ids: Vec<String>,
+    #[serde(default)]
+    callback_allowed_room_ids: Vec<String>,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct WeComStateModel {
     pub base_url: String,
     pub agent_id: u64,
     pub token_cached: bool,
     pub callback_configured: bool,
+    pub callback_timestamp_skew_secs: u64,
+    pub callback_replay_window_secs: u64,
+    pub callback_replay_cache_entries: usize,
+    pub callback_dm_allowed: bool,
+    pub callback_room_allowed: bool,
+    pub callback_require_room_mention: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,6 +236,31 @@ impl std::fmt::Debug for WeComConfig {
                 &redacted_secret(&self.callback_encoding_aes_key),
             )
             .field("callback_receive_id", &self.callback_receive_id())
+            .field(
+                "callback_timestamp_skew_secs",
+                &self.callback_timestamp_skew_secs,
+            )
+            .field(
+                "callback_replay_window_secs",
+                &self.callback_replay_window_secs,
+            )
+            .field(
+                "callback_replay_cache_entries",
+                &self.callback_replay_cache_entries,
+            )
+            .field("callback_dm_allowed", &self.callback_dm_allowed)
+            .field("callback_room_allowed", &self.callback_room_allowed)
+            .field(
+                "callback_require_room_mention",
+                &self.callback_require_room_mention,
+            )
+            .field("callback_mention_patterns", &self.callback_mention_patterns)
+            .field("callback_allowed_user_ids", &self.callback_allowed_user_ids)
+            .field(
+                "callback_allowed_external_user_ids",
+                &self.callback_allowed_external_user_ids,
+            )
+            .field("callback_allowed_room_ids", &self.callback_allowed_room_ids)
             .finish()
     }
 }
@@ -224,6 +279,22 @@ fn default_base_url() -> String {
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+const fn default_callback_timestamp_skew_secs() -> u64 {
+    DEFAULT_CALLBACK_TIMESTAMP_SKEW_SECS
+}
+
+const fn default_callback_replay_window_secs() -> u64 {
+    DEFAULT_CALLBACK_REPLAY_WINDOW_SECS
+}
+
+const fn default_callback_replay_cache_entries() -> usize {
+    DEFAULT_CALLBACK_REPLAY_CACHE_ENTRIES
+}
+
+const fn default_true() -> bool {
+    true
 }
 
 impl WeComConfig {
@@ -245,6 +316,10 @@ impl WeComConfig {
         self.callback_token = self.callback_token.trim().to_string();
         self.callback_encoding_aes_key = self.callback_encoding_aes_key.trim().to_string();
         self.callback_receive_id = self.callback_receive_id.trim().to_string();
+        normalize_string_list(&mut self.callback_mention_patterns);
+        normalize_string_list(&mut self.callback_allowed_user_ids);
+        normalize_string_list(&mut self.callback_allowed_external_user_ids);
+        normalize_string_list(&mut self.callback_allowed_room_ids);
     }
 
     pub fn validate(&self) -> FcpResult<()> {
@@ -323,6 +398,30 @@ impl WeComConfig {
                     message,
                 })?;
         }
+        if self.callback_timestamp_skew_secs == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "callback_timestamp_skew_secs must be greater than zero".into(),
+            });
+        }
+        if self.callback_replay_window_secs == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "callback_replay_window_secs must be greater than zero".into(),
+            });
+        }
+        if self.callback_replay_cache_entries == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "callback_replay_cache_entries must be greater than zero".into(),
+            });
+        }
+        if self.callback_require_room_mention && self.callback_mention_patterns.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "callback_mention_patterns must include at least one pattern when callback_require_room_mention is true".into(),
+            });
+        }
 
         Ok(())
     }
@@ -334,6 +433,12 @@ impl WeComConfig {
             agent_id: self.agent_id,
             token_cached,
             callback_configured: self.callback_configured(),
+            callback_timestamp_skew_secs: self.callback_timestamp_skew_secs,
+            callback_replay_window_secs: self.callback_replay_window_secs,
+            callback_replay_cache_entries: self.callback_replay_cache_entries,
+            callback_dm_allowed: self.callback_dm_allowed,
+            callback_room_allowed: self.callback_room_allowed,
+            callback_require_room_mention: self.callback_require_room_mention,
         }
     }
 
@@ -393,6 +498,65 @@ impl WeComConfig {
     pub fn callback_aes_key(&self) -> Result<[u8; 32], String> {
         decode_callback_aes_key(&self.callback_encoding_aes_key)
     }
+
+    #[must_use]
+    pub const fn callback_timestamp_skew_secs(&self) -> u64 {
+        self.callback_timestamp_skew_secs
+    }
+
+    #[must_use]
+    pub const fn callback_replay_window_secs(&self) -> u64 {
+        self.callback_replay_window_secs
+    }
+
+    #[must_use]
+    pub const fn callback_replay_cache_entries(&self) -> usize {
+        self.callback_replay_cache_entries
+    }
+
+    #[must_use]
+    pub const fn callback_dm_allowed(&self) -> bool {
+        self.callback_dm_allowed
+    }
+
+    #[must_use]
+    pub const fn callback_room_allowed(&self) -> bool {
+        self.callback_room_allowed
+    }
+
+    #[must_use]
+    pub const fn callback_require_room_mention(&self) -> bool {
+        self.callback_require_room_mention
+    }
+
+    #[must_use]
+    pub fn callback_mention_patterns(&self) -> &[String] {
+        &self.callback_mention_patterns
+    }
+
+    #[must_use]
+    pub fn callback_allowed_user_ids(&self) -> &[String] {
+        &self.callback_allowed_user_ids
+    }
+
+    #[must_use]
+    pub fn callback_allowed_external_user_ids(&self) -> &[String] {
+        &self.callback_allowed_external_user_ids
+    }
+
+    #[must_use]
+    pub fn callback_allowed_room_ids(&self) -> &[String] {
+        &self.callback_allowed_room_ids
+    }
+}
+
+fn normalize_string_list(values: &mut Vec<String>) {
+    for value in values.iter_mut() {
+        *value = value.trim().to_string();
+    }
+    values.retain(|value| !value.is_empty());
+    values.sort();
+    values.dedup();
 }
 
 pub fn decode_callback_aes_key(raw: &str) -> Result<[u8; 32], String> {
@@ -795,6 +959,71 @@ mod tests {
         assert!(model.token_cached);
         assert!(model.callback_configured);
         assert_eq!(config.callback_receive_id(), "corp");
+    }
+
+    #[test]
+    fn config_normalizes_callback_policy_lists_and_defaults() {
+        let config = WeComConfig::from_value(json!({
+            "corp_id": "corp",
+            "agent_id": 1_000_002_u64,
+            "agent_secret": "secret",
+            "callback_token": "token",
+            "callback_encoding_aes_key": sample_callback_key(),
+            "callback_allowed_user_ids": [" alice ", "", "alice", "bob"],
+            "callback_allowed_room_ids": [" room-2 ", "room-1"],
+            "callback_mention_patterns": [" @bot ", ""],
+        }))
+        .expect("config should parse");
+
+        assert_eq!(
+            config.callback_timestamp_skew_secs(),
+            DEFAULT_CALLBACK_TIMESTAMP_SKEW_SECS
+        );
+        assert_eq!(
+            config.callback_replay_window_secs(),
+            DEFAULT_CALLBACK_REPLAY_WINDOW_SECS
+        );
+        assert_eq!(
+            config
+                .callback_allowed_user_ids()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["alice", "bob"]
+        );
+        assert_eq!(
+            config
+                .callback_allowed_room_ids()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["room-1", "room-2"]
+        );
+        assert_eq!(
+            config
+                .callback_mention_patterns()
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["@bot"]
+        );
+        assert!(config.callback_dm_allowed());
+        assert!(config.callback_room_allowed());
+    }
+
+    #[test]
+    fn config_requires_mention_patterns_when_room_mentions_are_required() {
+        let error = WeComConfig::from_value(json!({
+            "corp_id": "corp",
+            "agent_id": 1_000_002_u64,
+            "agent_secret": "secret",
+            "callback_token": "token",
+            "callback_encoding_aes_key": sample_callback_key(),
+            "callback_require_room_mention": true,
+        }))
+        .expect_err("mention-required rooms need explicit mention patterns");
+
+        assert!(matches!(error, FcpError::InvalidRequest { code: 1001, .. }));
     }
 
     #[test]

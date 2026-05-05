@@ -201,9 +201,10 @@ impl QuorumStatus {
 
 /// Compute the effective quorum target for an emergency revocation:
 /// the lesser of [`PriorityGossipPolicy::EMERGENCY_QUORUM_WITNESSES`]
-/// and the majority of online peers (rounded up). Implements the
-/// "majority of online peers, whichever is smaller" rule from the
-/// ADR's open-question resolution #2.
+/// and the majority of online peers (rounded up).
+///
+/// Implements the "majority of online peers, whichever is smaller" rule from
+/// the ADR's open-question resolution #2.
 #[must_use]
 pub const fn effective_quorum_target(online_peers: u32) -> u32 {
     let majority = online_peers.div_ceil(2);
@@ -279,7 +280,7 @@ mod tests {
             "timestamp drift"
         );
 
-        let mut altered_zone = base.clone();
+        let mut altered_zone = base;
         altered_zone.zone_id = "z:public".parse().expect("valid zone id");
         assert_ne!(baseline, altered_zone.witness_signing_bytes(), "zone drift");
     }
@@ -309,7 +310,7 @@ mod tests {
         let pk = sk.verifying_key();
         let witness = sample_witness(7);
         let sig_bytes = sk.sign(&witness.witness_signing_bytes());
-        let signed = witness.clone().with_signature(NodeSignature::new(
+        let signed = witness.with_signature(NodeSignature::new(
             NodeId::new("node-witness"),
             sig_bytes.to_bytes(),
             1_700_000_000,
@@ -326,7 +327,7 @@ mod tests {
         let pk_b = sk_b.verifying_key();
         let witness = sample_witness(7);
         let sig_bytes = sk_a.sign(&witness.witness_signing_bytes());
-        let signed = witness.clone().with_signature(NodeSignature::new(
+        let signed = witness.with_signature(NodeSignature::new(
             NodeId::new("node-witness"),
             sig_bytes.to_bytes(),
             1_700_000_000,

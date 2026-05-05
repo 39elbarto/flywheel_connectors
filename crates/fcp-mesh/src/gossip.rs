@@ -1528,6 +1528,31 @@ pub struct RevocationPushFanoutPlan {
     pub selected_peers: Vec<TailscaleNodeId>,
     /// Earliest millisecond timestamp when another direct push may proceed.
     pub next_allowed_at_ms: Option<u64>,
+    /// Policy used to plan this fanout.
+    pub policy: PriorityGossipPolicy,
+    /// Number of peers offered to the planner before policy filtering.
+    pub requested_peer_count: usize,
+    /// Maximum peers the policy allowed for this attempt.
+    pub fanout_cap: usize,
+    /// Redaction-safe explanation for the selected fanout behavior.
+    pub decision: FanoutDecision,
+}
+
+/// Redaction-safe direct-push fanout decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutDecision {
+    /// Policy does not use direct push.
+    IntervalOnly,
+    /// A previous direct push in the same zone is still inside the interval.
+    RateLimited,
+    /// No peers were available for direct push.
+    EmptyPeerSet,
+    /// Direct push selected every offered peer.
+    FullPeerSet,
+    /// Direct push was capped by the configured amplification limit.
+    Capped,
+    /// Emergency path selected peers using the emergency burst cap.
+    EmergencyBurst,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1805,10 +1830,16 @@ impl MeshGossip {
         policy: PriorityGossipPolicy,
         now_ms: u64,
     ) -> RevocationPushFanoutPlan {
+        let requested_peer_count = peers.len();
+        let fanout_cap = policy.fanout_cap(&self.config);
         if !policy.uses_direct_push() {
             return RevocationPushFanoutPlan {
                 selected_peers: Vec::new(),
                 next_allowed_at_ms: None,
+                policy,
+                requested_peer_count,
+                fanout_cap,
+                decision: FanoutDecision::IntervalOnly,
             };
         }
 
@@ -1819,15 +1850,24 @@ impl MeshGossip {
                 return RevocationPushFanoutPlan {
                     selected_peers: Vec::new(),
                     next_allowed_at_ms: Some(next_allowed_at_ms),
+                    policy,
+                    requested_peer_count,
+                    fanout_cap,
+                    decision: FanoutDecision::RateLimited,
                 };
             }
         }
 
-        let selected_peers = peers
-            .iter()
-            .take(self.config.max_revocation_push_peers)
-            .cloned()
-            .collect::<Vec<_>>();
+        let selected_peers = peers.iter().take(fanout_cap).cloned().collect::<Vec<_>>();
+        let decision = if selected_peers.is_empty() {
+            FanoutDecision::EmptyPeerSet
+        } else if policy.is_emergency() {
+            FanoutDecision::EmergencyBurst
+        } else if selected_peers.len() < requested_peer_count {
+            FanoutDecision::Capped
+        } else {
+            FanoutDecision::FullPeerSet
+        };
         if !selected_peers.is_empty() {
             self.last_priority_push_at_ms
                 .insert(zone_id.clone(), now_ms);
@@ -1836,6 +1876,10 @@ impl MeshGossip {
         RevocationPushFanoutPlan {
             selected_peers,
             next_allowed_at_ms: Some(now_ms.saturating_add(interval_ms)),
+            policy,
+            requested_peer_count,
+            fanout_cap,
+            decision,
         }
     }
 
@@ -5184,6 +5228,120 @@ mod tests {
         let peer_count = 10usize;
         let push_count = peer_count.min(config.max_revocation_push_peers);
         assert_eq!(push_count, 5);
+    }
+
+    #[test]
+    fn direct_push_plan_reports_capped_static_fanout() {
+        let mut gossip = MeshGossip::new(
+            test_node("local-node"),
+            GossipConfig {
+                max_revocation_push_peers: 2,
+                ..GossipConfig::default()
+            },
+        );
+        let peers = vec![
+            test_node("peer-a"),
+            test_node("peer-b"),
+            test_node("peer-c"),
+        ];
+
+        let plan = gossip.plan_revocation_push_fanout(
+            &test_zone(),
+            &peers,
+            PriorityGossipPolicy::DirectPush,
+            1_000,
+        );
+
+        assert_eq!(plan.selected_peers, peers[..2].to_vec());
+        assert_eq!(plan.policy, PriorityGossipPolicy::DirectPush);
+        assert_eq!(plan.requested_peer_count, 3);
+        assert_eq!(plan.fanout_cap, 2);
+        assert_eq!(plan.decision, FanoutDecision::Capped);
+        assert_eq!(plan.next_allowed_at_ms, Some(1_100));
+    }
+
+    #[test]
+    fn emergency_fanout_plan_uses_emergency_burst_cap() {
+        let mut gossip = MeshGossip::new(
+            test_node("local-node"),
+            GossipConfig {
+                max_revocation_push_peers: 2,
+                ..GossipConfig::default()
+            },
+        );
+        let peers = (0..70)
+            .map(|index| test_node(&format!("peer-{index}")))
+            .collect::<Vec<_>>();
+
+        let plan = gossip.plan_revocation_push_fanout(
+            &test_zone(),
+            &peers,
+            PriorityGossipPolicy::Emergency,
+            1_000,
+        );
+
+        assert_eq!(
+            plan.selected_peers.len(),
+            PriorityGossipPolicy::EMERGENCY_BURST_FANOUT
+        );
+        assert_eq!(plan.policy, PriorityGossipPolicy::Emergency);
+        assert_eq!(plan.requested_peer_count, 70);
+        assert_eq!(
+            plan.fanout_cap,
+            PriorityGossipPolicy::EMERGENCY_BURST_FANOUT
+        );
+        assert_eq!(plan.decision, FanoutDecision::EmergencyBurst);
+        assert_eq!(plan.next_allowed_at_ms, Some(1_100));
+    }
+
+    #[test]
+    fn priority_interval_plan_reports_interval_only() {
+        let mut gossip = MeshGossip::new(test_node("local-node"), GossipConfig::default());
+        let peers = vec![test_node("peer-a")];
+
+        let plan = gossip.plan_revocation_push_fanout(
+            &test_zone(),
+            &peers,
+            PriorityGossipPolicy::PriorityInterval,
+            1_000,
+        );
+
+        assert!(plan.selected_peers.is_empty());
+        assert_eq!(plan.policy, PriorityGossipPolicy::PriorityInterval);
+        assert_eq!(plan.requested_peer_count, 1);
+        assert_eq!(plan.fanout_cap, 0);
+        assert_eq!(plan.decision, FanoutDecision::IntervalOnly);
+        assert_eq!(plan.next_allowed_at_ms, None);
+    }
+
+    #[test]
+    fn repeated_direct_push_plan_reports_rate_limit() {
+        let mut gossip = MeshGossip::new(test_node("local-node"), GossipConfig::default());
+        let peers = vec![test_node("peer-a"), test_node("peer-b")];
+        let zone = test_zone();
+
+        let _first = gossip.plan_revocation_push_fanout(
+            &zone,
+            &peers,
+            PriorityGossipPolicy::DirectPush,
+            1_000,
+        );
+        let limited = gossip.plan_revocation_push_fanout(
+            &zone,
+            &peers,
+            PriorityGossipPolicy::DirectPush,
+            1_050,
+        );
+
+        assert!(limited.selected_peers.is_empty());
+        assert_eq!(limited.policy, PriorityGossipPolicy::DirectPush);
+        assert_eq!(limited.requested_peer_count, 2);
+        assert_eq!(
+            limited.fanout_cap,
+            GossipConfig::default().max_revocation_push_peers
+        );
+        assert_eq!(limited.decision, FanoutDecision::RateLimited);
+        assert_eq!(limited.next_allowed_at_ms, Some(1_100));
     }
 
     // Regression: MeshGossip::handle_summary is a public lower-level mutator

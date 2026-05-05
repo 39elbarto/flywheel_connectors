@@ -54,11 +54,8 @@ fn node_id(suffix: &str) -> NodeId {
 }
 
 fn make_node(suffix: &str, memory_mb: u32, zones: Vec<ZoneId>) -> NodeInfo {
-    let connector = InstalledConnector::new(
-        connector_id(),
-        "1.0.0",
-        ObjectId::from_bytes([0xAA; 32]),
-    );
+    let connector =
+        InstalledConnector::new(connector_id(), "1.0.0", ObjectId::from_bytes([0xAA; 32]));
     let profile = DeviceProfile::builder(node_id(suffix))
         .memory_mb(memory_mb)
         .power_source(PowerSource::Mains)
@@ -253,10 +250,10 @@ fn render_golden() -> String {
         &planner,
         PlannerInput::new(
             vec![
-                make_node("admit",        4096, vec![work.clone()]),
-                make_node("no-pool",      4096, vec![work.clone()]),
-                make_node("cpu-hot",      4096, vec![work.clone()]),
-                make_node("mem-hot",      4096, vec![work.clone()]),
+                make_node("admit", 4096, vec![work.clone()]),
+                make_node("no-pool", 4096, vec![work.clone()]),
+                make_node("cpu-hot", 4096, vec![work.clone()]),
+                make_node("mem-hot", 4096, vec![work.clone()]),
             ],
             1000,
         )

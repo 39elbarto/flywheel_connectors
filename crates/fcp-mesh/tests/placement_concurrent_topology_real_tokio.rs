@@ -253,10 +253,8 @@ async fn placement_planner_under_concurrent_topology_churn() {
 
             let mut plans_completed: u64 = 0;
             let mut violations: Vec<String> = Vec::new();
-            let mut last_snapshot_for_replay: Option<(
-                PlannerInput,
-                Vec<fcp_mesh::CandidateNode>,
-            )> = None;
+            let mut last_snapshot_for_replay: Option<(PlannerInput, Vec<fcp_mesh::CandidateNode>)> =
+                None;
 
             loop {
                 if plans_completed >= READER_BUDGET_PLANS {
@@ -269,11 +267,9 @@ async fn placement_planner_under_concurrent_topology_churn() {
                 let candidates = planner.plan(&snapshot, &context);
                 let decisions = planner.resource_pool_decisions(&snapshot, &context);
 
-                if let Err(violation) = check_plan_against_snapshot(
-                    &snapshot,
-                    &candidates,
-                    &decisions,
-                ) {
+                if let Err(violation) =
+                    check_plan_against_snapshot(&snapshot, &candidates, &decisions)
+                {
                     violations.push(format!("reader-{reader_id}: {violation}"));
                     // Cap violations so a torn-read storm doesn't OOM.
                     if violations.len() >= 16 {
@@ -316,24 +312,18 @@ async fn placement_planner_under_concurrent_topology_churn() {
                     // Writer is done; let the reader drain a few more
                     // cycles to confirm the post-churn snapshot still
                     // produces a stable plan.
-                    let drain_target =
-                        plans_completed + (READER_BUDGET_PLANS / 100).max(8);
+                    let drain_target = plans_completed + (READER_BUDGET_PLANS / 100).max(8);
                     while plans_completed < drain_target {
                         let snapshot = {
                             let guard = reader_topology.read().await;
                             guard.clone()
                         };
                         let candidates = planner.plan(&snapshot, &context);
-                        let decisions =
-                            planner.resource_pool_decisions(&snapshot, &context);
-                        if let Err(violation) = check_plan_against_snapshot(
-                            &snapshot,
-                            &candidates,
-                            &decisions,
-                        ) {
-                            violations.push(format!(
-                                "reader-{reader_id} drain: {violation}"
-                            ));
+                        let decisions = planner.resource_pool_decisions(&snapshot, &context);
+                        if let Err(violation) =
+                            check_plan_against_snapshot(&snapshot, &candidates, &decisions)
+                        {
+                            violations.push(format!("reader-{reader_id} drain: {violation}"));
                         }
                         plans_completed += 1;
                     }

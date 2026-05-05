@@ -372,7 +372,6 @@ pub struct GossipDispatchOutcome {
 }
 
 impl GossipDispatchOutcome {
-    #[must_use]
     fn with_revocation_push(revocation_push: VerifiedRevocationPush) -> Self {
         Self {
             revocation_push: Some(revocation_push),
@@ -380,7 +379,6 @@ impl GossipDispatchOutcome {
         }
     }
 
-    #[must_use]
     fn with_response(response: GossipResponse) -> Self {
         Self {
             revocation_push: None,

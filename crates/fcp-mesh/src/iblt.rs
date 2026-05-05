@@ -205,7 +205,6 @@ impl Iblt {
     }
 
     /// Decode the sketch by repeatedly peeling pure cells.
-    #[must_use]
     pub fn decode(&self) -> IbltDecodeResult {
         let mut working = self.cells.clone();
         let mut pending = VecDeque::new();

@@ -33,8 +33,8 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 
 use fcp_prelude::{
-    rank_nodes_by_hrw, select_coordinator, ConnectorId, LeasePurpose as CoreLeasePurpose, ObjectId,
-    TailscaleNodeId, ZoneId,
+    ConnectorId, LeasePurpose as CoreLeasePurpose, ObjectId, TailscaleNodeId, ZoneId,
+    rank_nodes_by_hrw, select_coordinator,
 };
 use fcp_tailscale::NodeId;
 use serde::{Deserialize, Serialize};
@@ -878,6 +878,7 @@ pub struct ZoneSloTelemetrySample {
 impl ZoneSloTelemetrySample {
     /// Create a telemetry sample.
     #[must_use]
+    #[allow(clippy::too_many_arguments)] // Telemetry samples bind every observed route field.
     pub fn new(
         zone_id: ZoneId,
         node_id: NodeId,
@@ -940,6 +941,7 @@ impl ZoneSloTelemetryFeed {
     }
 
     /// Record the same candidate route outcome for every zone on the candidate.
+    #[allow(clippy::too_many_arguments)] // Route observation records the same field set as the sample.
     pub fn record_candidate_route(
         &mut self,
         candidate: &CandidateNode,
@@ -3218,10 +3220,12 @@ mod tests {
         let candidates = planner.plan(&input, &context);
         assert_eq!(candidates.len(), 2);
         // First candidate has SelectedAsBest
-        assert!(candidates[0]
-            .decision_reasons
-            .iter()
-            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
+        assert!(
+            candidates[0]
+                .decision_reasons
+                .iter()
+                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
+        );
         // Second has EligibleNotSelected
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(
             r,
@@ -4067,10 +4071,12 @@ mod tests {
         assert_eq!(candidates.len(), 3);
 
         // First should have SelectedAsBest { rank: 1 }
-        assert!(candidates[0]
-            .decision_reasons
-            .iter()
-            .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 })));
+        assert!(
+            candidates[0]
+                .decision_reasons
+                .iter()
+                .any(|r| matches!(r, DecisionReason::SelectedAsBest { rank: 1 }))
+        );
 
         // Second should have rank 2
         assert!(candidates[1].decision_reasons.iter().any(|r| matches!(

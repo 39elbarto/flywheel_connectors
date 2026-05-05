@@ -356,10 +356,89 @@ pub struct VideoMeta {
 /// Result of validating a Twilio webhook request signature.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignatureValidationResult {
-    /// Whether the signature format is valid.
+    /// Whether the signature cryptographically matches the supplied URL and parameters.
     pub valid: bool,
     /// Human-readable reason for the validation result.
     pub reason: String,
+    /// True when the signed request was already seen within the replay window.
+    pub is_replay: bool,
+    /// Stable, non-secret identity for the verified signed request.
+    pub verified_request_key: Option<String>,
+    /// The URL used for Twilio HMAC verification.
+    pub verification_url: Option<String>,
+}
+
+/// Result of applying inbound caller/message policy to a Twilio webhook.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboundPolicyDecision {
+    /// Whether the inbound webhook may be emitted or processed downstream.
+    pub allowed: bool,
+    /// Policy mode used for this decision.
+    pub policy: String,
+    /// Stable machine-readable reason code.
+    pub reason_code: String,
+    /// Human-readable reason for the decision.
+    pub reason: String,
+    /// Raw caller/sender value from the Twilio payload, if present.
+    pub from: Option<String>,
+    /// Normalized E.164 caller/sender value when valid.
+    pub normalized_from: Option<String>,
+    /// Exact allowlist entry that matched the caller/sender.
+    pub matched_from: Option<String>,
+    /// Raw recipient value from the Twilio payload, if present.
+    pub to: Option<String>,
+    /// Caller-provided or inferred inbound event type.
+    pub event_type: String,
+    /// Audit event type for structured allow/deny logs.
+    pub audit_event_type: String,
+    /// Inbound policy input is tainted because it came from an external webhook.
+    pub tainted: bool,
+}
+
+/// Structured log entry emitted while processing a Twilio webhook ingress request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookIngressLogEntry {
+    /// Pipeline phase that emitted the log.
+    pub phase: String,
+    /// Phase outcome.
+    pub outcome: String,
+    /// Stable machine-readable event code.
+    pub code: String,
+    /// Redaction-safe human-readable message.
+    pub message: String,
+}
+
+/// Result of processing a host-forwarded Twilio webhook ingress request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookIngressResult {
+    /// Whether the webhook may be emitted downstream.
+    pub accepted: bool,
+    /// HTTP-style status code the host should return to Twilio.
+    pub status_code: u16,
+    /// Stable machine-readable reason code.
+    pub reason_code: String,
+    /// Redaction-safe human-readable reason.
+    pub reason: String,
+    /// Parsed event type when available.
+    pub event_type: Option<String>,
+    /// Parsed event payload when accepted.
+    pub event: Option<serde_json::Value>,
+    /// Signature/replay validation result when signature verification ran.
+    pub signature: Option<SignatureValidationResult>,
+    /// Inbound caller/message policy decision when policy applies.
+    pub policy: Option<InboundPolicyDecision>,
+    /// FCP request-region metadata supplied by the host or synthesized for tests.
+    pub request_region: serde_json::Value,
+    /// ServiceBuilder-style ingress guardrails expected around this request.
+    pub service_layers: serde_json::Value,
+    /// Ordered structured processing logs.
+    pub logs: Vec<WebhookIngressLogEntry>,
+    /// Bounded payload size used for ingress admission.
+    pub body_bytes: usize,
+    /// Ingress input is tainted because it came from an external webhook.
+    pub tainted: bool,
+    /// True when the connector completed without leaving background work.
+    pub clean_shutdown: bool,
 }
 
 /// Parsed SMS/MMS webhook event from Twilio.

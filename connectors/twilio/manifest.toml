@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:6296fd0f664d3408a8297f6c3328bcf35a07c3143acc11306b9c1e0094105db7"
+interface_hash = "blake3-256:fcp.interface.v2:d07b3118cfa30182d4f5ff0ed9fb56d8238413766e29785aff78f6328de5a38a"
 
 [connector]
 id = "fcp.twilio"
@@ -2391,6 +2391,11 @@ description = "X-Twilio-Signature header value"
 type = "string"
 description = "Twilio auth token for HMAC computation"
 
+[provides.operations."twilio.webhook.validate_signature".input_schema.properties.allowed_hosts]
+type = "array"
+items = { type = "string" }
+description = "Optional exact host allowlist for the public webhook URL"
+
 [provides.operations."twilio.webhook.validate_signature".output_schema]
 type = "object"
 
@@ -2400,11 +2405,218 @@ type = "boolean"
 [provides.operations."twilio.webhook.validate_signature".output_schema.properties.reason]
 type = "string"
 
+[provides.operations."twilio.webhook.validate_signature".output_schema.properties.is_replay]
+type = "boolean"
+
+[provides.operations."twilio.webhook.validate_signature".output_schema.properties.verified_request_key]
+type = "string"
+
+[provides.operations."twilio.webhook.validate_signature".output_schema.properties.verification_url]
+type = "string"
+
 [provides.operations."twilio.webhook.validate_signature".ai_hints]
 when_to_use = "Validate an incoming Twilio webhook signature before processing. Local-only, no HTTP call."
 common_mistakes = ["Not using the full URL including protocol and query string."]
-examples = ['{"url": "https://example.com/webhook", "params": {"Body": "Hello"}, "signature": "abc=="}']
-related = ["twilio.webhook.parse_sms_event", "twilio.webhook.parse_voice_event"]
+examples = ['{"url": "https://example.com/webhook", "params": {"Body": "Hello"}, "signature": "abc==", "auth_token": "twilio_auth_token"}']
+related = ["twilio.webhook.evaluate_inbound_policy", "twilio.webhook.ingest_request", "twilio.webhook.parse_sms_event", "twilio.webhook.parse_voice_event"]
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy"]
+description = "Evaluate exact inbound caller/message policy for a Twilio webhook (local-only)"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".input_schema]
+type = "object"
+required = ["body", "inbound_policy"]
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".input_schema.properties.body]
+type = "object"
+description = "Webhook payload fields containing From/To and MessageSid or CallSid"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".input_schema.properties.inbound_policy]
+type = "string"
+enum = ["open", "allowlist", "disabled"]
+description = "Inbound policy mode to apply"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".input_schema.properties.allowed_from]
+type = "array"
+items = { type = "string" }
+description = "Exact E.164 caller/sender allowlist used when inbound_policy is allowlist"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".input_schema.properties.event_type]
+type = "string"
+description = "Optional caller-provided event type for audit metadata"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.allowed]
+type = "boolean"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.policy]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.reason_code]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.reason]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.from]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.normalized_from]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.matched_from]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.to]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.audit_event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.evaluate_inbound_policy".ai_hints]
+when_to_use = "Gate an authenticated Twilio SMS or voice webhook before emitting it downstream. Local-only."
+common_mistakes = ["Using suffix or punctuation-insensitive matching instead of exact E.164 allowlist entries.", "Treating anonymous or missing From values as allowed callers."]
+examples = ['{"body": {"MessageSid": "SMxxx", "From": "+15551234567", "To": "+15559876543"}, "inbound_policy": "allowlist", "allowed_from": ["+15551234567"]}']
+related = ["twilio.webhook.validate_signature", "twilio.webhook.ingest_request", "twilio.webhook.parse_sms_event", "twilio.webhook.parse_voice_event"]
+
+[provides.operations."twilio.webhook.ingest_request"]
+description = "Process a host-forwarded Twilio webhook request through ingress guardrails"
+capability = "twilio.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."twilio.webhook.ingest_request".rate_limit]
+max = 200
+per_ms = 60000
+
+[provides.operations."twilio.webhook.ingest_request".input_schema]
+type = "object"
+required = ["method", "url", "headers", "body"]
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.method]
+type = "string"
+description = "HTTP method supplied by the host request region"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.url]
+type = "string"
+description = "Full public Twilio webhook URL used for signature verification"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.headers]
+type = "object"
+description = "HTTP headers including X-Twilio-Signature"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.body]
+type = "object"
+description = "Form-decoded Twilio webhook body fields"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.auth_token]
+type = "string"
+description = "Twilio auth token for HMAC-SHA1 verification"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.allowed_hosts]
+type = "array"
+items = { type = "string" }
+description = "Optional exact public host allowlist"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.inbound_policy]
+type = "string"
+enum = ["open", "allowlist", "disabled"]
+description = "Inbound caller/message policy for non-status events"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.allowed_from]
+type = "array"
+items = { type = "string" }
+description = "Exact E.164 allowlist for inbound events"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.request_region]
+type = "object"
+description = "FCP host request-region metadata"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.max_body_bytes]
+type = "integer"
+description = "Maximum accepted decoded form body size"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.body_size_bytes]
+type = "integer"
+description = "Host-measured decoded form body size"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.timeout_ms]
+type = "integer"
+description = "Host timeout layer budget"
+
+[provides.operations."twilio.webhook.ingest_request".input_schema.properties.concurrency_limit]
+type = "integer"
+description = "Host concurrency-limit layer size"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.accepted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.reason_code]
+type = "string"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.reason]
+type = "string"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.event_type]
+type = "string"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.event]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.signature]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.policy]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.request_region]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.service_layers]
+type = "object"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.logs]
+type = "array"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.body_bytes]
+type = "integer"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations."twilio.webhook.ingest_request".output_schema.properties.clean_shutdown]
+type = "boolean"
+
+[provides.operations."twilio.webhook.ingest_request".ai_hints]
+when_to_use = "Handle a Twilio webhook forwarded by the FCP host request region. Verifies signature/replay, parses the payload, applies inbound policy for non-status events, and returns the HTTP-style outcome for Twilio."
+common_mistakes = ["Letting the connector open a listener instead of forwarding through the FCP host request region.", "Parsing or emitting the payload before signature and replay checks pass.", "Applying inbound caller allowlists to status callbacks instead of inbound message/voice events."]
+examples = ['{"method": "POST", "url": "https://example.com/twilio", "headers": {"X-Twilio-Signature": "abc=="}, "body": {"MessageSid": "SMxxx", "From": "+15551234567", "To": "+15559876543"}, "auth_token": "twilio_auth_token", "inbound_policy": "allowlist", "allowed_from": ["+15551234567"]}']
+related = ["twilio.webhook.validate_signature", "twilio.webhook.evaluate_inbound_policy", "twilio.webhook.parse_sms_event", "twilio.webhook.parse_status_callback", "twilio.webhook.parse_voice_event"]
 
 [provides.operations."twilio.webhook.parse_sms_event"]
 description = "Parse a Twilio SMS webhook payload into a structured event (local-only)"
@@ -2693,6 +2905,8 @@ scope = "instance"
 "twilio.video.room.participants" = ["twilio.video"]
 "twilio.video.recording.list" = ["twilio.video"]
 "twilio.webhook.validate_signature" = ["twilio.webhook"]
+"twilio.webhook.evaluate_inbound_policy" = ["twilio.webhook"]
+"twilio.webhook.ingest_request" = ["twilio.webhook"]
 "twilio.webhook.parse_sms_event" = ["twilio.webhook"]
 "twilio.webhook.parse_status_callback" = ["twilio.webhook"]
 "twilio.webhook.parse_voice_event" = ["twilio.webhook"]

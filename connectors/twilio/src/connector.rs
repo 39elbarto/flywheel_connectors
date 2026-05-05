@@ -1,6 +1,10 @@
 //! FCP Twilio Connector implementation.
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::{Duration as StdDuration, Instant},
+};
 
 use base64::Engine;
 use fcp_prelude::{
@@ -9,9 +13,12 @@ use fcp_prelude::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use hmac::{Hmac, Mac};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use sha1::{Digest as _, Sha1};
+use subtle::ConstantTimeEq;
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_API_BASE, TwilioAuth, TwilioClient};
@@ -22,6 +29,17 @@ struct TwilioConfig {
     auth: TwilioAuth,
     base_url: String,
 }
+
+const TWILIO_WEBHOOK_REPLAY_WINDOW: StdDuration = StdDuration::from_secs(10 * 60);
+const TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES: usize = 10_000;
+const TWILIO_WEBHOOK_REPLAY_PRUNE_INTERVAL: u64 = 64;
+const TWILIO_WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 64 * 1024;
+const TWILIO_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
+const TWILIO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
+const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
+const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
+
+type HmacSha1 = Hmac<Sha1>;
 
 impl TwilioConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
@@ -155,6 +173,585 @@ fn validate_base_url_for_auth(base_url: &str, auth: &TwilioAuth) -> FcpResult<St
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
+#[derive(Default)]
+struct TwilioWebhookReplayCache {
+    seen_until: HashMap<String, Instant>,
+    calls: u64,
+}
+
+impl TwilioWebhookReplayCache {
+    fn mark(&mut self, key: String) -> bool {
+        let now = Instant::now();
+        self.calls = self.calls.saturating_add(1);
+        if self.calls % TWILIO_WEBHOOK_REPLAY_PRUNE_INTERVAL == 0 {
+            self.prune(now);
+        }
+
+        if self
+            .seen_until
+            .get(&key)
+            .is_some_and(|expires_at| *expires_at > now)
+        {
+            return true;
+        }
+
+        self.seen_until
+            .insert(key, now + TWILIO_WEBHOOK_REPLAY_WINDOW);
+        if self.seen_until.len() > TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES {
+            self.prune(now);
+        }
+        false
+    }
+
+    fn prune(&mut self, now: Instant) {
+        self.seen_until.retain(|_, expires_at| *expires_at > now);
+        while self.seen_until.len() > TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES {
+            let Some(oldest) = self.seen_until.keys().next().cloned() else {
+                break;
+            };
+            self.seen_until.remove(&oldest);
+        }
+    }
+}
+
+fn serialize_result<T: Serialize>(value: T) -> FcpResult<serde_json::Value> {
+    serde_json::to_value(value).map_err(|e| FcpError::Internal {
+        message: format!("Serialization error: {e}"),
+    })
+}
+
+fn twilio_param_value_to_string(field: &str, value: &serde_json::Value) -> FcpResult<String> {
+    match value {
+        serde_json::Value::String(value) => Ok(value.clone()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Null => Ok(String::new()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Twilio webhook params field `{field}` must be a scalar string, number, boolean, or null"
+                ),
+            })
+        }
+    }
+}
+
+fn sorted_twilio_params(params: &serde_json::Value) -> FcpResult<Vec<(String, String)>> {
+    let params = params.as_object().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "params must be an object of Twilio form fields".into(),
+    })?;
+
+    let mut sorted = Vec::with_capacity(params.len());
+    for (field, value) in params {
+        sorted.push((field.clone(), twilio_param_value_to_string(field, value)?));
+    }
+    sorted.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(sorted)
+}
+
+fn build_twilio_data_to_sign(url: &str, sorted_params: &[(String, String)]) -> String {
+    let mut data = String::from(url);
+    for (key, value) in sorted_params {
+        data.push_str(key);
+        data.push_str(value);
+    }
+    data
+}
+
+fn canonical_twilio_param_string(sorted_params: &[(String, String)]) -> String {
+    sorted_params
+        .iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn twilio_replay_key(
+    verification_url: &str,
+    sorted_params: &[(String, String)],
+    signature: &str,
+) -> String {
+    let canonical_params = canonical_twilio_param_string(sorted_params);
+    let mut hasher = Sha1::new();
+    hasher.update(verification_url.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(canonical_params.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(signature.as_bytes());
+    let digest = hasher.finalize();
+    format!(
+        "twilio:req:{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
+    )
+}
+
+fn validate_twilio_webhook_url(
+    url: &str,
+    allowed_hosts: Option<&serde_json::Value>,
+) -> FcpResult<String> {
+    let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "url must not be empty".into(),
+        });
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid webhook url: {error}"),
+    })?;
+
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must use http or https".into(),
+        });
+    }
+
+    let Some(host) = parsed.host_str() else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must include a host".into(),
+        });
+    };
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must not include userinfo".into(),
+        });
+    }
+
+    if parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook url must not include a fragment".into(),
+        });
+    }
+
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "webhook url must use https unless targeting localhost/127.0.0.1/::1 for tests"
+                    .into(),
+        });
+    }
+
+    if let Some(allowed_hosts) = allowed_hosts {
+        let hosts = allowed_hosts.as_array().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_hosts must be an array of hostnames".into(),
+        })?;
+        if hosts.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "allowed_hosts must not be empty when provided".into(),
+            });
+        }
+        let normalized_host = host.to_ascii_lowercase();
+        let allowed = hosts.iter().any(|candidate| {
+            candidate
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .is_some_and(|value| value.to_ascii_lowercase() == normalized_host)
+        });
+        if !allowed {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("webhook url host `{host}` is not in allowed_hosts"),
+            });
+        }
+    }
+
+    Ok(trimmed.to_string())
+}
+
+fn compute_twilio_signature_digest(auth_token: &str, data_to_sign: &str) -> FcpResult<Vec<u8>> {
+    let mut mac =
+        HmacSha1::new_from_slice(auth_token.as_bytes()).map_err(|error| FcpError::Internal {
+            message: format!("Failed to initialize Twilio HMAC-SHA1 verifier: {error}"),
+        })?;
+    mac.update(data_to_sign.as_bytes());
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum TwilioInboundPolicyMode {
+    Open,
+    Allowlist,
+    Disabled,
+}
+
+impl TwilioInboundPolicyMode {
+    fn parse(input: &serde_json::Value) -> FcpResult<Self> {
+        let mode = input
+            .get("inbound_policy")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing required field: inbound_policy".into(),
+            })?;
+
+        match mode {
+            "open" => Ok(Self::Open),
+            "allowlist" => Ok(Self::Allowlist),
+            "disabled" => Ok(Self::Disabled),
+            other => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "inbound_policy must be one of open, allowlist, or disabled; got `{other}`"
+                ),
+            }),
+        }
+    }
+
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Allowlist => "allowlist",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+fn is_anonymous_twilio_sender(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "" | "anonymous" | "unknown" | "restricted" | "private" | "unavailable"
+    )
+}
+
+fn normalize_e164_phone(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let digits = trimmed.strip_prefix('+')?;
+    if digits.is_empty()
+        || digits.len() > 15
+        || digits.starts_with('0')
+        || !digits.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+fn normalize_allowed_from_values(input: Option<&serde_json::Value>) -> FcpResult<Vec<String>> {
+    let Some(input) = input else {
+        return Ok(Vec::new());
+    };
+    let values = input.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "allowed_from must be an array of exact E.164 phone numbers".into(),
+    })?;
+
+    let mut normalized = Vec::with_capacity(values.len());
+    for value in values {
+        let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_from entries must be strings".into(),
+        })?;
+        let Some(phone) = normalize_e164_phone(raw) else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "allowed_from entries must be exact E.164 phone numbers".into(),
+            });
+        };
+        normalized.push(phone);
+    }
+    Ok(normalized)
+}
+
+fn webhook_body(
+    input: &serde_json::Value,
+) -> FcpResult<&serde_json::Map<String, serde_json::Value>> {
+    input
+        .get("body")
+        .and_then(|value| value.as_object())
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "body must be an object of Twilio webhook fields".into(),
+        })
+}
+
+fn optional_body_string(
+    body: &serde_json::Map<String, serde_json::Value>,
+    field: &str,
+) -> Option<String> {
+    body.get(field)
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(String::from)
+}
+
+fn infer_twilio_inbound_event_type(body: &serde_json::Map<String, serde_json::Value>) -> String {
+    if body.contains_key("CallSid") {
+        "voice.inbound".into()
+    } else if body.contains_key("MessageSid") || body.contains_key("SmsSid") {
+        "sms.inbound".into()
+    } else {
+        "twilio.inbound".into()
+    }
+}
+
+fn inbound_policy_decision(
+    mode: TwilioInboundPolicyMode,
+    allowed: bool,
+    reason_code: &str,
+    reason: &str,
+    from: Option<String>,
+    normalized_from: Option<String>,
+    matched_from: Option<String>,
+    to: Option<String>,
+    event_type: String,
+) -> crate::types::InboundPolicyDecision {
+    crate::types::InboundPolicyDecision {
+        allowed,
+        policy: mode.as_str().into(),
+        reason_code: reason_code.into(),
+        reason: reason.into(),
+        from,
+        normalized_from,
+        matched_from,
+        to,
+        event_type,
+        audit_event_type: if allowed {
+            "twilio.inbound_policy.allowed".into()
+        } else {
+            "twilio.inbound_policy.denied".into()
+        },
+        tainted: true,
+    }
+}
+
+fn twilio_webhook_ingress_log(
+    phase: &str,
+    outcome: &str,
+    code: &str,
+    message: &str,
+) -> crate::types::WebhookIngressLogEntry {
+    crate::types::WebhookIngressLogEntry {
+        phase: phase.into(),
+        outcome: outcome.into(),
+        code: code.into(),
+        message: message.into(),
+    }
+}
+
+fn request_region_bool(input: &serde_json::Value, field: &str) -> bool {
+    input
+        .get("request_region")
+        .and_then(|region| region.get(field))
+        .and_then(serde_json::Value::as_bool)
+        .or_else(|| input.get(field).and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+}
+
+fn request_region_string(input: &serde_json::Value, field: &str, default: &str) -> String {
+    input
+        .get("request_region")
+        .and_then(|region| region.get(field))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| default.into(), String::from)
+}
+
+fn optional_u64_field(input: &serde_json::Value, field: &str, default: u64) -> FcpResult<u64> {
+    match input.get(field) {
+        Some(value) => value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be an unsigned integer"),
+        }),
+        None => Ok(default),
+    }
+}
+
+fn optional_usize_field(
+    input: &serde_json::Value,
+    field: &str,
+    default: usize,
+) -> FcpResult<usize> {
+    let default = u64::try_from(default).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} default is too large for this platform"),
+    })?;
+    let raw = optional_u64_field(input, field, default)?;
+    usize::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} is too large for this platform"),
+    })
+}
+
+fn twilio_webhook_ingress_request_region(
+    input: &serde_json::Value,
+    method: &str,
+    url: &str,
+) -> serde_json::Value {
+    json!({
+        "surface": "fcp.webhook.request_region",
+        "provider": "twilio",
+        "source": request_region_string(input, "source", "host_forwarded"),
+        "method": method,
+        "url": url,
+        "cancelled": request_region_bool(input, "cancelled"),
+        "deadline_exceeded": request_region_bool(input, "deadline_exceeded")
+    })
+}
+
+fn twilio_webhook_ingress_service_layers(
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let timeout_ms = optional_u64_field(input, "timeout_ms", TWILIO_WEBHOOK_INGRESS_TIMEOUT_MS)?;
+    let concurrency_limit = optional_u64_field(
+        input,
+        "concurrency_limit",
+        TWILIO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT,
+    )?;
+    let rate_limit_max = optional_u64_field(
+        input,
+        "rate_limit_max",
+        TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_MAX,
+    )?;
+    let rate_limit_window_ms = optional_u64_field(
+        input,
+        "rate_limit_window_ms",
+        TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS,
+    )?;
+
+    Ok(json!({
+        "builder": "fcp.webhook.ServiceBuilder",
+        "host_enforced": true,
+        "layers": [
+            { "name": "timeout", "timeout_ms": timeout_ms },
+            { "name": "concurrency_limit", "max_in_flight": concurrency_limit },
+            { "name": "load_shed", "enabled": true },
+            {
+                "name": "rate_limit",
+                "pool": "twilio.webhook",
+                "max": rate_limit_max,
+                "per_ms": rate_limit_window_ms
+            }
+        ]
+    }))
+}
+
+fn webhook_headers(
+    input: &serde_json::Value,
+) -> FcpResult<&serde_json::Map<String, serde_json::Value>> {
+    input
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "headers must be an object of HTTP header strings".into(),
+        })
+}
+
+fn webhook_header_value(
+    headers: &serde_json::Map<String, serde_json::Value>,
+    header_name: &str,
+) -> FcpResult<Option<String>> {
+    for (key, value) in headers {
+        if key.eq_ignore_ascii_case(header_name) {
+            let Some(value) = value.as_str() else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("header `{key}` must be a string"),
+                });
+            };
+            return Ok(Some(value.trim().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn twilio_webhook_body_size(
+    input: &serde_json::Value,
+    body: &serde_json::Value,
+) -> FcpResult<usize> {
+    if input.get("body_size_bytes").is_some() {
+        return optional_usize_field(input, "body_size_bytes", 0);
+    }
+
+    serde_json::to_vec(body)
+        .map(|body| body.len())
+        .map_err(|error| FcpError::Internal {
+            message: format!("Failed to measure Twilio webhook body: {error}"),
+        })
+}
+
+fn twilio_ingress_parse_operation(
+    body: &serde_json::Map<String, serde_json::Value>,
+) -> Option<&'static str> {
+    if body.contains_key("MessageStatus")
+        || (body.contains_key("CallStatus") && !body.contains_key("From"))
+    {
+        Some("twilio.webhook.parse_status_callback")
+    } else if body.contains_key("MessageSid") || body.contains_key("SmsSid") {
+        Some("twilio.webhook.parse_sms_event")
+    } else if body.contains_key("CallSid") {
+        Some("twilio.webhook.parse_voice_event")
+    } else {
+        None
+    }
+}
+
+fn deserialize_connector_value<T: for<'de> Deserialize<'de>>(
+    value: serde_json::Value,
+    what: &str,
+) -> FcpResult<T> {
+    serde_json::from_value(value).map_err(|error| FcpError::Internal {
+        message: format!("Failed to deserialize {what}: {error}"),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn twilio_webhook_ingress_response(
+    accepted: bool,
+    status_code: u16,
+    reason_code: &str,
+    reason: &str,
+    event: Option<serde_json::Value>,
+    signature: Option<crate::types::SignatureValidationResult>,
+    policy: Option<crate::types::InboundPolicyDecision>,
+    request_region: serde_json::Value,
+    service_layers: serde_json::Value,
+    logs: Vec<crate::types::WebhookIngressLogEntry>,
+    body_bytes: usize,
+) -> FcpResult<serde_json::Value> {
+    let event_type = event
+        .as_ref()
+        .and_then(|event| event.get("event_type"))
+        .and_then(serde_json::Value::as_str)
+        .map(String::from)
+        .or_else(|| policy.as_ref().map(|policy| policy.event_type.clone()));
+
+    serialize_result(crate::types::WebhookIngressResult {
+        accepted,
+        status_code,
+        reason_code: reason_code.into(),
+        reason: reason.into(),
+        event_type,
+        event: accepted.then_some(event).flatten(),
+        signature,
+        policy,
+        request_region,
+        service_layers,
+        logs,
+        body_bytes,
+        tainted: true,
+        clean_shutdown: true,
+    })
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct DoctorResult {
     status: String,
@@ -183,6 +780,7 @@ pub struct TwilioConnector {
     config: Option<TwilioConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    webhook_replay_cache: Mutex<TwilioWebhookReplayCache>,
 }
 
 impl TwilioConnector {
@@ -195,7 +793,14 @@ impl TwilioConnector {
             config: None,
             verifier: None,
             session_id: None,
+            webhook_replay_cache: Mutex::new(TwilioWebhookReplayCache::default()),
         }
+    }
+
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     /// Handle configure method.
@@ -1748,14 +2353,18 @@ impl TwilioConnector {
                             "url": { "type": "string", "description": "The full webhook URL" },
                             "params": { "type": "object", "description": "Form-encoded POST parameters as key-value pairs" },
                             "signature": { "type": "string", "description": "X-Twilio-Signature header value (base64-encoded HMAC-SHA1)" },
-                            "auth_token": { "type": "string", "description": "Twilio auth token for HMAC computation" }
+                            "auth_token": { "type": "string", "description": "Twilio auth token for HMAC computation" },
+                            "allowed_hosts": { "type": "array", "items": { "type": "string" }, "description": "Optional exact host allowlist for the public webhook URL" }
                         }
                     }),
                     json!({
                         "type": "object",
                         "properties": {
                             "valid": { "type": "boolean" },
-                            "reason": { "type": "string" }
+                            "reason": { "type": "string" },
+                            "is_replay": { "type": "boolean" },
+                            "verified_request_key": { "type": "string" },
+                            "verification_url": { "type": "string" }
                         }
                     }),
                     "twilio.webhook",
@@ -1772,7 +2381,123 @@ impl TwilioConnector {
                             r#"{"url": "https://example.com/webhook", "params": {"Body": "Hello", "From": "+15551234567"}, "signature": "abc123==", "auth_token": "your_token"}"#.into(),
                         ],
                         related: vec![
+                            CapabilityId::from_static("twilio.webhook.evaluate_inbound_policy"),
+                            CapabilityId::from_static("twilio.webhook.ingest_request"),
                             CapabilityId::from_static("twilio.webhook.parse_sms_event"),
+                            CapabilityId::from_static("twilio.webhook.parse_voice_event"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.webhook.evaluate_inbound_policy",
+                    "Evaluate exact inbound caller/message policy for a Twilio webhook",
+                    json!({
+                        "type": "object",
+                        "required": ["body", "inbound_policy"],
+                        "properties": {
+                            "body": { "type": "object", "description": "Webhook payload fields containing From/To and MessageSid or CallSid" },
+                            "inbound_policy": { "type": "string", "enum": ["open", "allowlist", "disabled"], "description": "Inbound policy mode to apply" },
+                            "allowed_from": { "type": "array", "items": { "type": "string" }, "description": "Exact E.164 caller/sender allowlist used when inbound_policy is allowlist" },
+                            "event_type": { "type": "string", "description": "Optional caller-provided event type for audit metadata" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "allowed": { "type": "boolean" },
+                            "policy": { "type": "string" },
+                            "reason_code": { "type": "string" },
+                            "reason": { "type": "string" },
+                            "from": { "type": "string" },
+                            "normalized_from": { "type": "string" },
+                            "matched_from": { "type": "string" },
+                            "to": { "type": "string" },
+                            "event_type": { "type": "string" },
+                            "audit_event_type": { "type": "string" },
+                            "tainted": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Gate an authenticated Twilio SMS or voice webhook before emitting it downstream. This is a local-only operation (no HTTP call).".into(),
+                        common_mistakes: vec![
+                            "Using suffix or punctuation-insensitive matching instead of exact E.164 allowlist entries.".into(),
+                            "Treating anonymous or missing From values as allowed callers.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"body": {"MessageSid": "SMxxx", "From": "+15551234567", "To": "+15559876543"}, "inbound_policy": "allowlist", "allowed_from": ["+15551234567"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.webhook.validate_signature"),
+                            CapabilityId::from_static("twilio.webhook.ingest_request"),
+                            CapabilityId::from_static("twilio.webhook.parse_sms_event"),
+                            CapabilityId::from_static("twilio.webhook.parse_voice_event"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "twilio.webhook.ingest_request",
+                    "Process a host-forwarded Twilio webhook request through ingress guardrails",
+                    json!({
+                        "type": "object",
+                        "required": ["method", "url", "headers", "body"],
+                        "properties": {
+                            "method": { "type": "string", "description": "HTTP method supplied by the host request region" },
+                            "url": { "type": "string", "description": "Full public Twilio webhook URL used for signature verification" },
+                            "headers": { "type": "object", "description": "HTTP headers including X-Twilio-Signature" },
+                            "body": { "type": "object", "description": "Form-decoded Twilio webhook body fields" },
+                            "auth_token": { "type": "string", "description": "Twilio auth token for HMAC-SHA1 verification" },
+                            "allowed_hosts": { "type": "array", "items": { "type": "string" }, "description": "Optional exact public host allowlist" },
+                            "inbound_policy": { "type": "string", "enum": ["open", "allowlist", "disabled"], "description": "Inbound caller/message policy for non-status events" },
+                            "allowed_from": { "type": "array", "items": { "type": "string" }, "description": "Exact E.164 allowlist for inbound events" },
+                            "request_region": { "type": "object", "description": "FCP host request-region metadata" },
+                            "max_body_bytes": { "type": "integer", "description": "Maximum accepted decoded form body size" },
+                            "body_size_bytes": { "type": "integer", "description": "Host-measured decoded form body size" },
+                            "timeout_ms": { "type": "integer", "description": "Host timeout layer budget" },
+                            "concurrency_limit": { "type": "integer", "description": "Host concurrency-limit layer size" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "accepted": { "type": "boolean" },
+                            "status_code": { "type": "integer" },
+                            "reason_code": { "type": "string" },
+                            "reason": { "type": "string" },
+                            "event_type": { "type": "string" },
+                            "event": { "type": "object" },
+                            "signature": { "type": "object" },
+                            "policy": { "type": "object" },
+                            "request_region": { "type": "object" },
+                            "service_layers": { "type": "object" },
+                            "logs": { "type": "array" },
+                            "body_bytes": { "type": "integer" },
+                            "tainted": { "type": "boolean" },
+                            "clean_shutdown": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.webhook",
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Handle a Twilio webhook that the FCP host has accepted into a request region. This verifies signature/replay, parses the payload, applies inbound policy for non-status events, and returns the HTTP-style outcome for Twilio.".into(),
+                        common_mistakes: vec![
+                            "Letting the connector open a listener instead of forwarding through the FCP host request region.".into(),
+                            "Parsing or emitting the payload before signature and replay checks pass.".into(),
+                            "Applying inbound caller allowlists to status callbacks instead of inbound message/voice events.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"method": "POST", "url": "https://example.com/twilio", "headers": {"X-Twilio-Signature": "abc=="}, "body": {"MessageSid": "SMxxx", "From": "+15551234567", "To": "+15559876543"}, "auth_token": "twilio_auth_token", "inbound_policy": "allowlist", "allowed_from": ["+15551234567"]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.webhook.validate_signature"),
+                            CapabilityId::from_static("twilio.webhook.evaluate_inbound_policy"),
+                            CapabilityId::from_static("twilio.webhook.parse_sms_event"),
+                            CapabilityId::from_static("twilio.webhook.parse_status_callback"),
                             CapabilityId::from_static("twilio.webhook.parse_voice_event"),
                         ],
                     },
@@ -2071,6 +2796,10 @@ impl TwilioConnector {
             "twilio.video.recording.list" => self.invoke_video_recording_list(input).await,
             // Webhook handling
             "twilio.webhook.validate_signature" => self.invoke_webhook_validate_signature(&input),
+            "twilio.webhook.evaluate_inbound_policy" => {
+                self.invoke_webhook_evaluate_inbound_policy(&input)
+            }
+            "twilio.webhook.ingest_request" => self.invoke_webhook_ingest_request(&input),
             "twilio.webhook.parse_sms_event" => self.invoke_webhook_parse_sms_event(&input),
             "twilio.webhook.parse_status_callback" => {
                 self.invoke_webhook_parse_status_callback(&input)
@@ -2730,15 +3459,15 @@ impl TwilioConnector {
 
     // ── Webhook handling implementations ─────────────────────
 
-    #[allow(clippy::unused_self)]
     fn invoke_webhook_validate_signature(
         &self,
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         use crate::types::SignatureValidationResult;
 
-        let _url = require_str(input, "url")?;
-        let _params = input.get("params").ok_or(FcpError::InvalidRequest {
+        let verification_url =
+            validate_twilio_webhook_url(require_str(input, "url")?, input.get("allowed_hosts"))?;
+        let params = input.get("params").ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: "Missing required field: params".into(),
         })?;
@@ -2749,24 +3478,34 @@ impl TwilioConnector {
             let result = SignatureValidationResult {
                 valid: false,
                 reason: "Signature is empty".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
             };
-            return serde_json::to_value(result).map_err(|e| FcpError::Internal {
-                message: format!("Serialization error: {e}"),
-            });
+            return serialize_result(result);
         }
 
-        // Check that the signature looks like valid base64
-        if base64::engine::general_purpose::STANDARD
-            .decode(signature)
-            .is_err()
-        {
+        let Ok(provided_signature) = base64::engine::general_purpose::STANDARD.decode(signature)
+        else {
             let result = SignatureValidationResult {
                 valid: false,
                 reason: "Signature is not valid base64".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
             };
-            return serde_json::to_value(result).map_err(|e| FcpError::Internal {
-                message: format!("Serialization error: {e}"),
-            });
+            return serialize_result(result);
+        };
+
+        if provided_signature.len() != 20 {
+            let result = SignatureValidationResult {
+                valid: false,
+                reason: "Signature must decode to a 20-byte HMAC-SHA1 digest".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
+            };
+            return serialize_result(result);
         }
 
         // HMAC-SHA1 validation requires auth_token.
@@ -2776,22 +3515,572 @@ impl TwilioConnector {
             let result = SignatureValidationResult {
                 valid: false,
                 reason: "Signature format is valid base64, but auth_token is required for HMAC-SHA1 verification. Provide auth_token for full validation.".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
             };
-            return serde_json::to_value(result).map_err(|e| FcpError::Internal {
-                message: format!("Serialization error: {e}"),
-            });
+            return serialize_result(result);
+        }
+        let Some(auth_token) = auth_material
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            let result = SignatureValidationResult {
+                valid: false,
+                reason: "auth_token must not be empty for HMAC-SHA1 verification".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
+            };
+            return serialize_result(result);
+        };
+
+        let sorted_params = sorted_twilio_params(params)?;
+        let data_to_sign = build_twilio_data_to_sign(&verification_url, &sorted_params);
+        let expected_signature = compute_twilio_signature_digest(auth_token, &data_to_sign)?;
+
+        if provided_signature
+            .as_slice()
+            .ct_eq(expected_signature.as_slice())
+            .unwrap_u8()
+            != 1
+        {
+            let result = SignatureValidationResult {
+                valid: false,
+                reason: "Invalid Twilio HMAC-SHA1 signature".into(),
+                is_replay: false,
+                verified_request_key: None,
+                verification_url: Some(verification_url),
+            };
+            return serialize_result(result);
         }
 
-        // Signature has valid format and auth_token provided — note that full
-        // HMAC-SHA1 cryptographic verification requires the sha1 crate which
-        // is not available in the workspace. Format validation passed.
+        let replay_key = twilio_replay_key(&verification_url, &sorted_params, signature);
+        let is_replay = self
+            .webhook_replay_cache
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "Twilio webhook replay cache mutex poisoned".into(),
+            })?
+            .mark(replay_key.clone());
         let result = SignatureValidationResult {
             valid: true,
-            reason: "Signature format is valid base64 and auth_token is present. Note: full HMAC-SHA1 cryptographic verification is a format check only; deploy with Twilio signature validation middleware for production security.".into(),
+            reason: if is_replay {
+                "Signature is valid, but this signed webhook was already seen within the replay window"
+                    .into()
+            } else {
+                "Signature is valid".into()
+            },
+            is_replay,
+            verified_request_key: Some(replay_key),
+            verification_url: Some(verification_url),
         };
-        serde_json::to_value(result).map_err(|e| FcpError::Internal {
-            message: format!("Serialization error: {e}"),
-        })
+        serialize_result(result)
+    }
+
+    #[allow(clippy::unused_self)]
+    fn invoke_webhook_evaluate_inbound_policy(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let mode = TwilioInboundPolicyMode::parse(input)?;
+        let body = webhook_body(input)?;
+        let from = optional_body_string(body, "From");
+        let to = optional_body_string(body, "To");
+        let event_type = input
+            .get("event_type")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(|| infer_twilio_inbound_event_type(body), String::from);
+
+        let decision = if from.is_none() {
+            inbound_policy_decision(
+                mode,
+                false,
+                "missing_from",
+                "Twilio webhook is missing a From caller/sender value",
+                from,
+                None,
+                None,
+                to,
+                event_type,
+            )
+        } else {
+            let from_value = from.as_deref().unwrap_or_default();
+            if is_anonymous_twilio_sender(from_value) {
+                inbound_policy_decision(
+                    mode,
+                    false,
+                    "anonymous_from",
+                    "Twilio webhook From caller/sender is anonymous or unavailable",
+                    from,
+                    None,
+                    None,
+                    to,
+                    event_type,
+                )
+            } else if let Some(normalized_from) = normalize_e164_phone(from_value) {
+                match mode {
+                    TwilioInboundPolicyMode::Disabled => inbound_policy_decision(
+                        mode,
+                        false,
+                        "inbound_disabled",
+                        "Inbound Twilio webhooks are disabled by policy",
+                        from,
+                        Some(normalized_from),
+                        None,
+                        to,
+                        event_type,
+                    ),
+                    TwilioInboundPolicyMode::Open => inbound_policy_decision(
+                        mode,
+                        true,
+                        "allowed_open",
+                        "Inbound Twilio webhook accepted by open policy",
+                        from,
+                        Some(normalized_from),
+                        None,
+                        to,
+                        event_type,
+                    ),
+                    TwilioInboundPolicyMode::Allowlist => {
+                        let allowed_from =
+                            normalize_allowed_from_values(input.get("allowed_from"))?;
+                        let matched_from = allowed_from
+                            .iter()
+                            .find(|candidate| candidate.as_str() == normalized_from)
+                            .cloned();
+                        if let Some(matched_from) = matched_from {
+                            inbound_policy_decision(
+                                mode,
+                                true,
+                                "allowed_exact_from",
+                                "Inbound Twilio webhook accepted by exact E.164 allowlist",
+                                from,
+                                Some(normalized_from),
+                                Some(matched_from),
+                                to,
+                                event_type,
+                            )
+                        } else {
+                            inbound_policy_decision(
+                                mode,
+                                false,
+                                if allowed_from.is_empty() {
+                                    "allowlist_empty"
+                                } else {
+                                    "not_allowlisted"
+                                },
+                                if allowed_from.is_empty() {
+                                    "Inbound Twilio allowlist is empty"
+                                } else {
+                                    "Inbound Twilio caller/sender is not exactly allowlisted"
+                                },
+                                from,
+                                Some(normalized_from),
+                                None,
+                                to,
+                                event_type,
+                            )
+                        }
+                    }
+                }
+            } else {
+                inbound_policy_decision(
+                    mode,
+                    false,
+                    "invalid_from",
+                    "Twilio webhook From caller/sender is not an exact E.164 phone number",
+                    from,
+                    None,
+                    None,
+                    to,
+                    event_type,
+                )
+            }
+        };
+
+        serialize_result(decision)
+    }
+
+    fn invoke_webhook_ingest_request(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        use crate::types::{InboundPolicyDecision, SignatureValidationResult};
+
+        let method = require_str(input, "method")?;
+        let url = require_str(input, "url")?;
+        let request_region = twilio_webhook_ingress_request_region(input, method, url);
+        let service_layers = twilio_webhook_ingress_service_layers(input)?;
+        let mut logs = vec![
+            twilio_webhook_ingress_log(
+                "request_region",
+                "ok",
+                "request_region_attached",
+                "FCP request-region metadata attached to webhook ingress",
+            ),
+            twilio_webhook_ingress_log(
+                "service_builder",
+                "ok",
+                "service_layers_applied",
+                "Timeout, concurrency, load-shed, and rate-limit layers are declared for host enforcement",
+            ),
+        ];
+
+        let body_value = input.get("body").ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing required field: body".into(),
+        })?;
+        let body_bytes = twilio_webhook_body_size(input, body_value)?;
+        let max_body_bytes = optional_usize_field(
+            input,
+            "max_body_bytes",
+            TWILIO_WEBHOOK_INGRESS_MAX_BODY_BYTES,
+        )?;
+
+        if request_region_bool(input, "cancelled") {
+            logs.push(twilio_webhook_ingress_log(
+                "request_region",
+                "denied",
+                "request_cancelled",
+                "Webhook request was cancelled before connector processing",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                408,
+                "request_cancelled",
+                "Webhook request was cancelled before connector processing",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        if request_region_bool(input, "deadline_exceeded") {
+            logs.push(twilio_webhook_ingress_log(
+                "timeout",
+                "denied",
+                "request_timeout",
+                "Webhook request deadline was exceeded before connector processing",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                408,
+                "request_timeout",
+                "Webhook request deadline was exceeded before connector processing",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        if !method.eq_ignore_ascii_case("POST") {
+            logs.push(twilio_webhook_ingress_log(
+                "admission",
+                "denied",
+                "method_not_allowed",
+                "Twilio webhook ingress accepts POST requests only",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                405,
+                "method_not_allowed",
+                "Twilio webhook ingress accepts POST requests only",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        if body_bytes > max_body_bytes {
+            logs.push(twilio_webhook_ingress_log(
+                "admission",
+                "denied",
+                "payload_too_large",
+                "Twilio webhook body exceeds configured ingress maximum",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                413,
+                "payload_too_large",
+                "Twilio webhook body exceeds configured ingress maximum",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        let Some(body) = body_value.as_object() else {
+            logs.push(twilio_webhook_ingress_log(
+                "parse",
+                "denied",
+                "malformed_payload",
+                "Twilio webhook body must be an object of form fields",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                400,
+                "malformed_payload",
+                "Twilio webhook body must be an object of form fields",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        };
+
+        let headers = webhook_headers(input)?;
+        let Some(signature_header) = webhook_header_value(headers, "x-twilio-signature")? else {
+            logs.push(twilio_webhook_ingress_log(
+                "signature",
+                "denied",
+                "missing_signature",
+                "Missing X-Twilio-Signature header",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                401,
+                "missing_signature",
+                "Missing X-Twilio-Signature header",
+                None,
+                None,
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        };
+
+        let mut signature_input = json!({
+            "url": url,
+            "params": body_value.clone(),
+            "signature": signature_header,
+        });
+        if let Some(auth_token) = input.get("auth_token") {
+            signature_input["auth_token"] = auth_token.clone();
+        }
+        if let Some(allowed_hosts) = input.get("allowed_hosts") {
+            signature_input["allowed_hosts"] = allowed_hosts.clone();
+        }
+
+        let signature_value = self.invoke_webhook_validate_signature(&signature_input)?;
+        let signature: SignatureValidationResult =
+            deserialize_connector_value(signature_value, "Twilio signature validation result")?;
+        logs.push(twilio_webhook_ingress_log(
+            "signature",
+            if signature.valid { "ok" } else { "denied" },
+            if signature.valid {
+                "signature_validated"
+            } else {
+                "invalid_signature"
+            },
+            &signature.reason,
+        ));
+
+        if !signature.valid {
+            return twilio_webhook_ingress_response(
+                false,
+                401,
+                "invalid_signature",
+                "Twilio webhook signature validation failed",
+                None,
+                Some(signature),
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        if signature.is_replay {
+            logs.push(twilio_webhook_ingress_log(
+                "replay",
+                "denied",
+                "replay_suppressed",
+                "Duplicate Twilio webhook request suppressed within replay window",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                409,
+                "replay_suppressed",
+                "Duplicate Twilio webhook request suppressed within replay window",
+                None,
+                Some(signature),
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        }
+
+        let Some(parse_operation) = twilio_ingress_parse_operation(body) else {
+            logs.push(twilio_webhook_ingress_log(
+                "parse",
+                "denied",
+                "malformed_payload",
+                "Twilio webhook payload did not match SMS, voice, or status callback fields",
+            ));
+            return twilio_webhook_ingress_response(
+                false,
+                400,
+                "malformed_payload",
+                "Twilio webhook payload did not match SMS, voice, or status callback fields",
+                None,
+                Some(signature),
+                None,
+                request_region,
+                service_layers,
+                logs,
+                body_bytes,
+            );
+        };
+
+        let parsed_event = match parse_operation {
+            "twilio.webhook.parse_sms_event" => {
+                self.invoke_webhook_parse_sms_event(&json!({ "body": body_value.clone() }))
+            }
+            "twilio.webhook.parse_status_callback" => {
+                self.invoke_webhook_parse_status_callback(&json!({ "body": body_value.clone() }))
+            }
+            "twilio.webhook.parse_voice_event" => {
+                self.invoke_webhook_parse_voice_event(&json!({ "body": body_value.clone() }))
+            }
+            _ => unreachable!("Twilio ingress parser dispatch is exhaustive"),
+        };
+        let parsed_event = match parsed_event {
+            Ok(event) => event,
+            Err(error) => {
+                logs.push(twilio_webhook_ingress_log(
+                    "parse",
+                    "denied",
+                    "malformed_payload",
+                    "Twilio webhook payload failed typed parsing",
+                ));
+                return twilio_webhook_ingress_response(
+                    false,
+                    400,
+                    "malformed_payload",
+                    &format!("Twilio webhook payload failed typed parsing: {error}"),
+                    None,
+                    Some(signature),
+                    None,
+                    request_region,
+                    service_layers,
+                    logs,
+                    body_bytes,
+                );
+            }
+        };
+        let event_type = parsed_event
+            .get("event_type")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("twilio.webhook");
+        logs.push(twilio_webhook_ingress_log(
+            "parse",
+            "ok",
+            "event_parsed",
+            "Twilio webhook payload parsed into a typed event",
+        ));
+
+        let policy = if event_type.ends_with(".status") {
+            logs.push(twilio_webhook_ingress_log(
+                "policy",
+                "skipped",
+                "status_callback_not_inbound",
+                "Status callbacks do not require inbound caller policy",
+            ));
+            None
+        } else {
+            let inbound_policy = input
+                .get("inbound_policy")
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "Missing required field: inbound_policy".into(),
+                })?;
+            let mut policy_input = serde_json::Map::new();
+            policy_input.insert("body".into(), body_value.clone());
+            policy_input.insert("inbound_policy".into(), inbound_policy.clone());
+            if let Some(allowed_from) = input.get("allowed_from") {
+                policy_input.insert("allowed_from".into(), allowed_from.clone());
+            }
+            policy_input.insert(
+                "event_type".into(),
+                serde_json::Value::String(event_type.into()),
+            );
+
+            let policy_value = self
+                .invoke_webhook_evaluate_inbound_policy(&serde_json::Value::Object(policy_input))?;
+            let policy: InboundPolicyDecision =
+                deserialize_connector_value(policy_value, "Twilio inbound policy decision")?;
+            logs.push(twilio_webhook_ingress_log(
+                "policy",
+                if policy.allowed { "ok" } else { "denied" },
+                &policy.reason_code,
+                &policy.reason,
+            ));
+            if !policy.allowed {
+                let reason_code = policy.reason_code.clone();
+                let reason = policy.reason.clone();
+                return twilio_webhook_ingress_response(
+                    false,
+                    403,
+                    &reason_code,
+                    &reason,
+                    None,
+                    Some(signature),
+                    Some(policy),
+                    request_region,
+                    service_layers,
+                    logs,
+                    body_bytes,
+                );
+            }
+            Some(policy)
+        };
+
+        logs.push(twilio_webhook_ingress_log(
+            "emit",
+            "ok",
+            "event_accepted",
+            "Twilio webhook event accepted for downstream emission",
+        ));
+        twilio_webhook_ingress_response(
+            true,
+            200,
+            "event_accepted",
+            "Twilio webhook event accepted for downstream emission",
+            Some(parsed_event),
+            Some(signature),
+            policy,
+            request_region,
+            service_layers,
+            logs,
+            body_bytes,
+        )
     }
 
     #[allow(clippy::unused_self)]
@@ -3142,7 +4431,11 @@ mod tests {
     use fcp_prelude::{CapabilityConstraints, ZoneId};
     use std::path::PathBuf;
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &str,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "twilio.send_message" => "twilio.message",
             "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
@@ -3161,6 +4454,8 @@ mod tests {
             "twilio.video.room.participants" => "twilio.video.participants.read",
             "twilio.video.recording.list" => "twilio.video.recordings.read",
             "twilio.webhook.validate_signature"
+            | "twilio.webhook.evaluate_inbound_policy"
+            | "twilio.webhook.ingest_request"
             | "twilio.webhook.parse_sms_event"
             | "twilio.webhook.parse_status_callback"
             | "twilio.webhook.parse_voice_event" => "twilio.webhook",
@@ -3180,6 +4475,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -3291,7 +4587,8 @@ mod tests {
         let mut connector = TwilioConnector::new();
         let signing_key = Ed25519SigningKey::generate();
 
-        let capability = generate_valid_token(&signing_key, "twilio.get_message");
+        let capability =
+            generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message");
         let result = connector
             .handle_invoke(json!({
                 "operation": "twilio.get_message",
@@ -3322,7 +4619,8 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "twilio.send_message");
+        let capability =
+            generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message");
         let result = connector
             .handle_invoke(json!({
                 "operation": "twilio.send_message",
@@ -3378,7 +4676,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twilio.get_message",
                 json!({ "message_sid": "SMtest" }),
-                generate_valid_token(&signing_key, "twilio.get_message"),
+                generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message"),
             ))
             .await
             .unwrap();
@@ -3396,7 +4694,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twilio.get_message",
                 json!({ "message_sid": "SMtest" }),
-                generate_valid_token(&signing_key, "twilio.send_message"),
+                generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message"),
             ))
             .await
             .unwrap();
@@ -3415,7 +4713,7 @@ mod tests {
             .handle_simulate(simulate_params(
                 "twilio.get_message",
                 json!({}),
-                generate_valid_token(&signing_key, "twilio.get_message"),
+                generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message"),
             ))
             .await
             .unwrap();
@@ -3516,10 +4814,12 @@ mod tests {
         assert!(op_ids.contains(&"twilio.video.recording.list"));
         // Webhook handling
         assert!(op_ids.contains(&"twilio.webhook.validate_signature"));
+        assert!(op_ids.contains(&"twilio.webhook.evaluate_inbound_policy"));
+        assert!(op_ids.contains(&"twilio.webhook.ingest_request"));
         assert!(op_ids.contains(&"twilio.webhook.parse_sms_event"));
         assert!(op_ids.contains(&"twilio.webhook.parse_status_callback"));
         assert!(op_ids.contains(&"twilio.webhook.parse_voice_event"));
-        assert_eq!(ops.len(), 39);
+        assert_eq!(ops.len(), 41);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────

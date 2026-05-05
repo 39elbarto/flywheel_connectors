@@ -14,12 +14,15 @@
 
 #![allow(clippy::too_many_lines)]
 
+use base64::Engine;
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
+use hmac::{Hmac, Mac};
 use serde_json::json;
+use sha1::Sha1;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{method, path_regex},
@@ -32,7 +35,29 @@ use fcp_twilio::connector::TwilioConnector;
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+type HmacSha1 = Hmac<Sha1>;
+
+const TWILIO_TEST_HMAC_KEY: &str = "fixture_hmac_key_for_signature_tests";
+
+fn twilio_signature(hmac_key: &str, url: &str, params: &[(&str, &str)]) -> String {
+    let mut sorted = params.to_vec();
+    sorted.sort_by(|left, right| left.0.cmp(right.0));
+    let mut data_to_sign = String::from(url);
+    for (key, value) in sorted {
+        data_to_sign.push_str(key);
+        data_to_sign.push_str(value);
+    }
+
+    let mut mac = HmacSha1::new_from_slice(hmac_key.as_bytes()).expect("hmac key accepted");
+    mac.update(data_to_sign.as_bytes());
+    base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes())
+}
+
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let cap = match op {
         "twilio.send_message" => "twilio.message",
         "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
@@ -47,6 +72,8 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         "twilio.video.room.participants" => "twilio.video.participants.read",
         "twilio.video.recording.list" => "twilio.video.recordings.read",
         "twilio.webhook.validate_signature"
+        | "twilio.webhook.evaluate_inbound_policy"
+        | "twilio.webhook.ingest_request"
         | "twilio.webhook.parse_sms_event"
         | "twilio.webhook.parse_status_callback"
         | "twilio.webhook.parse_voice_event" => "twilio.webhook",
@@ -66,6 +93,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -122,6 +150,18 @@ async fn setup_configure(connector: &mut TwilioConnector, base_url: &str) {
         }))
         .await
         .expect("configure should succeed");
+}
+
+async fn setup_webhook_ingest_connector() -> (TwilioConnector, fcp_core::CapabilityToken) {
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, "http://localhost").await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.ingest_request"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.ingest_request",
+    );
+    (connector, capability)
 }
 
 /// Standard Twilio message response.
@@ -195,7 +235,8 @@ async fn send_message_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -232,7 +273,8 @@ async fn get_message_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_message"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message");
 
     let result = connector
         .handle_invoke(json!({
@@ -268,7 +310,11 @@ async fn list_messages_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_messages"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_messages");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.list_messages",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -303,7 +349,8 @@ async fn create_call_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.create_call"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.create_call");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.create_call");
 
     let result = connector
         .handle_invoke(json!({
@@ -340,7 +387,7 @@ async fn get_call_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_call"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_call");
+    let capability = generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_call");
 
     let result = connector
         .handle_invoke(json!({
@@ -384,7 +431,11 @@ async fn list_recordings_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_recordings"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_recordings");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.list_recordings",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -419,7 +470,8 @@ async fn get_account_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_account"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_account");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_account");
 
     let result = connector
         .handle_invoke(json!({
@@ -457,7 +509,11 @@ async fn list_phone_numbers_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_phone_numbers"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_phone_numbers");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.list_phone_numbers",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -715,7 +771,8 @@ async fn capability_no_handshake_fails() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let capability = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -739,7 +796,8 @@ async fn capability_no_configure_fails() {
 
     let mut connector = TwilioConnector::new();
     let signing_key = Ed25519SigningKey::generate();
-    let capability = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -770,7 +828,8 @@ async fn capability_wrong_operation_fails() {
     )
     .await;
 
-    let wrong_capability = generate_valid_token(&signing_key, "twilio.send_message");
+    let wrong_capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -801,7 +860,8 @@ async fn capability_unknown_operation_fails() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.nonexistent"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.nonexistent");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.nonexistent");
 
     let err = connector
         .handle_invoke(json!({
@@ -936,6 +996,8 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.video.recording.list",
         // Webhook handling
         "twilio.webhook.validate_signature",
+        "twilio.webhook.evaluate_inbound_policy",
+        "twilio.webhook.ingest_request",
         "twilio.webhook.parse_sms_event",
         "twilio.webhook.parse_status_callback",
         "twilio.webhook.parse_voice_event",
@@ -944,7 +1006,7 @@ async fn lifecycle_introspect_all_operations() {
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 39);
+    assert_eq!(ops.len(), 41);
 
     for op in ops {
         assert!(
@@ -971,7 +1033,8 @@ async fn validation_send_message_missing_to() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -992,7 +1055,8 @@ async fn validation_send_message_missing_body() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.send_message"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.send_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.send_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -1013,7 +1077,8 @@ async fn validation_get_message_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_message"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_message");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_message");
 
     let err = connector
         .handle_invoke(json!({
@@ -1034,7 +1099,7 @@ async fn validation_get_call_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_call"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_call");
+    let capability = generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_call");
 
     let err = connector
         .handle_invoke(json!({
@@ -1055,7 +1120,8 @@ async fn validation_create_call_missing_url() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.create_call"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.create_call");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.create_call");
 
     let err = connector
         .handle_invoke(json!({
@@ -1110,7 +1176,8 @@ async fn list_media_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.list_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1150,7 +1217,8 @@ async fn get_media_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_media");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1184,7 +1252,8 @@ async fn list_media_empty_result() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.list_media");
 
     let result = connector
         .handle_invoke(json!({
@@ -1205,7 +1274,8 @@ async fn validation_list_media_missing_message_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.list_media"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.list_media");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.list_media");
 
     let err = connector
         .handle_invoke(json!({
@@ -1226,7 +1296,8 @@ async fn validation_get_media_missing_media_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.get_media"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.get_media");
+    let capability =
+        generate_valid_token(&signing_key, connector.instance_id(), "twilio.get_media");
 
     let err = connector
         .handle_invoke(json!({
@@ -1247,7 +1318,11 @@ async fn validation_download_recording_missing_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.download_recording"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.download_recording");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.download_recording",
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1274,7 +1349,11 @@ async fn webhook_parse_sms_event_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_sms_event",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1316,7 +1395,11 @@ async fn webhook_parse_sms_event_missing_message_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_sms_event",
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1344,7 +1427,11 @@ async fn webhook_parse_sms_event_minimal() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_sms_event",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1379,7 +1466,11 @@ async fn webhook_parse_status_callback_message_delivered() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_status_callback",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1415,7 +1506,11 @@ async fn webhook_parse_status_callback_call_completed() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_status_callback",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1448,7 +1543,11 @@ async fn webhook_parse_status_callback_with_error() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_status_callback",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1481,7 +1580,11 @@ async fn webhook_parse_status_callback_missing_sid() {
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key =
         setup_handshake(&mut connector, &["twilio.webhook.parse_status_callback"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_status_callback");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_status_callback",
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1508,7 +1611,11 @@ async fn webhook_parse_voice_event_happy_path() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_voice_event",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1551,7 +1658,11 @@ async fn webhook_parse_voice_event_missing_call_sid() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_voice_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_voice_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_voice_event",
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1570,6 +1681,719 @@ async fn webhook_parse_voice_event_missing_call_sid() {
     assert_invalid_request_contains(&err, "CallSid");
 }
 
+/// Evaluate inbound policy — exact E.164 allowlist accepts the caller.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_allowlist_accepts_exact_e164() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.allowlist_accept");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMallow",
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("allowlisted sender should be evaluated");
+
+    assert_eq!(result["allowed"], true);
+    assert_eq!(result["policy"], "allowlist");
+    assert_eq!(result["reason_code"], "allowed_exact_from");
+    assert_eq!(result["normalized_from"], "+15551234567");
+    assert_eq!(result["matched_from"], "+15551234567");
+    assert_eq!(result["event_type"], "sms.inbound");
+    assert_eq!(result["audit_event_type"], "twilio.inbound_policy.allowed");
+    assert_eq!(result["tainted"], true);
+}
+
+/// Evaluate inbound policy — disabled policy denies even valid E.164 callers.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_disabled_rejects() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.disabled");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "CallSid": "CAdisabled",
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "disabled"
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("disabled policy should return structured denial");
+
+    assert_eq!(result["allowed"], false);
+    assert_eq!(result["reason_code"], "inbound_disabled");
+    assert_eq!(result["event_type"], "voice.inbound");
+    assert_eq!(result["audit_event_type"], "twilio.inbound_policy.denied");
+}
+
+/// Evaluate inbound policy — no suffix or punctuation-insensitive matching.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_rejects_non_e164_suffix_match() {
+    let _ctx = AsyncTestContext::for_scenario(
+        "twilio.webhook.evaluate_inbound_policy.rejects_suffix_match",
+    );
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMsuffix",
+                    "From": "5551234567",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("invalid caller format should return structured denial");
+
+    assert_eq!(result["allowed"], false);
+    assert_eq!(result["reason_code"], "invalid_from");
+    assert!(result["normalized_from"].is_null());
+}
+
+/// Evaluate inbound policy — exact E.164 mismatch is denied.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_rejects_not_allowlisted() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.not_allowlisted");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMdeny",
+                    "From": "+15550000000",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("non-allowlisted sender should return structured denial");
+
+    assert_eq!(result["allowed"], false);
+    assert_eq!(result["reason_code"], "not_allowlisted");
+    assert_eq!(result["normalized_from"], "+15550000000");
+    assert!(result["matched_from"].is_null());
+}
+
+/// Evaluate inbound policy — missing and anonymous callers fail closed.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_rejects_missing_and_anonymous_from() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.missing_anonymous");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let missing = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMmissing",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "open"
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("missing From should return structured denial");
+    let anonymous = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "CallSid": "CAanonymous",
+                    "From": "anonymous",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "open"
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("anonymous From should return structured denial");
+
+    assert_eq!(missing["allowed"], false);
+    assert_eq!(missing["reason_code"], "missing_from");
+    assert_eq!(anonymous["allowed"], false);
+    assert_eq!(anonymous["reason_code"], "anonymous_from");
+}
+
+/// Evaluate inbound policy — invalid allowlist entries are configuration errors.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_rejects_invalid_allowlist_entry() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.bad_allowlist");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.webhook.evaluate_inbound_policy"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMbadconfig",
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "allowlist",
+                "allowed_from": ["5551234567"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect_err("bad allowlist entries should be rejected");
+
+    assert_invalid_request_contains(&err, "exact E.164");
+}
+
+/// Evaluate inbound policy — replay marking does not bypass caller policy.
+#[fcp_async_core::runtime::test]
+async fn webhook_evaluate_inbound_policy_keeps_replay_and_policy_separate() {
+    let _ctx =
+        AsyncTestContext::for_scenario("twilio.webhook.evaluate_inbound_policy.replay_interaction");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &[
+            "twilio.webhook.validate_signature",
+            "twilio.webhook.evaluate_inbound_policy",
+        ],
+    )
+    .await;
+    let validate_capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let policy_capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.evaluate_inbound_policy",
+    );
+    let url = "https://example.com/webhook";
+    let params = json!({
+        "MessageSid": "SMreplaypolicy",
+        "From": "+15551234567",
+        "To": "+15559876543",
+        "Body": "Hello"
+    });
+    let signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        url,
+        &[
+            ("Body", "Hello"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMreplaypolicy"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let validate_request = json!({
+        "operation": "twilio.webhook.validate_signature",
+        "input": {
+            "url": url,
+            "params": params,
+            "signature": signature,
+            "auth_token": TWILIO_TEST_HMAC_KEY
+        },
+        "capability_token": validate_capability
+    });
+
+    let first = connector
+        .handle_invoke(validate_request.clone())
+        .await
+        .expect("first signature validation should succeed");
+    let replay = connector
+        .handle_invoke(validate_request)
+        .await
+        .expect("duplicate signature validation should still be structured");
+    let policy = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.evaluate_inbound_policy",
+            "input": {
+                "body": {
+                    "MessageSid": "SMreplaypolicy",
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                },
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": policy_capability
+        }))
+        .await
+        .expect("policy evaluation should still run for signed request");
+
+    assert_eq!(first["valid"], true);
+    assert_eq!(first["is_replay"], false);
+    assert_eq!(replay["valid"], true);
+    assert_eq!(replay["is_replay"], true);
+    assert_eq!(policy["allowed"], true);
+    assert_eq!(policy["reason_code"], "allowed_exact_from");
+}
+
+/// Ingest request — no-mock loopback accepts valid SMS and voice status callbacks.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_accepts_valid_sms_and_voice_status() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.accepts");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let sms_url = "https://example.com/twilio/sms";
+    let sms_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        sms_url,
+        &[
+            ("Body", "hello from ingress"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMingresssms"),
+            ("To", "+15559876543"),
+        ],
+    );
+
+    let sms = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": sms_url,
+                "headers": { "X-Twilio-Signature": sms_signature },
+                "body": {
+                    "MessageSid": "SMingresssms",
+                    "From": "+15551234567",
+                    "To": "+15559876543",
+                    "Body": "hello from ingress"
+                },
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"],
+                "request_region": { "source": "loopback_harness" }
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("valid signed SMS ingress should be accepted");
+
+    assert_eq!(sms["accepted"], true);
+    assert_eq!(sms["status_code"], 200);
+    assert_eq!(sms["event_type"], "sms.inbound");
+    assert_eq!(sms["event"]["message_sid"], "SMingresssms");
+    assert_eq!(sms["signature"]["valid"], true);
+    assert_eq!(sms["signature"]["is_replay"], false);
+    assert_eq!(sms["policy"]["allowed"], true);
+    assert_eq!(sms["policy"]["reason_code"], "allowed_exact_from");
+    assert_eq!(
+        sms["request_region"]["surface"],
+        "fcp.webhook.request_region"
+    );
+    assert_eq!(
+        sms["service_layers"]["builder"],
+        "fcp.webhook.ServiceBuilder"
+    );
+    assert_eq!(sms["service_layers"]["layers"].as_array().unwrap().len(), 4);
+    assert_eq!(sms["clean_shutdown"], true);
+
+    let voice_status_url = "https://example.com/twilio/voice-status";
+    let voice_status_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        voice_status_url,
+        &[
+            ("CallSid", "CAstatusingress"),
+            ("CallStatus", "completed"),
+            ("Timestamp", "2026-01-15T10:00:00Z"),
+        ],
+    );
+    let voice_status = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": voice_status_url,
+                "headers": { "x-twilio-signature": voice_status_signature },
+                "body": {
+                    "CallSid": "CAstatusingress",
+                    "CallStatus": "completed",
+                    "Timestamp": "2026-01-15T10:00:00Z"
+                },
+                "auth_token": TWILIO_TEST_HMAC_KEY
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("valid signed voice status callback should be accepted");
+
+    assert_eq!(voice_status["accepted"], true);
+    assert_eq!(voice_status["event_type"], "call.status");
+    assert_eq!(voice_status["event"]["resource_type"], "call");
+    assert!(voice_status["policy"].is_null());
+    assert!(
+        voice_status["logs"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["code"] == "status_callback_not_inbound")
+    );
+}
+
+/// Ingest request — invalid signatures fail and duplicate signed requests are suppressed.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_rejects_invalid_signature_and_replay() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.signature_replay");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let url = "https://example.com/twilio/replay";
+    let signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        url,
+        &[
+            ("Body", "dedupe"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMingressreplay"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let request = json!({
+        "operation": "twilio.webhook.ingest_request",
+        "input": {
+            "method": "POST",
+            "url": url,
+            "headers": { "X-Twilio-Signature": signature },
+            "body": {
+                "MessageSid": "SMingressreplay",
+                "From": "+15551234567",
+                "To": "+15559876543",
+                "Body": "dedupe"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "open"
+        },
+        "capability_token": capability.clone()
+    });
+
+    let first = connector
+        .handle_invoke(request.clone())
+        .await
+        .expect("first signed request should be accepted");
+    let replay = connector
+        .handle_invoke(request)
+        .await
+        .expect("duplicate signed request should return structured suppression");
+    let invalid = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": "https://example.com/twilio/invalid",
+                "headers": { "X-Twilio-Signature": "not-valid-base64!!!@@@" },
+                "body": {
+                    "MessageSid": "SMingressinvalid",
+                    "From": "+15551234567",
+                    "To": "+15559876543",
+                    "Body": "bad signature"
+                },
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "inbound_policy": "open"
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("bad signature should return structured denial");
+
+    assert_eq!(first["accepted"], true);
+    assert_eq!(replay["accepted"], false);
+    assert_eq!(replay["status_code"], 409);
+    assert_eq!(replay["reason_code"], "replay_suppressed");
+    assert_eq!(replay["signature"]["is_replay"], true);
+    assert_eq!(invalid["accepted"], false);
+    assert_eq!(invalid["status_code"], 401);
+    assert_eq!(invalid["reason_code"], "invalid_signature");
+}
+
+/// Ingest request — inbound policy gates unauthorized and authorized callers.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_applies_inbound_policy() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.policy");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let denied_url = "https://example.com/twilio/policy-denied";
+    let denied_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        denied_url,
+        &[
+            ("Body", "blocked"),
+            ("From", "+15550000000"),
+            ("MessageSid", "SMingressdenied"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let denied = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": denied_url,
+                "headers": { "X-Twilio-Signature": denied_signature },
+                "body": {
+                    "MessageSid": "SMingressdenied",
+                    "From": "+15550000000",
+                    "To": "+15559876543",
+                    "Body": "blocked"
+                },
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("policy denial should be structured");
+
+    let allowed_url = "https://example.com/twilio/policy-allowed";
+    let allowed_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        allowed_url,
+        &[
+            ("Body", "allowed"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMingressallowed"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let allowed = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": allowed_url,
+                "headers": { "X-Twilio-Signature": allowed_signature },
+                "body": {
+                    "MessageSid": "SMingressallowed",
+                    "From": "+15551234567",
+                    "To": "+15559876543",
+                    "Body": "allowed"
+                },
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "inbound_policy": "allowlist",
+                "allowed_from": ["+15551234567"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("allowlisted caller should be accepted");
+
+    assert_eq!(denied["accepted"], false);
+    assert_eq!(denied["status_code"], 403);
+    assert_eq!(denied["reason_code"], "not_allowlisted");
+    assert!(denied["event"].is_null());
+    assert_eq!(denied["policy"]["allowed"], false);
+    assert_eq!(allowed["accepted"], true);
+    assert_eq!(allowed["event"]["message_sid"], "SMingressallowed");
+}
+
+/// Ingest request — malformed and oversized payloads are denied before emission.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_rejects_malformed_and_oversized_payloads() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.malformed_oversized");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let malformed_url = "https://example.com/twilio/malformed";
+    let malformed_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        malformed_url,
+        &[("Unexpected", "value")],
+    );
+    let malformed = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": malformed_url,
+                "headers": { "X-Twilio-Signature": malformed_signature },
+                "body": { "Unexpected": "value" },
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "inbound_policy": "open"
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("malformed payload should return structured denial");
+    let oversized = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": "https://example.com/twilio/oversized",
+                "headers": {},
+                "body": {
+                    "MessageSid": "SMingressoversized",
+                    "From": "+15551234567",
+                    "To": "+15559876543"
+                },
+                "body_size_bytes": 65_536,
+                "max_body_bytes": 32
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("oversized payload should return structured denial");
+
+    assert_eq!(malformed["accepted"], false);
+    assert_eq!(malformed["status_code"], 400);
+    assert_eq!(malformed["reason_code"], "malformed_payload");
+    assert_eq!(oversized["accepted"], false);
+    assert_eq!(oversized["status_code"], 413);
+    assert_eq!(oversized["reason_code"], "payload_too_large");
+    assert!(oversized["signature"].is_null());
+}
+
+/// Ingest request — request-region timeout/cancellation returns clean shutdown metadata.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_reports_timeout_cancellation_and_clean_shutdown() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.timeout_cancel");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let cancelled = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": "https://example.com/twilio/cancelled",
+                "headers": {},
+                "body": {},
+                "request_region": {
+                    "source": "loopback_harness",
+                    "cancelled": true
+                }
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("cancelled request should return structured denial");
+    let timed_out = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": {
+                "method": "POST",
+                "url": "https://example.com/twilio/timeout",
+                "headers": {},
+                "body": {},
+                "request_region": {
+                    "source": "loopback_harness",
+                    "deadline_exceeded": true
+                },
+                "timeout_ms": 1,
+                "concurrency_limit": 1
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("timed-out request should return structured denial");
+
+    assert_eq!(cancelled["accepted"], false);
+    assert_eq!(cancelled["status_code"], 408);
+    assert_eq!(cancelled["reason_code"], "request_cancelled");
+    assert_eq!(cancelled["clean_shutdown"], true);
+    assert_eq!(timed_out["accepted"], false);
+    assert_eq!(timed_out["reason_code"], "request_timeout");
+    assert_eq!(timed_out["clean_shutdown"], true);
+    assert_eq!(timed_out["service_layers"]["layers"][0]["name"], "timeout");
+    assert_eq!(
+        timed_out["service_layers"]["layers"][1]["name"],
+        "concurrency_limit"
+    );
+    assert_eq!(
+        timed_out["service_layers"]["layers"][2]["name"],
+        "load_shed"
+    );
+    assert_eq!(
+        timed_out["service_layers"]["layers"][3]["name"],
+        "rate_limit"
+    );
+}
+
 /// Validate signature — empty signature.
 #[fcp_async_core::runtime::test]
 async fn webhook_validate_signature_empty() {
@@ -1579,7 +2403,11 @@ async fn webhook_validate_signature_empty() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1607,7 +2435,11 @@ async fn webhook_validate_signature_invalid_base64() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1635,7 +2467,12 @@ async fn webhook_validate_signature_no_auth_token() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let signature = base64::engine::general_purpose::STANDARD.encode([0_u8; 20]);
 
     let result = connector
         .handle_invoke(json!({
@@ -1643,7 +2480,7 @@ async fn webhook_validate_signature_no_auth_token() {
             "input": {
                 "url": "https://example.com/webhook",
                 "params": {"Body": "Hello"},
-                "signature": "dGVzdA=="
+                "signature": signature
             },
             "capability_token": capability
         }))
@@ -1654,25 +2491,35 @@ async fn webhook_validate_signature_no_auth_token() {
     assert!(result["reason"].as_str().unwrap().contains("auth_token"));
 }
 
-/// Validate signature — valid format with `auth_token`.
+/// Validate signature — real HMAC-SHA1 accepts sorted Twilio parameters.
 #[fcp_async_core::runtime::test]
-async fn webhook_validate_signature_with_auth_token() {
-    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.validate_signature.with_auth_token");
+async fn webhook_validate_signature_valid_hmac_sha1() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.validate_signature.valid_hmac_sha1");
     let mock_server = MockServer::start().await;
 
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let url = "https://example.com/webhook";
+    let signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        url,
+        &[("From", "+15551234567"), ("Body", "Hello")],
+    );
 
     let result = connector
         .handle_invoke(json!({
             "operation": "twilio.webhook.validate_signature",
             "input": {
-                "url": "https://example.com/webhook",
+                "url": url,
                 "params": {"Body": "Hello", "From": "+15551234567"},
-                "signature": "dGVzdA==",
-                "auth_token": "my_auth_token_123"
+                "signature": signature,
+                "auth_token": TWILIO_TEST_HMAC_KEY
             },
             "capability_token": capability
         }))
@@ -1680,6 +2527,140 @@ async fn webhook_validate_signature_with_auth_token() {
         .expect("validate_signature should succeed");
 
     assert_eq!(result["valid"], true);
+    assert_eq!(result["is_replay"], false);
+    assert_eq!(result["verification_url"], url);
+    assert!(
+        result["verified_request_key"]
+            .as_str()
+            .unwrap()
+            .starts_with("twilio:req:")
+    );
+    assert_eq!(result["reason"], "Signature is valid");
+}
+
+/// Validate signature — arbitrary base64 is rejected even with `auth_token`.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_rejects_wrong_hmac_sha1() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.validate_signature.wrong_hmac_sha1");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let signature = base64::engine::general_purpose::STANDARD.encode([1_u8; 20]);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": "https://example.com/webhook",
+                "params": {"Body": "Hello", "From": "+15551234567"},
+                "signature": signature,
+                "auth_token": TWILIO_TEST_HMAC_KEY
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("validate_signature should return valid=false for bad HMAC");
+
+    assert_eq!(result["valid"], false);
+    assert_eq!(result["is_replay"], false);
+    assert!(
+        result["reason"]
+            .as_str()
+            .unwrap()
+            .contains("Invalid Twilio HMAC-SHA1")
+    );
+}
+
+/// Validate signature — duplicate signed requests are marked as replay.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_marks_replay() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.validate_signature.replay");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let url = "https://example.com/webhook";
+    let signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        url,
+        &[("Body", "Hello"), ("From", "+15551234567")],
+    );
+    let request = json!({
+        "operation": "twilio.webhook.validate_signature",
+        "input": {
+            "url": url,
+            "params": {"From": "+15551234567", "Body": "Hello"},
+            "signature": signature,
+            "auth_token": TWILIO_TEST_HMAC_KEY
+        },
+        "capability_token": capability
+    });
+
+    let first = connector
+        .handle_invoke(request.clone())
+        .await
+        .expect("first validation should succeed");
+    let second = connector
+        .handle_invoke(request)
+        .await
+        .expect("duplicate validation should still return structured result");
+
+    assert_eq!(first["valid"], true);
+    assert_eq!(first["is_replay"], false);
+    assert_eq!(second["valid"], true);
+    assert_eq!(second["is_replay"], true);
+    assert_eq!(
+        first["verified_request_key"], second["verified_request_key"],
+        "duplicate request must keep the same replay key"
+    );
+}
+
+/// Validate signature — URL host allowlist blocks host-header injection mistakes.
+#[fcp_async_core::runtime::test]
+async fn webhook_validate_signature_rejects_disallowed_url_host() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.validate_signature.allowed_hosts");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
+    let url = "https://evil.example/webhook";
+    let signature = twilio_signature(TWILIO_TEST_HMAC_KEY, url, &[("Body", "Hello")]);
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.validate_signature",
+            "input": {
+                "url": url,
+                "params": {"Body": "Hello"},
+                "signature": signature,
+                "auth_token": TWILIO_TEST_HMAC_KEY,
+                "allowed_hosts": ["example.com"]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect_err("disallowed host must fail closed");
+
+    assert_invalid_request_contains(&err, "allowed_hosts");
 }
 
 /// Validate signature — missing required params field.
@@ -1691,7 +2672,11 @@ async fn webhook_validate_signature_missing_params() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.validate_signature"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.validate_signature");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.validate_signature",
+    );
 
     let err = connector
         .handle_invoke(json!({
@@ -1717,7 +2702,11 @@ async fn webhook_parse_sms_event_missing_body() {
     let mut connector = TwilioConnector::new();
     setup_configure(&mut connector, &mock_server.uri()).await;
     let signing_key = setup_handshake(&mut connector, &["twilio.webhook.parse_sms_event"]).await;
-    let capability = generate_valid_token(&signing_key, "twilio.webhook.parse_sms_event");
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.webhook.parse_sms_event",
+    );
 
     let err = connector
         .handle_invoke(json!({

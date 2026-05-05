@@ -21,6 +21,39 @@ required = ["network.dns", "network.outbound"]
 optional = []
 forbidden = ["system.privileged"]
 
+[event_caps]
+streaming = true
+replay = true
+min_buffer_events = 64
+
+[provides.events.message_inbound]
+description = "Inbound iMessage or BlueBubbles message accepted after webhook auth, policy, dedupe, enrichment, and coalescing"
+streaming = true
+replay = true
+topic = "imessage.message.inbound"
+requires_ack = false
+
+[provides.events.message_outbound]
+description = "Outbound iMessage or BlueBubbles message observed through accepted webhook ingress"
+streaming = true
+replay = true
+topic = "imessage.message.outbound"
+requires_ack = false
+
+[provides.events.message_updated]
+description = "Updated iMessage or BlueBubbles message observed through accepted webhook ingress"
+streaming = true
+replay = true
+topic = "imessage.message.updated"
+requires_ack = false
+
+[provides.events.message_tapback]
+description = "Tapback or associated-message activity observed through accepted webhook ingress"
+streaming = true
+replay = true
+topic = "imessage.message.tapback"
+requires_ack = false
+
 [provides.operations.send_message]
 summary = "Send an iMessage"
 capability = "imessage.send"

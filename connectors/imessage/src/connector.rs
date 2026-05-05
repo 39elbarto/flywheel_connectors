@@ -11,10 +11,10 @@ use base64::Engine as _;
 use chrono::Utc;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, CorrelationId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    InvokeResponse, OperationId, OperationInfo, OrderingPolicy, RiskLevel, SafetyTier,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
@@ -63,6 +63,19 @@ const CAP_ADMIN: &str = "imessage.admin";
 
 const DEFAULT_SYNC_CHAT_LIMIT: u64 = 25;
 const DEFAULT_SYNC_MESSAGE_LIMIT: u64 = 50;
+const WEBHOOK_EVENT_BUFFER_MIN_EVENTS: u32 = 64;
+const WEBHOOK_EVENT_BUFFER_MIN_EVENTS_USIZE: usize = 64;
+const WEBHOOK_EVENT_BUFFER_MAX_EVENTS: usize = 256;
+
+#[must_use]
+fn webhook_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: true,
+        replay: true,
+        min_buffer_events: WEBHOOK_EVENT_BUFFER_MIN_EVENTS,
+        requires_ack: false,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum BlueBubblesDedupeClaim {
@@ -1159,6 +1172,7 @@ struct BlueBubblesState {
     runtime: ConnectorRuntime,
     webhook_dedupe: BlueBubblesInboundDedupeStore,
     webhook_coalescer: BlueBubblesWebhookCoalescer,
+    webhook_events: Mutex<EventStreamManager>,
     reply_context_cache: BlueBubblesReplyContextCache,
     contacts_enrichment_cache: BlueBubblesContactsEnrichmentCache,
 }
@@ -1175,6 +1189,13 @@ impl BlueBubblesState {
             })?;
         let webhook_dedupe = BlueBubblesInboundDedupeStore::from_config(&config)?;
         let webhook_coalescer = BlueBubblesWebhookCoalescer::default();
+        let webhook_events = Mutex::new(EventStreamManager::with_limits(
+            webhook_event_caps(),
+            BufferLimits::new(
+                WEBHOOK_EVENT_BUFFER_MIN_EVENTS_USIZE,
+                WEBHOOK_EVENT_BUFFER_MAX_EVENTS,
+            ),
+        ));
         let reply_context_cache = BlueBubblesReplyContextCache::default();
         let contacts_enrichment_cache = BlueBubblesContactsEnrichmentCache::default();
 
@@ -1184,8 +1205,15 @@ impl BlueBubblesState {
             runtime,
             webhook_dedupe,
             webhook_coalescer,
+            webhook_events,
             reply_context_cache,
             contacts_enrichment_cache,
+        })
+    }
+
+    fn lock_webhook_events(&self) -> FcpResult<std::sync::MutexGuard<'_, EventStreamManager>> {
+        self.webhook_events.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles webhook event stream lock poisoned".into(),
         })
     }
 
@@ -2931,7 +2959,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "reply_context_lookup": { "type": "object" },
                     "contacts_enrichment": { "type": "object" },
                     "event": { "type": "object" },
-                    "events": { "type": "array", "items": { "type": "object" } }
+                    "events": { "type": "array", "items": { "type": "object" } },
+                    "event_envelopes": { "type": "array", "items": { "type": "object" } }
                 }
             }),
             capability: CapabilityId::from_static(CAP_READ),
@@ -3016,6 +3045,27 @@ fn message_to_sync_event(chat_guid: &str, message: &Message) -> serde_json::Valu
         "has_attachments": !message.attachments.is_empty(),
         "message": message,
     })
+}
+
+fn webhook_event_stream_key(
+    account_id: &str,
+    event: &NormalizedBlueBubblesWebhookMessage,
+) -> Option<String> {
+    let conversation_key = event
+        .chat_guid
+        .as_deref()
+        .or(event.chat_identifier.as_deref())?
+        .trim();
+    if conversation_key.is_empty() {
+        return None;
+    }
+    let account_id = account_id.trim();
+    let account_id = if account_id.is_empty() {
+        "default"
+    } else {
+        account_id
+    };
+    Some(format!("bluebubbles:{account_id}:chat:{conversation_key}"))
 }
 
 fn required_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
@@ -3147,12 +3197,7 @@ impl FcpConnector for BlueBubblesConnector {
             session_id: SessionId::new(),
             manifest_hash: self.manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(webhook_event_caps()),
             auth_caps: None,
             op_catalog_hash: None,
         })
@@ -3265,12 +3310,7 @@ impl FcpConnector for BlueBubblesConnector {
             events: events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(webhook_event_caps()),
         }
     }
 
@@ -3280,21 +3320,119 @@ impl FcpConnector for BlueBubblesConnector {
         result
     }
 
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        self.base.check_ready()?;
+        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let mut stream = state.lock_webhook_events()?;
+        stream
+            .handle_subscribe(&req)
+            .map(|outcome| outcome.response)
+            .map_err(|error| FcpError::InvalidRequest {
+                code: 1005,
+                message: error.to_string(),
+            })
     }
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
+    async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()> {
+        self.base.check_ready()?;
+        let state = self.state.as_ref().ok_or(FcpError::NotConfigured)?;
+        let mut stream = state.lock_webhook_events()?;
+        stream.unsubscribe(&req.topics);
+        Ok(())
     }
 }
 
 impl BlueBubblesConnector {
+    fn record_webhook_event_envelopes(
+        &self,
+        state: &BlueBubblesState,
+        zone_id: &ZoneId,
+        correlation_id: Option<&CorrelationId>,
+        account_id: &str,
+        events: &[NormalizedBlueBubblesWebhookMessage],
+    ) -> FcpResult<Vec<EventEnvelope>> {
+        let mut stream = state.lock_webhook_events()?;
+        let mut envelopes = Vec::with_capacity(events.len());
+        for event in events {
+            let envelope =
+                self.webhook_event_envelope(zone_id, correlation_id, account_id, event)?;
+            envelopes.push(stream.record(envelope));
+        }
+        Ok(envelopes)
+    }
+
+    fn webhook_event_envelope(
+        &self,
+        zone_id: &ZoneId,
+        correlation_id: Option<&CorrelationId>,
+        account_id: &str,
+        event: &NormalizedBlueBubblesWebhookMessage,
+    ) -> FcpResult<EventEnvelope> {
+        let payload = serde_json::to_value(event).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize BlueBubbles webhook event: {error}"),
+        })?;
+        let principal = Principal {
+            kind: if event.is_from_me {
+                "bluebubbles_self".to_string()
+            } else {
+                "bluebubbles_sender".to_string()
+            },
+            id: event
+                .sender_id
+                .clone()
+                .or_else(|| event.chat_identifier.clone())
+                .or_else(|| event.chat_guid.clone())
+                .unwrap_or_else(|| "unknown".to_string()),
+            trust: TrustLevel::Untrusted,
+            display: event.sender_name.clone(),
+        };
+
+        let mut data = EventData::new(
+            self.base.id.clone(),
+            self.base.instance_id.clone(),
+            zone_id.clone(),
+            principal,
+            payload,
+        );
+        if let Some(correlation_id) = correlation_id.cloned() {
+            data = data.with_correlation_id(correlation_id);
+        }
+
+        let mut resource_uris = Vec::new();
+        let account_id = account_id.trim();
+        if !account_id.is_empty() {
+            resource_uris.push(format!("bluebubbles:account:{account_id}"));
+        }
+        resource_uris.push(format!("imessage:message:{}", event.event_id));
+        if let Some(chat_guid) = event.chat_guid.as_deref() {
+            resource_uris.push(format!("imessage:chat:{chat_guid}"));
+        }
+        data = data.with_resource_uris(resource_uris);
+
+        let mut envelope = EventEnvelope::new(event.topic.clone(), data);
+        if let Some(stream_key) = webhook_event_stream_key(account_id, event) {
+            envelope = envelope
+                .with_stream_key(stream_key)
+                .with_ordering(OrderingPolicy::PerKey);
+        } else {
+            envelope = envelope.with_ordering(OrderingPolicy::Unordered);
+        }
+        if let Some(timestamp) = event
+            .date_created_ms
+            .and_then(chrono::DateTime::<Utc>::from_timestamp_millis)
+        {
+            envelope.timestamp = timestamp;
+        }
+        Ok(envelope)
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
         let operation = req.operation.as_str();
         let required_cap = Self::required_capability(operation)?;
+        let event_zone_id = req.zone_id.clone();
+        let event_correlation_id = req.correlation_id.clone();
 
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         verifier.verify_bound(req.capability_token, &required_cap, &req.operation, &[])?;
@@ -3798,6 +3936,13 @@ impl BlueBubblesConnector {
                         .webhook_coalescer
                         .flush_all(&state.config.webhook_coalescing)?;
                     let first_event = outcome.events.first().cloned();
+                    let event_envelopes = self.record_webhook_event_envelopes(
+                        state,
+                        &event_zone_id,
+                        event_correlation_id.as_ref(),
+                        state.config.webhook_account_id.as_str(),
+                        &outcome.events,
+                    )?;
                     return Ok(InvokeResponse::ok(
                         req.id,
                         json!({
@@ -3812,6 +3957,7 @@ impl BlueBubblesConnector {
                             "contacts_enrichment": null,
                             "event": first_event,
                             "events": outcome.events,
+                            "event_envelopes": event_envelopes,
                         }),
                     ));
                 }
@@ -3885,6 +4031,13 @@ impl BlueBubblesConnector {
                     ("rejected", None, None, None, None, Vec::new())
                 };
                 let emitted_event = events.first().cloned();
+                let event_envelopes = self.record_webhook_event_envelopes(
+                    state,
+                    &event_zone_id,
+                    event_correlation_id.as_ref(),
+                    account_id,
+                    &events,
+                )?;
                 let correlation_id = req
                     .correlation_id
                     .as_ref()
@@ -3929,6 +4082,7 @@ impl BlueBubblesConnector {
                     "contacts_enrichment": contacts_enrichment,
                     "event": emitted_event,
                     "events": events,
+                    "event_envelopes": event_envelopes,
                 })
             }
             OP_GET_SERVER_INFO => {
@@ -5988,10 +6142,14 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_not_supported() {
+    fn test_webhook_streaming_caps_advertised() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert!(!intro.event_caps.as_ref().unwrap().streaming);
+        let caps = intro.event_caps.as_ref().unwrap();
+        assert!(caps.streaming);
+        assert!(caps.replay);
+        assert_eq!(caps.min_buffer_events, WEBHOOK_EVENT_BUFFER_MIN_EVENTS);
+        assert!(!caps.requires_ack);
     }
 
     #[fcp_async_core::runtime::test]
@@ -6183,6 +6341,42 @@ mod tests {
             first_result["event"]["attachments"][0]["mime_type"],
             "image/png"
         );
+        let envelopes = first_result["event_envelopes"].as_array().unwrap();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["topic"], "imessage.message.inbound");
+        assert_eq!(envelopes[0]["seq"], 0);
+        assert_eq!(envelopes[0]["cursor"], "0");
+        assert_eq!(
+            envelopes[0]["stream_key"],
+            "bluebubbles:acct-a:chat:iMessage;-;+15551234567"
+        );
+        assert_eq!(envelopes[0]["ordering"], "per_key");
+        assert_eq!(envelopes[0]["data"]["zone_id"], "z:work");
+        assert_eq!(envelopes[0]["data"]["payload"]["event_id"], "msg-1");
+        assert!(envelopes[0]["data"]["correlation_id"].as_str().is_some());
+
+        let subscribe = connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_1"),
+                topics: vec!["imessage.message.inbound".to_string()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            subscribe.result.confirmed_topics,
+            vec!["imessage.message.inbound".to_string()]
+        );
+        assert!(subscribe.result.replay_supported);
+        assert_eq!(
+            subscribe.result.cursors.get("imessage.message.inbound"),
+            Some(&"0".to_string())
+        );
 
         let req = InvokeRequest {
             input,
@@ -6194,11 +6388,10 @@ mod tests {
             ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
         };
         let second = connector.invoke(req).await.unwrap();
-        assert_eq!(second.result.as_ref().unwrap()["status"], "duplicate");
-        assert_eq!(
-            second.result.as_ref().unwrap()["duplicate_id"],
-            "acct-a:msg-1"
-        );
+        let second_result = second.result.as_ref().unwrap();
+        assert_eq!(second_result["status"], "duplicate");
+        assert_eq!(second_result["duplicate_id"], "acct-a:msg-1");
+        assert_eq!(second_result["event_envelopes"], json!([]));
     }
 
     #[fcp_async_core::runtime::test]
@@ -6934,6 +7127,7 @@ mod tests {
         .await;
         assert_eq!(first["status"], "buffered");
         assert!(first["event"].is_null());
+        assert_eq!(first["event_envelopes"], json!([]));
         assert_eq!(first["coalescing"]["buffered_count"], 1);
 
         let second = invoke_webhook_result(
@@ -6969,6 +7163,10 @@ mod tests {
         assert_eq!(flushed["status"], "flushed");
         assert_eq!(flushed["coalescing"]["emitted_count"], 1);
         assert_eq!(flushed["events"].as_array().unwrap().len(), 1);
+        let envelopes = flushed["event_envelopes"].as_array().unwrap();
+        assert_eq!(envelopes.len(), 1);
+        assert_eq!(envelopes[0]["topic"], "imessage.message.inbound");
+        assert_eq!(envelopes[0]["data"]["payload"]["coalesced_source_count"], 2);
         let event = &flushed["event"];
         assert_eq!(event["event_id"], "msg-split-1");
         assert_eq!(event["text"], "Dump https://example.test/report");

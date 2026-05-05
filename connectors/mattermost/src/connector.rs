@@ -4308,6 +4308,40 @@ mod tests {
         assert!(matches!(err, FcpError::NotHandshaken));
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn active_socket_task_is_reused_and_stop_joins_it() {
+        let mut connector = MattermostConnector::new();
+        let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+        *connector.socket_running.write().await = true;
+        connector.socket_shutdown_tx = Some(shutdown_tx);
+        connector.socket_task = Some(fcp_async_core::task::spawn(async move {
+            loop {
+                if *shutdown_rx.borrow() {
+                    break;
+                }
+                if shutdown_rx.changed().await.is_err() {
+                    break;
+                }
+            }
+        }));
+
+        let started = connector.ensure_socket_mode_running().await.unwrap();
+        assert!(!started);
+        assert!(
+            connector
+                .socket_task
+                .as_ref()
+                .is_some_and(|task| !task.is_finished()),
+            "active socket task should be reused instead of replaced"
+        );
+
+        connector.stop_socket_mode().await;
+        assert!(connector.socket_task.is_none());
+        assert!(connector.socket_shutdown_tx.is_none());
+        assert!(!*connector.socket_running.read().await);
+        assert!(!*connector.socket_connected.read().await);
+    }
+
     #[test]
     fn parse_subscribe_topics_defaults() {
         let topics = parse_subscribe_topics(&json!({}));

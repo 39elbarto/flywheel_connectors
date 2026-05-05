@@ -3,6 +3,7 @@
 
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
+use std::io::Write;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,8 +12,10 @@ use fcp_async_core::channel::{mpsc, oneshot};
 use fcp_async_core::{AsyncError, TaskGroup, task, time};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, X25519PublicKey, X25519SecretKey};
 use fcp_mesh::{
-    AvailabilityProfile, CpuArch, DeviceProfile, GossipMessage, GossipRequest, LatencyClass,
-    MeshNode, MeshNodeConfig, ObjectAdmissionClass, PowerSource, RevocationPushMessage,
+    AdaptiveRevocationPushFanoutConfig, AvailabilityProfile, CpuArch, DeviceProfile,
+    FanoutDecision, GossipConfig, GossipMessage, GossipRequest, LatencyClass, MeshGossip, MeshNode,
+    MeshNodeConfig, ObjectAdmissionClass, PowerSource, PriorityGossipPolicy,
+    RevocationPushFanoutEvidence, RevocationPushMessage,
 };
 use fcp_prelude::{EpochId, NodeSignature, ObjectId, TailscaleNodeId, ZoneId};
 use fcp_store::{
@@ -274,16 +277,35 @@ pub struct MultiNodeMeshHarness {
 impl MultiNodeMeshHarness {
     #[allow(clippy::unused_async)]
     pub async fn new_three_node(seed: u64) -> Result<Self, HarnessError> {
+        Self::new_with_node_count(seed, NODE_COUNT).await
+    }
+
+    #[allow(clippy::unused_async)]
+    pub async fn new_with_node_count(seed: u64, node_count: usize) -> Result<Self, HarnessError> {
+        Self::new_with_node_count_and_gossip_config(seed, node_count, GossipConfig::default()).await
+    }
+
+    #[allow(clippy::unused_async)]
+    pub async fn new_with_node_count_and_gossip_config(
+        seed: u64,
+        node_count: usize,
+        gossip_config: GossipConfig,
+    ) -> Result<Self, HarnessError> {
         let (outbound_tx, outbound_rx) = mpsc::channel(OUTBOUND_CHANNEL_CAPACITY);
         let mut tasks = TaskGroup::new();
         let mut nodes = BTreeMap::new();
 
-        for index in 0..NODE_COUNT {
+        for index in 0..node_count {
             let node_name = format!("mesh-harness-node-{}", index + 1);
             let identity = derive_identity(seed, &node_name);
             let sender_instance_id = derive_u64(seed, &node_name, "sender-instance");
             let local_node_id = derive_u64(seed, &node_name, "symbol-store-node");
-            let mesh_node = build_mesh_node(&node_name, sender_instance_id, local_node_id);
+            let mesh_node = build_mesh_node_with_gossip_config(
+                &node_name,
+                sender_instance_id,
+                local_node_id,
+                gossip_config.clone(),
+            );
 
             let (event_tx, event_rx) = mpsc::channel(NODE_EVENT_CHANNEL_CAPACITY);
 
@@ -1171,7 +1193,12 @@ async fn run_node_task(
     Ok(())
 }
 
-fn build_mesh_node(name: &str, sender_instance_id: u64, local_node_id: u64) -> MeshNode {
+fn build_mesh_node_with_gossip_config(
+    name: &str,
+    sender_instance_id: u64,
+    local_node_id: u64,
+    gossip_config: GossipConfig,
+) -> MeshNode {
     let object_store = Arc::new(MemoryObjectStore::new(MemoryObjectStoreConfig::default()));
     let symbol_store = Arc::new(MemorySymbolStore::new(MemorySymbolStoreConfig {
         local_node_id,
@@ -1180,7 +1207,9 @@ fn build_mesh_node(name: &str, sender_instance_id: u64, local_node_id: u64) -> M
     let quarantine_store = Arc::new(QuarantineStore::new(ObjectAdmissionPolicy::default()));
 
     MeshNode::new(
-        MeshNodeConfig::new(name).with_sender_instance_id(sender_instance_id),
+        MeshNodeConfig::new(name)
+            .with_sender_instance_id(sender_instance_id)
+            .with_gossip_config(gossip_config),
         object_store,
         symbol_store,
         quarantine_store,
@@ -1279,6 +1308,595 @@ fn test_symbol(
         },
         data: Bytes::from(vec![esi_byte; symbol_size]),
     }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RevocationDeliveryCounts {
+    queued: usize,
+    dropped_by_partition: usize,
+    dropped_by_packet_loss: usize,
+}
+
+impl RevocationDeliveryCounts {
+    const fn record(&mut self, disposition: DeliveryDisposition) {
+        match disposition {
+            DeliveryDisposition::Queued => self.queued += 1,
+            DeliveryDisposition::DroppedByPartition => self.dropped_by_partition += 1,
+            DeliveryDisposition::DroppedByPacketLoss => self.dropped_by_packet_loss += 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RevocationObservationCounts {
+    observed_messages: usize,
+    unique_recipients: usize,
+    duplicate_messages: usize,
+    bytes_sent: usize,
+    duplicate_ratio: f64,
+    propagation_latency_ms: Option<u64>,
+}
+
+fn plan_swarm_revocation_fanout(
+    local_node: &NodeId,
+    config: GossipConfig,
+    zone_id: &ZoneId,
+    peers: &[TailscaleNodeId],
+    policy: PriorityGossipPolicy,
+    now_ms: u64,
+) -> (RevocationPushFanoutEvidence, Vec<TailscaleNodeId>) {
+    let mut gossip = MeshGossip::new(TailscaleNodeId::new(local_node.as_str()), config);
+    let plan = gossip.plan_revocation_push_fanout(zone_id, peers, policy, now_ms);
+    (plan.redacted_evidence(), plan.selected_peers)
+}
+
+async fn deliver_revocation_pushes(
+    harness: &mut MultiNodeMeshHarness,
+    from: &NodeId,
+    selected_peers: &[TailscaleNodeId],
+    zone_id: &ZoneId,
+    revoked_id: ObjectId,
+    new_rev_seq: u64,
+) -> Result<RevocationDeliveryCounts, HarnessError> {
+    let mut counts = RevocationDeliveryCounts::default();
+    for peer in selected_peers {
+        let to = NodeId::new(peer.as_str());
+        let disposition = harness
+            .send_revocation_push(
+                from,
+                &to,
+                zone_id.clone(),
+                vec![revoked_id],
+                new_rev_seq,
+                true,
+            )
+            .await?;
+        counts.record(disposition);
+    }
+    Ok(counts)
+}
+
+#[allow(clippy::cast_precision_loss)]
+async fn collect_revocation_observations(
+    harness: &mut MultiNodeMeshHarness,
+    zone_id: &ZoneId,
+    revoked_id: ObjectId,
+    new_rev_seq: u64,
+    scenario_start_ms: u64,
+) -> Result<RevocationObservationCounts, HarnessError> {
+    let mut recipient_counts = BTreeMap::<String, usize>::new();
+    let mut observed_messages = 0usize;
+    let mut bytes_sent = 0usize;
+    let mut latest_received_at_ms = scenario_start_ms;
+
+    for node_id in harness.node_ids() {
+        let snapshot = harness.snapshot(&node_id, zone_id.clone(), 0).await?;
+        for entry in snapshot.observed_messages {
+            let GossipMessage::RevocationPush(push) = &entry.message else {
+                continue;
+            };
+            if push.new_rev_seq != new_rev_seq || !push.revoked_ids.contains(&revoked_id) {
+                continue;
+            }
+
+            observed_messages += 1;
+            *recipient_counts
+                .entry(snapshot.node_id.as_str().to_string())
+                .or_default() += 1;
+            bytes_sent += serde_json::to_vec(&entry.message)
+                .expect("revocation push observation should serialize")
+                .len();
+            latest_received_at_ms = latest_received_at_ms.max(entry.received_at_ms);
+        }
+    }
+
+    let unique_recipients = recipient_counts.len();
+    let duplicate_messages = observed_messages.saturating_sub(unique_recipients);
+    let duplicate_ratio = if observed_messages == 0 {
+        0.0
+    } else {
+        duplicate_messages as f64 / observed_messages as f64
+    };
+    let propagation_latency_ms =
+        (observed_messages > 0).then(|| latest_received_at_ms.saturating_sub(scenario_start_ms));
+
+    Ok(RevocationObservationCounts {
+        observed_messages,
+        unique_recipients,
+        duplicate_messages,
+        bytes_sent,
+        duplicate_ratio,
+        propagation_latency_ms,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn swarm_evidence_entry(
+    scenario_id: &'static str,
+    node_count: usize,
+    topology: &'static str,
+    static_baseline: &RevocationPushFanoutEvidence,
+    adaptive: &RevocationPushFanoutEvidence,
+    delivery: RevocationDeliveryCounts,
+    observations: RevocationObservationCounts,
+    skip_reason: Option<&'static str>,
+    details: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "scenario_id": scenario_id,
+        "node_count": node_count,
+        "topology": topology,
+        "peer_fanout": {
+            "static_baseline": static_baseline,
+            "adaptive": adaptive,
+            "static_selected_peers": static_baseline.selected_peer_count,
+            "adaptive_selected_peers": adaptive.selected_peer_count,
+            "suppressed_by_adaptive": static_baseline
+                .selected_peer_count
+                .saturating_sub(adaptive.selected_peer_count),
+        },
+        "message_counts": {
+            "queued": delivery.queued,
+            "dropped_by_partition": delivery.dropped_by_partition,
+            "dropped_by_packet_loss": delivery.dropped_by_packet_loss,
+            "observed": observations.observed_messages,
+            "unique_recipients": observations.unique_recipients,
+            "duplicates": observations.duplicate_messages,
+        },
+        "bytes_sent": observations.bytes_sent,
+        "convergence_latency_ms": observations.propagation_latency_ms,
+        "revocation_propagation_latency_ms": observations.propagation_latency_ms,
+        "duplicate_ratio": observations.duplicate_ratio,
+        "fallback_reason": adaptive.fallback_reason,
+        "skip_reason": skip_reason,
+        "details": details,
+    })
+}
+
+fn swarm_jsonl(entries: &[serde_json::Value]) -> String {
+    entries
+        .iter()
+        .map(|entry| serde_json::to_string(entry).expect("swarm evidence should serialize"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn assert_swarm_jsonl_contract(jsonl: &str) {
+    let required_fields = [
+        "scenario_id",
+        "node_count",
+        "topology",
+        "peer_fanout",
+        "message_counts",
+        "bytes_sent",
+        "convergence_latency_ms",
+        "revocation_propagation_latency_ms",
+        "duplicate_ratio",
+        "fallback_reason",
+        "skip_reason",
+    ];
+
+    for line in jsonl.lines() {
+        let value: serde_json::Value =
+            serde_json::from_str(line).expect("swarm evidence line should be valid JSON");
+        for field in required_fields {
+            assert!(
+                value.get(field).is_some(),
+                "swarm evidence line missing `{field}`: {line}"
+            );
+        }
+        assert!(
+            value["node_count"].as_u64().is_some_and(|count| count >= 3),
+            "swarm evidence must carry a realistic node_count: {line}"
+        );
+        assert!(
+            value["message_counts"]["observed"]
+                .as_u64()
+                .is_some_and(|observed| observed > 0),
+            "each swarm scenario must observe at least one real revocation push: {line}"
+        );
+    }
+}
+
+fn maybe_write_swarm_jsonl_artifact(jsonl: &str) -> std::io::Result<()> {
+    let Some(path) = std::env::var_os("FCP_SWARM_JSONL_OUT") else {
+        return Ok(());
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(jsonl.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+#[fcp_async_core::runtime::test]
+async fn adaptive_revocation_swarm_jsonl_evidence_compares_static_baseline() {
+    const SWARM_NODE_COUNT: usize = 20;
+    const STATIC_FANOUT_CAP: usize = 12;
+
+    let zone_id = ZoneId::work();
+    let source_revocation_id = test_object_id("adaptive-swarm-normal");
+    let churn_revocation_id = test_object_id("adaptive-swarm-churn");
+    let partition_revocation_id = test_object_id("adaptive-swarm-partition");
+    let heal_revocation_id = test_object_id("adaptive-swarm-heal");
+    let emergency_revocation_id = test_object_id("adaptive-swarm-emergency");
+    let overload_revocation_id = test_object_id("adaptive-swarm-overload");
+
+    let static_config = GossipConfig {
+        max_revocation_push_peers: STATIC_FANOUT_CAP,
+        ..GossipConfig::default()
+    };
+    let adaptive_config = GossipConfig {
+        max_revocation_push_peers: STATIC_FANOUT_CAP,
+        adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig::enabled(),
+        ..GossipConfig::default()
+    };
+
+    let mut harness = MultiNodeMeshHarness::new_with_node_count_and_gossip_config(
+        0x51A9_4E11_D00D,
+        SWARM_NODE_COUNT,
+        adaptive_config.clone(),
+    )
+    .await
+    .unwrap();
+    harness.register_all_peers().await.unwrap();
+
+    let node_ids = harness.node_ids();
+    assert_eq!(node_ids.len(), SWARM_NODE_COUNT);
+    let (source, peer_nodes) = node_ids
+        .split_first()
+        .expect("swarm harness should contain a source node");
+    let source = source.clone();
+    let peers = peer_nodes
+        .iter()
+        .map(|node_id| TailscaleNodeId::new(node_id.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(peers.len(), SWARM_NODE_COUNT - 1);
+
+    let (static_direct, _) = plan_swarm_revocation_fanout(
+        &source,
+        static_config.clone(),
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_000,
+    );
+    let (adaptive_direct, adaptive_selected) = plan_swarm_revocation_fanout(
+        &source,
+        adaptive_config.clone(),
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        1_000,
+    );
+    assert_eq!(static_direct.selected_peer_count, STATIC_FANOUT_CAP);
+    assert_eq!(adaptive_direct.decision, FanoutDecision::AdaptiveCapped);
+    assert!(
+        adaptive_direct.selected_peer_count < static_direct.selected_peer_count,
+        "adaptive gate should reduce ordinary direct-push amplification"
+    );
+
+    let mut entries = Vec::new();
+
+    for peer in &adaptive_selected {
+        harness.set_latency(
+            &source,
+            &NodeId::new(peer.as_str()),
+            Duration::from_millis(5),
+        );
+    }
+    let normal_start_ms = harness.now_ms();
+    let normal_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &adaptive_selected,
+        &zone_id,
+        source_revocation_id,
+        1,
+    )
+    .await
+    .unwrap();
+    harness
+        .advance_time(Duration::from_millis(5))
+        .await
+        .unwrap();
+    let normal_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        source_revocation_id,
+        1,
+        normal_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        normal_observations.unique_recipients,
+        adaptive_direct.selected_peer_count
+    );
+    entries.push(swarm_evidence_entry(
+        "normal_load_adaptive",
+        SWARM_NODE_COUNT,
+        "full_mesh",
+        &static_direct,
+        &adaptive_direct,
+        normal_delivery,
+        normal_observations,
+        None,
+        &serde_json::json!({
+            "comparison": "adaptive fanout is lower than static baseline",
+            "static_cap": STATIC_FANOUT_CAP,
+        }),
+    ));
+
+    for peer in &adaptive_selected {
+        harness.set_latency(&source, &NodeId::new(peer.as_str()), Duration::ZERO);
+    }
+
+    let churned_peer = NodeId::new(
+        adaptive_selected
+            .first()
+            .expect("adaptive plan should select a churn target")
+            .as_str(),
+    );
+    harness.set_packet_loss(&source, &churned_peer, 1.0);
+    let churn_start_ms = harness.now_ms();
+    let churn_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &adaptive_selected,
+        &zone_id,
+        churn_revocation_id,
+        2,
+    )
+    .await
+    .unwrap();
+    harness.set_packet_loss(&source, &churned_peer, 0.0);
+    let churn_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        churn_revocation_id,
+        2,
+        churn_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(churn_delivery.dropped_by_packet_loss, 1);
+    assert_eq!(
+        churn_observations.unique_recipients,
+        adaptive_direct.selected_peer_count - 1
+    );
+    entries.push(swarm_evidence_entry(
+        "churn_packet_loss",
+        SWARM_NODE_COUNT,
+        "full_mesh_one_lossy_link",
+        &static_direct,
+        &adaptive_direct,
+        churn_delivery,
+        churn_observations,
+        None,
+        &serde_json::json!({
+            "churned_peer_index": 0,
+            "packet_loss": 1.0,
+        }),
+    ));
+
+    let partitioned_peer = NodeId::new(
+        adaptive_selected
+            .get(1)
+            .expect("adaptive plan should select a partition target")
+            .as_str(),
+    );
+    harness.partition(std::slice::from_ref(&partitioned_peer));
+    let partition_start_ms = harness.now_ms();
+    let partition_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &adaptive_selected,
+        &zone_id,
+        partition_revocation_id,
+        3,
+    )
+    .await
+    .unwrap();
+    let partition_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        partition_revocation_id,
+        3,
+        partition_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(partition_delivery.dropped_by_partition, 1);
+
+    harness.heal_partitions();
+    let healed_peer = [TailscaleNodeId::new(partitioned_peer.as_str())];
+    let heal_start_ms = harness.now_ms();
+    let heal_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &healed_peer,
+        &zone_id,
+        heal_revocation_id,
+        4,
+    )
+    .await
+    .unwrap();
+    let heal_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        heal_revocation_id,
+        4,
+        heal_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(heal_observations.unique_recipients, 1);
+    entries.push(swarm_evidence_entry(
+        "partition_heal",
+        SWARM_NODE_COUNT,
+        "single_peer_partition_then_heal",
+        &static_direct,
+        &adaptive_direct,
+        partition_delivery,
+        partition_observations,
+        None,
+        &serde_json::json!({
+            "partitioned_peer_index": 1,
+            "post_heal": {
+                "queued": heal_delivery.queued,
+                "observed": heal_observations.observed_messages,
+                "bytes_sent": heal_observations.bytes_sent,
+                "revocation_propagation_latency_ms": heal_observations.propagation_latency_ms,
+            },
+        }),
+    ));
+
+    let (static_emergency, _) = plan_swarm_revocation_fanout(
+        &source,
+        static_config.clone(),
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::Emergency,
+        2_000,
+    );
+    let (adaptive_emergency, emergency_selected) = plan_swarm_revocation_fanout(
+        &source,
+        adaptive_config.clone(),
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::Emergency,
+        2_000,
+    );
+    assert_eq!(adaptive_emergency.decision, FanoutDecision::EmergencyBurst);
+    assert_eq!(adaptive_emergency.selected_peer_count, peers.len());
+    let emergency_start_ms = harness.now_ms();
+    let emergency_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &emergency_selected,
+        &zone_id,
+        emergency_revocation_id,
+        5,
+    )
+    .await
+    .unwrap();
+    let emergency_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        emergency_revocation_id,
+        5,
+        emergency_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(emergency_observations.unique_recipients, peers.len());
+    entries.push(swarm_evidence_entry(
+        "priority_revocation_emergency",
+        SWARM_NODE_COUNT,
+        "full_mesh_priority_bypass",
+        &static_emergency,
+        &adaptive_emergency,
+        emergency_delivery,
+        emergency_observations,
+        None,
+        &serde_json::json!({
+            "priority_policy": "emergency",
+            "adaptive_bypass_expected": true,
+        }),
+    ));
+
+    let overload_config = GossipConfig {
+        max_revocation_push_peers: STATIC_FANOUT_CAP,
+        adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig {
+            max_selected_peers: 4,
+            ..AdaptiveRevocationPushFanoutConfig::enabled()
+        },
+        ..GossipConfig::default()
+    };
+    let (static_overload, _) = plan_swarm_revocation_fanout(
+        &source,
+        static_config,
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        3_000,
+    );
+    let (adaptive_overload, overload_selected) = plan_swarm_revocation_fanout(
+        &source,
+        overload_config,
+        &zone_id,
+        &peers,
+        PriorityGossipPolicy::DirectPush,
+        3_000,
+    );
+    assert_eq!(adaptive_overload.decision, FanoutDecision::AdaptiveCapped);
+    assert_eq!(adaptive_overload.selected_peer_count, 4);
+    let overload_start_ms = harness.now_ms();
+    let overload_delivery = deliver_revocation_pushes(
+        &mut harness,
+        &source,
+        &overload_selected,
+        &zone_id,
+        overload_revocation_id,
+        6,
+    )
+    .await
+    .unwrap();
+    let overload_observations = collect_revocation_observations(
+        &mut harness,
+        &zone_id,
+        overload_revocation_id,
+        6,
+        overload_start_ms,
+    )
+    .await
+    .unwrap();
+    assert_eq!(overload_observations.unique_recipients, 4);
+    entries.push(swarm_evidence_entry(
+        "overload_adaptive_cap",
+        SWARM_NODE_COUNT,
+        "full_mesh_overload_gate",
+        &static_overload,
+        &adaptive_overload,
+        overload_delivery,
+        overload_observations,
+        None,
+        &serde_json::json!({
+            "adaptive_max_selected_peers": 4,
+            "static_baseline_selected_peers": static_overload.selected_peer_count,
+        }),
+    ));
+
+    let jsonl = swarm_jsonl(&entries);
+    assert_eq!(jsonl.lines().count(), 5);
+    assert_swarm_jsonl_contract(&jsonl);
+    maybe_write_swarm_jsonl_artifact(&jsonl).expect("swarm JSONL artifact should be writable");
+
+    harness.shutdown().await.unwrap();
 }
 
 #[fcp_async_core::runtime::test]

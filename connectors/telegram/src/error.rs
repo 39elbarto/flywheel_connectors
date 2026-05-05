@@ -111,7 +111,7 @@ fn redact_telegram_bot_token_segments(message: &str) -> String {
         redacted.push_str("[REDACTED]");
 
         let credential_end = message[credential_start..]
-            .find(|ch: char| matches!(ch, '/' | '?' | '#' | '&' | ')' | ' ' | '\t' | '\r' | '\n'))
+            .find(['/', '?', '#', '&', ')', ' ', '\t', '\r', '\n'])
             .map_or(message.len(), |relative_end| {
                 credential_start + relative_end
             });

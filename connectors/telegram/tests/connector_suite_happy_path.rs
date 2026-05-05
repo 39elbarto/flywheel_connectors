@@ -34,7 +34,7 @@ fn unique_zone_dir(label: &str) -> String {
     dir.to_string_lossy().into_owned()
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -44,11 +44,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_SEND)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -62,6 +62,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[OP_SEND_MESSAGE])
+        .target_instance(instance_id.as_str())
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -80,7 +81,7 @@ async fn connector_suite_happy_path_sends_message() {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "ok": true,
             "result": {
-                "id": 123456789,
+                "id": 123_456_789,
                 "is_bot": true,
                 "first_name": "Test Bot",
                 "username": "test_bot_fcp"
@@ -108,8 +109,8 @@ async fn connector_suite_happy_path_sends_message() {
             "ok": true,
             "result": {
                 "message_id": 42,
-                "chat": { "id": 123456, "type": "private", "first_name": "Test" },
-                "date": 1234567890,
+                "chat": { "id": 123_456, "type": "private", "first_name": "Test" },
+                "date": 1_234_567_890,
                 "text": "hello from connector suite"
             }
         })))
@@ -118,7 +119,12 @@ async fn connector_suite_happy_path_sends_message() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
+    let mut connector = TelegramConnector::new();
+    let connector_instance = connector.instance_id();
+    let handshake = handshake_request(
+        signing_key.verifying_key().to_bytes(),
+        connector_instance.clone(),
+    );
     let invoke = InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new("telegram-connector-suite"),
@@ -129,7 +135,7 @@ async fn connector_suite_happy_path_sends_message() {
             "chat_id": "123456",
             "text": "hello from connector suite"
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, &connector_instance),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -151,7 +157,6 @@ async fn connector_suite_happy_path_sends_message() {
         invoke_expectations: InvokeExpectations::default(),
     };
 
-    let mut connector = TelegramConnector::new();
     let mut runner = E2eRunner::new("fcp-telegram");
     let report = runner
         .run_connector_suite(&mut connector, suite)

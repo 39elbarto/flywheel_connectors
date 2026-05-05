@@ -410,6 +410,12 @@ impl TelegramConnector {
         }
     }
 
+    /// Return the connector instance ID used for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> InstanceId {
+        self.base.instance_id.clone()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -554,6 +560,16 @@ impl TelegramConnector {
             zone_dir = %zone_dir.display(),
             "Telegram bot verified"
         );
+
+        if let Some(requested_instance_id) = req.requested_instance_id.clone()
+            && self.base.instance_id != requested_instance_id
+        {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message: "Cannot update Telegram instance_id after connector state was shared"
+                    .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
 
         // Set up verifier
         self.verifier = Some(CapabilityVerifier::new(
@@ -827,7 +843,8 @@ impl TelegramConnector {
                 "chat_id": { "type": ["string", "integer"], "description": "Chat ID or @username" },
                 "text": { "type": "string", "description": "Message text" },
                 "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
-                "reply_to_message_id": { "type": "integer" }
+                "reply_to_message_id": { "type": "integer" },
+                "message_thread_id": { "type": "integer", "minimum": 0, "description": "Telegram forum topic or private-chat topic thread ID" }
             },
             "required": ["chat_id", "text"]
         })
@@ -852,7 +869,8 @@ impl TelegramConnector {
                 "media": { "type": "string", "description": "File ID (from a previous message) or HTTPS URL" },
                 "caption": { "type": "string", "description": "Media caption (up to 1024 characters)" },
                 "parse_mode": { "type": "string", "enum": ["HTML", "MarkdownV2"] },
-                "reply_to_message_id": { "type": "integer" }
+                "reply_to_message_id": { "type": "integer" },
+                "message_thread_id": { "type": "integer", "minimum": 0, "description": "Telegram forum topic or private-chat topic thread ID" }
             },
             "required": ["chat_id", "media_type", "media"]
         })
@@ -953,15 +971,39 @@ impl TelegramConnector {
         }
     }
 
-    fn resource_uris_for_input(input: &serde_json::Value) -> Vec<String> {
-        let mut resource_uris = Vec::new();
+    fn message_thread_id_from_input(input: &serde_json::Value) -> FcpResult<Option<i64>> {
+        let Some(value) = input.get("message_thread_id") else {
+            return Ok(None);
+        };
+        let Some(thread_id) = value.as_i64() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "message_thread_id must be a non-negative integer".into(),
+            });
+        };
+        if thread_id < 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "message_thread_id must be non-negative".into(),
+            });
+        }
+        Ok(Some(thread_id))
+    }
 
-        if let Some(chat_id) = input.get("chat_id") {
-            if let Some(chat_id) = chat_id.as_str() {
-                resource_uris.push(format!("telegram:chat:{chat_id}"));
-            } else if let Some(chat_id) = chat_id.as_i64() {
-                resource_uris.push(format!("telegram:chat:{chat_id}"));
+    fn resource_uris_for_input(input: &serde_json::Value) -> FcpResult<Vec<String>> {
+        let mut resource_uris = Vec::new();
+        let message_thread_id = Self::message_thread_id_from_input(input)?;
+
+        if let Some(chat_id) = input.get("chat_id").and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| value.as_i64().map(|id| id.to_string()))
+        }) {
+            if let Some(thread_id) = message_thread_id {
+                resource_uris.push(format!("telegram:chat:{chat_id}:topic:{thread_id}"));
             }
+            resource_uris.push(format!("telegram:chat:{chat_id}"));
         }
 
         if let Some(file_id) = input.get("file_id").and_then(|v| v.as_str()) {
@@ -972,7 +1014,7 @@ impl TelegramConnector {
             resource_uris.push(format!("telegram:callback:{callback_query_id}"));
         }
 
-        resource_uris
+        Ok(resource_uris)
     }
 
     /// Handle introspection.
@@ -1161,7 +1203,16 @@ impl TelegramConnector {
             });
         };
 
-        let resource_uris = Self::resource_uris_for_input(&req.input);
+        let resource_uris = match Self::resource_uris_for_input(&req.input) {
+            Ok(resource_uris) => resource_uris,
+            Err(error) => {
+                let response =
+                    SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+                return serde_json::to_value(response).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize response: {e}"),
+                });
+            }
+        };
         let response = match verifier.verify_bound(
             req.capability_token,
             &capability,
@@ -1279,7 +1330,7 @@ impl TelegramConnector {
             message: "Invalid operation ID format".into(),
         })?;
         let cap_id = capability_for_operation(operation)?;
-        let resource_uris = Self::resource_uris_for_input(&input);
+        let resource_uris = Self::resource_uris_for_input(&input)?;
 
         let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
         verifier.verify_bound(capability, &cap_id, &op_id, &resource_uris)?;
@@ -1352,6 +1403,7 @@ impl TelegramConnector {
         if let Some(reply_to) = input.get("reply_to_message_id").and_then(|v| v.as_i64()) {
             options.reply_to_message_id = Some(reply_to);
         }
+        options.message_thread_id = Self::message_thread_id_from_input(&input)?;
 
         let map_external = |err: TelegramError| err.to_fcp_error();
 
@@ -1456,6 +1508,7 @@ impl TelegramConnector {
         if let Some(reply_to) = input.get("reply_to_message_id").and_then(|v| v.as_i64()) {
             options.reply_to_message_id = Some(reply_to);
         }
+        options.message_thread_id = Self::message_thread_id_from_input(&input)?;
 
         let map_external = |err: TelegramError| err.to_fcp_error();
 
@@ -1752,26 +1805,30 @@ fn update_to_event(
     connector_id: &ConnectorId,
     instance_id: &InstanceId,
 ) -> Option<EventEnvelope> {
-    let (topic, payload, thread_info) = match &update.kind {
+    let (topic, payload, thread_info, resource_uris) = match &update.kind {
         UpdateKind::Message(msg) => (
             "telegram.message.new",
             message_to_json(msg),
             message_thread_info(msg),
+            message_resource_uris(msg),
         ),
         UpdateKind::EditedMessage(msg) => (
             "telegram.message.edited",
             message_to_json(msg),
             message_thread_info(msg),
+            message_resource_uris(msg),
         ),
         UpdateKind::ChannelPost(msg) => (
             "telegram.channel_post.new",
             message_to_json(msg),
             message_thread_info(msg),
+            message_resource_uris(msg),
         ),
         UpdateKind::EditedChannelPost(msg) => (
             "telegram.channel_post.edited",
             message_to_json(msg),
             message_thread_info(msg),
+            message_resource_uris(msg),
         ),
         UpdateKind::CallbackQuery(cb) => (
             "telegram.callback_query",
@@ -1781,7 +1838,8 @@ fn update_to_event(
                 "data": cb.data,
                 "chat_instance": cb.chat_instance
             }),
-            None,
+            cb.message.as_ref().and_then(message_thread_info),
+            callback_resource_uris(cb),
         ),
         UpdateKind::Unknown => return None,
     };
@@ -1809,7 +1867,7 @@ fn update_to_event(
         principal,
         payload,
         correlation_id: None,
-        resource_uris: vec![],
+        resource_uris,
         thread_info,
     };
 
@@ -1822,6 +1880,28 @@ fn message_thread_info(msg: &Message) -> Option<ThreadInfo> {
     msg.message_thread_id.map(|thread_id| {
         ThreadInfo::from_telegram_message_thread(thread_id, msg.chat.id.to_string())
     })
+}
+
+fn message_resource_uris(msg: &Message) -> Vec<String> {
+    let chat_id = msg.chat.id.to_string();
+    let mut resource_uris = Vec::new();
+    if let Some(thread_id) = msg.message_thread_id.filter(|thread_id| *thread_id >= 0) {
+        resource_uris.push(format!("telegram:chat:{chat_id}:topic:{thread_id}"));
+    }
+    resource_uris.push(format!("telegram:chat:{chat_id}"));
+    if let Some(from) = &msg.from {
+        resource_uris.push(format!("telegram:user:{}", from.id));
+    }
+    resource_uris
+}
+
+fn callback_resource_uris(callback: &CallbackQuery) -> Vec<String> {
+    let mut resource_uris = callback
+        .message
+        .as_ref()
+        .map_or_else(Vec::new, message_resource_uris);
+    resource_uris.push(format!("telegram:user:{}", callback.from.id));
+    resource_uris
 }
 
 /// Convert a Message to JSON.
@@ -2073,6 +2153,7 @@ mod tests {
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
         op: &str,
+        instance_id: &InstanceId,
     ) -> fcp_core::CapabilityToken {
         let cap = match op {
             "telegram.send_message" | "telegram.send_media" | "telegram.answer_callback_query" => {
@@ -2093,6 +2174,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[op])
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
@@ -2189,7 +2271,7 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, cap);
+        let capability = generate_valid_token(&signing_key, cap, &connector.base.instance_id);
         (connector, capability, mock_server)
     }
 
@@ -2209,9 +2291,7 @@ mod tests {
             validate_bot_token_syntax(&format!("{}:{}", oversized_bot_id, TEST_BOT_PARTS.concat()))
                 .is_err()
         );
-        assert!(
-            validate_bot_token_syntax(&format!("{}:{}", TEST_BOT_ID, oversized_suffix)).is_err()
-        );
+        assert!(validate_bot_token_syntax(&format!("{TEST_BOT_ID}:{oversized_suffix}")).is_err());
     }
 
     #[fcp_async_core::runtime::test]
@@ -2737,6 +2817,144 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_update_to_event_sets_topic_resource_uris_for_private_dm_topics() {
+        let update = Update {
+            update_id: 53,
+            kind: UpdateKind::Message(Message {
+                message_id: 8,
+                from: Some(User {
+                    id: 208214988,
+                    is_bot: false,
+                    first_name: "Topic".into(),
+                    last_name: None,
+                    username: Some("topic_user".into()),
+                    language_code: None,
+                }),
+                chat: Chat {
+                    id: 208214988,
+                    chat_type: "private".into(),
+                    title: None,
+                    username: Some("topic_user".into()),
+                    first_name: Some("Topic".into()),
+                    last_name: None,
+                },
+                date: 1_700_000_000,
+                text: Some("topic message".into()),
+                caption: None,
+                photo: None,
+                document: None,
+                audio: None,
+                video: None,
+                voice: None,
+                reply_to_message: None,
+                message_thread_id: Some(17_585),
+            }),
+        };
+
+        let event = update_to_event(
+            &update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+        )
+        .expect("event");
+
+        assert_eq!(
+            event.data.resource_uris,
+            vec![
+                "telegram:chat:208214988:topic:17585",
+                "telegram:chat:208214988",
+                "telegram:user:208214988",
+            ]
+        );
+        assert_eq!(
+            event.data.thread_info,
+            Some(ThreadInfo::from_telegram_message_thread(
+                17_585,
+                "208214988"
+            ))
+        );
+    }
+
+    #[test]
+    fn test_update_to_event_keeps_root_dm_chat_scoped_without_topic_resource() {
+        let update = Update {
+            update_id: 54,
+            kind: UpdateKind::Message(Message {
+                message_id: 9,
+                from: Some(User {
+                    id: 208214988,
+                    is_bot: false,
+                    first_name: "Root".into(),
+                    last_name: None,
+                    username: Some("root_user".into()),
+                    language_code: None,
+                }),
+                chat: Chat {
+                    id: 208214988,
+                    chat_type: "private".into(),
+                    title: None,
+                    username: Some("root_user".into()),
+                    first_name: Some("Root".into()),
+                    last_name: None,
+                },
+                date: 1_700_000_000,
+                text: Some("root message".into()),
+                caption: None,
+                photo: None,
+                document: None,
+                audio: None,
+                video: None,
+                voice: None,
+                reply_to_message: None,
+                message_thread_id: None,
+            }),
+        };
+
+        let event = update_to_event(
+            &update,
+            &ConnectorId::from_static("fcp.telegram"),
+            &InstanceId::new(),
+        )
+        .expect("event");
+
+        assert_eq!(
+            event.data.resource_uris,
+            vec!["telegram:chat:208214988", "telegram:user:208214988"]
+        );
+        assert!(event.data.thread_info.is_none());
+    }
+
+    #[test]
+    fn test_resource_uris_for_input_prefers_topic_before_chat() {
+        let input = json!({
+            "chat_id": 208214988,
+            "message_thread_id": 17585,
+            "text": "topic reply"
+        });
+
+        assert_eq!(
+            TelegramConnector::resource_uris_for_input(&input).expect("resource uris"),
+            vec![
+                "telegram:chat:208214988:topic:17585",
+                "telegram:chat:208214988",
+            ]
+        );
+    }
+
+    #[test]
+    fn test_message_thread_id_from_input_rejects_negative_topic_ids() {
+        let input = json!({
+            "chat_id": 208214988,
+            "message_thread_id": -1,
+            "text": "bad topic"
+        });
+
+        let err = TelegramConnector::message_thread_id_from_input(&input)
+            .expect_err("negative thread id should be rejected");
+        assert!(matches!(err, FcpError::InvalidRequest { code: 1003, .. }));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_polling_emits_event_envelope_from_get_updates() {
         let mock_server = MockServer::start().await;
@@ -3102,6 +3320,46 @@ mod tests {
             response.get("message_id").and_then(|v| v.as_i64()),
             Some(55)
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_send_message_invocation_passes_message_thread_id() {
+        let (connector, token, server) = setup_connector_with_token("telegram.send_message").await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": "208214988",
+                "text": "topic reply",
+                "message_thread_id": 17585
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 56,
+                    "chat": { "id": 208214988, "type": "private", "first_name": "Topic" },
+                    "date": 1234567890,
+                    "text": "topic reply"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let result = connector
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": {
+                    "chat_id": "208214988",
+                    "text": "topic reply",
+                    "message_thread_id": 17585
+                },
+                "capability_token": token
+            }))
+            .await
+            .expect("send_message invoke should succeed");
+
+        assert_eq!(result.get("message_id").and_then(|v| v.as_i64()), Some(56));
     }
 
     #[fcp_async_core::runtime::test]

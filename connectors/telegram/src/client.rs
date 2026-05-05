@@ -332,6 +332,7 @@ impl TelegramClient {
             caption: options.caption,
             parse_mode: options.parse_mode,
             reply_to_message_id: options.reply_to_message_id,
+            message_thread_id: options.message_thread_id,
         };
         self.request("POST", "sendPhoto", Some(&request), None)
             .await
@@ -352,6 +353,7 @@ impl TelegramClient {
             caption: options.caption,
             parse_mode: options.parse_mode,
             reply_to_message_id: options.reply_to_message_id,
+            message_thread_id: options.message_thread_id,
         };
         self.request("POST", "sendDocument", Some(&request), None)
             .await
@@ -372,6 +374,7 @@ impl TelegramClient {
             caption: options.caption,
             parse_mode: options.parse_mode,
             reply_to_message_id: options.reply_to_message_id,
+            message_thread_id: options.message_thread_id,
         };
         self.request("POST", "sendAudio", Some(&request), None)
             .await
@@ -392,6 +395,7 @@ impl TelegramClient {
             caption: options.caption,
             parse_mode: options.parse_mode,
             reply_to_message_id: options.reply_to_message_id,
+            message_thread_id: options.message_thread_id,
         };
         self.request("POST", "sendVideo", Some(&request), None)
             .await
@@ -412,6 +416,7 @@ impl TelegramClient {
             caption: options.caption,
             parse_mode: options.parse_mode,
             reply_to_message_id: options.reply_to_message_id,
+            message_thread_id: options.message_thread_id,
         };
         self.request("POST", "sendVoice", Some(&request), None)
             .await
@@ -1053,6 +1058,12 @@ mod tests {
 
         Mock::given(method("POST"))
             .and(path("/bottest_token_12345/sendPhoto"))
+            .and(body_json(serde_json::json!({
+                "chat_id": "123456",
+                "photo": "AgACAgIAAxk",
+                "caption": "Test photo",
+                "message_thread_id": 42
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "result": {
@@ -1077,6 +1088,7 @@ mod tests {
 
         let options = SendMediaOptions {
             caption: Some("Test photo".into()),
+            message_thread_id: Some(42),
             ..Default::default()
         };
         let message = client
@@ -1616,6 +1628,7 @@ mod tests {
         assert!(opts.caption.is_none());
         assert!(opts.parse_mode.is_none());
         assert!(opts.reply_to_message_id.is_none());
+        assert!(opts.message_thread_id.is_none());
     }
 
     // ─── TelegramError is_retryable additional tests ─────────────────
@@ -1668,6 +1681,7 @@ mod tests {
             caption: Some("Test caption".into()),
             parse_mode: Some("HTML".into()),
             reply_to_message_id: Some(7),
+            message_thread_id: Some(42),
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chat_id"], "123");
@@ -1675,6 +1689,7 @@ mod tests {
         assert_eq!(json["caption"], "Test caption");
         assert_eq!(json["parse_mode"], "HTML");
         assert_eq!(json["reply_to_message_id"], 7);
+        assert_eq!(json["message_thread_id"], 42);
     }
 
     #[test]
@@ -1686,6 +1701,7 @@ mod tests {
             caption: None,
             parse_mode: None,
             reply_to_message_id: None,
+            message_thread_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["chat_id"], "456");
@@ -1693,6 +1709,7 @@ mod tests {
         assert!(json.get("caption").is_none());
         assert!(json.get("parse_mode").is_none());
         assert!(json.get("reply_to_message_id").is_none());
+        assert!(json.get("message_thread_id").is_none());
     }
 
     #[test]
@@ -1704,6 +1721,7 @@ mod tests {
             caption: Some("Watch this".into()),
             parse_mode: None,
             reply_to_message_id: None,
+            message_thread_id: None,
         };
         let json = serde_json::to_value(&req).unwrap();
         assert_eq!(json["video"], "CQACAgIAAxk");
@@ -1750,12 +1768,14 @@ mod tests {
             caption: Some("test caption".into()),
             parse_mode: Some("HTML".into()),
             reply_to_message_id: Some(42),
+            message_thread_id: Some(77),
         };
         let cloned = original.clone();
         drop(original);
         assert_eq!(cloned.caption.as_deref(), Some("test caption"));
         assert_eq!(cloned.parse_mode.as_deref(), Some("HTML"));
         assert_eq!(cloned.reply_to_message_id, Some(42));
+        assert_eq!(cloned.message_thread_id, Some(77));
     }
 
     #[test]
@@ -1781,6 +1801,7 @@ mod tests {
             caption: Some("debug test".into()),
             parse_mode: None,
             reply_to_message_id: None,
+            message_thread_id: None,
         };
         let dbg = format!("{opts:?}");
         assert!(dbg.contains("SendMediaOptions"));

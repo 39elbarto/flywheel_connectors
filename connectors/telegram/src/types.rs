@@ -600,6 +600,7 @@ pub struct SendMediaOptions {
     pub caption: Option<String>,
     pub parse_mode: Option<String>,
     pub reply_to_message_id: Option<i64>,
+    pub message_thread_id: Option<i64>,
 }
 
 /// Request body for send media methods.
@@ -614,6 +615,7 @@ pub struct SendMediaRequest {
     pub caption: Option<String>,
     pub parse_mode: Option<String>,
     pub reply_to_message_id: Option<i64>,
+    pub message_thread_id: Option<i64>,
 }
 
 impl Serialize for SendMediaRequest {
@@ -633,6 +635,9 @@ impl Serialize for SendMediaRequest {
         if self.reply_to_message_id.is_some() {
             count += 1;
         }
+        if self.message_thread_id.is_some() {
+            count += 1;
+        }
 
         let mut map = serializer.serialize_map(Some(count))?;
         map.serialize_entry("chat_id", &self.chat_id)?;
@@ -645,6 +650,9 @@ impl Serialize for SendMediaRequest {
         }
         if let Some(reply_to_message_id) = self.reply_to_message_id {
             map.serialize_entry("reply_to_message_id", &reply_to_message_id)?;
+        }
+        if let Some(message_thread_id) = self.message_thread_id {
+            map.serialize_entry("message_thread_id", &message_thread_id)?;
         }
         map.end()
     }

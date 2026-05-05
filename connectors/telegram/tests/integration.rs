@@ -32,6 +32,7 @@ use fcp_telegram::{connector::TelegramConnector, limits as telegram_limits};
 
 const TEST_BOT_ID: &str = "123456";
 const TEST_BOT_SUFFIX: &str = "ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
+const TEST_INSTANCE_ID: &str = "inst_telegram_integration";
 
 fn test_bot_credential() -> String {
     format!("{TEST_BOT_ID}:{TEST_BOT_SUFFIX}")
@@ -86,6 +87,7 @@ fn generate_token_for_capability(
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[op])
+        .target_instance(TEST_INSTANCE_ID)
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -161,7 +163,8 @@ async fn setup_handshake(
             "zone_dir": zone_dir,
             "host_public_key": verifying_key.to_bytes(),
             "nonce": vec![0u8; 32],
-            "capabilities_requested": mapped
+            "capabilities_requested": mapped,
+            "requested_instance_id": TEST_INSTANCE_ID
         }))
         .await
         .expect("handshake should succeed");

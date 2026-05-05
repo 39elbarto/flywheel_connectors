@@ -26,9 +26,9 @@ use tracing::{info, instrument};
 use crate::client::{
     DEFAULT_BASE_URL, DEFAULT_DRIVE_EXPORT_BASE_URL, GoogleMeetAttendanceRow, GoogleMeetClient,
     GoogleMeetConferenceRecord, GoogleMeetDocsDestination, GoogleMeetParticipant,
-    GoogleMeetParticipantSession, GoogleMeetRecording, GoogleMeetSmartNote, GoogleMeetSpaceConfig,
-    GoogleMeetTranscript, extract_docs_destination_document_id, google_auth_is_secretless,
-    google_auth_redacted_label, validate_drive_document_id,
+    GoogleMeetParticipantSession, GoogleMeetSmartNote, GoogleMeetSpaceConfig, GoogleMeetTranscript,
+    extract_docs_destination_document_id, google_auth_is_secretless, google_auth_redacted_label,
+    validate_drive_document_id,
 };
 use crate::error::{GoogleMeetError, GoogleMeetResult};
 

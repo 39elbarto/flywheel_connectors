@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:5ab89ccd852176277eb5686e06d05c9fdcfb0db78ea641190b7ff950cf92d2fc"
+interface_hash = "blake3-256:fcp.interface.v2:3353b18caf2bae4bc94447813600590594f30a0ce047bef97f06942cef9d421c"
 
 [connector]
 id = "fcp.google-meet"

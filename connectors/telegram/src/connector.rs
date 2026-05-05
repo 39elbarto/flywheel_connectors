@@ -2,6 +2,7 @@
 //!
 //! Implements the FcpConnector trait with Telegram-specific operations.
 
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -34,6 +35,7 @@ const TELEGRAM_POLL_LEASE_FILE: &str = "telegram_poll_lease.json";
 const TELEGRAM_BOT_ID_MAX_DIGITS: usize = 20;
 const TELEGRAM_BOT_SECRET_MAX_CHARS: usize = 128;
 const MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
+const TELEGRAM_WEBHOOK_REPLAY_CACHE_ENTRIES: usize = 2048;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 fn current_unix_timestamp_secs() -> u64 {
@@ -297,6 +299,40 @@ impl TelegramPollLease {
     }
 }
 
+#[derive(Debug, Default)]
+struct TelegramWebhookReplayCache {
+    seen_update_ids: HashSet<i64>,
+    update_order: VecDeque<i64>,
+}
+
+impl TelegramWebhookReplayCache {
+    fn remember_if_fresh(&mut self, update_id: i64) -> bool {
+        if !self.seen_update_ids.insert(update_id) {
+            return false;
+        }
+
+        self.update_order.push_back(update_id);
+        while self.update_order.len() > TELEGRAM_WEBHOOK_REPLAY_CACHE_ENTRIES {
+            if let Some(evicted) = self.update_order.pop_front() {
+                self.seen_update_ids.remove(&evicted);
+            }
+        }
+
+        true
+    }
+
+    fn forget(&mut self, update_id: i64) {
+        if self.seen_update_ids.remove(&update_id) {
+            self.update_order.retain(|seen| *seen != update_id);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.seen_update_ids.clear();
+        self.update_order.clear();
+    }
+}
+
 /// Telegram FCP connector.
 pub struct TelegramConnector {
     base: Arc<BaseConnector>,
@@ -314,6 +350,7 @@ pub struct TelegramConnector {
 
     // Event broadcast
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    webhook_replay_cache: Arc<RwLock<TelegramWebhookReplayCache>>,
 
     // Metrics
     start_time: Instant,
@@ -409,6 +446,7 @@ impl TelegramConnector {
             poll_task: None,
             poll_shutdown_tx: None,
             event_tx,
+            webhook_replay_cache: Arc::new(RwLock::new(TelegramWebhookReplayCache::default())),
             start_time: Instant::now(),
         }
     }
@@ -496,6 +534,7 @@ impl TelegramConnector {
         }
 
         self.config = Some(config);
+        self.webhook_replay_cache.write().await.clear();
         self.base.set_configured(true);
 
         info!(auth_mode = ?auth_mode, "Telegram connector configured");
@@ -1761,11 +1800,36 @@ impl TelegramConnector {
             return Ok(response);
         };
 
+        if !self
+            .webhook_replay_cache
+            .write()
+            .await
+            .remember_if_fresh(update.update_id)
+        {
+            let response = json!({
+                "accepted": true,
+                "event_emitted": false,
+                "update_id": update.update_id,
+                "delivery_id": delivery_id,
+                "received_at": received_at,
+                "secret_verified": secret_verified,
+                "reason": "duplicate_update",
+            });
+            if let Some(schema) = Self::output_schema_for("telegram.ingest_webhook_update") {
+                validate_output_with_limits(&schema, &response, &Limits::default())?;
+            }
+            return Ok(response);
+        }
+
         let topic = event.topic.clone();
         let resource_uris = event.data.resource_uris.clone();
         let trust = format!("{:?}", event.data.principal.trust);
 
         if self.event_tx.send(Ok(event)).is_err() {
+            self.webhook_replay_cache
+                .write()
+                .await
+                .forget(update.update_id);
             let response = json!({
                 "accepted": true,
                 "event_emitted": false,
@@ -1852,6 +1916,7 @@ impl TelegramConnector {
         self.verifier = None;
         self.session_id = None;
         self.zone_dir = None;
+        self.webhook_replay_cache.write().await.clear();
         self.base.set_handshaken(false);
         self.base.set_configured(false);
 
@@ -4042,6 +4107,108 @@ mod tests {
                 "telegram:chat:208214988",
                 "telegram:user:208214988",
             ]
+        );
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should stop polling");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_ingest_webhook_update_suppresses_duplicate_update_id() {
+        let (mut connector, token, _server) =
+            setup_connector_with_token("telegram.ingest_webhook_update").await;
+        connector
+            .config
+            .as_mut()
+            .expect("connector should be configured")
+            .inbound_policy = inbound_policy(json!({
+            "mode": "allowlist",
+            "allowed_user_ids": [208214988]
+        }));
+        let mut event_rx = connector.event_tx.subscribe();
+
+        let payload = json!({
+            "update_id": 2006,
+            "message": {
+                "message_id": 16,
+                "from": {
+                    "id": 208214988,
+                    "is_bot": false,
+                    "first_name": "Replay"
+                },
+                "chat": {
+                    "id": 208214988,
+                    "type": "private",
+                    "first_name": "Replay"
+                },
+                "date": 1700000014,
+                "text": "/new replay"
+            }
+        })
+        .to_string();
+
+        let first_response = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload.clone(),
+                    "delivery_id": "telegram-delivery-2006-a"
+                },
+                "capability_token": token.clone()
+            }))
+            .await
+            .expect("first webhook ingest should emit");
+
+        assert_eq!(
+            first_response.get("accepted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            first_response
+                .get("event_emitted")
+                .and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timed out waiting for first webhook event")
+            .expect("broadcast receive should succeed")
+            .expect("event payload should be ok");
+        assert_eq!(event.seq, 2006);
+
+        let duplicate_response = connector
+            .handle_invoke(json!({
+                "operation": "telegram.ingest_webhook_update",
+                "input": {
+                    "payload": payload,
+                    "delivery_id": "telegram-delivery-2006-b"
+                },
+                "capability_token": token
+            }))
+            .await
+            .expect("duplicate webhook ingest should be acknowledged");
+
+        assert_eq!(
+            duplicate_response.get("accepted").and_then(|v| v.as_bool()),
+            Some(true)
+        );
+        assert_eq!(
+            duplicate_response
+                .get("event_emitted")
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+        assert_eq!(
+            duplicate_response.get("reason").and_then(|v| v.as_str()),
+            Some("duplicate_update")
+        );
+        assert!(
+            fcp_async_core::time::timeout(StdDuration::from_millis(100), event_rx.recv())
+                .await
+                .is_err(),
+            "duplicate webhook update should not emit a second event"
         );
 
         connector

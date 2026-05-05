@@ -381,7 +381,7 @@ mod tests {
             signature_bytes[32..].iter_mut().zip(ED25519_GROUP_ORDER_LE)
         {
             let sum = u16::from(*scalar_byte) + u16::from(order_byte) + carry;
-            *scalar_byte = sum as u8;
+            *scalar_byte = sum.to_le_bytes()[0];
             carry = sum >> 8;
         }
 

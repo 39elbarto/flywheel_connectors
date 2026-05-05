@@ -1,6 +1,6 @@
 //! FIPS 204 ML-DSA-65 (Module-Lattice Digital Signature Algorithm) provider.
 //!
-//! Wraps the [`ml-dsa`] crate (RustCrypto, FIPS 204 final) behind an
+//! Wraps the [`ml-dsa`] crate (`RustCrypto`, FIPS 204 final) behind an
 //! FCP-shaped API and bridges it to the byte-envelope wrappers in
 //! [`crate::owner_key`] (`MlDsa65VerifyingKeyBytes`, `MlDsa65SignatureBytes`).
 //!
@@ -40,7 +40,7 @@ use crate::owner_key::{
 // `Verifier` traits in scope, which silently shadows the one ml-dsa expects.
 use ml_dsa::signature::{Keypair, Verifier};
 
-/// Length of the ML-DSA-65 KeyGen seed (FIPS 204 §3.7 ξ).
+/// Length of the ML-DSA-65 `KeyGen` seed (FIPS 204 §3.7 ξ).
 pub const ML_DSA_65_SEED_SIZE: usize = 32;
 
 /// Owner of an expanded ML-DSA-65 secret key.
@@ -59,7 +59,8 @@ impl core::fmt::Debug for MlDsa65SigningKey {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("MlDsa65SigningKey")
             .field("seed", &"[redacted; 32 bytes]")
-            .field("verifying_key_kid", &self.verifying_key.key_id())
+            .field("expanded", &"[redacted; expanded signing key]")
+            .field("verifying_key", &self.verifying_key.key_id())
             .finish()
     }
 }
@@ -121,7 +122,7 @@ impl MlDsa65SigningKey {
 
     /// Borrow the matching verifying key.
     #[must_use]
-    pub fn verifying_key(&self) -> &MlDsa65VerifyingKey {
+    pub const fn verifying_key(&self) -> &MlDsa65VerifyingKey {
         &self.verifying_key
     }
 
@@ -146,6 +147,10 @@ impl MlDsa65SigningKey {
     /// Closes the modes-of-reasoning audit gap that
     /// `MlDsa65VerifyingKeyBytes` + `MlDsa65SignatureBytes` had typed
     /// envelopes but the secret-key role did not.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the internal seed length invariant is broken.
     #[must_use]
     pub fn to_envelope(&self) -> crate::owner_key::MlDsa65SecretKeyBytes {
         crate::owner_key::MlDsa65SecretKeyBytes::try_from_bytes(self.seed.as_slice().to_vec())
@@ -294,7 +299,7 @@ impl MlDsa65VerifyingKey {
     /// Borrow the byte envelope used by serde structures in
     /// [`crate::owner_key`].
     #[must_use]
-    pub fn envelope(&self) -> &MlDsa65VerifyingKeyBytes {
+    pub const fn envelope(&self) -> &MlDsa65VerifyingKeyBytes {
         &self.bytes
     }
 
@@ -354,7 +359,7 @@ fn sig_to_bytes(sig: &MlDsaSignature<MlDsa65>) -> CryptoResult<MlDsa65SignatureB
 /// than pull a third generation of `rand` into the dependency graph, we
 /// implement just the surface ml-dsa needs against `getrandom` directly.
 ///
-/// **Not exposed publicly** — this is a private FFI shim between rand_core
+/// **Not exposed publicly** — this is a private FFI shim between `rand_core`
 /// generations.
 struct OsRngV10;
 

@@ -17,10 +17,18 @@
 
 use fcp_crypto::CryptoError;
 
+type CryptoErrorDisplayCase = (CryptoError, &'static str);
+
 /// Build one representative instance of every current `CryptoError`
 /// variant, paired with the canonical Display string the wire contract
 /// guarantees.
-fn variant_display_matrix() -> Vec<(CryptoError, &'static str)> {
+fn variant_display_matrix() -> Vec<CryptoErrorDisplayCase> {
+    let mut cases = core_crypto_error_display_matrix();
+    cases.extend(cose_crypto_error_display_matrix());
+    cases
+}
+
+fn core_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
     vec![
         (
             CryptoError::InvalidKeyLength {
@@ -95,6 +103,11 @@ fn variant_display_matrix() -> Vec<(CryptoError, &'static str)> {
             CryptoError::MissingField(String::from("issuer")),
             "missing required field: issuer",
         ),
+    ]
+}
+
+fn cose_crypto_error_display_matrix() -> Vec<CryptoErrorDisplayCase> {
+    vec![
         (
             CryptoError::AlgorithmMismatch {
                 expected: "EdDSA",

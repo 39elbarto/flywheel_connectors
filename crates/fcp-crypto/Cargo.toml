@@ -89,6 +89,11 @@ tracing-subscriber.workspace = true
 criterion.workspace = true
 # Self-audit metamorphic harness (6po63.1)
 semver.workspace = true
+# Integration tests compare FCP X-Wing bytes against the upstream component
+# algorithms directly.
+ml-kem = "0.3.0"
+sha3 = "0.11.0"
+x25519-dalek-v3 = { package = "x25519-dalek", version = "3.0.0-pre.6", features = ["static_secrets"] }
 
 [[bench]]
 name = "crypto_benchmarks"

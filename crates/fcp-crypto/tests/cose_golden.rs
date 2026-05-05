@@ -163,7 +163,7 @@ fn cose_sign1_empty_claims_golden() {
 }
 
 /// Case B: single-operation capability token — the common issuance
-/// shape. One capability_id, one zone_id, one operation. Seed 0x02
+/// shape. One `capability_id`, one `zone_id`, one operation. Seed 0x02
 /// gives a different KID than case A so the protected header range
 /// is forced to change across the golden suite.
 #[test]
@@ -291,9 +291,7 @@ fn cose_sign1_decode_truncated_errors() {
     // Drop the last byte — the innermost CBOR structure can no longer
     // reconstruct, the decoder MUST reject.
     let truncated = &bytes[..bytes.len() - 1];
-    let err = CoseToken::from_cbor(truncated)
-        .err()
-        .expect("truncated CBOR must not parse");
+    let err = CoseToken::from_cbor(truncated).expect_err("truncated CBOR must not parse");
     // Any error variant is acceptable here — what matters is "not Ok".
     let msg = format!("{err}");
     assert!(
@@ -322,8 +320,7 @@ fn cose_sign1_verify_wrong_key_errors() {
 
     let err = decoded
         .verify(&other.verifying_key())
-        .err()
-        .expect("verification with wrong key MUST fail");
+        .expect_err("verification with wrong key MUST fail");
     // Must be a key-mismatch or signature-verification error, not
     // Ok-with-wrong-claims. The exact variant is a secondary concern.
     let msg = format!("{err}");
@@ -344,7 +341,7 @@ fn cose_sign1_verify_wrong_key_errors() {
 /// beyond the Sign1 types above.
 ///
 /// This leaves a "tripwire" — a real test if someone adds
-/// `pub use cose::{CoseEncrypt, CoseMac}` to fcp_crypto/src/lib.rs
+/// `pub use cose::{CoseEncrypt, CoseMac}` to `fcp_crypto/src/lib.rs`
 /// without adding goldens here.
 #[test]
 fn cose_encrypt_and_cose_mac_are_unimplemented_marker() {
@@ -352,5 +349,5 @@ fn cose_encrypt_and_cose_mac_are_unimplemented_marker() {
     // replace this with real goldens mirroring the Sign1 pattern above.
     let sentinel = "fcp_crypto currently exposes only CoseToken (COSE_Sign1); \
                     encryption uses HpkeSealedBox, MACs use Blake3Mac";
-    assert!(!sentinel.is_empty());
+    assert!(sentinel.contains("CoseToken"));
 }

@@ -1,6 +1,6 @@
 //! X-Wing hybrid KEM (X25519 + ML-KEM-768) — V4 zone-key sealing primitive.
 //!
-//! Production implementation backed by the RustCrypto [`x-wing`] crate
+//! Production implementation backed by the `RustCrypto` [`x-wing`] crate
 //! (X-Wing draft-connolly-cfrg-xwing-kem **draft 06**, pure Rust, audited).
 //!
 //! The [`XWingKem`] trait surface remains the same shape that was designed
@@ -12,7 +12,7 @@
 //!
 //! See `docs/architecture/ADR-0001_xwing_kem_vendor.md` for the full
 //! decision record. Summary: we use `x-wing = 0.1.0-rc.0` from the
-//! RustCrypto KEMs workspace because (a) it is a pure-Rust hybrid that
+//! `RustCrypto` KEMs workspace because (a) it is a pure-Rust hybrid that
 //! composes ML-KEM-768 (`ml-kem` crate, FIPS 203) with `x25519-dalek`
 //! ECDH using the X-Wing draft-06 combiner verbatim, (b) it ships with
 //! an opt-in `zeroize` feature on both halves, and (c) it passes the
@@ -115,10 +115,11 @@ pub mod purpose {
     pub const SECRET_SHARE: &[u8] = b"FCP4-SECRET-SHARE";
 }
 
-/// Wire-format version tag carried inside [`Fcp4Aad`] so a V3 verifier
-/// that ever fed Fcp4Aad bytes through its decoder cannot accidentally
-/// authenticate it. Belt-and-suspenders defence on top of the
-/// `FCP4-`-prefixed [`purpose`] strings.
+/// Wire-format version tag carried inside [`Fcp4Aad`].
+///
+/// This prevents any V3 verifier that ever fed `Fcp4Aad` bytes through its
+/// decoder from authenticating them accidentally. Belt-and-suspenders defence
+/// on top of the `FCP4-`-prefixed [`purpose`] strings.
 pub const FCP4_AAD_VERSION: u8 = 4;
 
 /// X-Wing public key (opaque wire bytes).
@@ -227,7 +228,7 @@ impl XWingSecretKey {
 
     /// Borrow the raw bytes.
     #[must_use]
-    pub fn as_bytes(&self) -> &[u8] {
+    pub const fn as_bytes(&self) -> &[u8] {
         &self.0
     }
 }
@@ -237,11 +238,11 @@ impl XWingSecretKey {
 struct XWingSharedSecret([u8; XWING_SHARED_SECRET_SIZE]);
 
 impl XWingSharedSecret {
-    fn from_bytes(bytes: [u8; XWING_SHARED_SECRET_SIZE]) -> Self {
+    const fn from_bytes(bytes: [u8; XWING_SHARED_SECRET_SIZE]) -> Self {
         Self(bytes)
     }
 
-    fn as_bytes(&self) -> &[u8; XWING_SHARED_SECRET_SIZE] {
+    const fn as_bytes(&self) -> &[u8; XWING_SHARED_SECRET_SIZE] {
         &self.0
     }
 }
@@ -353,6 +354,8 @@ impl XWingSealedBox {
     /// - [`CryptoError::HpkeFailed`] if either field's length is out of
     ///   bounds.
     pub fn from_canonical_cbor(bytes: &[u8]) -> CryptoResult<Self> {
+        const AEAD_TAG: usize = 16;
+
         if bytes.len() > MAX_V4_PAYLOAD_BYTES {
             return Err(CryptoError::PayloadTooLarge {
                 observed: bytes.len(),
@@ -370,7 +373,6 @@ impl XWingSealedBox {
                 "xwing sealed box CBOR: trailing bytes after sealed box".to_owned(),
             ));
         }
-        const AEAD_TAG: usize = 16;
         if decoded.enc.len() != XWING_ENC_SIZE {
             return Err(CryptoError::HpkeFailed(format!(
                 "xwing sealed box `enc` field must be {} bytes, got {}",
@@ -478,7 +480,7 @@ impl Fcp4Aad {
 ///
 /// Implementations live behind this trait so the V4 wiring code can be
 /// written against [`XWingProvider`] today and swapped for a different
-/// vendor (e.g. PQClean bindings via FFI) without further call-site
+/// vendor (e.g. `PQClean` bindings via FFI) without further call-site
 /// changes.
 pub trait XWingKem {
     /// Generate a fresh X-Wing keypair.
@@ -543,7 +545,7 @@ pub struct XWingWireSize {
     pub max_ciphertext: usize,
 }
 
-/// Production [`XWingKem`] implementation backed by the RustCrypto
+/// Production [`XWingKem`] implementation backed by the `RustCrypto`
 /// [`x-wing`] crate (draft 06).
 #[derive(Clone, Copy, Debug, Default)]
 pub struct XWingProvider;
@@ -584,9 +586,9 @@ impl XWingKem for XWingProvider {
         let mut rng = OsRngV10;
         let (ct, ss) = pk.encapsulate_with_rng(&mut rng);
         let shared_secret = XWingSharedSecret::from_bytes(ss.into());
-        let aead = build_aead(&shared_secret, aad)?;
+        let aead_cipher = build_aead(&shared_secret, aad)?;
         let nonce = Nonce::from([0u8; 12]);
-        let ciphertext = aead
+        let ciphertext = aead_cipher
             .encrypt(
                 &nonce,
                 Payload {
@@ -620,16 +622,17 @@ impl XWingKem for XWingProvider {
         let ct = x_wing::Ciphertext::from(ct_arr);
         let ss = real_sk.decapsulate(&ct);
         let shared_secret = XWingSharedSecret::from_bytes(ss.into());
-        let aead = build_aead(&shared_secret, aad)?;
+        let aead_cipher = build_aead(&shared_secret, aad)?;
         let nonce = Nonce::from([0u8; 12]);
-        aead.decrypt(
-            &nonce,
-            Payload {
-                msg: &sealed.ciphertext,
-                aad,
-            },
-        )
-        .map_err(|_| CryptoError::AeadDecryptFailed)
+        aead_cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &sealed.ciphertext,
+                    aad,
+                },
+            )
+            .map_err(|_| CryptoError::AeadDecryptFailed)
     }
 }
 
@@ -745,7 +748,7 @@ mod tests {
     fn secret_key_rejects_wrong_length() {
         let too_short = vec![0u8; XWING_SECRET_KEY_SIZE - 1];
         assert!(XWingSecretKey::from_bytes(&too_short).is_err());
-        assert!(XWingSecretKey::from_bytes(&vec![0u8; XWING_SECRET_KEY_SIZE]).is_ok());
+        assert!(XWingSecretKey::from_bytes(&[0u8; XWING_SECRET_KEY_SIZE]).is_ok());
     }
 
     #[test]
@@ -900,7 +903,7 @@ mod tests {
     #[test]
     fn stub_open_returns_sentinel_error() {
         let stub = XWingStub::new();
-        let sk = XWingSecretKey::from_bytes(&vec![0u8; XWING_SECRET_KEY_SIZE]).unwrap();
+        let sk = XWingSecretKey::from_bytes(&[0u8; XWING_SECRET_KEY_SIZE]).unwrap();
         let sealed = XWingSealedBox {
             enc: vec![0u8; XWING_ENC_SIZE],
             ciphertext: vec![0u8; 32],

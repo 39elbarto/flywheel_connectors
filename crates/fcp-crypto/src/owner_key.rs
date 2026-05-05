@@ -14,17 +14,20 @@ use crate::kid::KeyId;
 /// ML-DSA-65 public key length in bytes (FIPS 204).
 pub const ML_DSA_65_PUBLIC_KEY_SIZE: usize = 1_952;
 
-/// ML-DSA-65 secret key length in bytes (FIPS 204) — the EXPANDED in-memory
-/// form. The on-the-wire / on-disk canonical form is the seed (see
-/// [`ML_DSA_65_SEED_BYTES`]); this constant is retained for documentation and
-/// for any caller that round-trips the expanded form.
+/// ML-DSA-65 secret key length in bytes (FIPS 204).
+///
+/// This is the EXPANDED in-memory form. The on-the-wire / on-disk canonical
+/// form is the seed (see [`ML_DSA_65_SEED_BYTES`]); this constant is retained
+/// for documentation and for any caller that round-trips the expanded form.
 pub const ML_DSA_65_SECRET_KEY_SIZE: usize = 4_032;
 
-/// ML-DSA-65 ξ-seed length in bytes (FIPS 204 §3.7) — the canonical wire form
-/// of an ML-DSA-65 secret key per [`MlDsa65SecretKeyBytes`] (br-6bz52). Same
-/// numeric value as [`crate::ml_dsa::ML_DSA_65_SEED_SIZE`]; mirrored here so
-/// the byte-envelope module is self-contained and the kfr9j length-invariant
-/// pattern stays inside `owner_key.rs` for all three ML-DSA roles.
+/// ML-DSA-65 ξ-seed length in bytes (FIPS 204 §3.7).
+///
+/// This is the canonical wire form of an ML-DSA-65 secret key per
+/// [`MlDsa65SecretKeyBytes`] (br-6bz52). Same numeric value as
+/// [`crate::ml_dsa::ML_DSA_65_SEED_SIZE`]; mirrored here so the byte-envelope
+/// module is self-contained and the kfr9j length-invariant pattern stays
+/// inside `owner_key.rs` for all three ML-DSA roles.
 pub const ML_DSA_65_SEED_BYTES: usize = 32;
 
 /// ML-DSA-65 signature length in bytes (FIPS 204).
@@ -149,7 +152,7 @@ impl std::fmt::Debug for MlDsa65VerifyingKeyBytes {
 ///   deserialisation** (br-kfr9j pattern). The custom [`Deserialize`]
 ///   below mirrors `try_from_bytes`'s length check, so an
 ///   attacker-supplied envelope with a mis-sized payload fails fast at
-///   decode time and cannot reach the FIPS 204 KeyGen_internal panic
+///   decode time and cannot reach the FIPS 204 `KeyGen_internal` panic
 ///   surface.
 /// - **`PartialEq` is constant-time** (br-1zlht pattern) via
 ///   [`subtle::ConstantTimeEq`] — the seed is the load-bearing
@@ -429,7 +432,7 @@ pub struct OwnerKeyMigrationAttestation {
 impl OwnerKeyMigrationAttestation {
     /// Construct a cross-signed migration attestation envelope.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         transcript: OwnerKeyMigrationTranscript,
         signed_with_v3: Ed25519Signature,
         signed_with_v4: MlDsa65SignatureBytes,

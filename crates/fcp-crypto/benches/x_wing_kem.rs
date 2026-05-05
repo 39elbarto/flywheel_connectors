@@ -48,87 +48,94 @@ fn real_x_wing_keys(
     XWingDecapsulationKey,
 ) {
     let (pk, sk) = provider.generate().expect("X-Wing keygen must succeed");
-    let real_pk = XWingEncapsulationKey::try_from(pk.as_bytes())
+    let upstream_encapsulation_key = XWingEncapsulationKey::try_from(pk.as_bytes())
         .expect("FCP X-Wing public key must parse as upstream key");
     let sk_seed: [u8; XWING_SECRET_KEY_SIZE] = sk
         .as_bytes()
         .try_into()
         .expect("FCP X-Wing secret key is a 32-byte seed");
-    let real_sk = XWingDecapsulationKey::from(sk_seed);
-    (pk, sk, real_pk, real_sk)
+    let upstream_decapsulation_key = XWingDecapsulationKey::from(sk_seed);
+    (
+        pk,
+        sk,
+        upstream_encapsulation_key,
+        upstream_decapsulation_key,
+    )
 }
 
 fn x_wing_kem_benchmarks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("x_wing_kem");
-    group.sample_size(20);
-    group.warm_up_time(Duration::from_secs(1));
-    group.measurement_time(Duration::from_secs(3));
-
     let provider = XWingProvider::new();
-    let (pk, sk, real_pk, real_sk) = real_x_wing_keys(provider);
+    let (pk, sk, upstream_encapsulation_key, upstream_decapsulation_key) =
+        real_x_wing_keys(provider);
     let mut rng = BenchRng;
-    let (ct, _ss) = real_pk.encapsulate_with_rng(&mut rng);
-
-    group.bench_function("keygen", |b| {
-        b.iter(|| {
-            let _ = black_box(provider.generate().expect("X-Wing keygen must succeed"));
-        });
-    });
-
-    group.bench_function("encap", |b| {
-        b.iter(|| {
-            let mut rng = BenchRng;
-            let _ = black_box(real_pk.encapsulate_with_rng(&mut rng));
-        });
-    });
-
-    group.bench_function("decap", |b| {
-        b.iter(|| {
-            let _ = black_box(real_sk.decapsulate(black_box(&ct)));
-        });
-    });
-
+    let (ct, _ss) = upstream_encapsulation_key.encapsulate_with_rng(&mut rng);
     let aad = Fcp4Aad::for_zone_key(b"z:work", b"node-7", 1_700_000_000)
         .encode()
         .expect("FCP4 AAD must encode");
-    let payload_32b = [0xA5u8; 32];
-    let sealed_32b = provider
-        .seal(&pk, &payload_32b, &aad)
+    let small_payload = [0xA5u8; 32];
+    let small_sealed = provider
+        .seal(&pk, &small_payload, &aad)
         .expect("X-Wing seal must succeed");
 
-    group.bench_function("seal_32b", |b| {
-        b.iter(|| {
-            let _ = black_box(
-                provider
-                    .seal(black_box(&pk), black_box(&payload_32b), black_box(&aad))
-                    .expect("X-Wing seal must succeed"),
-            );
-        });
-    });
+    {
+        let mut group = c.benchmark_group("x_wing_kem");
+        group.sample_size(20);
+        group.warm_up_time(Duration::from_secs(1));
+        group.measurement_time(Duration::from_secs(3));
 
-    group.bench_function("open_32b", |b| {
-        b.iter(|| {
-            let _ = black_box(
-                provider
-                    .open(black_box(&sk), black_box(&sealed_32b), black_box(&aad))
-                    .expect("X-Wing open must succeed"),
-            );
+        group.bench_function("keygen", |b| {
+            b.iter(|| {
+                let _ = black_box(provider.generate().expect("X-Wing keygen must succeed"));
+            });
         });
-    });
 
-    group.bench_function("round_trip_32b", |b| {
-        b.iter(|| {
-            let sealed = provider
-                .seal(black_box(&pk), black_box(&payload_32b), black_box(&aad))
-                .expect("X-Wing seal must succeed");
-            let opened = provider
-                .open(black_box(&sk), black_box(&sealed), black_box(&aad))
-                .expect("X-Wing open must succeed");
-            black_box(opened);
+        group.bench_function("encap", |b| {
+            b.iter(|| {
+                let mut rng = BenchRng;
+                let _ = black_box(upstream_encapsulation_key.encapsulate_with_rng(&mut rng));
+            });
         });
-    });
 
-    group.finish();
+        group.bench_function("decap", |b| {
+            b.iter(|| {
+                let _ = black_box(upstream_decapsulation_key.decapsulate(black_box(&ct)));
+            });
+        });
+
+        group.bench_function("seal_32b", |b| {
+            b.iter(|| {
+                let _ = black_box(
+                    provider
+                        .seal(black_box(&pk), black_box(&small_payload), black_box(&aad))
+                        .expect("X-Wing seal must succeed"),
+                );
+            });
+        });
+
+        group.bench_function("open_32b", |b| {
+            b.iter(|| {
+                let _ = black_box(
+                    provider
+                        .open(black_box(&sk), black_box(&small_sealed), black_box(&aad))
+                        .expect("X-Wing open must succeed"),
+                );
+            });
+        });
+
+        group.bench_function("round_trip_32b", |b| {
+            b.iter(|| {
+                let sealed = provider
+                    .seal(black_box(&pk), black_box(&small_payload), black_box(&aad))
+                    .expect("X-Wing seal must succeed");
+                let opened = provider
+                    .open(black_box(&sk), black_box(&sealed), black_box(&aad))
+                    .expect("X-Wing open must succeed");
+                black_box(opened);
+            });
+        });
+
+        group.finish();
+    }
 
     let mut payload_group = c.benchmark_group("x_wing_kem_payload");
     payload_group.sample_size(20);
@@ -136,16 +143,16 @@ fn x_wing_kem_benchmarks(c: &mut Criterion) {
     payload_group.measurement_time(Duration::from_secs(3));
     payload_group.throughput(Throughput::Bytes(1024));
 
-    let payload_1kb = vec![0x5Au8; 1024];
-    let sealed_1kb = provider
-        .seal(&pk, &payload_1kb, &aad)
+    let large_payload = vec![0x5Au8; 1024];
+    let large_sealed = provider
+        .seal(&pk, &large_payload, &aad)
         .expect("X-Wing seal must succeed");
 
     payload_group.bench_function("seal_1kb", |b| {
         b.iter(|| {
             let _ = black_box(
                 provider
-                    .seal(black_box(&pk), black_box(&payload_1kb), black_box(&aad))
+                    .seal(black_box(&pk), black_box(&large_payload), black_box(&aad))
                     .expect("X-Wing seal must succeed"),
             );
         });
@@ -155,7 +162,7 @@ fn x_wing_kem_benchmarks(c: &mut Criterion) {
         b.iter(|| {
             let _ = black_box(
                 provider
-                    .open(black_box(&sk), black_box(&sealed_1kb), black_box(&aad))
+                    .open(black_box(&sk), black_box(&large_sealed), black_box(&aad))
                     .expect("X-Wing open must succeed"),
             );
         });

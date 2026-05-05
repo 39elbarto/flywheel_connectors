@@ -269,7 +269,7 @@ fn x_wing_wire_aad_field_flip_breaks_open() {
     changed_purpose.purpose = v4_purpose::OBJECTID_KEY.to_vec();
     let mut changed_time = base.clone();
     changed_time.issued_at = base.issued_at + 1;
-    let mut changed_version = base.clone();
+    let mut changed_version = base;
     changed_version.version = 99;
 
     for variant in [

@@ -377,13 +377,21 @@ mod tests {
         // Swap ciphertexts while keeping the `enc` header consistent with
         // the original AAD — models an attacker that captures both sealed
         // boxes and tries to substitute ciphertext.
+        let HpkeSealedBox {
+            enc: enc_a,
+            ciphertext: ciphertext_a,
+        } = sealed_a;
+        let HpkeSealedBox {
+            enc: enc_b,
+            ciphertext: ciphertext_b,
+        } = sealed_b;
         let swapped_a = HpkeSealedBox {
-            enc: sealed_a.enc.clone(),
-            ciphertext: sealed_b.ciphertext.clone(),
+            enc: enc_a,
+            ciphertext: ciphertext_b,
         };
         let swapped_b = HpkeSealedBox {
-            enc: sealed_b.enc.clone(),
-            ciphertext: sealed_a.ciphertext.clone(),
+            enc: enc_b,
+            ciphertext: ciphertext_a,
         };
 
         assert!(
@@ -782,7 +790,7 @@ mod tests {
             )
             .expect("transformed open should succeed");
 
-            let mut expected_transformed = opened.clone();
+            let mut expected_transformed = opened;
             expected_transformed.extend_from_slice(&suffix);
 
             // Holding the RNG seed constant keeps the encapsulated key stable,

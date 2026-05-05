@@ -949,7 +949,10 @@ mod tests {
         // either malicious or broken; reject immediately rather than
         // iterating the full slice to discover the duplicate.
         let shares: Vec<ShamirShare> = (0..256)
-            .map(|i| ShamirShare::new(((i % 255) + 1) as u8, vec![0u8; 4]))
+            .map(|i| {
+                let index = u8::try_from((i % 255) + 1).expect("share index is in 1..=255");
+                ShamirShare::new(index, vec![0u8; 4])
+            })
             .collect();
         let result = reconstruct_secret(&shares);
         assert!(matches!(result, Err(ShamirError::TooManyShares)));

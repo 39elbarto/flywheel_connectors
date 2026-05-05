@@ -1,10 +1,10 @@
 //! Golden-vector regression for br-m7aoz: the arena-based
-//! canonicalize_map MUST produce byte-identical canonical CBOR
+//! `canonicalize_map` MUST produce byte-identical canonical CBOR
 //! output to the pre-refactor (per-entry-clone) implementation.
 //!
 //! These vectors are the FIPS-204 / RFC 8949 §4.2.1 outputs for
 //! representative map shapes in FCP signed objects. If a future
-//! change to canonicalize_map (or to ciborium's encoder) drifts the
+//! change to `canonicalize_map` (or to ciborium's encoder) drifts the
 //! output, this test fails — protecting every signed-object
 //! transcript in the workspace from a silent canonical-form change.
 
@@ -22,6 +22,32 @@ struct FcpAadShape<'a> {
     issued_at: u64,
     #[serde(with = "serde_bytes")]
     zone_id: &'a [u8],
+}
+
+fn assert_nested_map_keys_sorted(v: &Value) {
+    match v {
+        Value::Map(entries) => {
+            let mut prev: Option<Vec<u8>> = None;
+            for (k, v_inner) in entries {
+                let mut k_bytes = Vec::new();
+                ciborium::ser::into_writer(k, &mut k_bytes).unwrap();
+                if let Some(p) = prev {
+                    assert!(
+                        p.as_slice() < k_bytes.as_slice(),
+                        "map keys must be sorted at every nesting level"
+                    );
+                }
+                prev = Some(k_bytes);
+                assert_nested_map_keys_sorted(v_inner);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                assert_nested_map_keys_sorted(item);
+            }
+        }
+        _ => {}
+    }
 }
 
 #[test]
@@ -200,7 +226,7 @@ fn canonicalize_arena_nested_map_recursion() {
         ),
     ]);
     let middle = Value::Map(vec![
-        (Value::Text("y".to_string()), inner.clone()),
+        (Value::Text("y".to_string()), inner),
         (
             Value::Text("b".to_string()),
             Value::Integer(Integer::from(3)),
@@ -215,33 +241,7 @@ fn canonicalize_arena_nested_map_recursion() {
     ]);
     let bytes = to_deterministic_cbor(&outer).unwrap();
     let recovered: Value = ciborium::from_reader(bytes.as_slice()).unwrap();
-    // Walk the tree and verify every Map level is sorted.
-    fn walk(v: &Value) {
-        match v {
-            Value::Map(entries) => {
-                let mut prev: Option<Vec<u8>> = None;
-                for (k, v_inner) in entries {
-                    let mut k_bytes = Vec::new();
-                    ciborium::ser::into_writer(k, &mut k_bytes).unwrap();
-                    if let Some(p) = prev {
-                        assert!(
-                            p.as_slice() < k_bytes.as_slice(),
-                            "map keys must be sorted at every nesting level"
-                        );
-                    }
-                    prev = Some(k_bytes);
-                    walk(v_inner);
-                }
-            }
-            Value::Array(items) => {
-                for item in items {
-                    walk(item);
-                }
-            }
-            _ => {}
-        }
-    }
-    walk(&recovered);
+    assert_nested_map_keys_sorted(&recovered);
 }
 
 #[test]

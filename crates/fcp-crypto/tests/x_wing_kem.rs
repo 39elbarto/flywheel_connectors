@@ -63,20 +63,20 @@ fn components_from_vector(v: &TestVector) -> Components {
     let mut expanded = shaker.finalize_xof();
 
     let mlkem_seed: Array<u8, U64> = read_xof::<64>(&mut expanded).into();
-    let (sk_mlkem, _pk_mlkem) = MlKem768::from_seed(&mlkem_seed);
-    let sk_x25519 = StaticSecret::from(read_xof::<32>(&mut expanded));
+    let (mlkem_secret_key, _mlkem_public_key) = MlKem768::from_seed(&mlkem_seed);
+    let x25519_secret_key = StaticSecret::from(read_xof::<32>(&mut expanded));
 
     let ct_mlkem: ml_kem::ml_kem_768::Ciphertext =
         <[u8; 1088]>::try_from(&v.ct[..1088]).unwrap().into();
-    let ss_mlkem = sk_mlkem.decapsulate(&ct_mlkem);
+    let mlkem_shared_secret = mlkem_secret_key.decapsulate(&ct_mlkem);
 
     let ct_x25519 = <[u8; 32]>::try_from(&v.ct[1088..]).unwrap();
     let pk_x25519 = <[u8; 32]>::try_from(&v.pk[1184..]).unwrap();
-    let ss_x25519 = sk_x25519.diffie_hellman(&PublicKey::from(ct_x25519));
+    let x25519_shared_secret = x25519_secret_key.diffie_hellman(&PublicKey::from(ct_x25519));
 
     Components {
-        ss_mlkem: array32(ss_mlkem.as_slice()),
-        ss_x25519: *ss_x25519.as_bytes(),
+        ss_mlkem: array32(mlkem_shared_secret.as_slice()),
+        ss_x25519: *x25519_shared_secret.as_bytes(),
         ct_x25519,
         pk_x25519,
     }

@@ -186,9 +186,10 @@ fn x_wing_kat_fcp_provider_round_trips() {
             .expect("vector sk is exactly XWING_SECRET_KEY_SIZE");
         let real_sk: DecapsulationKey = sk_arr.into();
         let pk_bytes = real_sk.encapsulation_key().to_bytes();
-        let fcp_pk = XWingPublicKey::from_bytes(&pk_bytes).expect("upstream pk has correct size");
+        let wrapped_public_key =
+            XWingPublicKey::from_bytes(&pk_bytes).expect("upstream pk has correct size");
         assert_eq!(
-            fcp_pk.as_bytes(),
+            wrapped_public_key.as_bytes(),
             v.pk.as_slice(),
             "vector #{i}: FCP-wrapped pk diverges from spec"
         );
@@ -196,7 +197,7 @@ fn x_wing_kat_fcp_provider_round_trips() {
         let plaintext = b"FCP V4 KAT round-trip payload";
         let aad = format!("xwing-kat-vector-{i}");
         let sealed = provider
-            .seal(&fcp_pk, plaintext, aad.as_bytes())
+            .seal(&wrapped_public_key, plaintext, aad.as_bytes())
             .expect("seal must succeed against spec-derived pk");
         assert_eq!(
             sealed.enc.len(),
@@ -204,10 +205,10 @@ fn x_wing_kat_fcp_provider_round_trips() {
             "vector #{i}: sealed.enc has wrong size"
         );
 
-        let fcp_sk = fcp_crypto::XWingSecretKey::from_bytes(&v.sk)
+        let wrapped_secret_key = fcp_crypto::XWingSecretKey::from_bytes(&v.sk)
             .expect("vector sk wraps into XWingSecretKey");
         let opened = provider
-            .open(&fcp_sk, &sealed, aad.as_bytes())
+            .open(&wrapped_secret_key, &sealed, aad.as_bytes())
             .expect("open must succeed with matching sk + aad");
         assert_eq!(opened.as_slice(), plaintext);
     }

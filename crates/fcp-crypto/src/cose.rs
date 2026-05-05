@@ -1325,7 +1325,7 @@ mod tests {
     }
 
     /// Regression for bead flywheel_connectors-8azf9: fcp-crypto's
-    /// CwtClaims decode used to accept a CBOR tag wrapping a claim
+    /// `CwtClaims` decode used to accept a CBOR tag wrapping a claim
     /// value, while fcp-cbor (the project-wide canonicalizer) rejects
     /// any `Value::Tag(..)` anywhere in the tree. A token accepted
     /// here but re-encoded through fcp-cbor for signature verification
@@ -1493,16 +1493,13 @@ mod tests {
         for idx in (0..cbor.len()).step_by(stride) {
             let mut mutated = cbor.clone();
             mutated[idx] ^= 0x01;
-            match CoseToken::from_cbor(&mutated) {
-                Ok(reparsed) => {
-                    assert!(
-                        reparsed.verify(&pk).is_err(),
-                        "byte flip at offset {idx} must break signature verification"
-                    );
-                }
-                Err(_) => {
-                    // Structural damage is also an acceptable rejection outcome.
-                }
+            if let Ok(reparsed) = CoseToken::from_cbor(&mutated) {
+                assert!(
+                    reparsed.verify(&pk).is_err(),
+                    "byte flip at offset {idx} must break signature verification"
+                );
+            } else {
+                // Structural damage is also an acceptable rejection outcome.
             }
             checked += 1;
         }
@@ -1604,7 +1601,7 @@ mod tests {
         assert_eq!(claims1.to_cbor().unwrap(), claims2.to_cbor().unwrap());
     }
 
-    /// Build a CoseSign1 with a caller-chosen protected `Header` and sign it
+    /// Build a `CoseSign1` with a caller-chosen protected `Header` and sign it
     /// with `signing_key` over the resulting TBS bytes. Used by the
     /// algorithm-confusion / crit-handling tests below.
     fn build_signed_token(signing_key: &Ed25519SigningKey, header: coset::Header) -> CoseToken {
@@ -1622,7 +1619,7 @@ mod tests {
         CoseToken { inner }
     }
 
-    /// Build a CoseSign1 with caller-chosen protected and unprotected headers.
+    /// Build a `CoseSign1` with caller-chosen protected and unprotected headers.
     fn build_signed_token_with_unprotected(
         signing_key: &Ed25519SigningKey,
         protected: coset::Header,

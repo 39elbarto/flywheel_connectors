@@ -20,7 +20,7 @@ use ciborium::value::{Integer, Value};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fcp_crypto::canonicalize::to_deterministic_cbor;
 
-/// Build a Value::Map with N text-keyed integer entries in
+/// Build a `Value::Map` with N text-keyed integer entries in
 /// REVERSE-sorted input order, forcing the canonicalizer to
 /// actually do work.
 fn reverse_sorted_map(n: usize) -> Value {
@@ -99,7 +99,7 @@ fn bench_nested_map(c: &mut Criterion) {
 
 /// Pre-canonical input — the value's keys are already in canonical
 /// order. Stresses the SORT-IS-CHEAP path. Post-refactor this
-/// should be the same cost as the reverse case (sort_by short-
+/// should be the same cost as the reverse case (`sort_by` short-
 /// circuits on already-sorted input) modulo a few comparator calls.
 fn bench_already_sorted_map(c: &mut Criterion) {
     let mut group = c.benchmark_group("canonicalize_map_already_sorted");

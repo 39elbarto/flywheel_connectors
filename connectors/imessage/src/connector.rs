@@ -7303,6 +7303,102 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_request_respects_request_region_cancellation() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_inbound(None))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let input = json!({
+            "method": "POST",
+            "url": webhook_callback_url("test-password-123"),
+            "headers": { "x-bluebubbles-event": "new-message" },
+            "account_id": "acct-a",
+            "body": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-cancellable-request",
+                    "text": "held by request region",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+
+        let mut cancelled_input = input.clone();
+        cancelled_input["request_region"] = json!({ "cancelled": true });
+        let cancelled =
+            invoke_webhook_request_result(&connector, &signing_key, cancelled_input).await;
+        assert_eq!(cancelled["accepted"], false);
+        assert_eq!(cancelled["status_code"], 408);
+        assert_eq!(cancelled["reason_code"], "request_cancelled");
+        assert!(cancelled["ingest"].is_null());
+
+        let mut deadline_input = input.clone();
+        deadline_input["request_region"] = json!({ "deadline_exceeded": true });
+        let deadline =
+            invoke_webhook_request_result(&connector, &signing_key, deadline_input).await;
+        assert_eq!(deadline["accepted"], false);
+        assert_eq!(deadline["status_code"], 408);
+        assert_eq!(deadline["reason_code"], "request_timeout");
+        assert!(deadline["ingest"].is_null());
+
+        let accepted = invoke_webhook_request_result(&connector, &signing_key, input).await;
+        assert_eq!(accepted["accepted"], true);
+        assert_eq!(accepted["reason_code"], "event_accepted");
+        assert_eq!(
+            accepted["ingest"]["dedupe_id"],
+            "acct-a:msg-cancellable-request"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_request_persists_replay_dedupe_across_restart() {
+        let dedupe_path = unique_dedupe_state_path();
+        let input = json!({
+            "method": "POST",
+            "url": webhook_callback_url("test-password-123"),
+            "headers": { "x-bluebubbles-event": "new-message" },
+            "account_id": "acct-a",
+            "body": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-request-persistent",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+
+        for (expected_status_code, expected_reason_code) in
+            [(200, "event_accepted"), (409, "replay_suppressed")]
+        {
+            let mut connector = BlueBubblesConnector::new();
+            connector
+                .configure(test_config_with_webhook_inbound(Some(&dedupe_path)))
+                .await
+                .unwrap();
+            let signing_key = Ed25519SigningKey::generate();
+            connector
+                .handshake(handshake_for_signing_key(&signing_key))
+                .await
+                .unwrap();
+            let response =
+                invoke_webhook_request_result(&connector, &signing_key, input.clone()).await;
+            assert_eq!(response["status_code"], expected_status_code);
+            assert_eq!(response["reason_code"], expected_reason_code);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_invoke_ingest_webhook_request_policy_rejection_never_emits() {
         let mut connector = BlueBubblesConnector::new();
         connector.configure(test_config()).await.unwrap();

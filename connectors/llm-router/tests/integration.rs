@@ -6,7 +6,7 @@
 #![allow(clippy::unreadable_literal)]
 
 use fcp_llm_router::connector::LlmRouterConnector;
-use serde_json::json;
+use serde_json::{Value, json};
 
 fn test_config() -> serde_json::Value {
     json!({
@@ -79,6 +79,17 @@ async fn configured_connector() -> LlmRouterConnector {
     c
 }
 
+fn operation_by_id<'a>(introspection: &'a Value, id: &str) -> Option<&'a Value> {
+    introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .and_then(|operations| {
+            operations
+                .iter()
+                .find(|op| op.get("id").and_then(Value::as_str) == Some(id))
+        })
+}
+
 #[fcp_async_core::runtime::test]
 async fn configure_with_three_providers() {
     let mut connector = LlmRouterConnector::new();
@@ -122,6 +133,67 @@ async fn introspect_lists_five_operations() {
     let result = connector.handle_introspect().await.unwrap();
     let ops = result["operations"].as_array().unwrap();
     assert_eq!(ops.len(), 5);
+}
+
+#[fcp_async_core::runtime::test]
+async fn route_output_schema_matches_decision_result_contract() {
+    let mut connector = configured_connector().await;
+    let introspection = connector.handle_introspect().await.unwrap();
+    let route_operation =
+        operation_by_id(&introspection, "llm-router.route").expect("missing route operation");
+    let summary = route_operation["summary"].as_str().unwrap();
+    assert!(
+        summary.contains("routing decision"),
+        "route summary must not imply inference output: {summary}"
+    );
+
+    let schema = &route_operation["output_schema"];
+    let required = schema["required"].as_array().unwrap();
+    let required_fields: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
+    let properties = &schema["properties"];
+
+    assert!(!required_fields.contains(&"response"));
+    assert!(properties.get("response").is_none());
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "llm-router.route",
+            "capability_token": "test",
+            "input": {
+                "messages": [{"role": "user", "content": "Hello, how are you?"}]
+            }
+        }))
+        .await
+        .unwrap();
+
+    for field in [
+        "dispatch_required",
+        "dispatch_instruction",
+        "provider",
+        "model",
+        "usage",
+        "cost_usd",
+        "routing_decision",
+        "provenance",
+    ] {
+        assert!(
+            required_fields.contains(&field),
+            "route schema should require {field}"
+        );
+        assert!(
+            result.get(field).is_some(),
+            "route result missing required schema field {field}"
+        );
+    }
+
+    assert_eq!(result["dispatch_required"].as_bool(), Some(true));
+    assert!(
+        result["dispatch_instruction"]
+            .as_str()
+            .unwrap()
+            .contains(".chat_completion")
+    );
+    assert!(result.get("response").is_none());
 }
 
 #[fcp_async_core::runtime::test]

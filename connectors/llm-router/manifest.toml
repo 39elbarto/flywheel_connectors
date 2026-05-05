@@ -51,7 +51,7 @@ forbidden = [
 # -----------------------------------------------------------------------------
 
 [provides.operations."llm-router.route"]
-description = "Route a chat completion request to the optimal provider/model based on configured strategy"
+description = "Select the optimal provider/model for a chat request and return a routing decision for the caller to dispatch"
 capability = "llm-router.route"
 risk_level = "medium"
 safety_tier = "safe"
@@ -129,7 +129,8 @@ enum = ["vision", "tool_use", "long_context", "code", "math", "streaming"]
 
 [provides.operations."llm-router.route".output_schema]
 required = [
-    "response",
+    "dispatch_required",
+    "dispatch_instruction",
     "provider",
     "model",
     "usage",
@@ -139,16 +140,20 @@ required = [
 ]
 type = "object"
 
-[provides.operations."llm-router.route".output_schema.properties.response]
-description = "Generated response content"
+[provides.operations."llm-router.route".output_schema.properties.dispatch_required]
+description = "True because this operation only selects a route; the caller must invoke the selected provider connector separately"
+type = "boolean"
+
+[provides.operations."llm-router.route".output_schema.properties.dispatch_instruction]
+description = "Human-readable instruction naming the selected provider connector and model to invoke for actual inference"
 type = "string"
 
 [provides.operations."llm-router.route".output_schema.properties.provider]
-description = "Provider that handled the request"
+description = "Provider selected for a follow-up dispatch"
 type = "string"
 
 [provides.operations."llm-router.route".output_schema.properties.model]
-description = "Model that generated the response"
+description = "Model selected for a follow-up dispatch"
 type = "string"
 
 [provides.operations."llm-router.route".output_schema.properties.usage]
@@ -161,7 +166,7 @@ type = "integer"
 type = "integer"
 
 [provides.operations."llm-router.route".output_schema.properties.cost_usd]
-description = "Actual cost of this request"
+description = "Estimated cost for the selected provider/model route"
 type = "number"
 
 [provides.operations."llm-router.route".output_schema.properties.routing_decision]
@@ -182,7 +187,7 @@ description = "Human-readable explanation of why this provider/model was selecte
 type = "string"
 
 [provides.operations."llm-router.route".output_schema.properties.provenance]
-description = "Provenance and taint metadata for the AI-generated output"
+description = "Provenance and taint metadata for the routing decision"
 type = "object"
 
 [provides.operations."llm-router.route".output_schema.properties.provenance.properties.source]
@@ -227,12 +232,13 @@ total_timeout_ms = 120000
 max_response_bytes = 10485760
 
 [provides.operations."llm-router.route".ai_hints]
-when_to_use = "Route a chat request to the best available AI provider. Use when you want automatic model selection based on cost, latency, or capability."
+when_to_use = "Select the best available AI provider/model before dispatch. Use when you want automatic model selection based on cost, latency, or capability; invoke the selected provider connector separately for inference."
 common_mistakes = [
     "Setting budget_limit_usd too low for the selected strategy.",
     "Specifying required_capabilities that no configured provider supports.",
     "Using preferred_provider without a fallback strategy.",
     "Not setting max_tokens when routing to different providers — each provider has different default limits which can cause unexpected truncation or high costs.",
+    "Expecting llm-router.route to return generated content; it returns a routing decision only.",
 ]
 examples = [
     '{"messages": [{"role": "user", "content": "Summarize this text"}]}',

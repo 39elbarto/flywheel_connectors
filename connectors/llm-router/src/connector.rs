@@ -174,9 +174,19 @@ impl LlmRouterConnector {
         match op {
             "llm-router.route" => Some(json!({
                 "type": "object",
-                "required": ["response", "provider", "model", "usage", "cost_usd", "routing_decision", "provenance"],
+                "required": [
+                    "dispatch_required",
+                    "dispatch_instruction",
+                    "provider",
+                    "model",
+                    "usage",
+                    "cost_usd",
+                    "routing_decision",
+                    "provenance"
+                ],
                 "properties": {
-                    "response": { "type": "string" },
+                    "dispatch_required": { "type": "boolean" },
+                    "dispatch_instruction": { "type": "string" },
                     "provider": { "type": "string" },
                     "model": { "type": "string" },
                     "usage": { "type": "object" },
@@ -597,8 +607,7 @@ impl LlmRouterConnector {
         let operations = vec![
             OperationInfo {
                 id: OperationId::from_static("llm-router.route"),
-                summary: "Route a chat completion request to the optimal provider/model"
-                    .to_string(),
+                summary: "Select a provider/model and return a routing decision".to_string(),
                 description: None,
                 input_schema: Self::operation_input_schema("llm-router.route").unwrap_or(json!({})),
                 output_schema: Self::operation_output_schema("llm-router.route")
@@ -1147,14 +1156,14 @@ impl LlmRouterConnector {
                 .filter(|s| !s.is_empty())
                 .map(String::from);
 
-            let api_key = pv
+            let direct_auth = pv
                 .get("api_key")
                 .and_then(|v| v.as_str())
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .map(String::from);
 
-            let auth = match (api_key, credential_id) {
+            let auth = match (direct_auth, credential_id) {
                 (Some(key), None) => ProviderAuth::ApiKey(key),
                 (None, Some(cid)) => ProviderAuth::CredentialId(cid),
                 (Some(_), Some(_)) => {
@@ -1319,7 +1328,7 @@ mod tests {
     use chrono::Duration;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_prelude::CapabilityConstraints;
+    use fcp_prelude::{CapabilityConstraints, InstanceId};
 
     fn test_config_params() -> serde_json::Value {
         json!({
@@ -1368,6 +1377,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operation: &str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = chrono::Utc::now();
         let constraints = CapabilityConstraints {
@@ -1382,6 +1392,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("test constraints CBOR should be valid")
@@ -1477,22 +1488,29 @@ mod tests {
             .expect("configure should succeed");
 
         let signing_key = Ed25519SigningKey::generate();
+        let instance_id = InstanceId::new();
         connector
             .handle_handshake(json!({
                 "protocol_version": "1.0.0",
                 "zone": "z:work",
                 "host_public_key": signing_key.verifying_key().to_bytes(),
+                "requested_instance_id": instance_id.clone(),
                 "nonce": vec![0u8; 32],
                 "capabilities_requested": ["llm-router.admin"]
             }))
             .await
             .expect("handshake should succeed");
 
-        let token = signed_token(&signing_key, "llm-router.admin", "llm-router.get_budget");
+        let admin_capability = signed_token(
+            &signing_key,
+            "llm-router.admin",
+            "llm-router.get_budget",
+            instance_id.as_str(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "llm-router.get_budget",
-                "capability_token": token,
+                "capability_token": admin_capability,
                 "input": {}
             }))
             .await
@@ -1889,11 +1907,17 @@ mod tests {
         let schema = LlmRouterConnector::operation_output_schema("llm-router.route").unwrap();
         let required = schema["required"].as_array().unwrap();
         let required_strs: Vec<&str> = required.iter().filter_map(|v| v.as_str()).collect();
-        assert!(required_strs.contains(&"response"));
+        assert!(required_strs.contains(&"dispatch_required"));
+        assert!(required_strs.contains(&"dispatch_instruction"));
         assert!(required_strs.contains(&"provider"));
         assert!(required_strs.contains(&"model"));
         assert!(required_strs.contains(&"cost_usd"));
+        assert!(required_strs.contains(&"routing_decision"));
         assert!(required_strs.contains(&"provenance"));
+        assert!(
+            !required_strs.contains(&"response"),
+            "route output schema must not promise inference output"
+        );
     }
 
     #[test]

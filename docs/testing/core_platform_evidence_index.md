@@ -284,6 +284,24 @@ Offline smoke coverage for the gate lives in:
 cargo test -p fcp-e2e --no-default-features --test swarm_gauntlet_e2e swarm_statistical -- --nocapture
 ```
 
+### Tailnet Invoke Evidence
+
+`fcp-tailnet-invoke-evidence` emits the `tailnet-invoke-evidence/v1`
+JSONL contract for direct-LAN and DERP/fallback invoke proof attempts. The
+current runner probes configured Tailscale LocalAPI state, records online-peer
+and route prerequisites, and emits a structured skip while the production
+`fcp-host` invoke path remains host-first instead of routed through the
+`fcp-mesh` / `fcp-tailscale` transport boundary.
+
+```bash
+cargo run -p fcp-host --bin fcp-tailnet-invoke-evidence -- --route direct-lan
+```
+
+Operators with an HTTP-exposed Tailscale LocalAPI can pass
+`--localapi-url <url>` or set `FCP_TAILSCALE_LOCALAPI_URL`; missing
+prerequisites remain machine-readable in `missing_prerequisites` and the full
+redacted `prerequisites` list.
+
 ### Cross-Controller Safety Invariants
 
 `swarm-controller-safety/v1` proves that the scheduler, placement controller,

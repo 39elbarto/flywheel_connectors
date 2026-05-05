@@ -9,6 +9,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::fmt;
 
 /// Stable schema tag for tailnet invoke evidence records.
 pub const TAILNET_INVOKE_EVIDENCE_SCHEMA_VERSION: &str = "tailnet-invoke-evidence/v1";
@@ -35,6 +36,33 @@ pub enum TailnetInvokeRouteMode {
     DirectLan,
     /// DERP or equivalent relay/fallback path.
     DerpFallback,
+}
+
+impl TailnetInvokeRouteMode {
+    /// Parse a command-line route label.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error string when the label is not one of the supported
+    /// route modes.
+    pub fn parse_cli(value: &str) -> Result<Self, String> {
+        match value {
+            "direct-lan" | "direct_lan" | "lan" => Ok(Self::DirectLan),
+            "derp-fallback" | "derp_fallback" | "derp" => Ok(Self::DerpFallback),
+            other => Err(format!(
+                "unsupported tailnet route mode '{other}', expected direct-lan or derp-fallback"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for TailnetInvokeRouteMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DirectLan => formatter.write_str("direct-lan"),
+            Self::DerpFallback => formatter.write_str("derp-fallback"),
+        }
+    }
 }
 
 /// One prerequisite required for a real tailnet invoke run.
@@ -155,6 +183,101 @@ pub struct TailnetInvokeRealTransportInput {
     pub latency: TailnetInvokeLatencySummary,
 }
 
+/// Live prerequisite observations collected by the executable evidence runner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::struct_excessive_bools)]
+pub struct TailnetInvokeHarnessObservation {
+    /// Whether a Tailscale `LocalAPI` endpoint was configured for the run.
+    pub localapi_configured: bool,
+    /// Whether `LocalAPI` reported the local node connected to the tailnet.
+    pub tailscale_connected: bool,
+    /// Count of online peers visible from `LocalAPI`.
+    pub online_peer_count: usize,
+    /// Whether the runner can prove the requested route mode from live telemetry.
+    pub route_telemetry_available: bool,
+    /// Whether production invoke is wired through the mesh/tailscale boundary.
+    pub production_mesh_invoke_transport_available: bool,
+    /// Redaction-safe detail from the `LocalAPI` probe.
+    pub localapi_detail: String,
+}
+
+impl TailnetInvokeHarnessObservation {
+    /// Build a conservative observation for environments without `LocalAPI`.
+    #[must_use]
+    pub fn localapi_not_configured() -> Self {
+        Self {
+            localapi_configured: false,
+            tailscale_connected: false,
+            online_peer_count: 0,
+            route_telemetry_available: false,
+            production_mesh_invoke_transport_available: false,
+            localapi_detail: "set --localapi-url or FCP_TAILSCALE_LOCALAPI_URL".to_string(),
+        }
+    }
+
+    /// Convert observations into the prerequisite list emitted in skip records.
+    #[must_use]
+    pub fn prerequisites(
+        &self,
+        route_mode: TailnetInvokeRouteMode,
+    ) -> Vec<TailnetInvokePrerequisite> {
+        let route_name = match route_mode {
+            TailnetInvokeRouteMode::DirectLan => "direct-lan-route-observed",
+            TailnetInvokeRouteMode::DerpFallback => "derp-fallback-route-observed",
+        };
+
+        vec![
+            TailnetInvokePrerequisite::new(
+                "tailscale-localapi-url",
+                self.localapi_configured,
+                self.localapi_detail.clone(),
+            ),
+            TailnetInvokePrerequisite::new(
+                "tailscale-connected",
+                self.tailscale_connected,
+                if self.tailscale_connected {
+                    "backend_state=Running".to_string()
+                } else {
+                    "backend_state was not Running".to_string()
+                },
+            ),
+            TailnetInvokePrerequisite::new(
+                "two-tailnet-nodes",
+                self.tailscale_connected && self.online_peer_count > 0,
+                format!("online_peer_count={}", self.online_peer_count),
+            ),
+            TailnetInvokePrerequisite::new(
+                route_name,
+                self.route_telemetry_available,
+                "LocalAPI status does not prove direct-vs-DERP invoke route telemetry",
+            ),
+            TailnetInvokePrerequisite::new(
+                "production-mesh-invoke-transport",
+                self.production_mesh_invoke_transport_available,
+                "fcp-host invoke remains host-first; mesh/tailscale invoke routing is not wired",
+            ),
+        ]
+    }
+
+    /// Build the structured skip record for the observed environment.
+    #[must_use]
+    pub fn structured_skip_record(
+        &self,
+        route_mode: TailnetInvokeRouteMode,
+        command_line: Vec<String>,
+        git_revision: impl Into<String>,
+        topology: impl Into<String>,
+    ) -> TailnetInvokeEvidenceRecord {
+        TailnetInvokeEvidenceRecord::structured_skip(
+            route_mode,
+            command_line,
+            git_revision,
+            topology,
+            self.prerequisites(route_mode),
+        )
+    }
+}
+
 /// Machine-readable evidence or skip record for tailnet invoke proof.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TailnetInvokeEvidenceRecord {
@@ -181,6 +304,9 @@ pub struct TailnetInvokeEvidenceRecord {
     /// Latency summary for real transport records.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latency: Option<TailnetInvokeLatencySummary>,
+    /// Full prerequisite diagnostics for structured skip records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prerequisites: Vec<TailnetInvokePrerequisite>,
     /// Missing prerequisites for structured skip records.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub missing_prerequisites: Vec<String>,
@@ -207,6 +333,7 @@ impl TailnetInvokeEvidenceRecord {
             auth_result: redact_sensitive_text(&input.auth_result),
             retries: input.retries,
             latency: Some(input.latency),
+            prerequisites: Vec::new(),
             missing_prerequisites: Vec::new(),
             skip_reason: None,
             generated_at: Utc::now(),
@@ -225,9 +352,9 @@ impl TailnetInvokeEvidenceRecord {
         let git_revision = git_revision.into();
         let topology = topology.into();
         let missing_prerequisites = prerequisites
-            .into_iter()
+            .iter()
             .filter(|prerequisite| !prerequisite.satisfied)
-            .map(|prerequisite| prerequisite.name)
+            .map(|prerequisite| prerequisite.name.clone())
             .collect::<Vec<_>>();
         let skip_reason = if missing_prerequisites.is_empty() {
             None
@@ -249,6 +376,7 @@ impl TailnetInvokeEvidenceRecord {
             auth_result: "not_attempted".to_string(),
             retries: 0,
             latency: None,
+            prerequisites,
             missing_prerequisites,
             skip_reason,
             generated_at: Utc::now(),
@@ -345,6 +473,20 @@ mod tests {
     }
 
     #[test]
+    fn route_mode_parses_cli_labels() {
+        assert_eq!(
+            TailnetInvokeRouteMode::parse_cli("direct-lan").expect("direct route"),
+            TailnetInvokeRouteMode::DirectLan
+        );
+        assert_eq!(
+            TailnetInvokeRouteMode::parse_cli("derp").expect("derp route"),
+            TailnetInvokeRouteMode::DerpFallback
+        );
+        assert!(TailnetInvokeRouteMode::parse_cli("funnel").is_err());
+        assert_eq!(TailnetInvokeRouteMode::DirectLan.to_string(), "direct-lan");
+    }
+
+    #[test]
     fn structured_skip_records_missing_prerequisites_and_rerun_command() {
         let credential_arg = format!("--{}=example-value", "token");
         let record = TailnetInvokeEvidenceRecord::structured_skip(
@@ -361,6 +503,7 @@ mod tests {
         assert_eq!(record.source, TailnetInvokeEvidenceSource::StructuredSkip);
         assert_eq!(record.auth_result, "not_attempted");
         assert!(record.latency.is_none());
+        assert_eq!(record.prerequisites.len(), 2);
         assert_eq!(record.missing_prerequisites, vec!["derp-route"]);
         assert_eq!(
             record.skip_reason.as_deref(),
@@ -372,7 +515,54 @@ mod tests {
         let value: Value = serde_json::from_str(&jsonl).expect("parse JSONL");
         assert_eq!(value["record_type"], "tailnet_invoke_evidence");
         assert_eq!(value["bead_id"], TAILNET_INVOKE_EVIDENCE_BEAD);
+        assert_eq!(
+            value["evidence"]["prerequisites"][1]["detail"],
+            "no relay route observed"
+        );
         assert!(!jsonl.contains("example-value"));
+    }
+
+    #[test]
+    fn harness_observation_builds_truthful_structured_skip() {
+        let observation = TailnetInvokeHarnessObservation {
+            localapi_configured: true,
+            tailscale_connected: true,
+            online_peer_count: 1,
+            route_telemetry_available: false,
+            production_mesh_invoke_transport_available: false,
+            localapi_detail: "backend_state=Running".to_string(),
+        };
+
+        let record = observation.structured_skip_record(
+            TailnetInvokeRouteMode::DirectLan,
+            vec![
+                "fcp-tailnet-invoke-evidence".to_string(),
+                "--route=direct-lan".to_string(),
+            ],
+            "abc123",
+            "two-node direct LAN proof",
+        );
+
+        assert_eq!(
+            record.missing_prerequisites,
+            vec![
+                "direct-lan-route-observed",
+                "production-mesh-invoke-transport"
+            ]
+        );
+        assert!(
+            record
+                .prerequisites
+                .iter()
+                .any(|prerequisite| prerequisite.name == "two-tailnet-nodes"
+                    && prerequisite.satisfied)
+        );
+        assert_eq!(
+            record.skip_reason.as_deref(),
+            Some(
+                "missing_prerequisites:direct-lan-route-observed,production-mesh-invoke-transport"
+            )
+        );
     }
 
     #[test]

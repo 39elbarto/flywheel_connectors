@@ -79,6 +79,9 @@ fn assert_tail_queueing_gain(executor: &BatchExecutor, request: &BatchInvokeRequ
     let summary = report
         .queueing_summary
         .expect("scheduler report should include queueing summary");
+    let morselization = report
+        .morselization
+        .expect("scheduler report should include max-parallelism morsels");
 
     assert!(
         summary.p99_wait_improvement_ms > 0,
@@ -91,6 +94,13 @@ fn assert_tail_queueing_gain(executor: &BatchExecutor, request: &BatchInvokeRequ
     assert!(
         summary.max_wait_increase_ms <= i64::try_from(request.operations.len()).unwrap_or(i64::MAX),
         "long-operation wait increase should stay bounded by the short burst: {summary:?}"
+    );
+    assert!(
+        morselization.largest_morsel_operations
+            <= usize::try_from(request.options.max_parallelism)
+                .unwrap_or(usize::MAX)
+                .max(1),
+        "morsel report should honor max_parallelism: {morselization:?}"
     );
 }
 
@@ -111,7 +121,11 @@ fn batch_scheduler(c: &mut Criterion) {
                     let (plan, report) = executor
                         .plan_with_schedule_report(black_box(request))
                         .expect("FIFO benchmark request should plan");
-                    black_box((plan.total_operations, report.queueing_summary));
+                    black_box((
+                        plan.total_operations,
+                        report.queueing_summary,
+                        report.morselization,
+                    ));
                 });
             },
         );
@@ -123,7 +137,11 @@ fn batch_scheduler(c: &mut Criterion) {
                     let (plan, report) = executor
                         .plan_with_schedule_report(black_box(request))
                         .expect("adaptive benchmark request should plan");
-                    black_box((plan.total_operations, report.queueing_summary));
+                    black_box((
+                        plan.total_operations,
+                        report.queueing_summary,
+                        report.morselization,
+                    ));
                 });
             },
         );

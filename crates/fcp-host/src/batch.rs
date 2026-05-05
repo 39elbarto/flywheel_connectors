@@ -375,8 +375,49 @@ pub struct BatchScheduleReport {
     /// Compact FIFO-vs-scheduled queue-wait replay summary.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queueing_summary: Option<BatchScheduleQueueingSummary>,
+    /// Dependency-tier morsels derived from `max_parallelism`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub morselization: Option<BatchMorselizationReport>,
     /// Per-operation decisions.
     pub decisions: Vec<BatchScheduleDecision>,
+}
+
+/// Replayable report for max-parallelism bounded execution morsels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BatchMorselizationReport {
+    /// Maximum operations allowed in one execution morsel.
+    pub max_operations_per_morsel: usize,
+    /// Number of morsels produced across all dependency tiers.
+    pub total_morsels: usize,
+    /// Number of dependency tiers that required splitting.
+    pub split_tiers: usize,
+    /// Largest operation count in any morsel.
+    pub largest_morsel_operations: usize,
+    /// Whether no tier needed splitting at the requested bound.
+    pub fallback: bool,
+    /// Human-readable fallback reason when no tier needed splitting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Ordered morsels. Flattening these operation ids reproduces the scheduled tiers.
+    pub morsels: Vec<BatchMorsel>,
+}
+
+/// A bounded chunk of one dependency tier.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct BatchMorsel {
+    /// Dependency tier index.
+    pub tier_index: usize,
+    /// Zero-based morsel index within the tier.
+    pub morsel_index: usize,
+    /// Operation ids included in this morsel.
+    pub operation_ids: Vec<String>,
+    /// Number of operations in this morsel.
+    pub operation_count: usize,
+    /// Sum of operation duration estimates for replay and capacity planning.
+    pub estimated_duration_ms: u64,
+    /// Fairness buckets represented in this morsel.
+    pub fairness_keys: Vec<String>,
 }
 
 /// Nearest-rank queue-wait percentiles in milliseconds.
@@ -714,7 +755,7 @@ impl BatchExecutor {
         self.validate(request)?;
         let tiers = topological_tiers(&request.operations)?;
         let (tiers, report) =
-            schedule_tiers_with_report(&request.operations, tiers, &request.options.scheduler);
+            schedule_tiers_with_report(&request.operations, tiers, &request.options);
         Ok((
             ExecutionPlan {
                 total_operations: request.operations.len(),
@@ -996,35 +1037,44 @@ fn schedule_tiers(
 fn schedule_tiers_with_report(
     operations: &[BatchOperation],
     tiers: Vec<ExecutionTier>,
-    options: &BatchSchedulerOptions,
+    options: &BatchOptions,
 ) -> (Vec<ExecutionTier>, BatchScheduleReport) {
+    let scheduler = &options.scheduler;
     let original_tiers: Vec<Vec<String>> = tiers
         .iter()
         .map(|tier| tier.operation_ids.clone())
         .collect();
-    let scheduled_tiers = schedule_tiers(operations, tiers, options);
+    let scheduled_tiers = schedule_tiers(operations, tiers, scheduler);
     let scheduled_tier_ids: Vec<Vec<String>> = scheduled_tiers
         .iter()
         .map(|tier| tier.operation_ids.clone())
         .collect();
-    let fallback = matches!(options.mode, BatchSchedulerMode::Fifo);
+    let fallback = matches!(scheduler.mode, BatchSchedulerMode::Fifo);
     let decisions = schedule_decisions(
         operations,
         &original_tiers,
         &scheduled_tier_ids,
-        options.mode,
+        scheduler.mode,
+    );
+    let morselization = morselization_report(
+        operations,
+        &scheduled_tier_ids,
+        usize::try_from(options.max_parallelism)
+            .unwrap_or(usize::MAX)
+            .max(1),
     );
 
     (
         scheduled_tiers,
         BatchScheduleReport {
-            mode: options.mode,
+            mode: scheduler.mode,
             total_operations: operations.len(),
             original_tiers,
             scheduled_tiers: scheduled_tier_ids,
             fallback,
             fallback_reason: fallback.then(|| "scheduler mode is fifo".to_owned()),
             queueing_summary: queueing_summary_from_decisions(&decisions),
+            morselization: Some(morselization),
             decisions,
         },
     )
@@ -1229,6 +1279,58 @@ fn queueing_summary_from_decisions(
         promoted_operations,
         delayed_operations,
     })
+}
+
+fn morselization_report(
+    operations: &[BatchOperation],
+    scheduled_tiers: &[Vec<String>],
+    max_operations_per_morsel: usize,
+) -> BatchMorselizationReport {
+    let max_operations_per_morsel = max_operations_per_morsel.max(1);
+    let metadata = BatchSchedulerMetadata::new(operations);
+    let mut morsels = Vec::new();
+    let mut split_tiers = 0usize;
+    let mut largest_morsel_operations = 0usize;
+
+    for (tier_index, tier) in scheduled_tiers.iter().enumerate() {
+        if tier.len() > max_operations_per_morsel {
+            split_tiers += 1;
+        }
+
+        for (morsel_index, chunk) in tier.chunks(max_operations_per_morsel).enumerate() {
+            largest_morsel_operations = largest_morsel_operations.max(chunk.len());
+            let estimated_duration_ms = chunk.iter().fold(0_u64, |total, operation_id| {
+                total.saturating_add(metadata.estimated_duration_ms(operation_id))
+            });
+            let mut fairness_keys: Vec<String> = chunk
+                .iter()
+                .filter_map(|operation_id| metadata.fairness_key(operation_id))
+                .collect();
+            fairness_keys.sort();
+            fairness_keys.dedup();
+
+            morsels.push(BatchMorsel {
+                tier_index,
+                morsel_index,
+                operation_ids: chunk.to_vec(),
+                operation_count: chunk.len(),
+                estimated_duration_ms,
+                fairness_keys,
+            });
+        }
+    }
+
+    let fallback = split_tiers == 0;
+    BatchMorselizationReport {
+        max_operations_per_morsel,
+        total_morsels: morsels.len(),
+        split_tiers,
+        largest_morsel_operations,
+        fallback,
+        fallback_reason: fallback
+            .then(|| "all scheduled tiers fit within max_parallelism".to_owned()),
+        morsels,
+    }
 }
 
 const fn schedule_action(
@@ -1773,6 +1875,15 @@ mod tests {
                 .iter()
                 .all(|decision| decision.action == BatchScheduleAction::FifoFallback)
         );
+        let morselization = report
+            .morselization
+            .expect("schedule report should include max-parallelism morsels");
+        assert!(morselization.fallback);
+        assert_eq!(
+            morselization.fallback_reason.as_deref(),
+            Some("all scheduled tiers fit within max_parallelism")
+        );
+        assert_eq!(morselization.total_morsels, 1);
     }
 
     #[test]
@@ -1926,6 +2037,90 @@ mod tests {
     }
 
     #[test]
+    fn batch_scheduler_morselization_report_splits_tiers_without_reordering() {
+        let executor = BatchExecutor::new();
+        let mut req = adaptive_request(
+            (0..10)
+                .map(|index| {
+                    scheduled_op(
+                        &format!("op_{index:02}"),
+                        BatchOperationPriority::Normal,
+                        u64::try_from(index + 1).unwrap(),
+                        Some(if index % 2 == 0 {
+                            "tenant-even"
+                        } else {
+                            "tenant-odd"
+                        }),
+                        &[],
+                    )
+                })
+                .collect(),
+        );
+        req.options.max_parallelism = 3;
+
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+        let morselization = report
+            .morselization
+            .expect("schedule report should include max-parallelism morsels");
+        let flattened: Vec<String> = morselization
+            .morsels
+            .iter()
+            .flat_map(|morsel| morsel.operation_ids.iter().cloned())
+            .collect();
+
+        assert!(!morselization.fallback);
+        assert_eq!(morselization.max_operations_per_morsel, 3);
+        assert_eq!(morselization.total_morsels, 4);
+        assert_eq!(morselization.split_tiers, 1);
+        assert_eq!(morselization.largest_morsel_operations, 3);
+        assert_eq!(flattened, plan.tiers[0].operation_ids);
+        assert!(
+            morselization
+                .morsels
+                .iter()
+                .all(|morsel| morsel.operation_count <= 3)
+        );
+        assert!(
+            morselization
+                .morsels
+                .iter()
+                .all(|morsel| morsel.estimated_duration_ms > 0)
+        );
+    }
+
+    #[test]
+    fn batch_scheduler_morselization_report_respects_dependency_tiers() {
+        let executor = BatchExecutor::new();
+        let mut req = adaptive_request(vec![
+            scheduled_op("root_a", BatchOperationPriority::Normal, 1, None, &[]),
+            scheduled_op("root_b", BatchOperationPriority::Normal, 1, None, &[]),
+            scheduled_op(
+                "dependent",
+                BatchOperationPriority::Critical,
+                1,
+                None,
+                &["root_a"],
+            ),
+        ]);
+        req.options.max_parallelism = 1;
+
+        let (plan, report) = executor.plan_with_schedule_report(&req).unwrap();
+        let morselization = report
+            .morselization
+            .expect("schedule report should include max-parallelism morsels");
+
+        assert_eq!(plan.tiers.len(), 2);
+        assert_eq!(morselization.total_morsels, 3);
+        assert_eq!(morselization.morsels[0].tier_index, 0);
+        assert_eq!(morselization.morsels[1].tier_index, 0);
+        assert_eq!(morselization.morsels[2].tier_index, 1);
+        assert_eq!(
+            morselization.morsels[2].operation_ids,
+            vec!["dependent".to_string()]
+        );
+    }
+
+    #[test]
     fn execute_sync_adaptive_response_includes_replay_summary() {
         let executor = BatchExecutor::new();
         let req = adaptive_request(vec![
@@ -1949,6 +2144,16 @@ mod tests {
         assert_eq!(summary.promoted_operations, 1);
         assert_eq!(summary.delayed_operations, 1);
         assert_eq!(summary.max_wait_increase_ms, 1);
+
+        let morselization = report
+            .morselization
+            .expect("adaptive replay report should carry max-parallelism morsels");
+        assert!(morselization.fallback);
+        assert_eq!(morselization.total_morsels, 1);
+        assert_eq!(
+            morselization.morsels[0].operation_ids,
+            vec!["short", "long"]
+        );
     }
 
     // ── Execution Tests ──

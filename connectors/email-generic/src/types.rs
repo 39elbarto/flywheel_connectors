@@ -174,13 +174,11 @@ fn split_sender_list(value: &str) -> Vec<String> {
 pub fn normalize_sender_address(address: &str) -> Option<String> {
     let trimmed = address.trim();
     let candidate = trimmed
-        .rfind('<')
-        .map_or(trimmed, |start| {
-            trimmed[start + 1..]
-                .find('>')
-                .map_or(&trimmed[start + 1..], |end| {
-                    &trimmed[start + 1..start + 1 + end]
-                })
+        .rsplit_once('<')
+        .map_or(trimmed, |(_, after_open)| {
+            after_open
+                .split_once('>')
+                .map_or(after_open, |(sender, _)| sender)
         })
         .trim()
         .trim_matches('"')

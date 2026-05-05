@@ -35,4 +35,5 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod realtime;
 pub mod types;

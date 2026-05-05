@@ -25,9 +25,11 @@ fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-async-core = { path = "../../crates/fcp-async-core" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
+fcp-streaming = { workspace = true }
 
 anyhow.workspace = true
 async-trait.workspace = true
+base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
@@ -41,6 +43,7 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+asupersync = { version = "0.3.1", default-features = false }
 ciborium.workspace = true
 wiremock.workspace = true
 futures-util.workspace = true

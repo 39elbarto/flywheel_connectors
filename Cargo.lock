@@ -3737,7 +3737,9 @@ name = "fcp-google-ai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asupersync",
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "ciborium",
@@ -3748,6 +3750,7 @@ dependencies = [
  "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-streaming",
  "fcp-testkit",
  "futures-util",
  "parking_lot",

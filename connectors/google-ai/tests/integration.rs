@@ -11,7 +11,19 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
+use std::time::Duration as StdDuration;
+
+use asupersync::net::websocket::{CloseReason, Message, ServerWebSocket, WebSocketAcceptor};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::{Duration, Utc};
+use fcp_async_core::Cx;
+use fcp_async_core::io::{AsyncRead, ReadBuf};
+use fcp_async_core::net::{TcpListener, TcpStream};
+use fcp_async_core::task;
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use serde_json::json;
@@ -20,7 +32,15 @@ use wiremock::{
     matchers::{body_partial_json, method, path, query_param},
 };
 
-use fcp_google_ai::{client::GoogleAiClient, connector::GoogleAiConnector, error::GoogleAiError};
+use fcp_google_ai::{
+    client::GoogleAiClient,
+    connector::GoogleAiConnector,
+    error::GoogleAiError,
+    realtime::{
+        GoogleLiveRealtimeAudioChunk, GoogleLiveRealtimeRunReport, GoogleLiveRealtimeSessionConfig,
+        run_google_live_realtime_session,
+    },
+};
 
 // ============================================================================
 // Helpers
@@ -94,6 +114,123 @@ async fn setup_configure(connector: &mut GoogleAiConnector, base_url: &str) {
         }))
         .await
         .expect("configure should succeed");
+}
+
+type TestLiveServerWebSocket = ServerWebSocket<TcpStream>;
+
+async fn read_live_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    let mut buf = Vec::new();
+    let mut temp = [0_u8; 256];
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > 16 * 1024 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_live_websocket(mut stream: TcpStream) -> (String, TestLiveServerWebSocket) {
+    let request = read_live_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    let request_text = String::from_utf8_lossy(&request).into_owned();
+    let ws = WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket");
+    (request_text, ws)
+}
+
+fn expect_live_text(message: Message, context: &str) -> String {
+    assert!(
+        matches!(&message, Message::Text(_)),
+        "expected text frame for {context}"
+    );
+    match message {
+        Message::Text(text) => text,
+        _ => String::new(),
+    }
+}
+
+async fn recv_live_json(ws: &mut TestLiveServerWebSocket, context: &str) -> serde_json::Value {
+    let message = ws
+        .recv(&Cx::for_testing())
+        .await
+        .expect(context)
+        .expect("live websocket message missing");
+    serde_json::from_str(&expect_live_text(message, context)).expect("live json frame")
+}
+
+async fn send_live_json(ws: &mut TestLiveServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn send_live_text(ws: &mut TestLiveServerWebSocket, value: &str, context: &str) {
+    ws.send(&Cx::for_testing(), Message::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn close_live_websocket(ws: &mut TestLiveServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+}
+
+fn assert_realtime_report_has_steps(report: &GoogleLiveRealtimeRunReport, expected: &[&str]) {
+    let steps: Vec<&str> = report
+        .events
+        .iter()
+        .map(|event| event.step.as_str())
+        .collect();
+    for expected_step in expected {
+        assert!(
+            steps.contains(expected_step),
+            "missing realtime step {expected_step}; observed {steps:?}"
+        );
+    }
+}
+
+fn assert_redacted_realtime_jsonl(report: &GoogleLiveRealtimeRunReport, forbidden: &[&str]) {
+    let jsonl = report.to_jsonl();
+    assert!(!jsonl.trim().is_empty(), "JSONL evidence must not be empty");
+    for secret in forbidden {
+        assert!(!jsonl.contains(secret), "JSONL leaked secret {secret}");
+    }
+    for (idx, line) in jsonl.lines().enumerate() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("JSONL parses");
+        assert_eq!(value["logVersion"], "v1", "line {idx}");
+        assert_eq!(
+            value["script"], "google_ai_live_realtime_loopback",
+            "line {idx}"
+        );
+        assert!(value["timestamp"].as_str().is_some(), "line {idx}");
+        assert!(value["step"].as_str().is_some(), "line {idx}");
+        assert!(value["correlationId"].as_str().is_some(), "line {idx}");
+        assert!(matches!(value["result"].as_str(), Some("pass" | "fail")));
+        assert!(value["durationMs"].as_u64().is_some(), "line {idx}");
+    }
 }
 
 fn success_response(text: &str, prompt_tokens: u64, candidates_tokens: u64) -> serde_json::Value {
@@ -2263,4 +2400,349 @@ async fn invoke_live_create_browser_session_returns_redaction_safe_contract() {
     );
     assert_eq!(result["provenance"]["client_secret_redacted_in_logs"], true);
     assert_eq!(result["expiresAt"], 1_778_013_000);
+}
+
+/// Realtime Live loopback exercises the WebSocket lifecycle without mocking the transport.
+#[fcp_async_core::runtime::test]
+async fn live_realtime_loopback_covers_lifecycle_audio_tools_and_jsonl() {
+    let live_credential = "live-credential-redacted";
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind live loopback");
+    let addr = listener.local_addr().expect("live loopback addr");
+    let server_task = task::spawn(async move {
+        let (stream, _) = listener.accept().await.expect("accept live loopback");
+        let (request, mut ws) = accept_live_websocket(stream).await;
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("authorization: token live-credential-redacted"),
+            "ephemeral token must be sent with Token auth scheme"
+        );
+
+        let setup = recv_live_json(&mut ws, "initial setup").await;
+        assert_eq!(
+            setup["setup"]["model"],
+            "models/gemini-2.5-flash-native-audio-preview-12-2025"
+        );
+        send_live_json(&mut ws, json!({ "setupComplete": {} }), "setup complete").await;
+
+        let first_audio = recv_live_json(&mut ws, "first audio").await;
+        assert_eq!(
+            first_audio["realtimeInput"]["audio"]["mimeType"],
+            "audio/pcm;rate=16000"
+        );
+        assert!(
+            first_audio["realtimeInput"]["audio"]["data"]
+                .as_str()
+                .is_some_and(|data| !data.is_empty())
+        );
+        let silence_audio = recv_live_json(&mut ws, "silence audio").await;
+        assert_eq!(
+            silence_audio["realtimeInput"]["audio"]["mimeType"],
+            "audio/pcm;rate=16000"
+        );
+        let audio_stream_end = recv_live_json(&mut ws, "audio stream end").await;
+        assert_eq!(audio_stream_end["realtimeInput"]["audioStreamEnd"], true);
+        let client_content = recv_live_json(&mut ws, "client content").await;
+        assert_eq!(
+            client_content["clientContent"]["turns"][0]["parts"][0]["text"],
+            "Start the call"
+        );
+        assert_eq!(client_content["clientContent"]["turnComplete"], true);
+
+        send_live_json(
+            &mut ws,
+            json!({
+                "sessionResumptionUpdate": {
+                    "resumable": true,
+                    "newHandle": "resume-handle-1"
+                }
+            }),
+            "session resumption update",
+        )
+        .await;
+        send_live_json(
+            &mut ws,
+            json!({
+                "serverContent": {
+                    "interrupted": true,
+                    "inputTranscription": {
+                        "text": "hello",
+                        "finished": true
+                    },
+                    "outputTranscription": {
+                        "text": "hi there",
+                        "finished": true
+                    },
+                    "modelTurn": {
+                        "parts": [
+                            {
+                                "inlineData": {
+                                    "mimeType": "audio/pcm;rate=24000",
+                                    "data": BASE64_STANDARD.encode([0_u8, 0_u8, 1, 0])
+                                }
+                            },
+                            { "text": "Visible assistant text" },
+                            { "text": "private thought", "thought": true }
+                        ]
+                    },
+                    "turnComplete": true,
+                    "waitingForInput": false
+                }
+            }),
+            "server content",
+        )
+        .await;
+        send_live_json(
+            &mut ws,
+            json!({ "toolCallCancellation": { "ids": ["cancelled-call"] } }),
+            "tool call cancellation",
+        )
+        .await;
+        send_live_json(
+            &mut ws,
+            json!({
+                "toolCall": {
+                    "functionCalls": [{
+                        "id": "call-1",
+                        "name": "openclaw_agent_consult",
+                        "args": { "question": "status" }
+                    }]
+                }
+            }),
+            "tool call",
+        )
+        .await;
+
+        let tool_response = recv_live_json(&mut ws, "tool response").await;
+        let response = &tool_response["toolResponse"]["functionResponses"][0];
+        assert_eq!(response["id"], "call-1");
+        assert_eq!(response["name"], "openclaw_agent_consult");
+        assert_eq!(response["scheduling"], "WHEN_IDLE");
+        assert_eq!(response["response"]["ok"], true);
+
+        send_live_json(
+            &mut ws,
+            json!({ "goAway": { "timeLeft": "30s" } }),
+            "go away",
+        )
+        .await;
+        close_live_websocket(&mut ws).await;
+    });
+
+    let report = run_google_live_realtime_session(
+        GoogleLiveRealtimeSessionConfig::new(
+            format!("ws://{addr}"),
+            live_credential,
+            json!({
+                "setup": {
+                    "model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"]
+                    },
+                    "inputAudioTranscription": {},
+                    "outputAudioTranscription": {},
+                    "sessionResumption": {},
+                    "contextWindowCompression": {
+                        "slidingWindow": {}
+                    }
+                }
+            }),
+        )
+        .with_audio_chunks(vec![
+            GoogleLiveRealtimeAudioChunk::g711_ulaw(8_000, [0x00, 0xff]),
+            GoogleLiveRealtimeAudioChunk::g711_ulaw(8_000, vec![0xff; 8]),
+        ])
+        .with_user_messages(vec!["Start the call".into()])
+        .with_silence_stream_end_ms(1)
+        .with_total_timeout(StdDuration::from_secs(5)),
+    )
+    .await
+    .expect("live realtime loopback succeeds");
+    server_task.await.expect("live server task");
+
+    assert_eq!(report.outcome, "completed");
+    assert!(report.ready);
+    assert_eq!(report.pending_audio_queued, 2);
+    assert_eq!(report.pending_audio_drained, 2);
+    assert_eq!(report.audio_frames_sent, 2);
+    assert!(report.audio_stream_end_sent);
+    assert_eq!(report.tool_calls, vec!["call-1"]);
+    assert_eq!(report.cancelled_tool_calls, vec!["cancelled-call"]);
+    assert_eq!(report.resumption_handle.as_deref(), Some("resume-handle-1"));
+    assert_eq!(report.go_away_time_left.as_deref(), Some("30s"));
+    assert_realtime_report_has_steps(
+        &report,
+        &[
+            "setup_complete",
+            "pending_audio_drained",
+            "audio_stream_end_sent",
+            "client_content_sent",
+            "playback_cleared",
+            "transcript",
+            "server_audio",
+            "assistant_text",
+            "tool_call_cancellation",
+            "tool_call",
+            "tool_response_sent",
+            "session_resumption_update",
+            "go_away",
+            "bounded_shutdown",
+        ],
+    );
+    assert_redacted_realtime_jsonl(
+        &report,
+        &[live_credential, "Visible assistant text", "hi there"],
+    );
+
+    let resume_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind live resume loopback");
+    let resume_addr = resume_listener.local_addr().expect("resume addr");
+    let resume_task = task::spawn(async move {
+        let (stream, _) = resume_listener.accept().await.expect("accept resume");
+        let (_request, mut ws) = accept_live_websocket(stream).await;
+        let setup = recv_live_json(&mut ws, "resume setup").await;
+        assert_eq!(
+            setup["setup"]["sessionResumption"]["handle"],
+            "resume-handle-1"
+        );
+        send_live_json(
+            &mut ws,
+            json!({ "setupComplete": {} }),
+            "resume setup complete",
+        )
+        .await;
+        close_live_websocket(&mut ws).await;
+    });
+    let resume_report = run_google_live_realtime_session(
+        GoogleLiveRealtimeSessionConfig::new(
+            format!("ws://{resume_addr}"),
+            live_credential,
+            json!({
+                "setup": {
+                    "model": "models/gemini-2.5-flash-native-audio-preview-12-2025",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"]
+                    },
+                    "sessionResumption": {
+                        "handle": report.resumption_handle.expect("resumption handle")
+                    }
+                }
+            }),
+        )
+        .with_total_timeout(StdDuration::from_secs(5)),
+    )
+    .await
+    .expect("resume loopback succeeds");
+    resume_task.await.expect("resume server task");
+    assert_eq!(resume_report.outcome, "completed");
+    assert!(resume_report.ready);
+    assert_redacted_realtime_jsonl(&resume_report, &[live_credential]);
+}
+
+/// Error-path realtime loopbacks stay bounded and produce redacted JSONL evidence.
+#[fcp_async_core::runtime::test]
+async fn live_realtime_loopback_covers_auth_malformed_and_pending_bounds() {
+    let auth_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind auth loopback");
+    let auth_addr = auth_listener.local_addr().expect("auth addr");
+    let auth_task = task::spawn(async move {
+        let (stream, _) = auth_listener.accept().await.expect("accept auth");
+        let (_request, mut ws) = accept_live_websocket(stream).await;
+        let _setup = recv_live_json(&mut ws, "auth setup").await;
+        send_live_json(
+            &mut ws,
+            json!({
+                "error": {
+                    "code": 401,
+                    "message": "bad ephemeral credential",
+                    "status": "UNAUTHENTICATED"
+                }
+            }),
+            "auth failure",
+        )
+        .await;
+        close_live_websocket(&mut ws).await;
+    });
+    let auth_report = run_google_live_realtime_session(
+        GoogleLiveRealtimeSessionConfig::new(
+            format!("ws://{auth_addr}"),
+            "bad-live-credential",
+            json!({
+                "setup": {
+                    "model": "models/gemini-live-test",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"]
+                    }
+                }
+            }),
+        )
+        .with_total_timeout(StdDuration::from_secs(5)),
+    )
+    .await
+    .expect("auth loopback returns evidence report");
+    auth_task.await.expect("auth task");
+    assert_eq!(auth_report.outcome, "auth_failure");
+    assert_realtime_report_has_steps(&auth_report, &["auth_failure"]);
+    assert_redacted_realtime_jsonl(&auth_report, &["bad-live-credential"]);
+
+    let malformed_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind malformed loopback");
+    let malformed_addr = malformed_listener.local_addr().expect("malformed addr");
+    let malformed_task = task::spawn(async move {
+        let (stream, _) = malformed_listener.accept().await.expect("accept malformed");
+        let (_request, mut ws) = accept_live_websocket(stream).await;
+        let _setup = recv_live_json(&mut ws, "malformed setup").await;
+        send_live_text(&mut ws, "{not-json", "malformed frame").await;
+        close_live_websocket(&mut ws).await;
+    });
+    let malformed_report = run_google_live_realtime_session(
+        GoogleLiveRealtimeSessionConfig::new(
+            format!("ws://{malformed_addr}"),
+            "malformed-live-credential",
+            json!({
+                "setup": {
+                    "model": "models/gemini-live-test",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"]
+                    }
+                }
+            }),
+        )
+        .with_total_timeout(StdDuration::from_secs(5)),
+    )
+    .await
+    .expect("malformed loopback returns evidence report");
+    malformed_task.await.expect("malformed task");
+    assert_eq!(malformed_report.outcome, "malformed_frame");
+    assert_realtime_report_has_steps(&malformed_report, &["malformed_frame"]);
+    assert_redacted_realtime_jsonl(&malformed_report, &["malformed-live-credential"]);
+
+    let mut bounded_config = GoogleLiveRealtimeSessionConfig::new(
+        "ws://127.0.0.1:9",
+        "pending-bound-credential",
+        json!({
+            "setup": {
+                "model": "models/gemini-live-test",
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"]
+                }
+            }
+        }),
+    )
+    .with_audio_chunks(vec![
+        GoogleLiveRealtimeAudioChunk::pcm16(16_000, [1, 0]),
+        GoogleLiveRealtimeAudioChunk::pcm16(16_000, [2, 0]),
+    ]);
+    bounded_config.max_pending_audio_chunks = 1;
+    let bounded_report = run_google_live_realtime_session(bounded_config)
+        .await
+        .expect("pending bound returns evidence report");
+    assert_eq!(bounded_report.outcome, "pending_audio_bound_exceeded");
+    assert_realtime_report_has_steps(&bounded_report, &["pending_audio_bound"]);
+    assert_redacted_realtime_jsonl(&bounded_report, &["pending-bound-credential"]);
 }

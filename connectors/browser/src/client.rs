@@ -7,7 +7,11 @@
 
 use std::time::Duration;
 
-use fcp_async_core::websocket::Message as WebSocketMessage;
+use fcp_async_core::{
+    Cx,
+    net::TcpStream,
+    websocket::{Message as WebSocketMessage, WebSocket, WsError},
+};
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
@@ -231,6 +235,76 @@ impl CdpCommand {
 
     fn to_websocket_message(&self) -> BrowserResult<WebSocketMessage> {
         Ok(WebSocketMessage::Text(serde_json::to_string(self)?))
+    }
+}
+
+#[async_trait::async_trait]
+trait CdpCommandTransport {
+    async fn send_cdp_message(&mut self, cx: &Cx, message: WebSocketMessage) -> BrowserResult<()>;
+
+    async fn recv_cdp_message(&mut self, cx: &Cx) -> BrowserResult<Option<WebSocketMessage>>;
+}
+
+#[async_trait::async_trait]
+impl CdpCommandTransport for WebSocket<TcpStream> {
+    async fn send_cdp_message(&mut self, cx: &Cx, message: WebSocketMessage) -> BrowserResult<()> {
+        self.send(cx, message)
+            .await
+            .map_err(|err| cdp_websocket_error(&err))
+    }
+
+    async fn recv_cdp_message(&mut self, cx: &Cx) -> BrowserResult<Option<WebSocketMessage>> {
+        self.recv(cx).await.map_err(|err| cdp_websocket_error(&err))
+    }
+}
+
+async fn execute_cdp_command<T>(
+    cx: &Cx,
+    transport: &mut T,
+    command: CdpCommand,
+) -> BrowserResult<serde_json::Value>
+where
+    T: CdpCommandTransport + Send,
+{
+    let expected_command_id = command.id;
+    cx.checkpoint().map_err(|err| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol command {expected_command_id} cancelled before send: {err}"
+        ),
+        status_code: None,
+    })?;
+
+    transport
+        .send_cdp_message(cx, command.to_websocket_message()?)
+        .await?;
+
+    loop {
+        cx.checkpoint().map_err(|err| BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol command {expected_command_id} cancelled while waiting for response: {err}"
+            ),
+            status_code: None,
+        })?;
+
+        let Some(message) = transport.recv_cdp_message(cx).await? else {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol connection closed before command {expected_command_id} response"
+                ),
+                status_code: None,
+            });
+        };
+
+        if let Some(result) = decode_cdp_response_message(message, expected_command_id)? {
+            return Ok(result);
+        }
+    }
+}
+
+fn cdp_websocket_error(error: &WsError) -> BrowserError {
+    BrowserError::Api {
+        message: format!("Chrome DevTools Protocol WebSocket error: {error}"),
+        status_code: None,
     }
 }
 
@@ -1381,10 +1455,43 @@ fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
+
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
         matchers::{header, method, path},
     };
+
+    #[derive(Debug, Default)]
+    struct FakeCdpTransport {
+        sent: Vec<WebSocketMessage>,
+        received: VecDeque<WebSocketMessage>,
+    }
+
+    impl FakeCdpTransport {
+        fn with_received(messages: impl IntoIterator<Item = WebSocketMessage>) -> Self {
+            Self {
+                sent: Vec::new(),
+                received: messages.into_iter().collect(),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl CdpCommandTransport for FakeCdpTransport {
+        async fn send_cdp_message(
+            &mut self,
+            _cx: &Cx,
+            message: WebSocketMessage,
+        ) -> BrowserResult<()> {
+            self.sent.push(message);
+            Ok(())
+        }
+
+        async fn recv_cdp_message(&mut self, _cx: &Cx) -> BrowserResult<Option<WebSocketMessage>> {
+            Ok(self.received.pop_front())
+        }
+    }
 
     #[fcp_async_core::runtime::test]
     async fn test_health_check_accepts_fcp_browser_control_plane() {
@@ -1688,6 +1795,76 @@ mod tests {
             decode_cdp_response_message(WebSocketMessage::binary(vec![1_u8, 2, 3]), 7).unwrap_err();
 
         assert!(format!("{err}").contains("UTF-8 text JSON"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_execute_cdp_command_sends_request_and_waits_for_matching_response() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut transport = FakeCdpTransport::with_received([
+            WebSocketMessage::Text(
+                r#"{"method":"Page.frameStartedLoading","params":{"frameId":"abc"}}"#.into(),
+            ),
+            WebSocketMessage::Text(r#"{"id":99,"result":{"ignored":true}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":7,"result":{"frameId":"abc"}}"#.into()),
+        ]);
+
+        let result = execute_cdp_command(
+            &cx,
+            &mut transport,
+            CdpCommand::new(
+                7,
+                "Page.navigate",
+                Some(serde_json::json!({ "url": "https://example.com" })),
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, serde_json::json!({ "frameId": "abc" }));
+        assert_eq!(transport.sent.len(), 1);
+        assert!(matches!(
+            &transport.sent[0],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":7,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_execute_cdp_command_reports_close_before_matching_response() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut transport = FakeCdpTransport::with_received([WebSocketMessage::Text(
+            r#"{"method":"Page.frameStartedLoading"}"#.into(),
+        )]);
+
+        let err = execute_cdp_command(
+            &cx,
+            &mut transport,
+            CdpCommand::new(7, "Page.navigate", None),
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err}");
+        assert!(message.contains("closed before command 7 response"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_execute_cdp_command_checks_cancellation_before_send() {
+        let cx = Cx::for_testing();
+        cx.set_cancel_requested(true);
+        let mut transport = FakeCdpTransport::default();
+
+        let err = execute_cdp_command(
+            &cx,
+            &mut transport,
+            CdpCommand::new(7, "Page.navigate", None),
+        )
+        .await
+        .unwrap_err();
+
+        let message = format!("{err}");
+        assert!(message.contains("cancelled before send"));
+        assert!(transport.sent.is_empty());
     }
 
     #[test]

@@ -1,9 +1,14 @@
 //! `BlueBubbles` `iMessage` connector implementation.
 
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use chrono::Utc;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
@@ -13,17 +18,13 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
-use fcp_webhook::{
-    SignatureAlgorithm, SignatureVerifier, WebhookConfig, WebhookError, WebhookHandler,
-    WebhookResult,
-};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
 use crate::types::{
-    BlueBubblesConfig, Message, QueryParams, bluebubbles_webhook_dedupe_id, default_webhook_events,
-    normalize_bluebubbles_webhook_payload,
+    BlueBubblesConfig, Message, QueryParams, bluebubbles_webhook_source_dedupe_ids,
+    default_webhook_events, normalize_bluebubbles_webhook_payload,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -49,18 +50,200 @@ const CAP_ADMIN: &str = "imessage.admin";
 
 const DEFAULT_SYNC_CHAT_LIMIT: u64 = 25;
 const DEFAULT_SYNC_MESSAGE_LIMIT: u64 = 50;
-const WEBHOOK_DEDUPE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
-#[derive(Debug, Clone)]
-struct BlueBubblesWebhookPassthroughVerifier;
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BlueBubblesDedupeClaim {
+    Claimed,
+    Duplicate { matched_id: String },
+}
 
-impl SignatureVerifier for BlueBubblesWebhookPassthroughVerifier {
-    fn verify(&self, _payload: &[u8], _signature: &str) -> WebhookResult<()> {
-        Ok(())
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct BlueBubblesDedupeFile {
+    entries: BTreeMap<String, BlueBubblesDedupeEntry>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct BlueBubblesDedupeEntry {
+    claimed_at_ms: i64,
+    finalized_at_ms: Option<i64>,
+}
+
+#[derive(Debug)]
+struct BlueBubblesInboundDedupeStore {
+    path: Option<PathBuf>,
+    ttl: Duration,
+    state: Mutex<BlueBubblesDedupeFile>,
+}
+
+impl BlueBubblesInboundDedupeStore {
+    fn from_config(config: &BlueBubblesConfig) -> FcpResult<Self> {
+        let path = config
+            .webhook_inbound
+            .dedupe_state_path
+            .as_ref()
+            .map(PathBuf::from);
+        let state = match path.as_deref() {
+            Some(path) => Self::load_state(path)?,
+            None => BlueBubblesDedupeFile::default(),
+        };
+        Ok(Self {
+            path,
+            ttl: Duration::from_secs(config.webhook_inbound.dedupe_ttl_seconds),
+            state: Mutex::new(state),
+        })
     }
 
-    fn algorithm(&self) -> SignatureAlgorithm {
-        SignatureAlgorithm::HmacSha256
+    fn load_state(path: &Path) -> FcpResult<BlueBubblesDedupeFile> {
+        if !path.exists() {
+            return Ok(BlueBubblesDedupeFile::default());
+        }
+
+        let bytes = fs::read(path).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to read BlueBubbles webhook dedupe state '{}': {error}",
+                path.display()
+            ),
+        })?;
+        serde_json::from_slice(&bytes).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to parse BlueBubbles webhook dedupe state '{}': {error}",
+                path.display()
+            ),
+        })
+    }
+
+    fn claim(&self, dedupe_ids: &[String]) -> FcpResult<BlueBubblesDedupeClaim> {
+        if dedupe_ids.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "BlueBubbles webhook dedupe requires at least one source ID".into(),
+            });
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let (claim, snapshot) = {
+            let mut state = self.lock_state()?;
+            self.prune_expired_locked(&mut state, now_ms);
+
+            if let Some(matched_id) = dedupe_ids
+                .iter()
+                .find(|dedupe_id| state.entries.contains_key(dedupe_id.as_str()))
+            {
+                (
+                    BlueBubblesDedupeClaim::Duplicate {
+                        matched_id: matched_id.clone(),
+                    },
+                    state.clone(),
+                )
+            } else {
+                for dedupe_id in dedupe_ids {
+                    state.entries.insert(
+                        dedupe_id.clone(),
+                        BlueBubblesDedupeEntry {
+                            claimed_at_ms: now_ms,
+                            finalized_at_ms: None,
+                        },
+                    );
+                }
+                (BlueBubblesDedupeClaim::Claimed, state.clone())
+            }
+        };
+        self.persist_locked(&snapshot)?;
+        Ok(claim)
+    }
+
+    fn finalize(&self, dedupe_ids: &[String]) -> FcpResult<()> {
+        let now_ms = Utc::now().timestamp_millis();
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            for dedupe_id in dedupe_ids {
+                if let Some(entry) = state.entries.get_mut(dedupe_id) {
+                    entry.finalized_at_ms = Some(now_ms);
+                }
+            }
+            state.clone()
+        };
+        self.persist_locked(&snapshot)
+    }
+
+    fn release(&self, dedupe_ids: &[String]) -> FcpResult<()> {
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            for dedupe_id in dedupe_ids {
+                state.entries.remove(dedupe_id);
+            }
+            state.clone()
+        };
+        self.persist_locked(&snapshot)
+    }
+
+    #[cfg(test)]
+    fn age_claim_for_test(&self, dedupe_id: &str, age_ms: i64) -> FcpResult<()> {
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            let Some(entry) = state.entries.get_mut(dedupe_id) else {
+                return Err(FcpError::Internal {
+                    message: format!("missing test dedupe id {dedupe_id}"),
+                });
+            };
+            entry.claimed_at_ms = entry.claimed_at_ms.saturating_sub(age_ms);
+            state.clone()
+        };
+        self.persist_locked(&snapshot)
+    }
+
+    fn lock_state(&self) -> FcpResult<std::sync::MutexGuard<'_, BlueBubblesDedupeFile>> {
+        self.state.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles webhook dedupe state lock was poisoned".into(),
+        })
+    }
+
+    fn prune_expired_locked(&self, state: &mut BlueBubblesDedupeFile, now_ms: i64) {
+        let ttl_ms = i64::try_from(self.ttl.as_millis()).unwrap_or(i64::MAX);
+        state
+            .entries
+            .retain(|_, entry| now_ms.saturating_sub(entry.claimed_at_ms) < ttl_ms);
+    }
+
+    fn persist_locked(&self, state: &BlueBubblesDedupeFile) -> FcpResult<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| FcpError::Internal {
+                message: format!(
+                    "Failed to create BlueBubbles webhook dedupe state directory '{}': {error}",
+                    parent.display()
+                ),
+            })?;
+        }
+
+        let bytes = serde_json::to_vec_pretty(state).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize BlueBubbles webhook dedupe state: {error}"),
+        })?;
+        let tmp_path = path.with_extension(format!(
+            "{}.tmp",
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("json")
+        ));
+        fs::write(&tmp_path, bytes).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to write BlueBubbles webhook dedupe state '{}': {error}",
+                tmp_path.display()
+            ),
+        })?;
+        fs::rename(&tmp_path, path).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to commit BlueBubbles webhook dedupe state '{}': {error}",
+                path.display()
+            ),
+        })?;
+        Ok(())
     }
 }
 
@@ -92,7 +275,7 @@ struct BlueBubblesState {
     config: BlueBubblesConfig,
     client: BlueBubblesClient,
     runtime: ConnectorRuntime,
-    webhook_dedupe: WebhookHandler<BlueBubblesWebhookPassthroughVerifier>,
+    webhook_dedupe: BlueBubblesInboundDedupeStore,
 }
 
 impl BlueBubblesState {
@@ -105,11 +288,7 @@ impl BlueBubblesState {
             BlueBubblesClient::from_config(&config).map_err(|error| FcpError::Internal {
                 message: format!("Failed to create BlueBubbles client: {error}"),
             })?;
-        let webhook_dedupe = WebhookHandler::with_config(
-            BlueBubblesWebhookPassthroughVerifier,
-            "bluebubbles",
-            WebhookConfig::default().with_idempotency_ttl(WEBHOOK_DEDUPE_TTL),
-        );
+        let webhook_dedupe = BlueBubblesInboundDedupeStore::from_config(&config)?;
 
         Ok(Self {
             config,
@@ -266,10 +445,46 @@ impl BlueBubblesConnector {
                 }),
                 critical: true,
             });
+
+            push_webhook_inbound_doctor_checks(&mut checks, config);
         }
 
         DoctorResult::from_checks(checks)
     }
+}
+
+fn push_webhook_inbound_doctor_checks(checks: &mut Vec<DoctorCheck>, config: &BlueBubblesConfig) {
+    let inbound = config.webhook_inbound.summary();
+    checks.push(DoctorCheck {
+        name: "webhook_inbound_policy".into(),
+        passed: inbound.allow_from_me
+            || inbound.allowed_sender_count > 0
+            || inbound.allowed_chat_count > 0,
+        message: Some(format!(
+            "Inbound policy: allow_from_me={}, allowed_senders={}, allowed_chats={}, groups={}, require_binding={}",
+            inbound.allow_from_me,
+            inbound.allowed_sender_count,
+            inbound.allowed_chat_count,
+            inbound.allow_group_chats,
+            inbound.require_conversation_binding
+        )),
+        critical: false,
+    });
+
+    checks.push(DoctorCheck {
+        name: "webhook_replay_dedupe".into(),
+        passed: true,
+        message: Some(format!(
+            "Replay dedupe TTL={}s, persistence={}",
+            inbound.dedupe_ttl_seconds,
+            if inbound.persistent_dedupe {
+                "file-backed"
+            } else {
+                "memory-only"
+            }
+        )),
+        critical: false,
+    });
 }
 
 impl Default for BlueBubblesConnector {
@@ -736,9 +951,9 @@ pub fn operations_info() -> Vec<OperationInfo> {
         },
         OperationInfo {
             id: OperationId::from_static(OP_INGEST_WEBHOOK_EVENT),
-            summary: "Normalize a BlueBubbles webhook event".into(),
+            summary: "Accept and normalize a BlueBubbles webhook event".into(),
             description: Some(
-                "Normalizes a host-delivered BlueBubbles webhook payload into an FCP event-shaped record and atomically claims its account-scoped dedupe key".into(),
+                "Normalizes a host-delivered BlueBubbles webhook payload, applies connector-local sender/conversation policy, and atomically claims all account-scoped source replay-dedupe keys".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -761,8 +976,12 @@ pub fn operations_info() -> Vec<OperationInfo> {
             output_schema: json!({
                 "type": "object",
                 "properties": {
-                    "status": { "type": "string", "enum": ["accepted", "duplicate"] },
+                    "status": { "type": "string", "enum": ["accepted", "duplicate", "rejected"] },
                     "dedupe_id": { "type": "string" },
+                    "dedupe_ids": { "type": "array", "items": { "type": "string" } },
+                    "duplicate_id": { "type": "string" },
+                    "acceptance": { "type": "object" },
+                    "policy": { "type": "object" },
                     "event": { "type": "object" }
                 }
             }),
@@ -771,10 +990,10 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local payload normalization and duplicate replay suppression".into(),
+                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance plus duplicate replay suppression".into(),
                 common_mistakes: vec![
-                    "Treating this as external sender authorization; pairing and sender policy are separate follow-up gates".into(),
-                    "Assuming in-process dedupe survives connector restart; the durable seven-day store is a separate follow-up".into(),
+                    "Leaving webhook_inbound sender/chat policy empty and expecting external senders to be accepted".into(),
+                    "Assuming memory-only dedupe survives connector restart; configure webhook_inbound.dedupe_state_path when restart replay suppression is required".into(),
                 ],
                 examples: vec![
                     r#"{"payload": {"type": "new-message", "data": {"guid": "msg-1", "text": "hello"}}}"#.into(),
@@ -1424,15 +1643,32 @@ impl BlueBubblesConnector {
                     .unwrap_or(state.config.webhook_account_id.as_str());
                 let event_type = optional_string(&req.input, "event_type");
                 let event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
-                let dedupe_id = bluebubbles_webhook_dedupe_id(account_id, &event);
-                let status = match state.webhook_dedupe.claim_event(&dedupe_id) {
-                    Ok(()) => "accepted",
-                    Err(WebhookError::ReplayDetected { .. }) => "duplicate",
-                    Err(error) => {
-                        return Err(FcpError::Internal {
-                            message: format!("BlueBubbles webhook dedupe failed: {error}"),
-                        });
+                let dedupe_ids = bluebubbles_webhook_source_dedupe_ids(account_id, &event);
+                let dedupe_id =
+                    dedupe_ids
+                        .first()
+                        .cloned()
+                        .ok_or_else(|| FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "BlueBubbles webhook event produced no dedupe IDs".into(),
+                        })?;
+                let acceptance = state.config.webhook_inbound.evaluate(&event);
+                let policy = state.config.webhook_inbound.summary();
+                let (status, duplicate_id) = if acceptance.accepted {
+                    match state.webhook_dedupe.claim(&dedupe_ids)? {
+                        BlueBubblesDedupeClaim::Claimed => {
+                            if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
+                                let _ = state.webhook_dedupe.release(&dedupe_ids);
+                                return Err(error);
+                            }
+                            ("accepted", None)
+                        }
+                        BlueBubblesDedupeClaim::Duplicate { matched_id } => {
+                            ("duplicate", Some(matched_id))
+                        }
                     }
+                } else {
+                    ("rejected", None)
                 };
                 let correlation_id = req
                     .correlation_id
@@ -1447,6 +1683,13 @@ impl BlueBubblesConnector {
                     chat_guid = %chat_guid,
                     dedupe_id = %dedupe_id,
                     dedupe_decision = %status,
+                    duplicate_id = %duplicate_id.as_deref().unwrap_or("none"),
+                    inbound_acceptance = %acceptance.reason,
+                    inbound_policy_allow_from_me = policy.allow_from_me,
+                    inbound_policy_allowed_sender_count = policy.allowed_sender_count,
+                    inbound_policy_allowed_chat_count = policy.allowed_chat_count,
+                    inbound_policy_allow_group_chats = policy.allow_group_chats,
+                    inbound_policy_persistent_dedupe = policy.persistent_dedupe,
                     auth_outcome = "capability_token_verified",
                     redaction_decision = "response_excludes_webhook_password",
                     "normalized BlueBubbles webhook event"
@@ -1454,6 +1697,10 @@ impl BlueBubblesConnector {
                 json!({
                     "status": status,
                     "dedupe_id": dedupe_id,
+                    "dedupe_ids": dedupe_ids,
+                    "duplicate_id": duplicate_id,
+                    "acceptance": acceptance,
+                    "policy": policy,
                     "event": event,
                 })
             }
@@ -1543,6 +1790,26 @@ mod tests {
             "server_url": server_url,
             "password": "test-password-123"
         })
+    }
+
+    fn test_config_with_webhook_inbound(dedupe_state_path: Option<&str>) -> serde_json::Value {
+        let mut config = test_config();
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567"],
+            "dedupe_state_path": dedupe_state_path
+        });
+        config
+    }
+
+    fn unique_dedupe_state_path() -> String {
+        std::env::temp_dir()
+            .join(format!(
+                "fcp-imessage-webhook-dedupe-{}.json",
+                uuid::Uuid::new_v4()
+            ))
+            .to_string_lossy()
+            .into_owned()
     }
 
     fn generate_valid_token(
@@ -2618,7 +2885,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_invoke_ingest_webhook_event_dedupes_replay() {
         let mut connector = BlueBubblesConnector::new();
-        connector.configure(test_config()).await.unwrap();
+        connector
+            .configure(test_config_with_webhook_inbound(None))
+            .await
+            .unwrap();
         let signing_key = Ed25519SigningKey::generate();
         connector
             .handshake(handshake_for_signing_key(&signing_key))
@@ -2653,6 +2923,9 @@ mod tests {
         let first_result = first.result.as_ref().unwrap();
         assert_eq!(first_result["status"], "accepted");
         assert_eq!(first_result["dedupe_id"], "acct-a:msg-1");
+        assert_eq!(first_result["dedupe_ids"], json!(["acct-a:msg-1"]));
+        assert_eq!(first_result["acceptance"]["reason"], "sender_allowed");
+        assert_eq!(first_result["policy"]["allowed_sender_count"], 1);
         assert_eq!(first_result["event"]["event_type"], "new-message");
         assert_eq!(first_result["event"]["event_id"], "msg-1");
         assert_eq!(
@@ -2680,6 +2953,229 @@ mod tests {
         };
         let second = connector.invoke(req).await.unwrap();
         assert_eq!(second.result.as_ref().unwrap()["status"], "duplicate");
+        assert_eq!(
+            second.result.as_ref().unwrap()["duplicate_id"],
+            "acct-a:msg-1"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_rejects_unbound_sender_without_claiming() {
+        let dedupe_path = unique_dedupe_state_path();
+        let input = json!({
+            "account_id": "acct-a",
+            "payload": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-unbound",
+                    "text": "hello",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+
+        let mut rejecting = BlueBubblesConnector::new();
+        rejecting
+            .configure(json!({
+                "password": "test-password-123",
+                "webhook_inbound": {
+                    "dedupe_state_path": dedupe_path.clone()
+                }
+            }))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        rejecting
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let rejected = rejecting
+            .invoke(InvokeRequest {
+                input: input.clone(),
+                capability_token: generate_valid_token(
+                    &rejecting,
+                    &signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(rejecting.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap();
+        let rejected_result = rejected.result.as_ref().unwrap();
+        assert_eq!(rejected_result["status"], "rejected");
+        assert_eq!(
+            rejected_result["acceptance"]["reason"],
+            "conversation_not_bound"
+        );
+
+        let mut accepting = BlueBubblesConnector::new();
+        accepting
+            .configure(test_config_with_webhook_inbound(Some(&dedupe_path)))
+            .await
+            .unwrap();
+        accepting
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let accepted = accepting
+            .invoke(InvokeRequest {
+                input,
+                capability_token: generate_valid_token(
+                    &accepting,
+                    &signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(accepting.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap();
+        assert_eq!(accepted.result.as_ref().unwrap()["status"], "accepted");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_persists_replay_dedupe_across_restart() {
+        let dedupe_path = unique_dedupe_state_path();
+        let input = json!({
+            "account_id": "acct-a",
+            "payload": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-persistent",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+
+        for expected_status in ["accepted", "duplicate"] {
+            let mut connector = BlueBubblesConnector::new();
+            connector
+                .configure(test_config_with_webhook_inbound(Some(&dedupe_path)))
+                .await
+                .unwrap();
+            let signing_key = Ed25519SigningKey::generate();
+            connector
+                .handshake(handshake_for_signing_key(&signing_key))
+                .await
+                .unwrap();
+            let response = connector
+                .invoke(InvokeRequest {
+                    input: input.clone(),
+                    capability_token: generate_valid_token(
+                        &connector,
+                        &signing_key,
+                        OP_INGEST_WEBHOOK_EVENT,
+                    ),
+                    ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+                })
+                .await
+                .unwrap();
+            assert_eq!(response.result.as_ref().unwrap()["status"], expected_status);
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_claims_secondary_source_ids() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_inbound(None))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let coalesced = json!({
+            "account_id": "acct-a",
+            "payload": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-primary",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "coalescedMessageIds": ["msg-secondary"],
+                    "isFromMe": false
+                }
+            }
+        });
+        let response = connector
+            .invoke(InvokeRequest {
+                input: coalesced,
+                capability_token: generate_valid_token(
+                    &connector,
+                    &signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap();
+        assert_eq!(response.result.as_ref().unwrap()["status"], "accepted");
+        assert_eq!(
+            response.result.as_ref().unwrap()["dedupe_ids"],
+            json!(["acct-a:msg-primary", "acct-a:msg-secondary"])
+        );
+
+        let secondary = json!({
+            "account_id": "acct-a",
+            "payload": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-secondary",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+        let replay = connector
+            .invoke(InvokeRequest {
+                input: secondary,
+                capability_token: generate_valid_token(
+                    &connector,
+                    &signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap();
+        assert_eq!(replay.result.as_ref().unwrap()["status"], "duplicate");
+        assert_eq!(
+            replay.result.as_ref().unwrap()["duplicate_id"],
+            "acct-a:msg-secondary"
+        );
+    }
+
+    #[test]
+    fn webhook_dedupe_store_release_and_ttl_allow_reclaim() {
+        let config = BlueBubblesConfig::from_value(json!({
+            "password": "test-password-123",
+            "webhook_inbound": {
+                "dedupe_ttl_seconds": 60
+            }
+        }))
+        .unwrap();
+        let store = BlueBubblesInboundDedupeStore::from_config(&config).unwrap();
+        let ids = vec!["acct-a:msg-release".to_string()];
+
+        assert_eq!(store.claim(&ids).unwrap(), BlueBubblesDedupeClaim::Claimed);
+        assert!(matches!(
+            store.claim(&ids).unwrap(),
+            BlueBubblesDedupeClaim::Duplicate { .. }
+        ));
+        store.release(&ids).unwrap();
+        assert_eq!(store.claim(&ids).unwrap(), BlueBubblesDedupeClaim::Claimed);
+
+        store
+            .age_claim_for_test("acct-a:msg-release", 61_000)
+            .unwrap();
+        assert_eq!(store.claim(&ids).unwrap(), BlueBubblesDedupeClaim::Claimed);
     }
 
     #[fcp_async_core::runtime::test]

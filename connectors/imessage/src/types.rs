@@ -2,6 +2,8 @@
 //!
 //! Covers the `BlueBubbles` REST API types for `iMessage` bridging.
 
+use std::collections::BTreeSet;
+
 use fcp_prelude::FcpError;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -53,6 +55,172 @@ pub struct BlueBubblesConfig {
     /// Account namespace used for inbound webhook dedupe keys.
     #[serde(default = "default_webhook_account_id")]
     pub webhook_account_id: String,
+
+    /// Inbound webhook authorization and replay-dedupe posture.
+    #[serde(default)]
+    pub webhook_inbound: BlueBubblesWebhookInboundConfig,
+}
+
+/// Policy and persistence config for accepted inbound `BlueBubbles` webhook events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesWebhookInboundConfig {
+    /// Local-account echo messages can be accepted without sender allowlist checks.
+    #[serde(default = "default_allow_from_me")]
+    pub allow_from_me: bool,
+
+    /// External DM sender handles that may produce accepted inbound events.
+    #[serde(default)]
+    pub allowed_sender_ids: Vec<String>,
+
+    /// Chat GUIDs or identifiers explicitly bound to this connector instance.
+    #[serde(default)]
+    pub allowed_chat_guids: Vec<String>,
+
+    /// Whether group conversations may be accepted at all.
+    #[serde(default)]
+    pub allow_group_chats: bool,
+
+    /// Whether DMs require an explicit configured conversation binding.
+    #[serde(default = "default_require_conversation_binding")]
+    pub require_conversation_binding: bool,
+
+    /// Optional JSON file used for replay dedupe across connector restart.
+    #[serde(default)]
+    pub dedupe_state_path: Option<String>,
+
+    /// How long replay dedupe claims remain active.
+    #[serde(default = "default_webhook_dedupe_ttl_seconds")]
+    pub dedupe_ttl_seconds: u64,
+}
+
+impl Default for BlueBubblesWebhookInboundConfig {
+    fn default() -> Self {
+        Self {
+            allow_from_me: default_allow_from_me(),
+            allowed_sender_ids: Vec::new(),
+            allowed_chat_guids: Vec::new(),
+            allow_group_chats: false,
+            require_conversation_binding: default_require_conversation_binding(),
+            dedupe_state_path: None,
+            dedupe_ttl_seconds: default_webhook_dedupe_ttl_seconds(),
+        }
+    }
+}
+
+impl BlueBubblesWebhookInboundConfig {
+    fn validate(mut self) -> Result<Self, FcpError> {
+        self.allowed_sender_ids = normalize_policy_list(self.allowed_sender_ids);
+        self.allowed_chat_guids = normalize_policy_list(self.allowed_chat_guids);
+        self.dedupe_state_path = self
+            .dedupe_state_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(str::to_owned);
+
+        if self.dedupe_ttl_seconds == 0 {
+            return Err(invalid_config(
+                "webhook_inbound.dedupe_ttl_seconds must be greater than zero",
+            ));
+        }
+
+        Ok(self)
+    }
+
+    /// Return a PII-safe summary suitable for doctor/introspection surfaces.
+    #[must_use]
+    pub fn summary(&self) -> BlueBubblesWebhookInboundSummary {
+        BlueBubblesWebhookInboundSummary {
+            allow_from_me: self.allow_from_me,
+            allowed_sender_count: self.allowed_sender_ids.len(),
+            allowed_chat_count: self.allowed_chat_guids.len(),
+            allow_group_chats: self.allow_group_chats,
+            require_conversation_binding: self.require_conversation_binding,
+            persistent_dedupe: self.dedupe_state_path.is_some(),
+            dedupe_ttl_seconds: self.dedupe_ttl_seconds,
+        }
+    }
+
+    /// Decide whether a normalized webhook event may cross the inbound boundary.
+    #[must_use]
+    pub fn evaluate(
+        &self,
+        event: &NormalizedBlueBubblesWebhookMessage,
+    ) -> BlueBubblesInboundDecision {
+        let conversation_bound = event.conversation_keys().iter().any(|candidate| {
+            self.allowed_chat_guids
+                .iter()
+                .any(|bound| bound == candidate)
+        });
+
+        if event.is_group {
+            if !self.allow_group_chats {
+                return BlueBubblesInboundDecision::rejected("group_not_allowed");
+            }
+            if !conversation_bound {
+                return BlueBubblesInboundDecision::rejected("conversation_not_bound");
+            }
+            return BlueBubblesInboundDecision::accepted("group_conversation_bound");
+        }
+
+        if self.require_conversation_binding && !conversation_bound {
+            return BlueBubblesInboundDecision::rejected("conversation_not_bound");
+        }
+
+        if event.is_from_me && self.allow_from_me {
+            return BlueBubblesInboundDecision::accepted("from_me_allowed");
+        }
+
+        let Some(sender_id) = event.sender_id.as_deref() else {
+            return BlueBubblesInboundDecision::rejected("sender_missing");
+        };
+
+        if self
+            .allowed_sender_ids
+            .iter()
+            .any(|allowed| allowed == sender_id)
+        {
+            return BlueBubblesInboundDecision::accepted("sender_allowed");
+        }
+
+        BlueBubblesInboundDecision::rejected("sender_not_allowed")
+    }
+}
+
+/// PII-safe inbound policy summary.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesWebhookInboundSummary {
+    pub allow_from_me: bool,
+    pub allowed_sender_count: usize,
+    pub allowed_chat_count: usize,
+    pub allow_group_chats: bool,
+    pub require_conversation_binding: bool,
+    pub persistent_dedupe: bool,
+    pub dedupe_ttl_seconds: u64,
+}
+
+/// Result of applying inbound sender/conversation policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BlueBubblesInboundDecision {
+    pub accepted: bool,
+    pub reason: &'static str,
+}
+
+impl BlueBubblesInboundDecision {
+    const fn accepted(reason: &'static str) -> Self {
+        Self {
+            accepted: true,
+            reason,
+        }
+    }
+
+    const fn rejected(reason: &'static str) -> Self {
+        Self {
+            accepted: false,
+            reason,
+        }
+    }
 }
 
 impl BlueBubblesConfig {
@@ -87,6 +255,7 @@ impl BlueBubblesConfig {
         self.webhook_host = self.webhook_host.trim().to_string();
         self.webhook_path = normalize_webhook_path(&self.webhook_path);
         self.webhook_account_id = self.webhook_account_id.trim().to_string();
+        self.webhook_inbound = self.webhook_inbound.validate()?;
 
         if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
@@ -178,6 +347,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("webhook_port", &self.webhook_port)
             .field("webhook_path", &self.webhook_path)
             .field("webhook_account_id", &self.webhook_account_id)
+            .field("webhook_inbound", &self.webhook_inbound.summary())
             .finish()
     }
 }
@@ -210,6 +380,18 @@ fn default_webhook_account_id() -> String {
     "default".to_string()
 }
 
+const fn default_allow_from_me() -> bool {
+    true
+}
+
+const fn default_require_conversation_binding() -> bool {
+    true
+}
+
+const fn default_webhook_dedupe_ttl_seconds() -> u64 {
+    7 * 24 * 60 * 60
+}
+
 fn normalize_webhook_path(path: &str) -> String {
     let path = path.trim();
     if path.starts_with('/') {
@@ -217,6 +399,15 @@ fn normalize_webhook_path(path: &str) -> String {
     } else {
         format!("/{path}")
     }
+}
+
+fn normalize_policy_list(values: Vec<String>) -> Vec<String> {
+    values
+        .into_iter()
+        .filter_map(|value| nonempty_string(&value))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn invalid_config(message: impl Into<String>) -> FcpError {
@@ -608,6 +799,19 @@ pub struct NormalizedBlueBubblesWebhookMessage {
 
     /// Whether this payload represents a tapback-style associated message.
     pub is_tapback: bool,
+
+    /// Additional source `BlueBubbles` message IDs represented by this event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub source_message_ids: Vec<String>,
+}
+
+impl NormalizedBlueBubblesWebhookMessage {
+    fn conversation_keys(&self) -> Vec<String> {
+        [&self.chat_guid, &self.chat_identifier]
+            .into_iter()
+            .filter_map(|value| value.as_deref().and_then(nonempty_string))
+            .collect()
+    }
 }
 
 const MAX_WEBHOOK_GUID_CHARS: usize = 512;
@@ -667,6 +871,29 @@ fn read_u64(record: Option<&Map<String, Value>>, keys: &[&str]) -> Option<u64> {
                 .or_else(|| value.as_i64().and_then(|number| u64::try_from(number).ok()))
         })
     })
+}
+
+fn read_string_array(record: Option<&Map<String, Value>>, keys: &[&str]) -> Vec<String> {
+    let Some(record) = record else {
+        return Vec::new();
+    };
+
+    keys.iter()
+        .find_map(|key| record.get(*key))
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| match value {
+                    Value::String(value) => nonempty_string(value),
+                    Value::Number(value) => Some(value.to_string()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn read_record<'a>(
@@ -847,6 +1074,15 @@ pub fn normalize_bluebubbles_webhook_payload(
         }
     });
     let balloon_bundle_id = read_string(Some(record), &["balloonBundleId", "balloon_bundle_id"]);
+    let source_message_ids = read_string_array(
+        Some(record),
+        &[
+            "sourceMessageIds",
+            "source_message_ids",
+            "coalescedMessageIds",
+            "coalesced_message_ids",
+        ],
+    );
     let group_from_guid = chat_guid.as_deref().and_then(|guid| {
         if guid.contains(";+;") {
             Some(true)
@@ -877,6 +1113,7 @@ pub fn normalize_bluebubbles_webhook_payload(
         associated_message_type,
         balloon_bundle_id,
         is_tapback: is_tapback_type(associated_message_type),
+        source_message_ids,
     })
 }
 
@@ -886,12 +1123,7 @@ pub fn bluebubbles_webhook_dedupe_id(
     account_id: &str,
     message: &NormalizedBlueBubblesWebhookMessage,
 ) -> String {
-    let account_id = account_id.trim();
-    let account_id = if account_id.is_empty() {
-        "default"
-    } else {
-        account_id
-    };
+    let account_id = normalized_webhook_account_id(account_id);
     let base = if message.balloon_bundle_id.is_some() {
         message
             .associated_message_guid
@@ -908,6 +1140,45 @@ pub fn bluebubbles_webhook_dedupe_id(
     format!("{account_id}:{base}{suffix}")
 }
 
+/// Build every account-scoped source ID that must be claimed for this event.
+#[must_use]
+pub fn bluebubbles_webhook_source_dedupe_ids(
+    account_id: &str,
+    message: &NormalizedBlueBubblesWebhookMessage,
+) -> Vec<String> {
+    let primary = bluebubbles_webhook_dedupe_id(account_id, message);
+    let suffix = if message.event_type == "updated-message" {
+        ":updated"
+    } else {
+        ""
+    };
+    let account_id = normalized_webhook_account_id(account_id);
+    let mut ids = vec![primary];
+    let mut add_id = |raw_id: &str| {
+        let Some(raw_id) = nonempty_string(raw_id) else {
+            return;
+        };
+        let dedupe_id = format!("{account_id}:{raw_id}{suffix}");
+        if !ids.iter().any(|existing| existing == &dedupe_id) {
+            ids.push(dedupe_id);
+        }
+    };
+    add_id(&message.event_id);
+    for source_id in &message.source_message_ids {
+        add_id(source_id);
+    }
+    ids
+}
+
+fn normalized_webhook_account_id(account_id: &str) -> &str {
+    let account_id = account_id.trim();
+    if account_id.is_empty() {
+        "default"
+    } else {
+        account_id
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -922,6 +1193,13 @@ mod tests {
         assert_eq!(config.webhook_port, 8645);
         assert_eq!(config.webhook_path, "/bluebubbles-webhook");
         assert_eq!(config.webhook_account_id, "default");
+        assert!(config.webhook_inbound.allow_from_me);
+        assert!(config.webhook_inbound.allowed_sender_ids.is_empty());
+        assert!(config.webhook_inbound.allowed_chat_guids.is_empty());
+        assert!(!config.webhook_inbound.allow_group_chats);
+        assert!(config.webhook_inbound.require_conversation_binding);
+        assert!(config.webhook_inbound.dedupe_state_path.is_none());
+        assert_eq!(config.webhook_inbound.dedupe_ttl_seconds, 604_800);
         assert!(config.attachment_dir.is_none());
     }
 
@@ -951,6 +1229,38 @@ mod tests {
         assert_eq!(config.server_passcode, "secret");
         assert_eq!(config.server_host().as_deref(), Some("example.com"));
         assert!(config.attachment_dir.is_none());
+    }
+
+    #[test]
+    fn config_from_value_normalizes_webhook_inbound_policy() {
+        let config = BlueBubblesConfig::from_value(serde_json::json!({
+            "password": "secret",
+            "webhook_inbound": {
+                "allowed_sender_ids": [" +15551234567 ", "", "+15551234567", "alice@example.com"],
+                "allowed_chat_guids": [" iMessage;-;+15551234567 ", "iMessage;-;+15551234567"],
+                "allow_group_chats": true,
+                "require_conversation_binding": false,
+                "dedupe_state_path": " /tmp/fcp-imessage-dedupe.json ",
+                "dedupe_ttl_seconds": 42
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            config.webhook_inbound.allowed_sender_ids,
+            vec!["+15551234567", "alice@example.com"]
+        );
+        assert_eq!(
+            config.webhook_inbound.allowed_chat_guids,
+            vec!["iMessage;-;+15551234567"]
+        );
+        assert!(config.webhook_inbound.allow_group_chats);
+        assert!(!config.webhook_inbound.require_conversation_binding);
+        assert_eq!(
+            config.webhook_inbound.dedupe_state_path.as_deref(),
+            Some("/tmp/fcp-imessage-dedupe.json")
+        );
+        assert_eq!(config.webhook_inbound.dedupe_ttl_seconds, 42);
     }
 
     #[test]
@@ -1006,6 +1316,10 @@ mod tests {
             serde_json::json!({
                 "password": "secret",
                 "webhook_account_id": "   "
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_inbound": { "dedupe_ttl_seconds": 0 }
             }),
         ];
 
@@ -1236,7 +1550,8 @@ mod tests {
                 "threadOriginatorGuid": "root-1",
                 "associatedMessageGuid": "assoc-1",
                 "associatedMessageType": 0,
-                "balloonBundleId": "com.example.MessagesPlugin"
+                "balloonBundleId": "com.example.MessagesPlugin",
+                "coalescedMessageIds": ["msg-002", "msg-003", "msg-002"]
             }
         });
 
@@ -1274,6 +1589,7 @@ mod tests {
             Some("com.example.MessagesPlugin")
         );
         assert!(!normalized.is_tapback);
+        assert_eq!(normalized.source_message_ids, vec!["msg-002", "msg-003"]);
     }
 
     #[test]
@@ -1332,6 +1648,77 @@ mod tests {
         assert_eq!(
             bluebubbles_webhook_dedupe_id("acct-a", &normalized),
             "acct-a:msg-root:updated"
+        );
+        assert_eq!(
+            bluebubbles_webhook_source_dedupe_ids("acct-a", &normalized),
+            vec!["acct-a:msg-root:updated", "acct-a:balloon-1:updated"]
+        );
+    }
+
+    #[test]
+    fn webhook_inbound_policy_requires_sender_and_conversation_for_external_dm() {
+        let payload = serde_json::json!({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-1",
+                "handle": { "address": "+15551234567" },
+                "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                "isFromMe": false
+            }
+        });
+        let event = normalize_bluebubbles_webhook_payload(&payload, None).unwrap();
+        let default_policy = BlueBubblesWebhookInboundConfig::default();
+
+        assert_eq!(
+            default_policy.evaluate(&event),
+            BlueBubblesInboundDecision::rejected("conversation_not_bound")
+        );
+
+        let policy = BlueBubblesWebhookInboundConfig {
+            allowed_sender_ids: vec!["+15551234567".to_string()],
+            allowed_chat_guids: vec!["iMessage;-;+15551234567".to_string()],
+            ..BlueBubblesWebhookInboundConfig::default()
+        }
+        .validate()
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate(&event),
+            BlueBubblesInboundDecision::accepted("sender_allowed")
+        );
+    }
+
+    #[test]
+    fn webhook_inbound_policy_keeps_groups_conservative() {
+        let payload = serde_json::json!({
+            "type": "new-message",
+            "data": {
+                "guid": "group-msg-1",
+                "handle": { "address": "+15551234567" },
+                "chats": [{ "guid": "iMessage;+;group-chat" }],
+                "isFromMe": false
+            }
+        });
+        let event = normalize_bluebubbles_webhook_payload(&payload, None).unwrap();
+        let bound_but_dm_only = BlueBubblesWebhookInboundConfig {
+            allowed_chat_guids: vec!["iMessage;+;group-chat".to_string()],
+            ..BlueBubblesWebhookInboundConfig::default()
+        };
+
+        assert_eq!(
+            bound_but_dm_only.evaluate(&event),
+            BlueBubblesInboundDecision::rejected("group_not_allowed")
+        );
+
+        let group_policy = BlueBubblesWebhookInboundConfig {
+            allowed_chat_guids: vec!["iMessage;+;group-chat".to_string()],
+            allow_group_chats: true,
+            ..BlueBubblesWebhookInboundConfig::default()
+        };
+
+        assert_eq!(
+            group_policy.evaluate(&event),
+            BlueBubblesInboundDecision::accepted("group_conversation_bound")
         );
     }
 }

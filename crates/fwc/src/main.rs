@@ -259,6 +259,7 @@ mod snapshot_recovery;
 #[cfg(test)]
 mod snapshot_workflow;
 mod supply_chain_cmd;
+mod swarm_evidence_cmd;
 mod template;
 #[allow(dead_code)] // Handlebars-style template rendering with --template flag.
 mod template_render;
@@ -540,6 +541,10 @@ enum Commands {
 
     /// Work with audit-chain artifacts and reports.
     Audit(audit_chain::AuditArgs),
+
+    /// Inspect replayable swarm decision cards and evidence bundles.
+    #[command(name = "swarm-evidence", visible_alias = "swarm")]
+    SwarmEvidence(swarm_evidence_cmd::SwarmEvidenceArgs),
 
     /// Validate and repair connector manifests.
     Manifest(manifest_cmd::ManifestArgs),
@@ -3226,6 +3231,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::SupplyChain(_) => passthrough_only_dispatch("supply-chain"),
         Commands::Bootstrap(args) => bootstrap_dispatch(args)?,
         Commands::Audit(args) => audit_dispatch(args)?,
+        Commands::SwarmEvidence(args) => swarm_evidence_dispatch(args)?,
         Commands::Manifest(_) => passthrough_only_dispatch("manifest"),
         Commands::Net(_) => passthrough_only_dispatch("net"),
         Commands::Trace(_) => passthrough_only_dispatch("trace"),
@@ -6971,6 +6977,18 @@ fn audit_dispatch(args: &audit_chain::AuditArgs) -> Result<DispatchOutcome> {
         audit_chain::AuditCommands::Gaps(gaps_args) => audit_gaps_dispatch(gaps_args),
         _ => Ok(passthrough_only_dispatch("audit")),
     }
+}
+
+fn swarm_evidence_dispatch(
+    args: &swarm_evidence_cmd::SwarmEvidenceArgs,
+) -> Result<DispatchOutcome> {
+    let mut payload = swarm_evidence_cmd::run(args)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::OfflineArtifact, "swarm-evidence");
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -25626,6 +25644,7 @@ mod tests {
         normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
         try_host_mcp_tool_definitions, try_host_tool_operation_info,
+        validate_registry_binary_name,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
@@ -32205,6 +32224,39 @@ deny_ptrace = true
                 command => panic!("expected audit matrix command, got {command:?}"),
             },
             command => panic!("expected audit command, got {command:?}"),
+        }
+    }
+
+    #[test]
+    fn prepare_cli_parses_swarm_evidence_explore_command() {
+        let prepared = prepare_cli(&[
+            "fwc".to_owned(),
+            "swarm-evidence".to_owned(),
+            "explore".to_owned(),
+            "bundle.jsonl".to_owned(),
+            "--action".to_owned(),
+            "delay".to_owned(),
+            "--dominant-loss-term".to_owned(),
+            "zone_fairness".to_owned(),
+            "--limit".to_owned(),
+            "5".to_owned(),
+        ])
+        .expect("swarm evidence command should parse");
+
+        match prepared.cli.command {
+            Commands::SwarmEvidence(args) => match args.command {
+                super::swarm_evidence_cmd::SwarmEvidenceCommand::Explore(explore_args) => {
+                    assert_eq!(explore_args.file, PathBuf::from("bundle.jsonl"));
+                    assert_eq!(explore_args.filters.action.as_deref(), Some("delay"));
+                    assert_eq!(
+                        explore_args.filters.dominant_loss_term.as_deref(),
+                        Some("zone_fairness")
+                    );
+                    assert_eq!(explore_args.limit, 5);
+                }
+                command => panic!("expected swarm evidence explore command, got {command:?}"),
+            },
+            command => panic!("expected swarm evidence command, got {command:?}"),
         }
     }
 

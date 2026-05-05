@@ -140,6 +140,74 @@ max_redirects = 0
 [provides.operations.mark_read.ai_hints]
 when_to_use = "When you want to mark an iMessage conversation as read"
 
+[provides.operations.register_webhook]
+summary = "Register a BlueBubbles webhook"
+capability = "imessage.admin"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.register_webhook.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.register_webhook.ai_hints]
+when_to_use = "When a supervised FCP webhook receiver URL is ready and the local BlueBubbles bridge should deliver new-message and updated-message events to it"
+
+[provides.operations.list_webhooks]
+summary = "List BlueBubbles webhooks"
+capability = "imessage.admin"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.list_webhooks.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.list_webhooks.ai_hints]
+when_to_use = "When you need to inspect existing BlueBubbles webhook callback registrations before register or cleanup"
+
+[provides.operations.unregister_webhook]
+summary = "Unregister BlueBubbles webhooks"
+capability = "imessage.admin"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.unregister_webhook.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.unregister_webhook.ai_hints]
+when_to_use = "When a BlueBubbles callback URL is no longer valid or duplicate webhook registrations need cleanup"
+
+[provides.operations.ingest_webhook_event]
+summary = "Normalize a BlueBubbles webhook event"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "best_effort"
+
+[provides.operations.ingest_webhook_event.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.ingest_webhook_event.ai_hints]
+when_to_use = "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local payload normalization plus duplicate replay suppression"
+
 [provides.operations.get_server_info]
 summary = "Get BlueBubbles server info"
 capability = "imessage.admin"

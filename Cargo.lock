@@ -4219,6 +4219,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-webhook",
  "hex",
  "reqwest 0.13.2",
  "serde",

@@ -6,18 +6,25 @@ use async_trait::async_trait;
 use base64::Engine as _;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
+use fcp_webhook::{
+    SignatureAlgorithm, SignatureVerifier, WebhookConfig, WebhookError, WebhookHandler,
+    WebhookResult,
+};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
-use crate::types::{BlueBubblesConfig, Message, QueryParams};
+use crate::types::{
+    BlueBubblesConfig, Message, QueryParams, bluebubbles_webhook_dedupe_id, default_webhook_events,
+    normalize_bluebubbles_webhook_payload,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -30,6 +37,10 @@ const OP_SYNC_EVENTS: &str = "imessage.sync_events";
 const OP_DOWNLOAD_ATTACHMENT: &str = "imessage.download_attachment";
 const OP_MARK_READ: &str = "imessage.mark_read";
 const OP_GET_SERVER_INFO: &str = "imessage.get_server_info";
+const OP_REGISTER_WEBHOOK: &str = "imessage.register_webhook";
+const OP_LIST_WEBHOOKS: &str = "imessage.list_webhooks";
+const OP_UNREGISTER_WEBHOOK: &str = "imessage.unregister_webhook";
+const OP_INGEST_WEBHOOK_EVENT: &str = "imessage.ingest_webhook_event";
 
 // Capability IDs
 const CAP_SEND: &str = "imessage.send";
@@ -38,6 +49,20 @@ const CAP_ADMIN: &str = "imessage.admin";
 
 const DEFAULT_SYNC_CHAT_LIMIT: u64 = 25;
 const DEFAULT_SYNC_MESSAGE_LIMIT: u64 = 50;
+const WEBHOOK_DEDUPE_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
+
+#[derive(Debug, Clone)]
+struct BlueBubblesWebhookPassthroughVerifier;
+
+impl SignatureVerifier for BlueBubblesWebhookPassthroughVerifier {
+    fn verify(&self, _payload: &[u8], _signature: &str) -> WebhookResult<()> {
+        Ok(())
+    }
+
+    fn algorithm(&self) -> SignatureAlgorithm {
+        SignatureAlgorithm::HmacSha256
+    }
+}
 
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
@@ -67,6 +92,7 @@ struct BlueBubblesState {
     config: BlueBubblesConfig,
     client: BlueBubblesClient,
     runtime: ConnectorRuntime,
+    webhook_dedupe: WebhookHandler<BlueBubblesWebhookPassthroughVerifier>,
 }
 
 impl BlueBubblesState {
@@ -79,11 +105,17 @@ impl BlueBubblesState {
             BlueBubblesClient::from_config(&config).map_err(|error| FcpError::Internal {
                 message: format!("Failed to create BlueBubbles client: {error}"),
             })?;
+        let webhook_dedupe = WebhookHandler::with_config(
+            BlueBubblesWebhookPassthroughVerifier,
+            "bluebubbles",
+            WebhookConfig::default().with_idempotency_ttl(WEBHOOK_DEDUPE_TTL),
+        );
 
         Ok(Self {
             config,
             client,
             runtime,
+            webhook_dedupe,
         })
     }
 }
@@ -141,8 +173,11 @@ impl BlueBubblesConnector {
             | OP_GET_CHAT
             | OP_GET_MESSAGES
             | OP_SYNC_EVENTS
-            | OP_DOWNLOAD_ATTACHMENT => CAP_READ,
-            OP_GET_SERVER_INFO => CAP_ADMIN,
+            | OP_DOWNLOAD_ATTACHMENT
+            | OP_INGEST_WEBHOOK_EVENT => CAP_READ,
+            OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
+                CAP_ADMIN
+            }
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -571,6 +606,185 @@ pub fn operations_info() -> Vec<OperationInfo> {
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
+            id: OperationId::from_static(OP_REGISTER_WEBHOOK),
+            summary: "Register a BlueBubbles webhook".into(),
+            description: Some(
+                "Registers a BlueBubbles callback URL for message webhook events, reusing an existing matching registration by default".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Absolute callback URL. Defaults to the connector webhook_host/webhook_port/webhook_path with password query auth."
+                    },
+                    "events": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "BlueBubbles event names to register",
+                        "default": default_webhook_events()
+                    },
+                    "skip_if_existing": {
+                        "type": "boolean",
+                        "description": "When true, list existing webhooks and avoid duplicate registration for the same URL",
+                        "default": true
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "registration_status": { "type": "string", "enum": ["existing", "registered"] },
+                    "webhook": { "type": "object" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_ADMIN),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When the host has a supervised BlueBubbles webhook receiver URL and needs the Mac bridge to start delivering message events".into(),
+                common_mistakes: vec![
+                    "Registering duplicate callback URLs after a restart instead of using skip_if_existing".into(),
+                    "Assuming this starts the local HTTP listener; it only registers the remote BlueBubbles callback".into(),
+                ],
+                examples: vec![
+                    r#"{"url": "http://localhost:8645/bluebubbles-webhook?password=secret"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static(OP_LIST_WEBHOOKS),
+                    CapabilityId::from_static(OP_UNREGISTER_WEBHOOK),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_LIST_WEBHOOKS),
+            summary: "List BlueBubbles webhooks".into(),
+            description: Some("Lists webhook registrations currently configured on the BlueBubbles server".into()),
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "webhooks": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_ADMIN),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need to inspect current BlueBubbles webhook callback registrations before registering or cleaning up".into(),
+                common_mistakes: vec![
+                    "Assuming the webhook URL is secret-free; BlueBubbles callback auth may be embedded in the URL".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![CapabilityId::from_static(OP_REGISTER_WEBHOOK)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_UNREGISTER_WEBHOOK),
+            summary: "Unregister BlueBubbles webhooks".into(),
+            description: Some(
+                "Deletes one BlueBubbles webhook by ID or all registrations matching a callback URL".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "webhook_id": {
+                        "type": "string",
+                        "description": "Specific BlueBubbles webhook ID to delete"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Callback URL; all matching registered webhooks with IDs are deleted"
+                    }
+                },
+                "anyOf": [
+                    { "required": ["webhook_id"] },
+                    { "required": ["url"] }
+                ]
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "deleted_count": { "type": "integer" },
+                    "deleted": { "type": "array", "items": { "type": "object" } }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_ADMIN),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When a BlueBubbles callback is no longer valid or duplicate callback registrations need cleanup".into(),
+                common_mistakes: vec![
+                    "Deleting a webhook before the replacement receiver has been registered and verified".into(),
+                ],
+                examples: vec![
+                    r#"{"webhook_id": "42"}"#.into(),
+                    r#"{"url": "http://localhost:8645/bluebubbles-webhook?password=secret"}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static(OP_LIST_WEBHOOKS)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_INGEST_WEBHOOK_EVENT),
+            summary: "Normalize a BlueBubbles webhook event".into(),
+            description: Some(
+                "Normalizes a host-delivered BlueBubbles webhook payload into an FCP event-shaped record and atomically claims its account-scoped dedupe key".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["payload"],
+                "properties": {
+                    "payload": {
+                        "type": "object",
+                        "description": "Raw BlueBubbles webhook JSON body"
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "description": "Optional event type override when the transport carries it outside the JSON body"
+                    },
+                    "account_id": {
+                        "type": "string",
+                        "description": "Optional account namespace for dedupe; defaults to connector webhook_account_id"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string", "enum": ["accepted", "duplicate"] },
+                    "dedupe_id": { "type": "string" },
+                    "event": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local payload normalization and duplicate replay suppression".into(),
+                common_mistakes: vec![
+                    "Treating this as external sender authorization; pairing and sender policy are separate follow-up gates".into(),
+                    "Assuming in-process dedupe survives connector restart; the durable seven-day store is a separate follow-up".into(),
+                ],
+                examples: vec![
+                    r#"{"payload": {"type": "new-message", "data": {"guid": "msg-1", "text": "hello"}}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static(OP_SYNC_EVENTS)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
             id: OperationId::from_static(OP_GET_SERVER_INFO),
             summary: "Get BlueBubbles server info".into(),
             description: Some(
@@ -631,6 +845,96 @@ fn message_to_sync_event(chat_guid: &str, message: &Message) -> serde_json::Valu
         "has_attachments": !message.attachments.is_empty(),
         "message": message,
     })
+}
+
+fn required_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing '{field}' field"),
+        })
+}
+
+fn optional_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn webhook_events_from_input(input: &Value) -> FcpResult<Vec<String>> {
+    let Some(values) = input.get("events") else {
+        return Ok(default_webhook_events());
+    };
+    let events = values.as_array().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: "events must be an array of non-empty strings".into(),
+    })?;
+    let events = events
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "events must contain only non-empty strings".into(),
+                })
+        })
+        .collect::<FcpResult<Vec<_>>>()?;
+    if events.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "events must not be empty".into(),
+        });
+    }
+    Ok(events)
+}
+
+#[must_use]
+pub fn events_info() -> Vec<EventInfo> {
+    let schema = json!({
+        "type": "object",
+        "required": ["event_type", "topic", "event_id", "is_from_me", "is_group"],
+        "properties": {
+            "event_type": { "type": "string" },
+            "topic": { "type": "string" },
+            "event_id": { "type": "string" },
+            "chat_guid": { "type": "string" },
+            "chat_identifier": { "type": "string" },
+            "sender_id": { "type": "string" },
+            "sender_name": { "type": "string" },
+            "text": { "type": "string" },
+            "is_from_me": { "type": "boolean" },
+            "is_group": { "type": "boolean" },
+            "attachments": { "type": "array", "items": { "type": "object" } },
+            "reply_to_message_guid": { "type": "string" },
+            "associated_message_guid": { "type": "string" },
+            "associated_message_type": { "type": "integer" },
+            "balloon_bundle_id": { "type": "string" },
+            "is_tapback": { "type": "boolean" }
+        }
+    });
+    [
+        "imessage.message.inbound",
+        "imessage.message.outbound",
+        "imessage.message.updated",
+        "imessage.message.tapback",
+    ]
+    .into_iter()
+    .map(|topic| EventInfo {
+        topic: topic.to_string(),
+        schema: schema.clone(),
+        requires_ack: false,
+    })
+    .collect()
 }
 
 fcp_core::impl_fcp_sealed!(BlueBubblesConnector);
@@ -776,7 +1080,7 @@ impl FcpConnector for BlueBubblesConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: operations_info(),
-            events: Vec::new(),
+            events: events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
             event_caps: Some(EventCaps {
@@ -1046,6 +1350,99 @@ impl BlueBubblesConnector {
 
                 json!({ "status": "marked_read" })
             }
+            OP_REGISTER_WEBHOOK => {
+                let webhook_url = optional_string(&req.input, "url")
+                    .map(str::to_string)
+                    .map_or_else(|| state.config.webhook_registration_url(), Ok)?;
+                let events = webhook_events_from_input(&req.input)?;
+                let skip_if_existing = req
+                    .input
+                    .get("skip_if_existing")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+
+                client
+                    .register_webhook(runtime, &webhook_url, events, skip_if_existing)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_LIST_WEBHOOKS => {
+                let webhooks = client
+                    .list_webhooks(runtime)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({ "webhooks": webhooks })
+            }
+            OP_UNREGISTER_WEBHOOK => {
+                let mut deleted = Vec::new();
+                if let Some(webhook_id) = optional_string(&req.input, "webhook_id") {
+                    let response = client
+                        .delete_webhook(runtime, webhook_id)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    deleted.push(json!({
+                        "webhook_id": webhook_id,
+                        "response": response,
+                    }));
+                } else {
+                    let webhook_url = required_string(&req.input, "url")?;
+                    let webhooks = client
+                        .list_webhooks(runtime)
+                        .await
+                        .map_err(|e| e.to_fcp_error())?;
+                    for webhook in webhooks
+                        .into_iter()
+                        .filter(|webhook| webhook.url.as_deref() == Some(webhook_url))
+                    {
+                        if let Some(webhook_id) = webhook.id.as_deref() {
+                            let response = client
+                                .delete_webhook(runtime, webhook_id)
+                                .await
+                                .map_err(|e| e.to_fcp_error())?;
+                            deleted.push(json!({
+                                "webhook_id": webhook_id,
+                                "url": webhook.url,
+                                "response": response,
+                            }));
+                        }
+                    }
+                }
+                json!({
+                    "deleted_count": deleted.len(),
+                    "deleted": deleted,
+                })
+            }
+            OP_INGEST_WEBHOOK_EVENT => {
+                let payload = req
+                    .input
+                    .get("payload")
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing 'payload' field".into(),
+                    })?;
+                let account_id = optional_string(&req.input, "account_id")
+                    .unwrap_or(state.config.webhook_account_id.as_str());
+                let event_type = optional_string(&req.input, "event_type");
+                let event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
+                let dedupe_id = bluebubbles_webhook_dedupe_id(account_id, &event);
+                match state.webhook_dedupe.claim_event(&dedupe_id) {
+                    Ok(()) => json!({
+                        "status": "accepted",
+                        "dedupe_id": dedupe_id,
+                        "event": event,
+                    }),
+                    Err(WebhookError::ReplayDetected { .. }) => json!({
+                        "status": "duplicate",
+                        "dedupe_id": dedupe_id,
+                        "event": event,
+                    }),
+                    Err(error) => {
+                        return Err(FcpError::Internal {
+                            message: format!("BlueBubbles webhook dedupe failed: {error}"),
+                        });
+                    }
+                }
+            }
             OP_GET_SERVER_INFO => {
                 let info = client
                     .server_info(runtime)
@@ -1134,10 +1531,16 @@ mod tests {
         })
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        connector: &BlueBubblesConnector,
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+    ) -> CapabilityToken {
         let capability = match op {
             OP_SEND_MESSAGE | OP_MARK_READ => CAP_SEND,
-            OP_GET_SERVER_INFO => CAP_ADMIN,
+            OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
+                CAP_ADMIN
+            }
             _ => CAP_READ,
         };
         let now = Utc::now();
@@ -1156,6 +1559,7 @@ mod tests {
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
+            .target_instance(connector.base.instance_id.as_str())
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1383,7 +1787,7 @@ mod tests {
                 "chat_guid": "iMessage;-;+15551234567",
                 "message": "hello from fcp"
             }),
-            capability_token: generate_valid_token(&signing_key, OP_SEND_MESSAGE),
+            capability_token: generate_valid_token(&connector, &signing_key, OP_SEND_MESSAGE),
             ..base_invoke(connector.id(), OP_SEND_MESSAGE)
         };
         let response = connector.invoke(req).await?;
@@ -1495,7 +1899,7 @@ mod tests {
             OperationId::from_static(OP_SEND_MESSAGE),
             ZoneId::work(),
             json!({}),
-            generate_valid_token(&signing_key, OP_SEND_MESSAGE),
+            generate_valid_token(&connector, &signing_key, OP_SEND_MESSAGE),
         );
         let resp = connector.simulate(req).await.unwrap();
         assert!(resp.would_succeed);
@@ -1546,7 +1950,7 @@ mod tests {
             OperationId::from_static(OP_SEND_MESSAGE),
             ZoneId::work(),
             json!({}),
-            generate_valid_token(&signing_key, OP_GET_CHATS),
+            generate_valid_token(&connector, &signing_key, OP_GET_CHATS),
         );
         let resp = connector.simulate(req).await.unwrap();
         assert!(!resp.would_succeed);
@@ -1557,7 +1961,7 @@ mod tests {
     fn test_introspection_operations() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 8);
+        assert_eq!(intro.operations.len(), 12);
         assert!(
             intro
                 .operations
@@ -1605,6 +2009,36 @@ mod tests {
                 .operations
                 .iter()
                 .any(|op| op.id.as_str() == OP_GET_SERVER_INFO)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_REGISTER_WEBHOOK)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_LIST_WEBHOOKS)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_UNREGISTER_WEBHOOK)
+        );
+        assert!(
+            intro
+                .operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_INGEST_WEBHOOK_EVENT)
+        );
+        assert!(
+            intro
+                .events
+                .iter()
+                .any(|event| event.topic == "imessage.message.tapback")
         );
     }
 
@@ -1868,7 +2302,7 @@ mod tests {
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 8);
+        assert_eq!(ops.len(), 12);
     }
 
     #[test]
@@ -1932,6 +2366,17 @@ mod tests {
             .unwrap();
         assert_eq!(mark.safety_tier, SafetyTier::Safe);
         assert_eq!(mark.idempotency, IdempotencyClass::BestEffort);
+    }
+
+    #[test]
+    fn test_webhook_register_is_risky_best_effort() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_REGISTER_WEBHOOK)
+            .unwrap();
+        assert_eq!(op.safety_tier, SafetyTier::Risky);
+        assert_eq!(op.idempotency, IdempotencyClass::BestEffort);
     }
 
     #[test]
@@ -2065,7 +2510,7 @@ mod tests {
                 "after": 1_700_000_000_000_i64,
                 "message_limit": 10
             }),
-            capability_token: generate_valid_token(&signing_key, OP_SYNC_EVENTS),
+            capability_token: generate_valid_token(&connector, &signing_key, OP_SYNC_EVENTS),
             ..base_invoke(connector.id(), OP_SYNC_EVENTS)
         };
 
@@ -2078,5 +2523,107 @@ mod tests {
         assert_eq!(events[0]["thread"]["thread_originator_guid"], "root-1");
         assert_eq!(result["next_after"], 1_700_000_000_101_i64);
         assert_eq!(result["synced_chats"], 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_dedupes_replay() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let input = json!({
+            "account_id": "acct-a",
+            "payload": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-1",
+                    "text": "hello",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+        let req = InvokeRequest {
+            input: input.clone(),
+            capability_token: generate_valid_token(
+                &connector,
+                &signing_key,
+                OP_INGEST_WEBHOOK_EVENT,
+            ),
+            ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+        };
+        let first = connector.invoke(req).await.unwrap();
+        let first_result = first.result.as_ref().unwrap();
+        assert_eq!(first_result["status"], "accepted");
+        assert_eq!(first_result["dedupe_id"], "acct-a:msg-1");
+        assert_eq!(first_result["event"]["topic"], "imessage.message.inbound");
+
+        let req = InvokeRequest {
+            input,
+            capability_token: generate_valid_token(
+                &connector,
+                &signing_key,
+                OP_INGEST_WEBHOOK_EVENT,
+            ),
+            ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+        };
+        let second = connector.invoke(req).await.unwrap();
+        assert_eq!(second.result.as_ref().unwrap()["status"], "duplicate");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_register_webhook_posts_when_no_existing_match() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/webhook"))
+            .and(query_param("password", "test-password-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "data": []
+            })))
+            .mount(&mock_server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/webhook"))
+            .and(query_param("password", "test-password-123"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "status": 200,
+                "message": "registered",
+                "data": {
+                    "id": "wh-1",
+                    "url": "http://localhost:8645/bluebubbles-webhook?password=secret",
+                    "events": ["new-message", "updated-message"]
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_url(&mock_server.uri()))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+        let req = InvokeRequest {
+            input: json!({
+                "url": "http://localhost:8645/bluebubbles-webhook?password=secret"
+            }),
+            capability_token: generate_valid_token(&connector, &signing_key, OP_REGISTER_WEBHOOK),
+            ..base_invoke(connector.id(), OP_REGISTER_WEBHOOK)
+        };
+
+        let response = connector.invoke(req).await.unwrap();
+        let result = response.result.as_ref().unwrap();
+        assert_eq!(result["registration_status"], "registered");
+        assert_eq!(result["response"]["data"]["id"], "wh-1");
     }
 }

@@ -8,6 +8,7 @@ use fcp_sdk::migration::{
 };
 use fcp_sdk::retry::RetryDecision;
 use reqwest::Client;
+use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -37,6 +38,7 @@ fn sanitize_path_segment<'a>(value: &'a str, field: &str) -> BlueBubblesResult<&
 use crate::types::{
     BlueBubblesConfig, Chat, Message, PaginatedResponse, QueryParams, SEND_METHOD_APPLE_SCRIPT,
     SEND_METHOD_PRIVATE_API, SendMessageRequest, SendMessageResponse, ServerInfo,
+    WebhookRegistration, WebhookRegistrationRequest,
 };
 
 fn retry_after_from_headers(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
@@ -67,6 +69,48 @@ async fn decode_server_info(resp: reqwest::Response) -> Result<ServerInfo, BlueB
         .filter(|data| data.is_object())
         .unwrap_or(&value);
     serde_json::from_value(info.clone()).map_err(BlueBubblesError::Json)
+}
+
+async fn decode_json_value(resp: reqwest::Response) -> Result<Value, BlueBubblesError> {
+    resp.json::<Value>().await.map_err(BlueBubblesError::Http)
+}
+
+fn parse_webhook_registrations(
+    value: &Value,
+) -> Result<Vec<WebhookRegistration>, BlueBubblesError> {
+    let data = value
+        .get("data")
+        .filter(|value| value.is_array() || value.is_object())
+        .unwrap_or(&value);
+
+    if let Some(webhooks) = data.as_array() {
+        return webhooks
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BlueBubblesError::Json);
+    }
+
+    if let Some(webhooks) = data
+        .as_object()
+        .and_then(|object| object.get("webhooks"))
+        .and_then(Value::as_array)
+    {
+        return webhooks
+            .iter()
+            .cloned()
+            .map(serde_json::from_value)
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(BlueBubblesError::Json);
+    }
+
+    Err(BlueBubblesError::Json(serde_json::Error::io(
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "BlueBubbles webhook list response did not contain an array",
+        ),
+    )))
 }
 
 fn parse_macos_major_version(version: Option<&str>) -> Option<u64> {
@@ -310,6 +354,279 @@ impl BlueBubblesClient {
                 }
 
                 match decode_server_info(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// List registered `BlueBubbles` webhook callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails or the response cannot be parsed.
+    pub async fn list_webhooks(
+        &self,
+        runtime: &ConnectorRuntime,
+    ) -> BlueBubblesResult<Vec<WebhookRegistration>> {
+        let url = format!("{}/api/v1/webhook", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            async move {
+                debug!(attempt, "Listing BlueBubbles webhooks");
+                let resp = match client
+                    .get(&url)
+                    .query(&[("password", &server_passcode)])
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_json_value(resp)
+                    .await
+                    .and_then(|value| parse_webhook_registrations(&value))
+                {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Register a `BlueBubbles` webhook callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails.
+    pub async fn register_webhook(
+        &self,
+        runtime: &ConnectorRuntime,
+        webhook_url: &str,
+        events: Vec<String>,
+        skip_if_existing: bool,
+    ) -> BlueBubblesResult<Value> {
+        let webhook_url = webhook_url.trim();
+        if webhook_url.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "webhook url must not be empty".into(),
+            ));
+        }
+        reqwest::Url::parse(webhook_url).map_err(|error| {
+            BlueBubblesError::Validation(format!("webhook url must be absolute: {error}"))
+        })?;
+        if events.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "webhook events must not be empty".into(),
+            ));
+        }
+
+        if skip_if_existing {
+            let webhooks = self.list_webhooks(runtime).await?;
+            if let Some(existing) = webhooks
+                .iter()
+                .find(|webhook| webhook.url.as_deref() == Some(webhook_url))
+            {
+                return Ok(json!({
+                    "registration_status": "existing",
+                    "webhook": existing,
+                }));
+            }
+        }
+
+        let url = format!("{}/api/v1/webhook", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+        let body = WebhookRegistrationRequest {
+            url: webhook_url.to_string(),
+            events,
+        };
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let body = body.clone();
+            async move {
+                debug!(attempt, "Registering BlueBubbles webhook");
+                let resp = match client
+                    .post(&url)
+                    .query(&[("password", &server_passcode)])
+                    .json(&body)
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_json_value(resp).await {
+                    Ok(value) => AttemptOutcome::Success(json!({
+                        "registration_status": "registered",
+                        "response": value,
+                    })),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Delete a registered `BlueBubbles` webhook callback by server ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API call fails.
+    pub async fn delete_webhook(
+        &self,
+        runtime: &ConnectorRuntime,
+        webhook_id: &str,
+    ) -> BlueBubblesResult<Value> {
+        let webhook_id = sanitize_path_segment(webhook_id, "webhook_id")?;
+        let url = format!("{}/api/v1/webhook/{webhook_id}", self.server_url);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            async move {
+                debug!(attempt, "Deleting BlueBubbles webhook");
+                let resp = match client
+                    .delete(&url)
+                    .query(&[("password", &server_passcode)])
+                    .send()
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_json_value(resp).await {
                     Ok(value) => AttemptOutcome::Success(value),
                     Err(error) => AttemptOutcome::Terminal(error),
                 }

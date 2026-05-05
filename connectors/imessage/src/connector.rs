@@ -29,7 +29,7 @@ use crate::types::{
     NormalizedBlueBubblesWebhookMessage, QueryParams, SendMessageOptions,
     bluebubbles_webhook_source_dedupe_ids, default_webhook_events,
     normalize_bluebubbles_contact_phone_key, normalize_bluebubbles_message_effect,
-    normalize_bluebubbles_webhook_payload,
+    normalize_bluebubbles_tapback_reaction, normalize_bluebubbles_webhook_payload,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -38,6 +38,11 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const OP_SEND_MESSAGE: &str = "imessage.send_message";
 const OP_RESOLVE_SEND_TARGET: &str = "imessage.resolve_send_target";
 const OP_CREATE_CHAT: &str = "imessage.create_chat";
+const OP_GET_ACTION_AVAILABILITY: &str = "imessage.get_action_availability";
+const OP_EDIT_MESSAGE: &str = "imessage.edit_message";
+const OP_UNSEND_MESSAGE: &str = "imessage.unsend_message";
+const OP_SEND_REACTION: &str = "imessage.send_reaction";
+const OP_SET_TYPING: &str = "imessage.set_typing";
 const OP_GET_CHATS: &str = "imessage.get_chats";
 const OP_GET_CHAT: &str = "imessage.get_chat";
 const OP_GET_MESSAGES: &str = "imessage.get_messages";
@@ -1588,7 +1593,8 @@ impl BlueBubblesConnector {
 
     fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         let capability = match operation {
-            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_MARK_READ => CAP_SEND,
+            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_EDIT_MESSAGE | OP_UNSEND_MESSAGE
+            | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
             OP_GET_CHATS
             | OP_GET_CHAT
             | OP_GET_MESSAGES
@@ -1596,9 +1602,11 @@ impl BlueBubblesConnector {
             | OP_DOWNLOAD_ATTACHMENT
             | OP_RESOLVE_SEND_TARGET
             | OP_INGEST_WEBHOOK_EVENT => CAP_READ,
-            OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
-                CAP_ADMIN
-            }
+            OP_GET_SERVER_INFO
+            | OP_GET_ACTION_AVAILABILITY
+            | OP_REGISTER_WEBHOOK
+            | OP_LIST_WEBHOOKS
+            | OP_UNREGISTER_WEBHOOK => CAP_ADMIN,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
@@ -1841,6 +1849,22 @@ fn optional_u64_field(input: &Value, names: &[&str], label: &str) -> FcpResult<O
             });
         };
         return Ok(Some(number));
+    }
+    Ok(None)
+}
+
+fn optional_bool_field(input: &Value, names: &[&str], label: &str) -> FcpResult<Option<bool>> {
+    for name in names {
+        let Some(value) = input.get(*name) else {
+            continue;
+        };
+        let Some(flag) = value.as_bool() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{label} must be a boolean"),
+            });
+        };
+        return Ok(Some(flag));
     }
     Ok(None)
 }
@@ -2109,6 +2133,205 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     CapabilityId::from_static(OP_RESOLVE_SEND_TARGET),
                     CapabilityId::from_static(OP_SEND_MESSAGE),
                 ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_GET_ACTION_AVAILABILITY),
+            summary: "Inspect BlueBubbles action availability".into(),
+            description: Some(
+                "Returns a server-info-derived snapshot for Private API action gates: edit, unsend, tapback reactions, typing indicators, and read receipts. Authentication and rate-limit failures are preserved as errors; other server-info failures produce unavailable action reasons.".into(),
+            ),
+            input_schema: json!({ "type": "object" }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "server_info_available": { "type": "boolean" },
+                    "server_info_error": { "type": ["string", "null"] },
+                    "private_api": { "type": ["boolean", "null"] },
+                    "helper_connected": { "type": ["boolean", "null"] },
+                    "os_version": { "type": ["string", "null"] },
+                    "server_version": { "type": ["string", "null"] },
+                    "edit": { "type": "object" },
+                    "unsend": { "type": "object" },
+                    "reaction": { "type": "object" },
+                    "typing": { "type": "object" },
+                    "mark_read": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_ADMIN),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "When you need deterministic availability reasons before invoking BlueBubbles Private API actions".into(),
+                common_mistakes: vec![
+                    "Treating static OperationInfo as proof an action is enabled on the local Mac".into(),
+                    "Ignoring macOS 26 edit denial; BlueBubbles edit is intentionally unavailable there".into(),
+                ],
+                examples: vec![r"{}".into()],
+                related: vec![
+                    CapabilityId::from_static(OP_EDIT_MESSAGE),
+                    CapabilityId::from_static(OP_UNSEND_MESSAGE),
+                    CapabilityId::from_static(OP_SEND_REACTION),
+                    CapabilityId::from_static(OP_SET_TYPING),
+                    CapabilityId::from_static(OP_MARK_READ),
+                ],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_EDIT_MESSAGE),
+            summary: "Edit a sent iMessage".into(),
+            description: Some(
+                "Edits a sent message through BlueBubbles /api/v1/message/{guid}/edit. Requires known enabled Private API, connected helper when reported, and a supported macOS version; macOS 26+ fails closed.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["message_guid", "new_text"],
+                "properties": {
+                    "message_guid": { "type": "string" },
+                    "new_text": { "type": "string" },
+                    "part_index": { "type": "integer", "minimum": 0, "default": 0 },
+                    "backwards_compatibility_message": { "type": "string" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "action": { "type": "string" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When the caller explicitly wants to edit a previously sent iMessage by GUID".into(),
+                common_mistakes: vec![
+                    "Calling edit before checking get_action_availability on macOS 26+ hosts".into(),
+                    "Passing a short reply alias instead of the full message GUID".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_GET_ACTION_AVAILABILITY)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_UNSEND_MESSAGE),
+            summary: "Unsend a sent iMessage".into(),
+            description: Some(
+                "Retracts a sent message through BlueBubbles /api/v1/message/{guid}/unsend. Requires known enabled Private API and fails closed when the action cannot be proven available.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["message_guid"],
+                "properties": {
+                    "message_guid": { "type": "string" },
+                    "part_index": { "type": "integer", "minimum": 0, "default": 0 }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "action": { "type": "string" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Dangerous,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When the caller explicitly wants to retract a previously sent iMessage by GUID".into(),
+                common_mistakes: vec![
+                    "Treating unsend as best effort; FCP fails closed when support is unknown or disabled".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_GET_ACTION_AVAILABILITY)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_SEND_REACTION),
+            summary: "Send or remove an iMessage tapback".into(),
+            description: Some(
+                "Adds or removes a BlueBubbles tapback reaction through /api/v1/message/react. Reaction input is normalized to iMessage tapbacks only: love, like, dislike, laugh, emphasize, or question.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["chat_guid", "message_guid", "reaction"],
+                "properties": {
+                    "chat_guid": { "type": "string" },
+                    "message_guid": { "type": "string" },
+                    "reaction": { "type": "string" },
+                    "remove": { "type": "boolean", "default": false },
+                    "part_index": { "type": "integer", "minimum": 0, "default": 0 }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "reaction": { "type": "string" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When the caller wants to add or remove an iMessage tapback on a specific message".into(),
+                common_mistakes: vec![
+                    "Passing arbitrary emoji; iMessage tapbacks are limited to six reaction types".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_GET_ACTION_AVAILABILITY)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_SET_TYPING),
+            summary: "Start or stop an iMessage typing indicator".into(),
+            description: Some(
+                "Starts or stops a BlueBubbles typing indicator using POST or DELETE /api/v1/chat/{guid}/typing. Requires known enabled Private API and fails closed otherwise.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["chat_guid"],
+                "properties": {
+                    "chat_guid": { "type": "string" },
+                    "typing": { "type": "boolean", "default": true }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "typing": { "type": "boolean" },
+                    "response": { "type": "object" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_SEND),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When the caller wants to explicitly show or clear a typing indicator for a chat".into(),
+                common_mistakes: vec![
+                    "Assuming missing Private API support can be ignored; FCP returns a stable unsupported error".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(OP_GET_ACTION_AVAILABILITY)],
             },
             rate_limit: None,
             requires_approval: Some(ApprovalMode::None),
@@ -3026,6 +3249,112 @@ impl BlueBubblesConnector {
                     "response": outcome.response,
                 })
             }
+            OP_GET_ACTION_AVAILABILITY => {
+                let availability = client
+                    .action_availability(runtime)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&availability).map_err(|e| FcpError::Internal {
+                    message: format!("Failed to serialize action availability: {e}"),
+                })?
+            }
+            OP_EDIT_MESSAGE => {
+                let message_guid = required_string(&req.input, "message_guid")?;
+                let new_text = required_string(&req.input, "new_text")?;
+                let part_index =
+                    optional_u64_field(&req.input, &["part_index", "partIndex"], "part_index")?
+                        .unwrap_or(0);
+                let backwards_compatibility_message =
+                    optional_string(&req.input, "backwards_compatibility_message");
+                let response = client
+                    .edit_message(
+                        runtime,
+                        message_guid,
+                        new_text,
+                        part_index,
+                        backwards_compatibility_message,
+                    )
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "edited",
+                    "action": "edit",
+                    "message_guid": message_guid,
+                    "part_index": part_index,
+                    "response": response,
+                })
+            }
+            OP_UNSEND_MESSAGE => {
+                let message_guid = required_string(&req.input, "message_guid")?;
+                let part_index =
+                    optional_u64_field(&req.input, &["part_index", "partIndex"], "part_index")?
+                        .unwrap_or(0);
+                let response = client
+                    .unsend_message(runtime, message_guid, part_index)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "unsent",
+                    "action": "unsend",
+                    "message_guid": message_guid,
+                    "part_index": part_index,
+                    "response": response,
+                })
+            }
+            OP_SEND_REACTION => {
+                let chat_guid = required_string(&req.input, "chat_guid")?;
+                let message_guid = required_string(&req.input, "message_guid")?;
+                let reaction_input = required_string(&req.input, "reaction")?;
+                let remove =
+                    optional_bool_field(&req.input, &["remove"], "remove")?.unwrap_or(false);
+                let part_index =
+                    optional_u64_field(&req.input, &["part_index", "partIndex"], "part_index")?
+                        .unwrap_or(0);
+                let normalized_reaction = normalize_bluebubbles_tapback_reaction(
+                    reaction_input,
+                    remove,
+                )
+                .ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message:
+                        "reaction must be one of love, like, dislike, laugh, emphasize, or question"
+                            .into(),
+                })?;
+                let response = client
+                    .send_reaction(
+                        runtime,
+                        chat_guid,
+                        message_guid,
+                        reaction_input,
+                        remove,
+                        part_index,
+                    )
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "reacted",
+                    "action": "reaction",
+                    "chat_guid": chat_guid,
+                    "message_guid": message_guid,
+                    "reaction": normalized_reaction,
+                    "part_index": part_index,
+                    "response": response,
+                })
+            }
+            OP_SET_TYPING => {
+                let chat_guid = required_string(&req.input, "chat_guid")?;
+                let typing =
+                    optional_bool_field(&req.input, &["typing"], "typing")?.unwrap_or(true);
+                let response = client
+                    .set_typing(runtime, chat_guid, typing)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": if typing { "typing_started" } else { "typing_stopped" },
+                    "typing": typing,
+                    "response": response,
+                })
+            }
             OP_GET_CHATS => {
                 let offset = req.input.get("offset").and_then(serde_json::Value::as_u64);
                 let limit = req.input.get("limit").and_then(serde_json::Value::as_u64);
@@ -3603,10 +3932,13 @@ mod tests {
         op: &str,
     ) -> CapabilityToken {
         let capability = match op {
-            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_MARK_READ => CAP_SEND,
-            OP_GET_SERVER_INFO | OP_REGISTER_WEBHOOK | OP_LIST_WEBHOOKS | OP_UNREGISTER_WEBHOOK => {
-                CAP_ADMIN
-            }
+            OP_SEND_MESSAGE | OP_CREATE_CHAT | OP_EDIT_MESSAGE | OP_UNSEND_MESSAGE
+            | OP_SEND_REACTION | OP_SET_TYPING | OP_MARK_READ => CAP_SEND,
+            OP_GET_SERVER_INFO
+            | OP_GET_ACTION_AVAILABILITY
+            | OP_REGISTER_WEBHOOK
+            | OP_LIST_WEBHOOKS
+            | OP_UNREGISTER_WEBHOOK => CAP_ADMIN,
             _ => CAP_READ,
         };
         let now = Utc::now();
@@ -3639,6 +3971,7 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct LoopbackRequest {
+        method: String,
         target: String,
         body: Vec<u8>,
     }
@@ -3783,7 +4116,7 @@ mod tests {
         let mut lines = header_text.split("\r\n");
         let request_line = lines.next().expect("request line");
         let mut parts = request_line.split_whitespace();
-        let _method = parts.next().expect("method");
+        let method = parts.next().expect("method").to_string();
         let target = parts.next().expect("target").to_string();
         let mut headers = HashMap::new();
         for line in lines.filter(|line| !line.is_empty()) {
@@ -3802,7 +4135,11 @@ mod tests {
         }
         body.truncate(content_length);
 
-        LoopbackRequest { target, body }
+        LoopbackRequest {
+            method,
+            target,
+            body,
+        }
     }
 
     fn write_loopback_response(
@@ -4042,91 +4379,36 @@ mod tests {
     fn test_introspection_operations() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 14);
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_SEND_MESSAGE)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_RESOLVE_SEND_TARGET)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_CREATE_CHAT)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_GET_CHATS)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_GET_CHAT)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_GET_MESSAGES)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_SYNC_EVENTS)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_DOWNLOAD_ATTACHMENT)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_MARK_READ)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_GET_SERVER_INFO)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_REGISTER_WEBHOOK)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_LIST_WEBHOOKS)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_UNREGISTER_WEBHOOK)
-        );
-        assert!(
-            intro
-                .operations
-                .iter()
-                .any(|op| op.id.as_str() == OP_INGEST_WEBHOOK_EVENT)
-        );
+        assert_eq!(intro.operations.len(), 19);
+        for operation in [
+            OP_SEND_MESSAGE,
+            OP_RESOLVE_SEND_TARGET,
+            OP_CREATE_CHAT,
+            OP_GET_ACTION_AVAILABILITY,
+            OP_EDIT_MESSAGE,
+            OP_UNSEND_MESSAGE,
+            OP_SEND_REACTION,
+            OP_SET_TYPING,
+            OP_GET_CHATS,
+            OP_GET_CHAT,
+            OP_GET_MESSAGES,
+            OP_SYNC_EVENTS,
+            OP_DOWNLOAD_ATTACHMENT,
+            OP_MARK_READ,
+            OP_GET_SERVER_INFO,
+            OP_REGISTER_WEBHOOK,
+            OP_LIST_WEBHOOKS,
+            OP_UNREGISTER_WEBHOOK,
+            OP_INGEST_WEBHOOK_EVENT,
+        ] {
+            assert!(
+                intro
+                    .operations
+                    .iter()
+                    .any(|op| op.id.as_str() == operation),
+                "missing operation {operation}"
+            );
+        }
         assert!(
             intro
                 .events
@@ -4755,10 +5037,291 @@ mod tests {
         assert_eq!(disabled_requests.len(), 1);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn private_api_actions_loopback_edit_unsend_reaction_typing_and_read() {
+        let available_info = || {
+            LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "15.7",
+                        "server_version": "1.9.0",
+                        "private_api": true,
+                        "helper_connected": true
+                    }
+                }),
+            )
+        };
+        let action_ok = || LoopbackResponse::json(200, &json!({ "ok": true }));
+        let server = BlueBubblesLoopback::spawn(
+            "private-api-actions",
+            vec![
+                available_info(),
+                action_ok(),
+                available_info(),
+                action_ok(),
+                available_info(),
+                action_ok(),
+                available_info(),
+                action_ok(),
+                available_info(),
+                action_ok(),
+                available_info(),
+                action_ok(),
+            ],
+        );
+
+        let edit = invoke_against_loopback(
+            server.uri(),
+            OP_EDIT_MESSAGE,
+            json!({
+                "message_guid": "msg-edit",
+                "new_text": "edited text",
+                "backwards_compatibility_message": "edited fallback",
+                "part_index": 2
+            }),
+            None,
+        )
+        .await
+        .expect("edit should succeed when the action gate is available");
+        assert_eq!(edit["status"], "edited");
+
+        let unsend = invoke_against_loopback(
+            server.uri(),
+            OP_UNSEND_MESSAGE,
+            json!({
+                "message_guid": "msg-unsend",
+                "part_index": 1
+            }),
+            None,
+        )
+        .await
+        .expect("unsend should succeed when the action gate is available");
+        assert_eq!(unsend["status"], "unsent");
+
+        let reaction = invoke_against_loopback(
+            server.uri(),
+            OP_SEND_REACTION,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message_guid": "msg-react",
+                "reaction": "thumbs up",
+                "remove": true,
+                "part_index": 3
+            }),
+            None,
+        )
+        .await
+        .expect("tapback reaction should succeed when the action gate is available");
+        assert_eq!(reaction["reaction"], "-like");
+
+        let typing_started = invoke_against_loopback(
+            server.uri(),
+            OP_SET_TYPING,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "typing": true
+            }),
+            None,
+        )
+        .await
+        .expect("typing start should succeed when the action gate is available");
+        assert_eq!(typing_started["status"], "typing_started");
+
+        let typing_stopped = invoke_against_loopback(
+            server.uri(),
+            OP_SET_TYPING,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "typing": false
+            }),
+            None,
+        )
+        .await
+        .expect("typing stop should succeed when the action gate is available");
+        assert_eq!(typing_stopped["status"], "typing_stopped");
+
+        let mark_read = invoke_against_loopback(
+            server.uri(),
+            OP_MARK_READ,
+            json!({ "chat_guid": "iMessage;-;+15551234567" }),
+            None,
+        )
+        .await
+        .expect("mark_read should succeed when the action gate is available");
+        assert_eq!(mark_read["status"], "marked_read");
+
+        let (requests, logs) = server.finish();
+        assert_eq!(requests.len(), 12);
+        assert_eq!(
+            requests[1].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/msg-edit/edit")
+        );
+        let edit_body = requests[1].json_body();
+        assert_eq!(edit_body["editedMessage"], "edited text");
+        assert_eq!(
+            edit_body["backwardsCompatibilityMessage"],
+            "edited fallback"
+        );
+        assert_eq!(edit_body["partIndex"], 2);
+
+        assert_eq!(
+            requests[3].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/msg-unsend/unsend")
+        );
+        assert_eq!(requests[3].json_body()["partIndex"], 1);
+
+        assert_eq!(
+            requests[5].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/message/react")
+        );
+        let reaction_body = requests[5].json_body();
+        assert_eq!(reaction_body["chatGuid"], "iMessage;-;+15551234567");
+        assert_eq!(reaction_body["selectedMessageGuid"], "msg-react");
+        assert_eq!(reaction_body["reaction"], "-like");
+        assert_eq!(reaction_body["partIndex"], 3);
+
+        assert_eq!(requests[7].method, "POST");
+        assert_eq!(
+            requests[7].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/chat/iMessage;-;+15551234567/typing")
+        );
+        assert_eq!(requests[9].method, "DELETE");
+        assert_eq!(
+            requests[9].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/chat/iMessage;-;+15551234567/typing")
+        );
+        assert_eq!(
+            requests[11].target.split_once('?').map(|(path, _)| path),
+            Some("/api/v1/chat/iMessage;-;+15551234567/read")
+        );
+        assert!(
+            logs.iter().all(|entry| entry["target"]
+                .as_str()
+                .is_some_and(|target| !target.contains("test-password-123"))),
+            "private action loopback transcript must redact the passcode"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn private_api_actions_fail_closed_when_disabled_unknown_or_macos26_edit() {
+        let disabled = BlueBubblesLoopback::spawn(
+            "private-actions-disabled",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "15.7",
+                        "server_version": "1.9.0",
+                        "private_api": false,
+                        "helper_connected": true
+                    }
+                }),
+            )],
+        );
+        let disabled_error = invoke_against_loopback(
+            disabled.uri(),
+            OP_SEND_REACTION,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "message_guid": "msg-react",
+                "reaction": "like"
+            }),
+            None,
+        )
+        .await
+        .expect_err("reaction should fail closed when Private API is disabled");
+        assert!(matches!(disabled_error, FcpError::InvalidRequest { .. }));
+        let (disabled_requests, _) = disabled.finish();
+        assert_eq!(disabled_requests.len(), 1);
+
+        let unknown = BlueBubblesLoopback::spawn(
+            "private-actions-server-info-unknown",
+            vec![LoopbackResponse::json(
+                503,
+                &json!({"error": "server info temporarily unavailable"}),
+            )],
+        );
+        let unknown_error = invoke_against_loopback(
+            unknown.uri(),
+            OP_SET_TYPING,
+            json!({
+                "chat_guid": "iMessage;-;+15551234567",
+                "typing": true
+            }),
+            None,
+        )
+        .await
+        .expect_err("typing should fail closed when server info is unavailable");
+        assert!(matches!(unknown_error, FcpError::InvalidRequest { .. }));
+        let (unknown_requests, _) = unknown.finish();
+        assert_eq!(unknown_requests.len(), 1);
+
+        let macos26 = BlueBubblesLoopback::spawn(
+            "private-actions-macos26-edit",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "26.0",
+                        "server_version": "1.9.0",
+                        "private_api": true,
+                        "helper_connected": true
+                    }
+                }),
+            )],
+        );
+        let macos26_error = invoke_against_loopback(
+            macos26.uri(),
+            OP_EDIT_MESSAGE,
+            json!({
+                "message_guid": "msg-edit",
+                "new_text": "edited text"
+            }),
+            None,
+        )
+        .await
+        .expect_err("edit should fail closed on macOS 26+");
+        assert!(matches!(macos26_error, FcpError::InvalidRequest { .. }));
+        let (macos26_requests, _) = macos26.finish();
+        assert_eq!(macos26_requests.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn get_action_availability_loopback_reports_dynamic_status() {
+        let server = BlueBubblesLoopback::spawn(
+            "private-actions-availability",
+            vec![LoopbackResponse::json(
+                200,
+                &json!({
+                    "data": {
+                        "os_version": "26.0",
+                        "server_version": "1.9.0",
+                        "private_api": true,
+                        "helper_connected": true
+                    }
+                }),
+            )],
+        );
+        let result =
+            invoke_against_loopback(server.uri(), OP_GET_ACTION_AVAILABILITY, json!({}), None)
+                .await
+                .expect("availability should return a dynamic status object");
+        assert_eq!(result["server_info_available"], true);
+        assert_eq!(result["private_api"], true);
+        assert_eq!(result["helper_connected"], true);
+        assert_eq!(result["edit"]["supported"], false);
+        assert_eq!(result["edit"]["reason"], "macos26_edit_unsupported");
+        assert_eq!(result["unsend"]["supported"], true);
+        assert_eq!(result["typing"]["reason"], "private_api_supported");
+        let (requests, _) = server.finish();
+        assert_eq!(requests.len(), 1);
+    }
+
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 14);
+        assert_eq!(ops.len(), 19);
     }
 
     #[test]
@@ -4822,6 +5385,53 @@ mod tests {
         assert_eq!(create.capability, CapabilityId::from_static(CAP_SEND));
         assert_eq!(create.safety_tier, SafetyTier::Risky);
         assert_eq!(create.idempotency, IdempotencyClass::None);
+    }
+
+    #[test]
+    fn test_private_api_action_operations_are_explicitly_cataloged() {
+        let ops = operations_info();
+        let expected = [
+            (
+                OP_GET_ACTION_AVAILABILITY,
+                CAP_ADMIN,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+            ),
+            (
+                OP_EDIT_MESSAGE,
+                CAP_SEND,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+            ),
+            (
+                OP_UNSEND_MESSAGE,
+                CAP_SEND,
+                SafetyTier::Dangerous,
+                IdempotencyClass::None,
+            ),
+            (
+                OP_SEND_REACTION,
+                CAP_SEND,
+                SafetyTier::Risky,
+                IdempotencyClass::BestEffort,
+            ),
+            (
+                OP_SET_TYPING,
+                CAP_SEND,
+                SafetyTier::Safe,
+                IdempotencyClass::BestEffort,
+            ),
+        ];
+
+        for (operation_id, capability, safety_tier, idempotency) in expected {
+            let op = ops
+                .iter()
+                .find(|op| op.id.as_str() == operation_id)
+                .unwrap();
+            assert_eq!(op.capability.as_str(), capability);
+            assert_eq!(op.safety_tier, safety_tier);
+            assert_eq!(op.idempotency, idempotency);
+        }
     }
 
     #[test]

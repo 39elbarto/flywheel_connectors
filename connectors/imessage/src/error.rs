@@ -38,6 +38,10 @@ pub enum BlueBubblesError {
     #[error("Private API required for: {feature}")]
     PrivateApiRequired { feature: String },
 
+    /// Action is unavailable even though the API is reachable.
+    #[error("Unsupported BlueBubbles action {action}: {reason}")]
+    UnsupportedAction { action: String, reason: String },
+
     /// Attachment exceeds size limit.
     #[error("Attachment too large: {size_bytes} bytes (max {max_bytes})")]
     AttachmentTooLarge { size_bytes: u64, max_bytes: u64 },
@@ -75,6 +79,7 @@ impl BlueBubblesError {
             | Self::Unauthorized { .. }
             | Self::AttachmentNotFound { .. }
             | Self::PrivateApiRequired { .. }
+            | Self::UnsupportedAction { .. }
             | Self::AttachmentTooLarge { .. }
             | Self::ChatNotFound { .. }
             | Self::Config(_)
@@ -134,6 +139,10 @@ impl BlueBubblesError {
             Self::PrivateApiRequired { feature } => FcpError::InvalidRequest {
                 code: 1010,
                 message: format!("Private API required for: {feature}"),
+            },
+            Self::UnsupportedAction { action, reason } => FcpError::InvalidRequest {
+                code: 1011,
+                message: format!("Unsupported BlueBubbles action {action}: {reason}"),
             },
             Self::AttachmentTooLarge {
                 size_bytes,

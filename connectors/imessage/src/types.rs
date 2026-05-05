@@ -1050,6 +1050,62 @@ pub fn normalize_bluebubbles_message_effect(value: &str) -> Option<String> {
         .or_else(|| Some(trimmed.to_string()))
 }
 
+fn tapback_alias_to_type(alias: &str) -> Option<&'static str> {
+    Some(match alias {
+        "heart" | "love" | "loved" | "red-heart" | "redheart" | "fire" => "love",
+        "thumbs-up" | "thumbsup" | "thumb" | "like" | "liked" | "ok" => "like",
+        "thumbs-down" | "thumbsdown" | "dislike" | "disliked" | "boo" | "no" => "dislike",
+        "haha" | "lol" | "lmao" | "rofl" | "xd" | "laugh" | "laughed" | "smile" | "smiley"
+        | "happy" | "joy" => "laugh",
+        "emphasis" | "emphasize" | "emphasized" | "exclaim" | "important" | "bang" | "wow"
+        | "!" | "!!" => "emphasize",
+        "question" | "questioned" | "ask" | "?" => "question",
+        _ => return None,
+    })
+}
+
+/// Normalize a user-facing reaction into an iMessage tapback type.
+///
+/// `BlueBubbles` accepts exactly love/like/dislike/laugh/emphasize/question,
+/// with removal represented by a leading `-`.
+#[must_use]
+pub fn normalize_bluebubbles_tapback_reaction(value: &str, remove: bool) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let without_remove = trimmed.strip_prefix('-').unwrap_or(trimmed).trim();
+    if without_remove.is_empty() {
+        return None;
+    }
+
+    let lower = without_remove.to_ascii_lowercase();
+    let dashed = lower
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_whitespace() || ch == '_' {
+                '-'
+            } else {
+                ch
+            }
+        })
+        .collect::<String>();
+    let compact = lower
+        .chars()
+        .filter(|ch| !ch.is_ascii_whitespace() && *ch != '_' && *ch != '-')
+        .collect::<String>();
+
+    let reaction = tapback_alias_to_type(&lower)
+        .or_else(|| tapback_alias_to_type(&dashed))
+        .or_else(|| tapback_alias_to_type(&compact))?;
+    let should_remove = remove || trimmed.starts_with('-');
+    Some(if should_remove {
+        format!("-{reaction}")
+    } else {
+        reaction.to_string()
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Chat types
 // ---------------------------------------------------------------------------
@@ -1521,6 +1577,10 @@ pub struct ServerInfo {
     /// Whether the Private API is enabled.
     #[serde(default)]
     pub private_api: bool,
+
+    /// Whether the `BlueBubbles` helper is connected, when the server reports it.
+    #[serde(default)]
+    pub helper_connected: Option<bool>,
 
     /// Proxy service in use (e.g. "ngrok", "cloudflare").
     #[serde(default)]
@@ -2748,6 +2808,27 @@ mod tests {
     }
 
     #[test]
+    fn tapback_reaction_normalization_matches_bluebubbles_types() {
+        assert_eq!(
+            normalize_bluebubbles_tapback_reaction("thumbs up", false).as_deref(),
+            Some("like")
+        );
+        assert_eq!(
+            normalize_bluebubbles_tapback_reaction("emphasis", true).as_deref(),
+            Some("-emphasize")
+        );
+        assert_eq!(
+            normalize_bluebubbles_tapback_reaction("-question", false).as_deref(),
+            Some("-question")
+        );
+        assert_eq!(
+            normalize_bluebubbles_tapback_reaction("LOL", false).as_deref(),
+            Some("laugh")
+        );
+        assert!(normalize_bluebubbles_tapback_reaction("party", false).is_none());
+    }
+
+    #[test]
     fn send_message_response_deserialize() {
         let json = serde_json::json!({
             "status": 200,
@@ -2771,11 +2852,13 @@ mod tests {
             "os_version": "14.2",
             "server_version": "1.9.0",
             "private_api": true,
+            "helper_connected": true,
             "proxy_service": "cloudflare"
         });
         let info: ServerInfo = serde_json::from_value(json).unwrap();
         assert_eq!(info.os_version.as_deref(), Some("14.2"));
         assert!(info.private_api);
+        assert_eq!(info.helper_connected, Some(true));
         assert_eq!(info.proxy_service.as_deref(), Some("cloudflare"));
     }
 

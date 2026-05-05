@@ -7,7 +7,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::Client;
+use reqwest::{Client, Method};
 use serde_json::{Value, json};
 use std::time::Duration;
 use tracing::{debug, warn};
@@ -40,7 +40,7 @@ use crate::types::{
     BlueBubblesTargetService, Chat, Message, PaginatedResponse, QueryParams,
     SEND_METHOD_APPLE_SCRIPT, SEND_METHOD_PRIVATE_API, SendMessageOptions, SendMessageRequest,
     SendMessageResponse, ServerInfo, WebhookRegistration, WebhookRegistrationRequest,
-    normalize_bluebubbles_handle,
+    normalize_bluebubbles_handle, normalize_bluebubbles_tapback_reaction,
 };
 
 const TARGET_RESOLUTION_PAGE_LIMIT: u64 = 500;
@@ -78,6 +78,14 @@ async fn decode_server_info(resp: reqwest::Response) -> Result<ServerInfo, BlueB
 
 async fn decode_json_value(resp: reqwest::Response) -> Result<Value, BlueBubblesError> {
     resp.json::<Value>().await.map_err(BlueBubblesError::Http)
+}
+
+async fn decode_optional_json_value(resp: reqwest::Response) -> Result<Value, BlueBubblesError> {
+    let bytes = resp.bytes().await.map_err(BlueBubblesError::Http)?;
+    if bytes.is_empty() {
+        return Ok(json!({}));
+    }
+    serde_json::from_slice(&bytes).map_err(BlueBubblesError::Json)
 }
 
 async fn decode_bounded_message(
@@ -381,6 +389,162 @@ impl SendMethodDecision {
     }
 }
 
+/// Private-API action family used for deterministic availability checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlueBubblesPrivateApiAction {
+    Edit,
+    Unsend,
+    Reaction,
+    Typing,
+    MarkRead,
+}
+
+impl BlueBubblesPrivateApiAction {
+    const fn key(self) -> &'static str {
+        match self {
+            Self::Edit => "edit",
+            Self::Unsend => "unsend",
+            Self::Reaction => "reaction",
+            Self::Typing => "typing",
+            Self::MarkRead => "mark_read",
+        }
+    }
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Edit => "message edit",
+            Self::Unsend => "message unsend",
+            Self::Reaction => "tapback reaction",
+            Self::Typing => "typing indicator",
+            Self::MarkRead => "read receipt",
+        }
+    }
+}
+
+/// Stable action availability status for one `BlueBubbles` action.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct BlueBubblesActionStatus {
+    pub supported: bool,
+    pub reason: &'static str,
+    pub requires_private_api: bool,
+}
+
+impl BlueBubblesActionStatus {
+    const fn supported(reason: &'static str) -> Self {
+        Self {
+            supported: true,
+            reason,
+            requires_private_api: true,
+        }
+    }
+
+    const fn unsupported(reason: &'static str) -> Self {
+        Self {
+            supported: false,
+            reason,
+            requires_private_api: true,
+        }
+    }
+}
+
+/// Server-derived `BlueBubbles` action availability snapshot.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct BlueBubblesActionAvailability {
+    pub server_info_available: bool,
+    pub server_info_error: Option<String>,
+    pub private_api: Option<bool>,
+    pub helper_connected: Option<bool>,
+    pub os_version: Option<String>,
+    pub server_version: Option<String>,
+    pub edit: BlueBubblesActionStatus,
+    pub unsend: BlueBubblesActionStatus,
+    pub reaction: BlueBubblesActionStatus,
+    pub typing: BlueBubblesActionStatus,
+    pub mark_read: BlueBubblesActionStatus,
+}
+
+impl BlueBubblesActionAvailability {
+    fn from_info(info: &ServerInfo) -> Self {
+        Self {
+            server_info_available: true,
+            server_info_error: None,
+            private_api: Some(info.private_api),
+            helper_connected: info.helper_connected,
+            os_version: info.os_version.clone(),
+            server_version: info.server_version.clone(),
+            edit: action_status(BlueBubblesPrivateApiAction::Edit, info),
+            unsend: action_status(BlueBubblesPrivateApiAction::Unsend, info),
+            reaction: action_status(BlueBubblesPrivateApiAction::Reaction, info),
+            typing: action_status(BlueBubblesPrivateApiAction::Typing, info),
+            mark_read: action_status(BlueBubblesPrivateApiAction::MarkRead, info),
+        }
+    }
+
+    fn unavailable(error: &BlueBubblesError) -> Self {
+        Self {
+            server_info_available: false,
+            server_info_error: Some(error.to_string()),
+            private_api: None,
+            helper_connected: None,
+            os_version: None,
+            server_version: None,
+            edit: BlueBubblesActionStatus::unsupported("server_info_unavailable"),
+            unsend: BlueBubblesActionStatus::unsupported("server_info_unavailable"),
+            reaction: BlueBubblesActionStatus::unsupported("server_info_unavailable"),
+            typing: BlueBubblesActionStatus::unsupported("server_info_unavailable"),
+            mark_read: BlueBubblesActionStatus::unsupported("server_info_unavailable"),
+        }
+    }
+}
+
+fn action_status(
+    action: BlueBubblesPrivateApiAction,
+    info: &ServerInfo,
+) -> BlueBubblesActionStatus {
+    if !info.private_api {
+        return BlueBubblesActionStatus::unsupported("private_api_disabled");
+    }
+    if info.helper_connected == Some(false) {
+        return BlueBubblesActionStatus::unsupported("helper_disconnected");
+    }
+
+    if action == BlueBubblesPrivateApiAction::Edit {
+        let major = parse_macos_major_version(info.os_version.as_deref());
+        return match major {
+            Some(13..=25) => BlueBubblesActionStatus::supported("private_api_macos_supported"),
+            Some(0..=12) => BlueBubblesActionStatus::unsupported("macos_version_too_old"),
+            Some(_) => BlueBubblesActionStatus::unsupported("macos26_edit_unsupported"),
+            None => BlueBubblesActionStatus::unsupported("os_version_unknown"),
+        };
+    }
+
+    BlueBubblesActionStatus::supported("private_api_supported")
+}
+
+fn action_unavailable_error(
+    action: BlueBubblesPrivateApiAction,
+    status: &BlueBubblesActionStatus,
+    source_error: Option<&BlueBubblesError>,
+) -> BlueBubblesError {
+    if status.reason == "private_api_disabled" {
+        return BlueBubblesError::PrivateApiRequired {
+            feature: action.label().to_string(),
+        };
+    }
+    if status.reason == "server_info_unavailable" {
+        let feature = source_error.map_or_else(
+            || action.label().to_string(),
+            |error| format!("{} (server info unavailable: {error})", action.label()),
+        );
+        return BlueBubblesError::PrivateApiRequired { feature };
+    }
+
+    BlueBubblesError::UnsupportedAction {
+        action: action.label().to_string(),
+        reason: status.reason.to_string(),
+    }
+}
+
 /// Result of a `BlueBubbles` send plus the method decision that shaped the request.
 #[derive(Debug, Clone)]
 pub struct SendMessageOutcome {
@@ -561,6 +725,143 @@ impl BlueBubblesClient {
                 }
 
                 match decode_server_info(resp).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Compute a server-derived action availability snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns authentication and rate-limit errors directly; other server-info failures become
+    /// an unavailable snapshot so callers can inspect deterministic disabled reasons.
+    pub async fn action_availability(
+        &self,
+        runtime: &ConnectorRuntime,
+    ) -> BlueBubblesResult<BlueBubblesActionAvailability> {
+        match self.server_info(runtime).await {
+            Ok(info) => Ok(BlueBubblesActionAvailability::from_info(&info)),
+            Err(error) => {
+                if matches!(
+                    &error,
+                    BlueBubblesError::Unauthorized { .. } | BlueBubblesError::RateLimited { .. }
+                ) {
+                    Err(error)
+                } else {
+                    Ok(BlueBubblesActionAvailability::unavailable(&error))
+                }
+            }
+        }
+    }
+
+    async fn require_action_available(
+        &self,
+        runtime: &ConnectorRuntime,
+        action: BlueBubblesPrivateApiAction,
+    ) -> BlueBubblesResult<ServerInfo> {
+        match self.server_info(runtime).await {
+            Ok(info) => {
+                let status = action_status(action, &info);
+                if status.supported {
+                    Ok(info)
+                } else {
+                    Err(action_unavailable_error(action, &status, None))
+                }
+            }
+            Err(error) => {
+                if matches!(
+                    &error,
+                    BlueBubblesError::Unauthorized { .. } | BlueBubblesError::RateLimited { .. }
+                ) {
+                    Err(error)
+                } else {
+                    let status = BlueBubblesActionStatus::unsupported("server_info_unavailable");
+                    Err(action_unavailable_error(action, &status, Some(&error)))
+                }
+            }
+        }
+    }
+
+    async fn private_api_json_action(
+        &self,
+        runtime: &ConnectorRuntime,
+        action: BlueBubblesPrivateApiAction,
+        method: Method,
+        path: String,
+        body: Option<Value>,
+    ) -> BlueBubblesResult<Value> {
+        self.require_action_available(runtime, action).await?;
+
+        let url = format!("{}{}", self.server_url, path);
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        let server_passcode = self.server_passcode.clone();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let server_passcode = server_passcode.clone();
+            let body = body.clone();
+            let method = method.clone();
+            async move {
+                debug!(
+                    attempt,
+                    action = action.key(),
+                    "Calling BlueBubbles Private API action"
+                );
+                let mut request = client
+                    .request(method, &url)
+                    .query(&[("password", &server_passcode)]);
+                if let Some(body) = &body {
+                    request = request.json(body);
+                }
+                let resp = match request.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        return AttemptOutcome::Retryable {
+                            error: BlueBubblesError::from_transport_error(e),
+                            retry_after: None,
+                        };
+                    }
+                };
+
+                let status = resp.status().as_u16();
+                if status == 401 || status == 403 {
+                    return AttemptOutcome::Terminal(BlueBubblesError::Unauthorized {
+                        message: "Invalid server password".into(),
+                    });
+                }
+
+                if status == 429 {
+                    let retry_after = retry_after_from_headers(resp.headers());
+                    return AttemptOutcome::Retryable {
+                        error: BlueBubblesError::RateLimited {
+                            retry_after_ms: duration_to_ms(
+                                retry_after.unwrap_or(Duration::from_secs(30)),
+                            ),
+                        },
+                        retry_after,
+                    };
+                }
+
+                if !resp.status().is_success() {
+                    let text = resp.text().await.unwrap_or_default();
+                    let decision = classify_http_status(status, None);
+                    let err = BlueBubblesError::from_api_response(status, &text);
+                    if !matches!(decision, RetryDecision::Terminal) {
+                        return AttemptOutcome::Retryable {
+                            error: err,
+                            retry_after: None,
+                        };
+                    }
+                    return AttemptOutcome::Terminal(err);
+                }
+
+                match decode_optional_json_value(resp).await {
                     Ok(value) => AttemptOutcome::Success(value),
                     Err(error) => AttemptOutcome::Terminal(error),
                 }
@@ -1365,6 +1666,141 @@ impl BlueBubblesClient {
         .await
     }
 
+    /// Edit a sent message through the `BlueBubbles` Private API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is unsupported or the API call fails.
+    pub async fn edit_message(
+        &self,
+        runtime: &ConnectorRuntime,
+        message_guid: &str,
+        new_text: &str,
+        part_index: u64,
+        backwards_compatibility_message: Option<&str>,
+    ) -> BlueBubblesResult<Value> {
+        let message_guid = sanitize_path_segment(message_guid, "message_guid")?;
+        let new_text = new_text.trim();
+        if new_text.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "edit_message new_text must not be empty".into(),
+            ));
+        }
+        let fallback = format!("Edited to: {new_text}");
+        let backwards_compatibility_message = backwards_compatibility_message
+            .and_then(|message| {
+                let message = message.trim();
+                (!message.is_empty()).then_some(message)
+            })
+            .unwrap_or(&fallback);
+        let body = json!({
+            "editedMessage": new_text,
+            "backwardsCompatibilityMessage": backwards_compatibility_message,
+            "partIndex": part_index,
+        });
+        self.private_api_json_action(
+            runtime,
+            BlueBubblesPrivateApiAction::Edit,
+            Method::POST,
+            format!("/api/v1/message/{message_guid}/edit"),
+            Some(body),
+        )
+        .await
+    }
+
+    /// Unsend a sent message through the `BlueBubbles` Private API.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is unsupported or the API call fails.
+    pub async fn unsend_message(
+        &self,
+        runtime: &ConnectorRuntime,
+        message_guid: &str,
+        part_index: u64,
+    ) -> BlueBubblesResult<Value> {
+        let message_guid = sanitize_path_segment(message_guid, "message_guid")?;
+        self.private_api_json_action(
+            runtime,
+            BlueBubblesPrivateApiAction::Unsend,
+            Method::POST,
+            format!("/api/v1/message/{message_guid}/unsend"),
+            Some(json!({ "partIndex": part_index })),
+        )
+        .await
+    }
+
+    /// Send or remove an iMessage tapback reaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is unsupported, the reaction is invalid, or the API call
+    /// fails.
+    pub async fn send_reaction(
+        &self,
+        runtime: &ConnectorRuntime,
+        chat_guid: &str,
+        message_guid: &str,
+        reaction: &str,
+        remove: bool,
+        part_index: u64,
+    ) -> BlueBubblesResult<Value> {
+        let chat_guid = chat_guid.trim();
+        if chat_guid.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "send_reaction chat_guid must not be empty".into(),
+            ));
+        }
+        let message_guid = message_guid.trim();
+        if message_guid.is_empty() {
+            return Err(BlueBubblesError::Validation(
+                "send_reaction message_guid must not be empty".into(),
+            ));
+        }
+        let reaction =
+            normalize_bluebubbles_tapback_reaction(reaction, remove).ok_or_else(|| {
+                BlueBubblesError::Validation(
+                    "reaction must be one of love, like, dislike, laugh, emphasize, or question"
+                        .into(),
+                )
+            })?;
+        self.private_api_json_action(
+            runtime,
+            BlueBubblesPrivateApiAction::Reaction,
+            Method::POST,
+            "/api/v1/message/react".to_string(),
+            Some(json!({
+                "chatGuid": chat_guid,
+                "selectedMessageGuid": message_guid,
+                "reaction": reaction,
+                "partIndex": part_index,
+            })),
+        )
+        .await
+    }
+
+    /// Start or stop a `BlueBubbles` typing indicator.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the action is unsupported or the API call fails.
+    pub async fn set_typing(
+        &self,
+        runtime: &ConnectorRuntime,
+        chat_guid: &str,
+        typing: bool,
+    ) -> BlueBubblesResult<Value> {
+        let chat_guid = sanitize_path_segment(chat_guid, "chat_guid")?;
+        self.private_api_json_action(
+            runtime,
+            BlueBubblesPrivateApiAction::Typing,
+            if typing { Method::POST } else { Method::DELETE },
+            format!("/api/v1/chat/{chat_guid}/typing"),
+            None,
+        )
+        .await
+    }
+
     /// Get a paginated list of chats.
     ///
     /// # Errors
@@ -1808,6 +2244,8 @@ impl BlueBubblesClient {
         chat_guid: &str,
     ) -> BlueBubblesResult<()> {
         let chat_guid = sanitize_path_segment(chat_guid, "chat_guid")?;
+        self.require_action_available(runtime, BlueBubblesPrivateApiAction::MarkRead)
+            .await?;
         let url = format!("{}/api/v1/chat/{chat_guid}/read", self.server_url);
         let ctx = runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
@@ -1915,6 +2353,7 @@ mod tests {
             os_version: os_version.map(str::to_string),
             server_version: Some("1.9.0".into()),
             private_api,
+            helper_connected: None,
             proxy_service: None,
         }
     }
@@ -1986,5 +2425,43 @@ mod tests {
         assert_eq!(parse_macos_major_version(Some(" 15.7 ")), Some(15));
         assert_eq!(parse_macos_major_version(Some("Tahoe")), None);
         assert_eq!(parse_macos_major_version(None), None);
+    }
+
+    #[test]
+    fn action_availability_requires_private_api_and_known_edit_support() {
+        let mut info = server_info(true, Some("15.7"));
+        info.helper_connected = Some(true);
+        let availability = BlueBubblesActionAvailability::from_info(&info);
+        assert!(availability.edit.supported);
+        assert_eq!(availability.edit.reason, "private_api_macos_supported");
+        assert!(availability.unsend.supported);
+        assert!(availability.reaction.supported);
+        assert!(availability.typing.supported);
+        assert!(availability.mark_read.supported);
+
+        let disabled = BlueBubblesActionAvailability::from_info(&server_info(false, Some("15.7")));
+        assert!(!disabled.unsend.supported);
+        assert_eq!(disabled.unsend.reason, "private_api_disabled");
+
+        let macos26 = BlueBubblesActionAvailability::from_info(&server_info(true, Some("26.0")));
+        assert!(!macos26.edit.supported);
+        assert_eq!(macos26.edit.reason, "macos26_edit_unsupported");
+        assert!(macos26.unsend.supported);
+
+        let unknown = BlueBubblesActionAvailability::from_info(&server_info(true, None));
+        assert!(!unknown.edit.supported);
+        assert_eq!(unknown.edit.reason, "os_version_unknown");
+    }
+
+    #[test]
+    fn action_availability_treats_disconnected_helper_as_unsupported() {
+        let mut info = server_info(true, Some("15.7"));
+        info.helper_connected = Some(false);
+        let availability = BlueBubblesActionAvailability::from_info(&info);
+        assert_eq!(availability.helper_connected, Some(false));
+        assert!(!availability.edit.supported);
+        assert_eq!(availability.edit.reason, "helper_disconnected");
+        assert!(!availability.typing.supported);
+        assert_eq!(availability.typing.reason, "helper_disconnected");
     }
 }

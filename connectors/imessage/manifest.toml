@@ -72,6 +72,91 @@ max_redirects = 0
 [provides.operations.create_chat.ai_hints]
 when_to_use = "When no existing DM chat can be resolved and the caller explicitly wants to create a new iMessage conversation by sending the first message through BlueBubbles Private API."
 
+[provides.operations.get_action_availability]
+summary = "Inspect iMessage private-API action availability"
+capability = "imessage.admin"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.get_action_availability.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.get_action_availability.ai_hints]
+when_to_use = "When you need to know whether edit, unsend, tapback reactions, typing indicators, or read receipts are supported on the local BlueBubbles server before invoking them."
+
+[provides.operations.edit_message]
+summary = "Edit a sent iMessage"
+capability = "imessage.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.edit_message.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.edit_message.ai_hints]
+when_to_use = "When the caller explicitly wants to edit a sent message by GUID. Requires known enabled Private API and fails closed on macOS 26+ where iMessage editing is unsupported."
+
+[provides.operations.unsend_message]
+summary = "Unsend a sent iMessage"
+capability = "imessage.send"
+risk = "high"
+safety_tier = "dangerous"
+idempotency = "none"
+
+[provides.operations.unsend_message.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.unsend_message.ai_hints]
+when_to_use = "When the caller explicitly wants to retract a sent message by GUID. Requires known enabled Private API and returns deterministic unsupported errors when unavailable."
+
+[provides.operations.send_reaction]
+summary = "Send or remove an iMessage tapback"
+capability = "imessage.send"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "best_effort"
+
+[provides.operations.send_reaction.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.send_reaction.ai_hints]
+when_to_use = "When the caller wants to add or remove a tapback reaction. Reaction input is normalized to love, like, dislike, laugh, emphasize, or question."
+
+[provides.operations.set_typing]
+summary = "Start or stop an iMessage typing indicator"
+capability = "imessage.send"
+risk = "low"
+safety_tier = "safe"
+idempotency = "best_effort"
+
+[provides.operations.set_typing.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.set_typing.ai_hints]
+when_to_use = "When the caller wants to explicitly show or clear a typing indicator. Requires known enabled Private API support."
+
 [provides.operations.get_chats]
 summary = "List iMessage chats"
 capability = "imessage.read"

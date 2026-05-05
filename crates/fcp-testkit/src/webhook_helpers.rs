@@ -461,6 +461,18 @@ impl WebhookIngressHarness {
         }
     }
 
+    /// Create a harness with a caller-supplied HTTP client.
+    ///
+    /// This is useful for tests that need deterministic timeout behavior without
+    /// targeting a recently freed local port that another parallel test can reuse.
+    #[must_use]
+    pub fn with_client(endpoint: impl Into<String>, client: Client) -> Self {
+        Self {
+            endpoint: endpoint.into(),
+            client,
+        }
+    }
+
     /// Target endpoint used by the harness.
     #[must_use]
     pub fn endpoint(&self) -> &str {
@@ -792,12 +804,16 @@ mod tests {
     async fn test_webhook_ingress_harness_records_transport_failures() {
         let listener = TcpListener::bind("127.0.0.1:0").expect("ephemeral port");
         let address = listener.local_addr().expect("local addr");
-        drop(listener);
 
         let payload = WebhookPayloadBuilder::new("listener.restart")
             .with_json_body(&serde_json::json!({"id": "evt_transport"}))
             .build();
-        let harness = WebhookIngressHarness::new(format!("http://{address}/hooks/restart"));
+        let client = Client::builder()
+            .timeout(Duration::from_millis(40))
+            .build()
+            .expect("timeout client should build");
+        let harness =
+            WebhookIngressHarness::with_client(format!("http://{address}/hooks/restart"), client);
         let policy = WebhookRetryPolicy::new(2).with_delay(Duration::from_millis(1));
 
         let transcript = harness.deliver_with_retry(&payload, &policy).await;
@@ -816,6 +832,22 @@ mod tests {
                 .all(|attempt| attempt.error.is_some())
         );
         assert!(!transcript.succeeded());
+
+        let logs = render_ingress_test_jsonl(
+            "webhook_transport_timeout",
+            "corr-transport-timeout",
+            address,
+            "listener_held_until_test_shutdown",
+            &transcript,
+        );
+        assert!(logs.contains("\"event\":\"request_lifecycle\""));
+        assert!(logs.contains("\"event\":\"shutdown\""));
+        assert!(logs.contains("\"final_pass\":false"));
+        assert!(
+            logs.lines()
+                .all(|line| serde_json::from_str::<Value>(line).is_ok()),
+            "ingress proof logs must be JSONL: {logs}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -848,6 +880,83 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_webhook_ingress_parallel_transport_failure_is_port_isolated() {
+        let fixture = HttpFixtureServer::start().expect("fixture should bind");
+        fixture.mount(
+            HttpFixtureRoute::post("/hooks/parallel")
+                .respond_with(HttpFixtureResponse::text(202, "accepted")),
+        );
+
+        let held_listener = TcpListener::bind("127.0.0.1:0").expect("held listener should bind");
+        let held_address = held_listener.local_addr().expect("held listener address");
+        let timeout_client = Client::builder()
+            .timeout(Duration::from_millis(40))
+            .build()
+            .expect("timeout client should build");
+
+        let valid_payload = WebhookPayloadBuilder::new("parallel.accept")
+            .with_json_body(&serde_json::json!({
+                "id": "evt_parallel_accept",
+                "correlation_id": "corr-parallel-accept",
+            }))
+            .build();
+        let failing_payload = WebhookPayloadBuilder::new("parallel.timeout")
+            .with_json_body(&serde_json::json!({
+                "id": "evt_parallel_timeout",
+                "correlation_id": "corr-parallel-timeout",
+            }))
+            .build();
+
+        let valid_harness =
+            WebhookIngressHarness::new(format!("{}/hooks/parallel", fixture.base_url()));
+        let failing_harness = WebhookIngressHarness::with_client(
+            format!("http://{held_address}/hooks/parallel"),
+            timeout_client,
+        );
+        let failure_policy = WebhookRetryPolicy::new(2).with_delay(Duration::from_millis(1));
+
+        let (valid_transcript, failure_transcript) = futures_util::join!(
+            valid_harness.deliver(&valid_payload),
+            failing_harness.deliver_with_retry(&failing_payload, &failure_policy),
+        );
+
+        assert!(valid_transcript.succeeded());
+        assert!(!failure_transcript.succeeded());
+        assert_eq!(
+            fixture.recorded_requests().len(),
+            1,
+            "transport-failure delivery must not reuse or pollute the live fixture port"
+        );
+
+        let logs = [
+            render_ingress_test_jsonl(
+                "webhook_parallel_port_isolation",
+                "corr-parallel-accept",
+                fixture.address(),
+                "live_fixture_shutdown_on_drop",
+                &valid_transcript,
+            ),
+            render_ingress_test_jsonl(
+                "webhook_parallel_port_isolation",
+                "corr-parallel-timeout",
+                held_address,
+                "held_listener_shutdown_on_drop",
+                &failure_transcript,
+            ),
+        ]
+        .join("");
+        assert!(logs.contains("\"test_id\":\"webhook_parallel_port_isolation\""));
+        assert!(logs.contains("\"bound_address\""));
+        assert!(logs.contains("\"correlation_id\":\"corr-parallel-accept\""));
+        assert!(logs.contains("\"correlation_id\":\"corr-parallel-timeout\""));
+        assert!(
+            logs.lines()
+                .all(|line| serde_json::from_str::<Value>(line).is_ok()),
+            "parallel ingress proof logs must be JSONL: {logs}"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_attachment_fixture_mounts_binary_payload() {
         let fixture = HttpFixtureServer::start().expect("fixture should bind");
         let attachment = WebhookAttachmentFixture::mount_binary(
@@ -875,5 +984,48 @@ mod tests {
             response.bytes().await.expect("attachment bytes").as_ref(),
             &[1, 2, 3, 4]
         );
+    }
+
+    fn render_ingress_test_jsonl(
+        test_id: &str,
+        correlation_id: &str,
+        bound_address: std::net::SocketAddr,
+        shutdown_event: &str,
+        transcript: &WebhookIngressTranscript,
+    ) -> String {
+        let mut lines = transcript
+            .attempts
+            .iter()
+            .map(|attempt| {
+                serde_json::json!({
+                    "event": "request_lifecycle",
+                    "test_id": test_id,
+                    "bound_address": bound_address.to_string(),
+                    "bound_port": bound_address.port(),
+                    "correlation_id": correlation_id,
+                    "endpoint": transcript.endpoint,
+                    "attempt": attempt.attempt,
+                    "status": attempt.status,
+                    "transport_error": attempt.error,
+                    "duration_ms": u64::try_from(attempt.duration.as_millis()).unwrap_or(u64::MAX),
+                    "final_pass": attempt.is_success(),
+                })
+            })
+            .map(|value| serde_json::to_string(&value).expect("ingress log should serialize"))
+            .collect::<Vec<_>>();
+        lines.push(
+            serde_json::to_string(&serde_json::json!({
+                "event": "shutdown",
+                "test_id": test_id,
+                "bound_address": bound_address.to_string(),
+                "bound_port": bound_address.port(),
+                "correlation_id": correlation_id,
+                "shutdown_event": shutdown_event,
+                "final_pass": transcript.succeeded(),
+                "attempts": transcript.attempts.len(),
+            }))
+            .expect("shutdown log should serialize"),
+        );
+        format!("{}\n", lines.join("\n"))
     }
 }

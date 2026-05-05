@@ -24,6 +24,87 @@ use crate::{
 /// Default browser-control endpoint.
 pub const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
 
+/// Required FCP browser-control contract version.
+pub const BROWSER_CONTROL_PROTOCOL_VERSION: u64 = 1;
+
+#[derive(Clone, Copy)]
+struct BrowserControlOperation {
+    id: &'static str,
+    path: &'static str,
+}
+
+const REQUIRED_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] = &[
+    BrowserControlOperation {
+        id: "browser.navigate",
+        path: "/navigate",
+    },
+    BrowserControlOperation {
+        id: "browser.screenshot",
+        path: "/screenshot",
+    },
+    BrowserControlOperation {
+        id: "browser.render_pdf",
+        path: "/pdf",
+    },
+    BrowserControlOperation {
+        id: "browser.extract_text",
+        path: "/extract_text",
+    },
+    BrowserControlOperation {
+        id: "browser.extract_links",
+        path: "/extract_links",
+    },
+    BrowserControlOperation {
+        id: "browser.wait_for_selector",
+        path: "/wait_for_selector",
+    },
+    BrowserControlOperation {
+        id: "browser.click",
+        path: "/click",
+    },
+    BrowserControlOperation {
+        id: "browser.fill_form",
+        path: "/fill_form",
+    },
+    BrowserControlOperation {
+        id: "browser.evaluate_js",
+        path: "/evaluate",
+    },
+    BrowserControlOperation {
+        id: "browser.get_cookies",
+        path: "/cookies",
+    },
+    BrowserControlOperation {
+        id: "browser.set_cookies",
+        path: "/set_cookies",
+    },
+    BrowserControlOperation {
+        id: "browser.set_proxy",
+        path: "/proxy/set",
+    },
+    BrowserControlOperation {
+        id: "browser.clear_proxy",
+        path: "/proxy/clear",
+    },
+];
+
+/// FCP browser-control worker contract expected by this connector client.
+pub(crate) fn browser_control_contract_descriptor() -> serde_json::Value {
+    serde_json::json!({
+        "control_plane": "fcp-browser-control",
+        "protocol_version": BROWSER_CONTROL_PROTOCOL_VERSION,
+        "operations": REQUIRED_BROWSER_CONTROL_OPERATIONS
+            .iter()
+            .map(|operation| {
+                serde_json::json!({
+                    "id": operation.id,
+                    "path": operation.path,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
 /// Authentication mode for the Browser connector.
 #[derive(Clone)]
 pub enum BrowserAuth {
@@ -143,11 +224,11 @@ impl BrowserClient {
     pub async fn health_check(&self) -> BrowserResult<()> {
         let url = format!("{}/health", self.browser_url);
         match self.execute(|| self.http.get(&url)).await {
-            Ok(body) if is_fcp_browser_control_health(&body) => Ok(()),
-            Ok(_) => Err(BrowserError::InvalidConfig(
-                "browser control-plane /health response did not advertise fcp-browser-control"
-                    .into(),
-            )),
+            Ok(body) => validate_fcp_browser_control_health(&body).map_err(|reason| {
+                BrowserError::InvalidConfig(format!(
+                    "browser control-plane /health response is not compatible with fcp-browser-control contract v{BROWSER_CONTROL_PROTOCOL_VERSION}: {reason}"
+                ))
+            }),
             Err(err) => {
                 if self.raw_chrome_cdp_endpoint_detected().await {
                     Err(BrowserError::InvalidConfig(
@@ -489,11 +570,59 @@ impl BrowserClient {
     }
 }
 
-fn is_fcp_browser_control_health(body: &serde_json::Value) -> bool {
-    body.get("control_plane")
+fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), String> {
+    let control_plane = body
+        .get("control_plane")
         .or_else(|| body.get("service"))
         .and_then(serde_json::Value::as_str)
-        .is_some_and(|value| value == "fcp-browser-control" || value == "fcp.browser-control")
+        .ok_or_else(|| "missing control_plane/service".to_string())?;
+    if control_plane != "fcp-browser-control" && control_plane != "fcp.browser-control" {
+        return Err(format!(
+            "unexpected control_plane/service `{control_plane}`"
+        ));
+    }
+
+    let protocol_version = body
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "missing numeric protocol_version".to_string())?;
+    if protocol_version != BROWSER_CONTROL_PROTOCOL_VERSION {
+        return Err(format!(
+            "unsupported protocol_version {protocol_version}; expected {BROWSER_CONTROL_PROTOCOL_VERSION}"
+        ));
+    }
+
+    let operations = body
+        .get("operations")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "missing operations array".to_string())?;
+    for required in REQUIRED_BROWSER_CONTROL_OPERATIONS {
+        if !operations
+            .iter()
+            .any(|operation| browser_control_operation_matches(operation, required))
+        {
+            return Err(format!(
+                "missing required operation `{}` at `{}`",
+                required.id, required.path
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn browser_control_operation_matches(
+    operation: &serde_json::Value,
+    required: &BrowserControlOperation,
+) -> bool {
+    operation
+        .get("id")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|id| id == required.id)
+        && operation
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|path| path == required.path)
 }
 
 fn looks_like_chrome_cdp_version(body: &serde_json::Value) -> bool {
@@ -522,11 +651,9 @@ mod tests {
 
         Mock::given(method("GET"))
             .and(path("/health"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "control_plane": "fcp-browser-control",
-                "status": "ok",
-                "protocol_version": 1
-            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
+            )
             .mount(&mock_server)
             .await;
 
@@ -535,6 +662,38 @@ mod tests {
             .with_browser_url(&mock_server.uri());
 
         client.health_check().await.unwrap();
+    }
+
+    #[test]
+    fn test_health_contract_rejects_missing_operation_advertisement() {
+        let mut body = browser_control_contract_descriptor();
+        body["operations"] = serde_json::json!([
+            { "id": "browser.navigate", "path": "/navigate" },
+            { "id": "browser.screenshot", "path": "/screenshot" }
+        ]);
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.render_pdf"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_operation_path() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["path"] = serde_json::Value::String("/wrong-navigate".into());
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("/navigate"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_protocol_version() {
+        let mut body = browser_control_contract_descriptor();
+        body["protocol_version"] = serde_json::Value::Number(2.into());
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("unsupported protocol_version 2"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -577,7 +736,9 @@ mod tests {
             "Browser": "Chrome/123.0.0.0"
         })));
         assert!(!looks_like_chrome_cdp_version(&serde_json::json!({
-            "control_plane": "fcp-browser-control"
+            "control_plane": "fcp-browser-control",
+            "protocol_version": 1,
+            "operations": []
         })));
     }
 

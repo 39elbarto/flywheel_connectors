@@ -28,7 +28,11 @@ use fcp_browser::connector::BrowserConnector;
 // ============================================================================
 
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    connector: &BrowserConnector,
+    op: &str,
+) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     let cap = match op {
         "browser.screenshot" | "browser.render_pdf" => "browser.capture",
@@ -58,6 +62,7 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(connector.instance_id())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -164,7 +169,7 @@ async fn test_navigate() {
     let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.navigate");
+    let token = generate_valid_token(&key, &connector, "browser.navigate");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.navigate",
@@ -198,7 +203,7 @@ async fn test_screenshot() {
     let key = setup_handshake(&mut connector, &["browser.screenshot"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.screenshot");
+    let token = generate_valid_token(&key, &connector, "browser.screenshot");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.screenshot",
@@ -231,7 +236,7 @@ async fn test_render_pdf() {
     let key = setup_handshake(&mut connector, &["browser.render_pdf"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.render_pdf");
+    let token = generate_valid_token(&key, &connector, "browser.render_pdf");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.render_pdf",
@@ -263,7 +268,7 @@ async fn test_extract_text() {
     let key = setup_handshake(&mut connector, &["browser.extract_text"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.extract_text");
+    let token = generate_valid_token(&key, &connector, "browser.extract_text");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.extract_text",
@@ -297,7 +302,7 @@ async fn test_extract_links() {
     let key = setup_handshake(&mut connector, &["browser.extract_links"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.extract_links");
+    let token = generate_valid_token(&key, &connector, "browser.extract_links");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.extract_links",
@@ -330,7 +335,7 @@ async fn test_wait_for_selector() {
     let key = setup_handshake(&mut connector, &["browser.wait_for_selector"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.wait_for_selector");
+    let token = generate_valid_token(&key, &connector, "browser.wait_for_selector");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.wait_for_selector",
@@ -361,7 +366,7 @@ async fn test_click() {
     let key = setup_handshake(&mut connector, &["browser.click"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.click");
+    let token = generate_valid_token(&key, &connector, "browser.click");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.click",
@@ -393,7 +398,7 @@ async fn test_fill_form() {
     let key = setup_handshake(&mut connector, &["browser.fill_form"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.fill_form");
+    let token = generate_valid_token(&key, &connector, "browser.fill_form");
     let input = json!({
         "fields": {
             "#name": "Alice",
@@ -436,7 +441,7 @@ async fn test_evaluate_js() {
     let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let token = generate_valid_token(&key, &connector, "browser.evaluate_js");
     let input = json!({ "expression": "document.title" });
     let approval = generate_execution_approval("browser.evaluate_js", &input);
     let result = connector
@@ -474,7 +479,7 @@ async fn test_get_cookies() {
     let key = setup_handshake(&mut connector, &["browser.get_cookies"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.get_cookies");
+    let token = generate_valid_token(&key, &connector, "browser.get_cookies");
     let input = json!({ "domain": "example.com" });
     let approval = generate_execution_approval("browser.get_cookies", &input);
     let result = connector
@@ -513,7 +518,7 @@ async fn test_set_cookies() {
     let key = setup_handshake(&mut connector, &["browser.set_cookies"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.set_cookies");
+    let token = generate_valid_token(&key, &connector, "browser.set_cookies");
     let input = json!({
         "cookies": [
             { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
@@ -557,7 +562,7 @@ async fn test_session_save() {
     let key = setup_handshake(&mut connector, &["browser.session.save"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.session.save");
+    let token = generate_valid_token(&key, &connector, "browser.session.save");
     let input = json!({
         "domain": "example.com",
         "lease_seq": 10,
@@ -617,7 +622,7 @@ async fn test_session_restore_and_describe() {
     .await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let save_token = generate_valid_token(&key, "browser.session.save");
+    let save_token = generate_valid_token(&key, &connector, "browser.session.save");
     let save_input = json!({
         "domain": "example.com",
         "lease_seq": 10,
@@ -635,7 +640,7 @@ async fn test_session_restore_and_describe() {
         .unwrap();
     let state_object_id = saved["state_object_id"].as_str().unwrap().to_string();
 
-    let restore_token = generate_valid_token(&key, "browser.session.restore");
+    let restore_token = generate_valid_token(&key, &connector, "browser.session.restore");
     let restore_input = json!({
         "state_object_id": state_object_id,
         "lease_seq": 11,
@@ -657,7 +662,7 @@ async fn test_session_restore_and_describe() {
     assert_eq!(restored["lease_seq"], 11);
     assert_eq!(restored["audit"]["operation"], "browser.session.restore");
 
-    let describe_token = generate_valid_token(&key, "browser.session.describe");
+    let describe_token = generate_valid_token(&key, &connector, "browser.session.describe");
     let described = connector
         .handle_invoke(json!({
             "operation": "browser.session.describe",
@@ -697,7 +702,7 @@ async fn test_session_restore_rejects_stale_lease_seq() {
     .await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let save_token = generate_valid_token(&key, "browser.session.save");
+    let save_token = generate_valid_token(&key, &connector, "browser.session.save");
     let save_input = json!({
         "lease_seq": 5,
         "lease_object_id": "lease-obj-5"
@@ -713,7 +718,7 @@ async fn test_session_restore_rejects_stale_lease_seq() {
         .await
         .unwrap();
 
-    let restore_token = generate_valid_token(&key, "browser.session.restore");
+    let restore_token = generate_valid_token(&key, &connector, "browser.session.restore");
     let restore_input = json!({
         "state_object_id": saved["state_object_id"],
         "lease_seq": 4,
@@ -757,7 +762,7 @@ async fn test_set_proxy() {
     let key = setup_handshake(&mut connector, &["browser.set_proxy"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.set_proxy");
+    let token = generate_valid_token(&key, &connector, "browser.set_proxy");
     let input = json!({
         "server": "http://proxy.example.com:8080",
         "bypass_list": ["localhost"]
@@ -798,7 +803,7 @@ async fn test_clear_proxy() {
     let key = setup_handshake(&mut connector, &["browser.clear_proxy"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.clear_proxy");
+    let token = generate_valid_token(&key, &connector, "browser.clear_proxy");
     let input = json!({});
     let approval = generate_execution_approval("browser.clear_proxy", &input);
     let result = connector
@@ -836,7 +841,7 @@ async fn test_error_429_rate_limited() {
     let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.navigate");
+    let token = generate_valid_token(&key, &connector, "browser.navigate");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.navigate",
@@ -867,7 +872,7 @@ async fn test_error_500_server_error() {
     let key = setup_handshake(&mut connector, &["browser.screenshot"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.screenshot");
+    let token = generate_valid_token(&key, &connector, "browser.screenshot");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.screenshot",
@@ -905,7 +910,7 @@ async fn test_error_400_client_error() {
     let key = setup_handshake(&mut connector, &["browser.click"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.click");
+    let token = generate_valid_token(&key, &connector, "browser.click");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.click",
@@ -938,7 +943,7 @@ async fn test_invoke_not_configured() {
     let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
     // Skip configure — connector not configured
 
-    let token = generate_valid_token(&key, "browser.navigate");
+    let token = generate_valid_token(&key, &connector, "browser.navigate");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.navigate",
@@ -965,7 +970,7 @@ async fn test_invoke_wrong_capability() {
     setup_configure(&mut connector, &mock_server.uri()).await;
 
     // Try to invoke screenshot with a navigate token
-    let token = generate_valid_token(&key, "browser.navigate");
+    let token = generate_valid_token(&key, &connector, "browser.navigate");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.screenshot",
@@ -986,7 +991,7 @@ async fn test_dangerous_operation_requires_approval_token() {
     let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let token = generate_valid_token(&key, &connector, "browser.evaluate_js");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.evaluate_js",
@@ -1056,7 +1061,7 @@ async fn test_all_execution_scoped_ops_require_approval_token() {
     ];
 
     for (operation, input) in cases {
-        let token = generate_valid_token(&key, operation);
+        let token = generate_valid_token(&key, &connector, operation);
         let result = connector
             .handle_invoke(json!({
                 "operation": operation,
@@ -1099,7 +1104,7 @@ async fn test_dangerous_operation_allows_wildcard_execution_scope() {
     let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let token = generate_valid_token(&key, &connector, "browser.evaluate_js");
     let input = json!({ "expression": "document.title" });
     let approval = generate_execution_approval_with_pattern("browser.*");
     let result = connector
@@ -1126,7 +1131,7 @@ async fn test_dangerous_operation_approval_scope_mismatch() {
     let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let token = generate_valid_token(&key, &connector, "browser.evaluate_js");
     let approval = generate_execution_approval("browser.set_proxy", &json!({}));
     let result = connector
         .handle_invoke(json!({
@@ -1156,7 +1161,7 @@ async fn test_invoke_unknown_operation() {
     let key = setup_handshake(&mut connector, &["browser.nonexistent"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.nonexistent");
+    let token = generate_valid_token(&key, &connector, "browser.nonexistent");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.nonexistent",
@@ -1245,7 +1250,7 @@ async fn test_navigate_missing_url() {
     let key = setup_handshake(&mut connector, &["browser.navigate"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.navigate");
+    let token = generate_valid_token(&key, &connector, "browser.navigate");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.navigate",
@@ -1272,7 +1277,7 @@ async fn test_click_missing_selector() {
     let key = setup_handshake(&mut connector, &["browser.click"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.click");
+    let token = generate_valid_token(&key, &connector, "browser.click");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.click",
@@ -1299,7 +1304,7 @@ async fn test_evaluate_js_missing_expression() {
     let key = setup_handshake(&mut connector, &["browser.evaluate_js"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.evaluate_js");
+    let token = generate_valid_token(&key, &connector, "browser.evaluate_js");
     let approval = generate_execution_approval("browser.evaluate_js", &json!({}));
     let result = connector
         .handle_invoke(json!({
@@ -1328,7 +1333,7 @@ async fn test_fill_form_missing_fields() {
     let key = setup_handshake(&mut connector, &["browser.fill_form"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.fill_form");
+    let token = generate_valid_token(&key, &connector, "browser.fill_form");
     let approval = generate_execution_approval("browser.fill_form", &json!({}));
     let result = connector
         .handle_invoke(json!({
@@ -1357,7 +1362,7 @@ async fn test_set_cookies_missing_cookies() {
     let key = setup_handshake(&mut connector, &["browser.set_cookies"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.set_cookies");
+    let token = generate_valid_token(&key, &connector, "browser.set_cookies");
     let approval = generate_execution_approval("browser.set_cookies", &json!({}));
     let result = connector
         .handle_invoke(json!({
@@ -1386,7 +1391,7 @@ async fn test_session_save_missing_lease_fields() {
     let key = setup_handshake(&mut connector, &["browser.session.save"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.session.save");
+    let token = generate_valid_token(&key, &connector, "browser.session.save");
     let approval = generate_execution_approval("browser.session.save", &json!({}));
     let result = connector
         .handle_invoke(json!({
@@ -1415,7 +1420,7 @@ async fn test_wait_for_selector_missing_selector() {
     let key = setup_handshake(&mut connector, &["browser.wait_for_selector"]).await;
     setup_configure(&mut connector, &mock_server.uri()).await;
 
-    let token = generate_valid_token(&key, "browser.wait_for_selector");
+    let token = generate_valid_token(&key, &connector, "browser.wait_for_selector");
     let result = connector
         .handle_invoke(json!({
             "operation": "browser.wait_for_selector",

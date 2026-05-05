@@ -16,7 +16,9 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{BrowserAuth, BrowserClient, DEFAULT_BROWSER_URL},
+    client::{
+        BrowserAuth, BrowserClient, DEFAULT_BROWSER_URL, browser_control_contract_descriptor,
+    },
     error::BrowserError,
     types::{Cookie, ProxyConfig},
 };
@@ -192,6 +194,12 @@ impl BrowserConnector {
         }
     }
 
+    /// Connector instance ID used for bound capability-token verification.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     /// Handle configure method.
     #[instrument(skip(self, params))]
     pub async fn handle_configure(
@@ -281,6 +289,7 @@ impl BrowserConnector {
                 "requests_error": metrics.requests_error,
             },
             "placement_profile": placement_profile,
+            "browser_control_contract": browser_control_contract_descriptor(),
         });
         if let Some(config) = &self.config {
             let (allowlisted, host) = match reqwest::Url::parse(&config.browser_url) {
@@ -1996,6 +2005,7 @@ mod tests {
 
     fn generate_valid_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         cap: &str,
         op: &str,
     ) -> CapabilityToken {
@@ -2006,6 +2016,7 @@ mod tests {
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&test_constraints_cbor())
             .expect("constraints CBOR should validate")
@@ -2054,7 +2065,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "browser.navigate", "browser.navigate");
+        let token = generate_valid_token(
+            &signing_key,
+            connector.base.instance_id.as_str(),
+            "browser.navigate",
+            "browser.navigate",
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "browser.navigate",
@@ -2090,7 +2106,12 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "browser.interact", "browser.click");
+        let token = generate_valid_token(
+            &signing_key,
+            connector.base.instance_id.as_str(),
+            "browser.interact",
+            "browser.click",
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "browser.click",
@@ -2327,11 +2348,9 @@ mod tests {
         let mock_server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/health"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-                "control_plane": "fcp-browser-control",
-                "status": "ok",
-                "protocol_version": 1
-            })))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(browser_control_contract_descriptor()),
+            )
             .mount(&mock_server)
             .await;
 

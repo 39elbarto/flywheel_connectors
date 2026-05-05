@@ -12161,6 +12161,87 @@ done"#;
         assert_eq!(body["clean_shutdown"], true);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn bluebubbles_ingress_route_accept_loop_stops_on_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host ingress listener");
+        let addr = listener.local_addr().expect("listener should expose addr");
+        let app = axum::Router::new().route(
+            BLUEBUBBLES_INGRESS_ROUTE,
+            post(|| async {
+                (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "accepted": true,
+                        "route": BLUEBUBBLES_INGRESS_ROUTE,
+                        "source": "fcp_host_accept_loop"
+                    })),
+                )
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+        let server = task::spawn(async move { serve_tcp(listener, app, shutdown_rx).await });
+
+        let mut stream = fcp_async_core::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to host ingress listener");
+        let request = format!(
+            "POST {BLUEBUBBLES_INGRESS_ROUTE} HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: 2\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {{}}"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write ingress request");
+        stream.flush().await.expect("flush ingress request");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read ingress response");
+        let response = String::from_utf8(response).expect("http response should be utf-8");
+        assert!(
+            response.contains("202 Accepted"),
+            "expected route response over host accept loop, got {response}"
+        );
+        assert!(
+            response.contains("fcp_host_accept_loop"),
+            "expected route body from host accept-loop app, got {response}"
+        );
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+
+        shutdown_tx
+            .send(true)
+            .expect("shutdown receiver should still be live");
+        let server_result = server.await.expect("serve_tcp task should join");
+        server_result.expect("serve_tcp should exit cleanly after shutdown");
+
+        let mut stopped_accepting = false;
+        for _ in 0..5 {
+            match fcp_async_core::net::TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(_) => {
+                    stopped_accepting = true;
+                    break;
+                }
+            }
+            fcp_async_core::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            stopped_accepting,
+            "host ingress listener still accepted connections after shutdown"
+        );
+    }
+
     #[test]
     fn operation_priority_marks_health_as_high() {
         assert_eq!(operation_priority("health"), RequestPriority::High);

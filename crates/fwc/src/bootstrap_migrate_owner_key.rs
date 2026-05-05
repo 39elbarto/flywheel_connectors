@@ -174,7 +174,7 @@ struct V3OwnerState {
 }
 
 struct V4OwnerState {
-    signing_key: MlDsa65SigningKey,
+    signing_key: Box<MlDsa65SigningKey>,
     evidence: V4OwnerKeyEvidence,
 }
 
@@ -378,11 +378,11 @@ fn load_v3_owner_state(dry_run: bool, inputs: &RuntimeInputs) -> Result<V3OwnerS
 fn load_v4_owner_state(inputs: &RuntimeInputs) -> Result<V4OwnerState> {
     let (signing_key, source) = match inputs.v4_seed {
         Some(seed) => (
-            MlDsa65SigningKey::from_seed(&seed).context("invalid imported V4 ML-DSA-65 seed")?,
+            boxed_v4_signing_key_from_seed(&seed)?,
             format!("env:{V4_SEED_ENV}"),
         ),
         None => (
-            MlDsa65SigningKey::generate().context("failed to generate V4 ML-DSA-65 key")?,
+            generate_boxed_v4_signing_key()?,
             "generated-in-memory".to_owned(),
         ),
     };
@@ -399,6 +399,22 @@ fn load_v4_owner_state(inputs: &RuntimeInputs) -> Result<V4OwnerState> {
         },
         signing_key,
     })
+}
+
+#[allow(clippy::large_stack_frames)]
+fn boxed_v4_signing_key_from_seed(
+    seed: &[u8; ML_DSA_65_SEED_SIZE],
+) -> Result<Box<MlDsa65SigningKey>> {
+    Ok(Box::new(
+        MlDsa65SigningKey::from_seed(seed).context("invalid imported V4 ML-DSA-65 seed")?,
+    ))
+}
+
+#[allow(clippy::large_stack_frames)]
+fn generate_boxed_v4_signing_key() -> Result<Box<MlDsa65SigningKey>> {
+    Ok(Box::new(
+        MlDsa65SigningKey::generate().context("failed to generate V4 ML-DSA-65 key")?,
+    ))
 }
 
 #[derive(Clone, Debug)]

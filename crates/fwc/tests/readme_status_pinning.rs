@@ -1,6 +1,6 @@
 //! README status table ↔ production-path drift defence (br-lvz4t).
 //!
-//! VioletPine's audit (br-lvz4t) found that README.md labelled
+//! `VioletPine`'s audit (br-lvz4t) found that README.md labelled
 //! "Mesh-Native Architecture" as `IMPLEMENTED` even though every
 //! production invoke still flows through the host-first
 //! `fwc → fcp-host → connector subprocess` path. The README's own

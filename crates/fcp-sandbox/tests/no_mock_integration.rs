@@ -16,6 +16,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_manifest::{NetworkConstraints, SandboxProfile, SandboxSection};
 use fcp_sandbox::*;
+use serde_json::{Value, json};
 use wasmtime::{Store, component::Resource};
 use wasmtime_wasi::{
     clocks::WasiClocksView,
@@ -809,6 +810,55 @@ fn compiled_policy_platform_flags() {
     let policy = policy.with_platform_flags(flags.clone());
     assert!(!flags.is_empty());
     assert!(policy.platform_flags.linux_use_landlock);
+}
+
+#[test]
+fn windows_appcontainer_smoke_skip_artifact_is_redaction_safe_jsonl()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut section = strict_sandbox_section();
+    section.profile = SandboxProfile::Permissive;
+    let policy = CompiledPolicy::from_manifest(
+        &section,
+        Some(PathBuf::from("/tmp/fcp-windows-appcontainer-state")),
+    )?
+    .with_platform_flags(PlatformFlags {
+        windows_low_integrity: true,
+        windows_appcontainer_capabilities: vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT.to_string()],
+        ..PlatformFlags::default()
+    });
+
+    let connector_id = "fcp.secret-customer@example.com:windows-smoke";
+    let profile = policy.windows_appcontainer_profile(connector_id)?;
+    let raw_profile_name = profile.name.clone();
+    let report = WindowsAppContainerLifecycleReport {
+        profile,
+        action: WindowsAppContainerLifecycleAction::SkippedInactive,
+        sid_present: false,
+        cleanup: WindowsAppContainerCleanupDecision::None,
+        skip_reason: Some("host_os_not_windows_or_appcontainer_worker_unavailable".to_string()),
+    };
+    let evidence =
+        WindowsAppContainerEvidence::from_lifecycle(connector_id, &report, false, "skip");
+    let line = evidence.to_jsonl_line()?;
+    let value: Value = serde_json::from_str(&line)?;
+
+    assert_eq!(value["schema"], "fcp.windows_appcontainer_smoke.v1");
+    assert_eq!(value["os"], "windows");
+    assert_eq!(value["lifecycle_action"], "skipped_inactive");
+    assert_eq!(value["sid_present"].as_bool(), Some(false));
+    assert_eq!(value["job_object_attached"].as_bool(), Some(false));
+    assert_eq!(value["cleanup"], "none");
+    assert_eq!(value["capability_decision"], "mapped");
+    assert_eq!(value["action_result"], "skip");
+    assert_eq!(value["step_order"], json!(["appcontainer_lifecycle"]));
+    assert_eq!(
+        value["skip_reason"],
+        "host_os_not_windows_or_appcontainer_worker_unavailable"
+    );
+    assert!(!line.contains(connector_id));
+    assert!(!line.contains("secret-customer@example.com"));
+    assert!(!line.contains(&raw_profile_name));
+    Ok(())
 }
 
 // ============================================================================

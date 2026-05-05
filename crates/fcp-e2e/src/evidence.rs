@@ -23,6 +23,14 @@ pub const FORMAL_INVARIANTS_WITNESS_SCHEMA_VERSION: &str = "fcp-lean-witness/v1"
 /// Canonical replay-bundle path for formal invariant witnesses.
 pub const FORMAL_INVARIANTS_WITNESS_PATH: &str = "lean/witnesses/formal_invariants.v1.json";
 
+/// Lean theorem whose model is cross-validated against the Rust verifier.
+pub const LATTICE_DELEGATION_STRUCTURAL_THEOREM: &str =
+    "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected";
+
+/// Cross-validation seed for the Rust-vs-Lean lattice delegation model bridge.
+pub const LATTICE_DELEGATION_CROSS_VALIDATION_SEED: &str =
+    "fcp-policy:lattice_delegation_rust_matches_lean_structural_model:v1:cases=1024";
+
 /// Theorems required before formal-invariant-gated E2E scenarios may run.
 pub const FORMAL_INVARIANT_THEOREMS: &[&str] = &[
     "Fcp.Invariants.Capability.capability_token_ladder_composes_only_through_bound",
@@ -30,7 +38,7 @@ pub const FORMAL_INVARIANT_THEOREMS: &[&str] = &[
     "Fcp.Invariants.Audit.audit_chain_hash_link_fork_resistance",
     "Fcp.Invariants.Zone.merge_preserves_integrity_and_confidentiality",
     "Fcp.Invariants.Symbol.symbol_fungibility_reconstruction_guarantee",
-    "Fcp.Invariants.LatticeDelegation.lattice_delegation_chain_corruption_rejected",
+    LATTICE_DELEGATION_STRUCTURAL_THEOREM,
 ];
 
 // ── Scenario metadata ───────────────────────────────────────────────────
@@ -120,6 +128,10 @@ pub struct LeanWitness {
     pub lake_target: String,
     /// Date the witness was last verified, as `YYYY-MM-DD`.
     pub verified_at: String,
+    /// Optional deterministic seed for Rust-vs-model cross-validation tied to
+    /// this theorem witness.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cross_validation_seed: Option<String>,
 }
 
 /// Materialized witness file generated after a successful `lake build`.
@@ -194,6 +206,24 @@ pub enum LeanWitnessError {
         /// Hash from the witness file.
         expected: String,
         /// Hash computed from the current source file.
+        actual: String,
+    },
+    /// A theorem that requires Rust-vs-model cross-validation did not record
+    /// the seed for that bridge test.
+    #[error("Lean witness {theorem} is missing required cross_validation_seed")]
+    MissingCrossValidationSeed {
+        /// Fully-qualified theorem name.
+        theorem: String,
+    },
+    /// A theorem that requires Rust-vs-model cross-validation recorded a seed
+    /// that does not match the canonical bridge-test seed.
+    #[error("Lean witness {theorem} has cross_validation_seed {actual:?}, expected {expected:?}")]
+    CrossValidationSeedMismatch {
+        /// Fully-qualified theorem name.
+        theorem: String,
+        /// Expected seed string.
+        expected: String,
+        /// Actual seed string from the witness.
         actual: String,
     },
 }
@@ -632,6 +662,23 @@ fn verify_required_lean_witness(
             theorem: theorem.to_string(),
         });
     }
+    if theorem == LATTICE_DELEGATION_STRUCTURAL_THEOREM {
+        let seed = witness
+            .cross_validation_seed
+            .as_deref()
+            .map(str::trim)
+            .filter(|seed| !seed.is_empty())
+            .ok_or_else(|| LeanWitnessError::MissingCrossValidationSeed {
+                theorem: theorem.to_string(),
+            })?;
+        if seed != LATTICE_DELEGATION_CROSS_VALIDATION_SEED {
+            return Err(LeanWitnessError::CrossValidationSeedMismatch {
+                theorem: theorem.to_string(),
+                expected: LATTICE_DELEGATION_CROSS_VALIDATION_SEED.to_string(),
+                actual: seed.to_string(),
+            });
+        }
+    }
 
     let source_path = Path::new(&witness.source_path);
     if !is_safe_repo_relative_path(source_path) {
@@ -997,6 +1044,14 @@ mod tests {
                 .theorem
                 .ends_with("symbol_fungibility_reconstruction_guarantee")
         }));
+        let lattice = witnesses
+            .iter()
+            .find(|witness| witness.theorem == LATTICE_DELEGATION_STRUCTURAL_THEOREM)
+            .expect("lattice delegation theorem witness must be present");
+        assert_eq!(
+            lattice.cross_validation_seed.as_deref(),
+            Some(LATTICE_DELEGATION_CROSS_VALIDATION_SEED)
+        );
     }
 
     #[test]
@@ -1011,6 +1066,7 @@ mod tests {
                 source_hash: "sha256:test".to_string(),
                 lake_target: "Fcp".to_string(),
                 verified_at: "2026-05-02".to_string(),
+                cross_validation_seed: None,
             }],
         );
 

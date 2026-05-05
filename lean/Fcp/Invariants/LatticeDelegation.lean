@@ -25,6 +25,13 @@ This matches the soundness guarantees the Rust implementation
 this file should be augmented with the SIS-reduction theorem; the
 structural piece proven here remains a load-bearing pre-condition
 either way.
+
+Important scope boundary: this file proves the Lean model, not the
+Rust implementation by extraction. The bridge to production code is
+the deterministic cross-validation property test
+`lattice_delegation_rust_matches_lean_structural_model` in
+`crates/fcp-policy/tests/lattice_delegation_proptest.rs`, with the
+seed recorded in `lean/witnesses/formal_invariants.v1.json`.
 -/
 
 structure Period where

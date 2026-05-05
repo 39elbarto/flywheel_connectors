@@ -28,6 +28,14 @@ fn zone() -> ZoneId {
     ZoneId::work()
 }
 
+fn zone_from_kind(kind: u8) -> ZoneId {
+    match kind % 3 {
+        0 => ZoneId::work(),
+        1 => ZoneId::private(),
+        _ => ZoneId::public(),
+    }
+}
+
 fn period_open() -> DelegationPeriod {
     DelegationPeriod {
         start_unix_ms: 0,
@@ -62,6 +70,38 @@ fn sub_token_targeting(leaf: u8) -> LatticeSubToken {
         request_descriptor_hash: [0u8; 32],
         preimage_bytes: vec![0u8; 64],
     }
+}
+
+fn lean_period_contains(period: DelegationPeriod, now_unix_ms: u64) -> bool {
+    period.start_unix_ms <= now_unix_ms && now_unix_ms <= period.end_unix_ms
+}
+
+fn lean_accepts_token(
+    leaf: &DelegationCertificate,
+    ancestors: &[DelegationCertificate],
+    request_zone: &ZoneId,
+    now_unix_ms: u64,
+) -> bool {
+    leaf.zone_id == *request_zone
+        && lean_period_contains(leaf.period, now_unix_ms)
+        && ancestors
+            .iter()
+            .all(|ancestor| lean_period_contains(ancestor.period, now_unix_ms))
+}
+
+fn rust_reached_crypto_or_accepted(
+    outcome: &Result<
+        fcp_policy::lattice_delegation::LatticeVerificationReceipt,
+        LatticeDelegationError,
+    >,
+) -> bool {
+    matches!(
+        outcome,
+        Ok(_)
+            | Err(LatticeDelegationError::NotImplemented)
+            | Err(LatticeDelegationError::VerificationEquationFailed { .. })
+            | Err(LatticeDelegationError::PreimageTooLong { .. })
+    )
 }
 
 fn assert_terminates(verifier: &LatticeDelegationVerifierImpl, sub_token: &LatticeSubToken) {
@@ -280,5 +320,85 @@ proptest! {
             v.verify_sub_token(&sub, &other_zone, 1_700_000_000_000)
         }));
         prop_assert!(result.is_ok(), "verifier panicked on cross-zone request");
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 1024,
+        ..ProptestConfig::default()
+    })]
+
+    /// Cross-validates Rust's structural verifier gates against the Lean
+    /// `AcceptsToken` predicate in `lean/Fcp/Invariants/LatticeDelegation.lean`.
+    ///
+    /// The generated trust set is deliberately complete, acyclic, depth-bounded,
+    /// and uses a correctly encoded preimage so the only possible structural
+    /// disagreement is one of the three Lean-modeled checks: leaf zone agreement,
+    /// leaf period containment, or ancestor period containment. A Lean-accepted
+    /// tuple must reach the crypto verifier (today: `NotImplemented`; later:
+    /// crypto result), while a Lean-rejected tuple must stop at a structural
+    /// `ZoneMismatch` or `OutsidePeriod` before crypto is reached.
+    #[test]
+    fn lattice_delegation_rust_matches_lean_structural_model(
+        chain_len in 0usize..=4,
+        leaf_zone_kind in 0u8..=2,
+        request_zone_kind in 0u8..=2,
+        ancestor_zone_kinds in proptest::collection::vec(0u8..=2, 4),
+        leaf_start in any::<u64>(),
+        leaf_end in any::<u64>(),
+        ancestor_starts in proptest::collection::vec(any::<u64>(), 4),
+        ancestor_ends in proptest::collection::vec(any::<u64>(), 4),
+        now_unix_ms in any::<u64>(),
+    ) {
+        let leaf_zone = zone_from_kind(leaf_zone_kind);
+        let request_zone = zone_from_kind(request_zone_kind);
+        let leaf_period = DelegationPeriod {
+            start_unix_ms: leaf_start,
+            end_unix_ms: leaf_end,
+        };
+        let leaf = cert(
+            1,
+            (chain_len > 0).then_some(2),
+            leaf_zone,
+            leaf_period,
+        );
+
+        let mut certs = vec![leaf.clone()];
+        for idx in 0..chain_len {
+            let id = u8::try_from(idx + 2).expect("chain_len <= 4 fits in u8");
+            let parent = (idx + 1 < chain_len).then_some(id + 1);
+            certs.push(cert(
+                id,
+                parent,
+                zone_from_kind(ancestor_zone_kinds[idx]),
+                DelegationPeriod {
+                    start_unix_ms: ancestor_starts[idx],
+                    end_unix_ms: ancestor_ends[idx],
+                },
+            ));
+        }
+
+        let expected_accepts =
+            lean_accepts_token(&leaf, &certs[1..], &request_zone, now_unix_ms);
+        let verifier = verifier_with(certs);
+        let outcome =
+            verifier.verify_sub_token(&sub_token_targeting(1), &request_zone, now_unix_ms);
+
+        if expected_accepts {
+            prop_assert!(
+                rust_reached_crypto_or_accepted(&outcome),
+                "Lean accepted but Rust stopped before crypto: {outcome:?}"
+            );
+        } else {
+            prop_assert!(
+                matches!(
+                    outcome,
+                    Err(LatticeDelegationError::ZoneMismatch { .. })
+                        | Err(LatticeDelegationError::OutsidePeriod { .. })
+                ),
+                "Lean rejected but Rust did not reject at a modeled structural gate: {outcome:?}"
+            );
+        }
     }
 }

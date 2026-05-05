@@ -20,7 +20,7 @@ use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConf
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::client::TeamsClient;
@@ -1017,24 +1017,36 @@ impl TeamsConnector {
         let target = MessageTarget::from_input(&req.input)?;
         let message_id = require_str(&req.input, "message_id")?;
         let payload = Self::build_message_payload(&req.input)?;
-        let reply = match target {
-            MessageTarget::Channel {
-                team_id,
-                channel_id,
-            } => client
-                .reply_to_channel_message(team_id, channel_id, message_id, &payload)
-                .await
-                .map_err(|err| err.to_fcp_error())?,
-            MessageTarget::Chat { chat_id } => client
-                .reply_with_quote(chat_id, &[message_id.to_string()], &payload)
-                .await
-                .map_err(|err| err.to_fcp_error())?,
+        let (reply, delivery_mode, fallback_diagnostic) =
+            match Self::send_threaded_reply(client, target, message_id, &payload).await {
+                Ok(reply) => (reply, "threaded", None),
+                Err(error) => {
+                    let Some(diagnostic) = Self::threaded_reply_fallback_diagnostic(&error) else {
+                        return Err(error.to_fcp_error());
+                    };
+                    warn!(
+                        event = "teams.reply.threaded_fallback",
+                        target = target.label(),
+                        status_code = diagnostic.status_code,
+                        provider_code = diagnostic.code,
+                        "Teams threaded reply rejected; trying flat message fallback"
+                    );
+                    let reply = Self::send_flat_reply_fallback(client, target, &payload)
+                        .await
+                        .map_err(|fallback_error| fallback_error.to_fcp_error())?;
+                    (reply, "flat_fallback", Some(diagnostic.to_json()))
+                }
+            };
+        let activity_type = if delivery_mode == "flat_fallback" {
+            "outbound_reply_flat_fallback"
+        } else {
+            "outbound_reply"
         };
         self.update_state_for_outbound_message(
             target,
             &req.input,
             reply.id.as_deref(),
-            "outbound_reply",
+            activity_type,
         );
 
         Ok(json!({
@@ -1042,7 +1054,69 @@ impl TeamsConnector {
             "reply_to_id": message_id,
             "target": target.label(),
             "conversation_id": target.conversation_id(),
+            "threaded_attempted": true,
+            "delivery_mode": delivery_mode,
+            "fallback_diagnostic": fallback_diagnostic,
         }))
+    }
+
+    async fn send_threaded_reply(
+        client: &TeamsClient,
+        target: MessageTarget<'_>,
+        message_id: &str,
+        payload: &Value,
+    ) -> Result<crate::types::ChatMessage, TeamsError> {
+        match target {
+            MessageTarget::Channel {
+                team_id,
+                channel_id,
+            } => {
+                client
+                    .reply_to_channel_message(team_id, channel_id, message_id, payload)
+                    .await
+            }
+            MessageTarget::Chat { chat_id } => {
+                client
+                    .reply_with_quote(chat_id, &[message_id.to_string()], payload)
+                    .await
+            }
+        }
+    }
+
+    async fn send_flat_reply_fallback(
+        client: &TeamsClient,
+        target: MessageTarget<'_>,
+        payload: &Value,
+    ) -> Result<crate::types::ChatMessage, TeamsError> {
+        match target {
+            MessageTarget::Channel {
+                team_id,
+                channel_id,
+            } => {
+                client
+                    .send_channel_message_payload(team_id, channel_id, payload)
+                    .await
+            }
+            MessageTarget::Chat { chat_id } => {
+                client.send_chat_message_payload(chat_id, payload).await
+            }
+        }
+    }
+
+    fn threaded_reply_fallback_diagnostic(
+        error: &TeamsError,
+    ) -> Option<ThreadedReplyFallbackDiagnostic<'_>> {
+        match error {
+            TeamsError::Graph {
+                code,
+                status_code: 400,
+                ..
+            } => Some(ThreadedReplyFallbackDiagnostic {
+                status_code: 400,
+                code,
+            }),
+            _ => None,
+        }
     }
 
     async fn invoke_update_operation(
@@ -1622,7 +1696,22 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "properties": {
                     "message_id": { "type": "string" },
                     "reply_to_id": { "type": "string" },
-                    "target": { "type": "string" }
+                    "target": { "type": "string" },
+                    "conversation_id": { "type": "string" },
+                    "threaded_attempted": { "type": "boolean" },
+                    "delivery_mode": {
+                        "type": "string",
+                        "enum": ["threaded", "flat_fallback"]
+                    },
+                    "fallback_diagnostic": {
+                        "type": "object",
+                        "properties": {
+                            "reason": { "type": "string" },
+                            "provider": { "type": "string" },
+                            "status_code": { "type": "integer" },
+                            "code": { "type": "string" }
+                        }
+                    }
                 }
             }),
             capability: CapabilityId::from_static(CAP_WRITE),
@@ -1786,6 +1875,23 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Clone, Copy)]
+struct ThreadedReplyFallbackDiagnostic<'a> {
+    status_code: u16,
+    code: &'a str,
+}
+
+impl ThreadedReplyFallbackDiagnostic<'_> {
+    fn to_json(self) -> Value {
+        json!({
+            "reason": "threaded_reply_rejected",
+            "provider": "microsoft_graph",
+            "status_code": self.status_code,
+            "code": self.code,
+        })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -2279,6 +2385,26 @@ mod tests {
         connector
     }
 
+    fn reply_request(input: Value) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_reply"),
+            connector_id: ConnectorId::from_static("fcp.teams"),
+            operation: OperationId::from_static(OP_REPLY_MSG),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token: CapabilityToken::test_token(),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
@@ -2350,6 +2476,283 @@ mod tests {
             payload["attachments"][0]["contentType"],
             "application/vnd.microsoft.card.adaptive"
         );
+    }
+
+    #[test]
+    fn test_reply_message_schema_exposes_fallback_diagnostics() {
+        let ops = operations_info();
+        let reply = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_REPLY_MSG)
+            .unwrap();
+        assert_eq!(
+            reply.output_schema["properties"]["delivery_mode"]["type"],
+            "string"
+        );
+        assert_eq!(
+            reply.output_schema["properties"]["threaded_attempted"]["type"],
+            "boolean"
+        );
+        assert_eq!(
+            reply.output_schema["properties"]["fallback_diagnostic"]["type"],
+            "object"
+        );
+    }
+
+    #[test]
+    fn test_message_target_parses_channel_and_chat_routes() {
+        let channel_input = json!({
+            "team_id": "team_1",
+            "channel_id": "channel_1",
+        });
+        let channel = MessageTarget::from_input(&channel_input).unwrap();
+        assert_eq!(channel.label(), "channel");
+        assert_eq!(channel.conversation_id(), "channel_1");
+
+        let chat_input = json!({
+            "chat_id": "chat_1",
+        });
+        let chat = MessageTarget::from_input(&chat_input).unwrap();
+        assert_eq!(chat.label(), "chat");
+        assert_eq!(chat.conversation_id(), "chat_1");
+
+        let ambiguous_input = json!({
+            "team_id": "team_1",
+            "channel_id": "channel_1",
+            "chat_id": "chat_1",
+        });
+        assert!(MessageTarget::from_input(&ambiguous_input).is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_operation_reports_threaded_channel_delivery() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages/root_1/replies",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+                "id": "reply_1",
+                "replyToId": "root_1",
+                "body": { "contentType": "text", "content": "threaded" }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let connector = TeamsConnector::new();
+        let output = connector
+            .invoke_reply_operation(
+                &client,
+                &reply_request(json!({
+                    "team_id": "team_1",
+                    "channel_id": "channel_1",
+                    "message_id": "root_1",
+                    "content": "threaded",
+                })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["message_id"], "reply_1");
+        assert_eq!(output["reply_to_id"], "root_1");
+        assert_eq!(output["delivery_mode"], "threaded");
+        assert_eq!(output["threaded_attempted"], json!(true));
+        assert!(output["fallback_diagnostic"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_operation_channel_falls_back_to_flat_send_on_graph_400() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages/root_1/replies",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "code": "BadRequest",
+                    "message": "Threaded replies are not supported in this conversation"
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+                "id": "flat_1",
+                "body": { "contentType": "text", "content": "fallback" }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let connector = TeamsConnector::new();
+        let output = connector
+            .invoke_reply_operation(
+                &client,
+                &reply_request(json!({
+                    "team_id": "team_1",
+                    "channel_id": "channel_1",
+                    "message_id": "root_1",
+                    "content": "fallback",
+                })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["message_id"], "flat_1");
+        assert_eq!(output["reply_to_id"], "root_1");
+        assert_eq!(output["delivery_mode"], "flat_fallback");
+        assert_eq!(output["fallback_diagnostic"]["status_code"], 400);
+        assert_eq!(output["fallback_diagnostic"]["code"], "BadRequest");
+        assert!(output["fallback_diagnostic"].get("message").is_none());
+
+        let state = lock_unpoisoned(&connector.conversation_states)
+            .get("channel_1")
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            state.last_activity_type.as_deref(),
+            Some("outbound_reply_flat_fallback")
+        );
+        assert_eq!(state.reply_to_id.as_deref(), Some("root_1"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_operation_chat_falls_back_to_flat_send_on_graph_400() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/chats/chat_1/messages/replyWithQuote",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(400).set_body_json(json!({
+                "error": {
+                    "code": "BadRequest",
+                    "message": "Reply with quote is unavailable"
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/chats/chat_1/messages"))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+                "id": "flat_chat_1",
+                "chatId": "chat_1",
+                "body": { "contentType": "text", "content": "fallback" }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let connector = TeamsConnector::new();
+        let output = connector
+            .invoke_reply_operation(
+                &client,
+                &reply_request(json!({
+                    "chat_id": "chat_1",
+                    "message_id": "root_1",
+                    "content": "fallback",
+                })),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(output["message_id"], "flat_chat_1");
+        assert_eq!(output["target"], "chat");
+        assert_eq!(output["conversation_id"], "chat_1");
+        assert_eq!(output["delivery_mode"], "flat_fallback");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_operation_does_not_fallback_on_rate_limit() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages/root_1/replies",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(429))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+                "id": "must_not_send"
+            })))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let connector = TeamsConnector::new();
+        let error = connector
+            .invoke_reply_operation(
+                &client,
+                &reply_request(json!({
+                    "team_id": "team_1",
+                    "channel_id": "channel_1",
+                    "message_id": "root_1",
+                    "content": "do not fallback",
+                })),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FcpError::RateLimited { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_reply_operation_does_not_fallback_on_forbidden() {
+        let mock_server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages/root_1/replies",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(403).set_body_json(json!({
+                "error": {
+                    "code": "Forbidden",
+                    "message": "Insufficient privileges to complete the operation."
+                }
+            })))
+            .expect(1)
+            .mount(&mock_server)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(
+                "/teams/team_1/channels/channel_1/messages",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(201).set_body_json(json!({
+                "id": "must_not_send"
+            })))
+            .expect(0)
+            .mount(&mock_server)
+            .await;
+
+        let client = TeamsClient::new(&mock_server.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let connector = TeamsConnector::new();
+        let error = connector
+            .invoke_reply_operation(
+                &client,
+                &reply_request(json!({
+                    "team_id": "team_1",
+                    "channel_id": "channel_1",
+                    "message_id": "root_1",
+                    "content": "do not fallback",
+                })),
+            )
+            .await
+            .unwrap_err();
+
+        assert!(matches!(error, FcpError::Unauthorized { code: 2003, .. }));
     }
 
     #[test]

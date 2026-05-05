@@ -31,6 +31,7 @@ async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
 reqwest = { workspace = true, features = ["json"] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

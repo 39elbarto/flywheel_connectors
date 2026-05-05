@@ -2,7 +2,7 @@
 //!
 //! Covers the `BlueBubbles` REST API types for `iMessage` bridging.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use fcp_prelude::FcpError;
 use reqwest::Url;
@@ -67,6 +67,14 @@ pub struct BlueBubblesConfig {
     /// Optional API fallback for resolving missing inbound reply context.
     #[serde(default)]
     pub reply_context_api_fallback: BlueBubblesReplyContextApiFallbackConfig,
+
+    /// Optional Contacts-backed enrichment for accepted inbound group participants.
+    #[serde(
+        default,
+        alias = "enrichGroupParticipantsFromContacts",
+        deserialize_with = "deserialize_contacts_enrichment_config"
+    )]
+    pub contacts_enrichment: BlueBubblesContactsEnrichmentConfig,
 }
 
 /// Policy and persistence config for accepted inbound `BlueBubbles` webhook events.
@@ -470,6 +478,215 @@ pub struct BlueBubblesReplyContextApiFallbackSummary {
     pub max_response_bytes: usize,
 }
 
+/// Per-account or per-chat override for Contacts-backed participant enrichment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesContactsEnrichmentOverride {
+    /// Account namespace this override applies to.
+    #[serde(default)]
+    pub account_id: Option<String>,
+
+    /// Chat GUID or identifier this override applies to.
+    #[serde(default)]
+    pub chat_guid: Option<String>,
+
+    /// Override value. Chat-scoped overrides take precedence over account-scoped overrides.
+    pub enabled: bool,
+}
+
+/// Config for opt-in Contacts-backed group participant enrichment.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesContactsEnrichmentConfig {
+    /// Global default. Defaults to false because local Contacts access can expose private data.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Account/chat-specific overrides. Chat-scoped matches win over account matches.
+    #[serde(default)]
+    pub overrides: Vec<BlueBubblesContactsEnrichmentOverride>,
+
+    /// Explicit `AddressBook` `SQLite` database paths. Empty means discover the macOS default.
+    #[serde(default)]
+    pub database_paths: Vec<String>,
+
+    /// Optional home directory used for macOS `AddressBook` discovery.
+    #[serde(default)]
+    pub home_dir: Option<String>,
+
+    /// Deterministic phone-to-name source for tests or operator-provided fixtures.
+    #[serde(default)]
+    pub test_contacts: BTreeMap<String, String>,
+
+    /// TTL for positive contact-name cache entries.
+    #[serde(default = "default_contacts_positive_cache_ttl_seconds")]
+    pub positive_cache_ttl_seconds: u64,
+
+    /// TTL for negative contact-name cache entries.
+    #[serde(default = "default_contacts_negative_cache_ttl_seconds")]
+    pub negative_cache_ttl_seconds: u64,
+
+    /// Maximum normalized phone keys retained in the enrichment cache.
+    #[serde(default = "default_contacts_max_cache_entries")]
+    pub max_cache_entries: usize,
+}
+
+impl Default for BlueBubblesContactsEnrichmentConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            overrides: Vec::new(),
+            database_paths: Vec::new(),
+            home_dir: None,
+            test_contacts: BTreeMap::new(),
+            positive_cache_ttl_seconds: default_contacts_positive_cache_ttl_seconds(),
+            negative_cache_ttl_seconds: default_contacts_negative_cache_ttl_seconds(),
+            max_cache_entries: default_contacts_max_cache_entries(),
+        }
+    }
+}
+
+impl BlueBubblesContactsEnrichmentConfig {
+    fn validate(mut self) -> Result<Self, FcpError> {
+        for override_config in &mut self.overrides {
+            override_config.account_id = override_config
+                .account_id
+                .as_deref()
+                .and_then(nonempty_string);
+            override_config.chat_guid = override_config
+                .chat_guid
+                .as_deref()
+                .and_then(nonempty_string);
+        }
+        self.overrides.retain(|override_config| {
+            override_config.account_id.is_some() || override_config.chat_guid.is_some()
+        });
+        self.database_paths = normalize_policy_list(self.database_paths);
+        self.home_dir = self
+            .home_dir
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned);
+
+        self.test_contacts = std::mem::take(&mut self.test_contacts)
+            .into_iter()
+            .filter_map(|(phone, name)| {
+                let phone = normalize_bluebubbles_contact_phone_key(&phone)?;
+                nonempty_string(&name).map(|name| (phone, name))
+            })
+            .collect();
+
+        if self.positive_cache_ttl_seconds == 0 {
+            return Err(invalid_config(
+                "contacts_enrichment.positive_cache_ttl_seconds must be greater than zero",
+            ));
+        }
+        if self.negative_cache_ttl_seconds == 0 {
+            return Err(invalid_config(
+                "contacts_enrichment.negative_cache_ttl_seconds must be greater than zero",
+            ));
+        }
+        if self.max_cache_entries == 0 {
+            return Err(invalid_config(
+                "contacts_enrichment.max_cache_entries must be greater than zero",
+            ));
+        }
+
+        Ok(self)
+    }
+
+    /// Return a PII-safe summary suitable for doctor/introspection surfaces.
+    #[must_use]
+    pub fn summary(&self) -> BlueBubblesContactsEnrichmentSummary {
+        BlueBubblesContactsEnrichmentSummary {
+            enabled: self.enabled,
+            default_enabled: false,
+            account_override_count: self
+                .overrides
+                .iter()
+                .filter(|override_config| {
+                    override_config.account_id.is_some() && override_config.chat_guid.is_none()
+                })
+                .count(),
+            chat_override_count: self
+                .overrides
+                .iter()
+                .filter(|override_config| override_config.chat_guid.is_some())
+                .count(),
+            explicit_database_count: self.database_paths.len(),
+            home_dir_configured: self.home_dir.is_some(),
+            test_contact_count: self.test_contacts.len(),
+            positive_cache_ttl_seconds: self.positive_cache_ttl_seconds,
+            negative_cache_ttl_seconds: self.negative_cache_ttl_seconds,
+            max_cache_entries: self.max_cache_entries,
+        }
+    }
+
+    /// Resolve enrichment enablement for one accepted inbound event.
+    #[must_use]
+    pub fn enabled_for(&self, account_id: &str, chat_keys: &[String]) -> bool {
+        for chat_key in chat_keys {
+            if let Some(override_config) = self.overrides.iter().find(|override_config| {
+                override_config.chat_guid.as_deref() == Some(chat_key.as_str())
+                    && override_config
+                        .account_id
+                        .as_deref()
+                        .is_none_or(|configured| configured == account_id)
+            }) {
+                return override_config.enabled;
+            }
+        }
+
+        if let Some(override_config) = self.overrides.iter().find(|override_config| {
+            override_config.chat_guid.is_none()
+                && override_config.account_id.as_deref() == Some(account_id)
+        }) {
+            return override_config.enabled;
+        }
+
+        self.enabled
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum BlueBubblesContactsEnrichmentConfigInput {
+    Enabled(bool),
+    Config(BlueBubblesContactsEnrichmentConfig),
+}
+
+fn deserialize_contacts_enrichment_config<'de, D>(
+    deserializer: D,
+) -> Result<BlueBubblesContactsEnrichmentConfig, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match BlueBubblesContactsEnrichmentConfigInput::deserialize(deserializer)? {
+        BlueBubblesContactsEnrichmentConfigInput::Enabled(enabled) => {
+            Ok(BlueBubblesContactsEnrichmentConfig {
+                enabled,
+                ..BlueBubblesContactsEnrichmentConfig::default()
+            })
+        }
+        BlueBubblesContactsEnrichmentConfigInput::Config(config) => Ok(config),
+    }
+}
+
+/// PII-safe Contacts enrichment summary.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesContactsEnrichmentSummary {
+    pub enabled: bool,
+    pub default_enabled: bool,
+    pub account_override_count: usize,
+    pub chat_override_count: usize,
+    pub explicit_database_count: usize,
+    pub home_dir_configured: bool,
+    pub test_contact_count: usize,
+    pub positive_cache_ttl_seconds: u64,
+    pub negative_cache_ttl_seconds: u64,
+    pub max_cache_entries: usize,
+}
+
 /// Result of applying inbound sender/conversation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlueBubblesInboundDecision {
@@ -528,6 +745,7 @@ impl BlueBubblesConfig {
         self.webhook_inbound = self.webhook_inbound.validate()?;
         self.webhook_coalescing = self.webhook_coalescing.validate()?;
         self.reply_context_api_fallback = self.reply_context_api_fallback.validate()?;
+        self.contacts_enrichment = self.contacts_enrichment.validate()?;
 
         if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
@@ -625,6 +843,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
                 "reply_context_api_fallback",
                 &self.reply_context_api_fallback.summary(),
             )
+            .field("contacts_enrichment", &self.contacts_enrichment.summary())
             .finish()
     }
 }
@@ -701,6 +920,18 @@ const fn default_reply_context_max_response_bytes() -> usize {
     256 * 1024
 }
 
+const fn default_contacts_positive_cache_ttl_seconds() -> u64 {
+    60 * 60
+}
+
+const fn default_contacts_negative_cache_ttl_seconds() -> u64 {
+    5 * 60
+}
+
+const fn default_contacts_max_cache_entries() -> usize {
+    2048
+}
+
 fn normalize_webhook_path(path: &str) -> String {
     let path = path.trim();
     if path.starts_with('/') {
@@ -724,6 +955,23 @@ fn invalid_config(message: impl Into<String>) -> FcpError {
         code: 1001,
         message: format!("Invalid BlueBubbles config: {}", message.into()),
     }
+}
+
+/// Normalize a phone number into the Contacts lookup key used by `BlueBubbles`.
+#[must_use]
+pub fn normalize_bluebubbles_contact_phone_key(value: &str) -> Option<String> {
+    let digits = value
+        .chars()
+        .filter(char::is_ascii_digit)
+        .collect::<String>();
+    if digits.is_empty() {
+        return None;
+    }
+    let normalized = match (digits.len(), digits.strip_prefix('1')) {
+        (11, Some(rest)) => rest.to_string(),
+        _ => digits,
+    };
+    (normalized.len() >= 7).then_some(normalized)
 }
 
 // ---------------------------------------------------------------------------
@@ -1125,6 +1373,24 @@ pub struct NormalizedWebhookAttachment {
     pub total_bytes: Option<u64>,
 }
 
+/// Participant metadata normalized from inbound group webhook payloads.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlueBubblesWebhookParticipant {
+    /// Phone number, email, or bridge handle identifying the participant.
+    pub address: String,
+
+    /// Human-readable display name when exposed or safely enriched.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+
+    /// Whether this participant represents the local account.
+    pub is_me: bool,
+
+    /// Whether `display_name` came from opt-in Contacts enrichment.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub contact_name_enriched: bool,
+}
+
 /// Normalized message-shaped event from a `BlueBubbles` webhook payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NormalizedBlueBubblesWebhookMessage {
@@ -1166,6 +1432,10 @@ pub struct NormalizedBlueBubblesWebhookMessage {
     /// Attachments on the inbound message.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub attachments: Vec<NormalizedWebhookAttachment>,
+
+    /// Participant metadata for group conversations, when exposed by `BlueBubbles`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub participants: Vec<BlueBubblesWebhookParticipant>,
 
     /// Thread/reply originator GUID, when present.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1255,6 +1525,11 @@ where
 fn nonempty_string(value: &str) -> Option<String> {
     let value = value.trim().to_string();
     (!value.is_empty()).then_some(value)
+}
+
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 fn read_string(record: Option<&Map<String, Value>>, keys: &[&str]) -> Option<String> {
@@ -1402,6 +1677,105 @@ fn normalize_attachments(record: &Map<String, Value>) -> Vec<NormalizedWebhookAt
         .unwrap_or_default()
 }
 
+fn read_participant_string(record: &Map<String, Value>, keys: &[&str]) -> Option<String> {
+    read_string(Some(record), keys).or_else(|| {
+        ["handle", "sender", "contact"]
+            .into_iter()
+            .find_map(|nested_key| read_string(read_record(Some(record), &[nested_key]), keys))
+    })
+}
+
+fn read_participant_bool(record: &Map<String, Value>, keys: &[&str]) -> Option<bool> {
+    read_bool(Some(record), keys).or_else(|| {
+        ["handle", "sender", "contact"]
+            .into_iter()
+            .find_map(|nested_key| read_bool(read_record(Some(record), &[nested_key]), keys))
+    })
+}
+
+fn normalize_webhook_participant(value: &Value) -> Option<BlueBubblesWebhookParticipant> {
+    match value {
+        Value::String(value) => {
+            nonempty_string(value).map(|address| BlueBubblesWebhookParticipant {
+                address,
+                display_name: None,
+                is_me: false,
+                contact_name_enriched: false,
+            })
+        }
+        Value::Number(value) => Some(BlueBubblesWebhookParticipant {
+            address: value.to_string(),
+            display_name: None,
+            is_me: false,
+            contact_name_enriched: false,
+        }),
+        Value::Object(record) => {
+            let address = read_participant_string(
+                record,
+                &[
+                    "address",
+                    "handle",
+                    "id",
+                    "phoneNumber",
+                    "phone_number",
+                    "email",
+                ],
+            )?;
+            let display_name = read_participant_string(
+                record,
+                &["displayName", "display_name", "name", "fullName", "title"],
+            );
+            let is_me = read_participant_bool(record, &["isMe", "is_me", "me"]).unwrap_or(false);
+
+            Some(BlueBubblesWebhookParticipant {
+                address,
+                display_name,
+                is_me,
+                contact_name_enriched: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn push_participants_from_record(
+    participants: &mut Vec<BlueBubblesWebhookParticipant>,
+    seen: &mut BTreeSet<String>,
+    record: Option<&Map<String, Value>>,
+) {
+    let Some(record) = record else {
+        return;
+    };
+
+    for key in ["participants", "handles", "participantHandles"] {
+        let Some(values) = record.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        for value in values {
+            let Some(participant) = normalize_webhook_participant(value) else {
+                continue;
+            };
+            let dedupe_key = participant.address.to_ascii_lowercase();
+            if seen.insert(dedupe_key) {
+                participants.push(participant);
+            }
+        }
+    }
+}
+
+fn normalize_webhook_participants(
+    record: &Map<String, Value>,
+    chat_record: Option<&Map<String, Value>>,
+    chat_from_list: Option<&Map<String, Value>>,
+) -> Vec<BlueBubblesWebhookParticipant> {
+    let mut participants = Vec::new();
+    let mut seen = BTreeSet::new();
+    push_participants_from_record(&mut participants, &mut seen, Some(record));
+    push_participants_from_record(&mut participants, &mut seen, chat_record);
+    push_participants_from_record(&mut participants, &mut seen, chat_from_list);
+    participants
+}
+
 fn is_tapback_type(associated_type: Option<i32>) -> bool {
     associated_type.is_some_and(|value| (2000..4000).contains(&value))
 }
@@ -1535,8 +1909,10 @@ pub fn normalize_bluebubbles_webhook_payload(
             None
         }
     });
+    let participants = normalize_webhook_participants(record, chat_record, chat_from_list);
     let is_group = group_from_guid
         .or_else(|| read_bool(Some(record), &["isGroup", "is_group", "group"]))
+        .or_else(|| (participants.len() > 2).then_some(true))
         .unwrap_or(false);
 
     Ok(NormalizedBlueBubblesWebhookMessage {
@@ -1551,6 +1927,7 @@ pub fn normalize_bluebubbles_webhook_payload(
         is_from_me,
         is_group,
         attachments: normalize_attachments(record),
+        participants,
         reply_to_message_guid,
         reply_context: None,
         associated_message_guid,
@@ -1667,6 +2044,14 @@ mod tests {
             config.reply_context_api_fallback.max_response_bytes,
             256 * 1024
         );
+        assert!(!config.contacts_enrichment.enabled);
+        assert!(config.contacts_enrichment.overrides.is_empty());
+        assert!(config.contacts_enrichment.database_paths.is_empty());
+        assert!(config.contacts_enrichment.home_dir.is_none());
+        assert!(config.contacts_enrichment.test_contacts.is_empty());
+        assert_eq!(config.contacts_enrichment.positive_cache_ttl_seconds, 3600);
+        assert_eq!(config.contacts_enrichment.negative_cache_ttl_seconds, 300);
+        assert_eq!(config.contacts_enrichment.max_cache_entries, 2048);
         assert!(config.attachment_dir.is_none());
     }
 
@@ -1699,6 +2084,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn config_from_value_normalizes_webhook_inbound_policy() {
         let config = BlueBubblesConfig::from_value(serde_json::json!({
             "password": "secret",
@@ -1727,6 +2113,24 @@ mod tests {
                 "overrides": [
                     { "account_id": " acct-a ", "enabled": false },
                     { "chat_guid": " iMessage;-;+15551234567 ", "enabled": true },
+                    { "account_id": " ", "chat_guid": " ", "enabled": true }
+                ]
+            },
+            "contacts_enrichment": {
+                "enabled": false,
+                "database_paths": [" /tmp/addressbook-1.abcddb ", "", "/tmp/addressbook-1.abcddb"],
+                "home_dir": " /Users/example ",
+                "test_contacts": {
+                    "+1 (555) 123-4567": " Alice Example ",
+                    "not-a-phone": "Ignored",
+                    "+15557654321": " "
+                },
+                "positive_cache_ttl_seconds": 60,
+                "negative_cache_ttl_seconds": 30,
+                "max_cache_entries": 8,
+                "overrides": [
+                    { "account_id": " acct-a ", "enabled": false },
+                    { "chat_guid": " iMessage;+;family ", "enabled": true },
                     { "account_id": " ", "chat_guid": " ", "enabled": true }
                 ]
             }
@@ -1769,6 +2173,59 @@ mod tests {
                 .reply_context_api_fallback
                 .enabled_for("acct-a", &["iMessage;-;+15551234567".to_string()])
         );
+        assert!(!config.contacts_enrichment.enabled);
+        assert_eq!(
+            config.contacts_enrichment.database_paths,
+            vec!["/tmp/addressbook-1.abcddb"]
+        );
+        assert_eq!(
+            config.contacts_enrichment.home_dir.as_deref(),
+            Some("/Users/example")
+        );
+        assert_eq!(
+            config
+                .contacts_enrichment
+                .test_contacts
+                .get("5551234567")
+                .map(String::as_str),
+            Some("Alice Example")
+        );
+        assert_eq!(config.contacts_enrichment.test_contacts.len(), 1);
+        assert_eq!(config.contacts_enrichment.positive_cache_ttl_seconds, 60);
+        assert_eq!(config.contacts_enrichment.negative_cache_ttl_seconds, 30);
+        assert_eq!(config.contacts_enrichment.max_cache_entries, 8);
+        assert_eq!(config.contacts_enrichment.overrides.len(), 2);
+        assert!(!config.contacts_enrichment.enabled_for("acct-a", &[]));
+        assert!(
+            config
+                .contacts_enrichment
+                .enabled_for("acct-a", &["iMessage;+;family".to_string()])
+        );
+    }
+
+    #[test]
+    fn config_accepts_legacy_contacts_enrichment_boolean_alias() {
+        let config = BlueBubblesConfig::from_value(serde_json::json!({
+            "password": "secret",
+            "enrichGroupParticipantsFromContacts": true
+        }))
+        .unwrap();
+
+        assert!(config.contacts_enrichment.enabled);
+    }
+
+    #[test]
+    fn contact_phone_lookup_key_matches_bluebubbles_contacts_rules() {
+        assert_eq!(
+            normalize_bluebubbles_contact_phone_key("+1 (555) 123-4567").as_deref(),
+            Some("5551234567")
+        );
+        assert_eq!(
+            normalize_bluebubbles_contact_phone_key("555.123.4567").as_deref(),
+            Some("5551234567")
+        );
+        assert!(normalize_bluebubbles_contact_phone_key("abc@example.com").is_none());
+        assert!(normalize_bluebubbles_contact_phone_key("123456").is_none());
     }
 
     #[test]
@@ -1864,6 +2321,18 @@ mod tests {
             serde_json::json!({
                 "password": "secret",
                 "reply_context_api_fallback": { "max_response_bytes": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "contacts_enrichment": { "positive_cache_ttl_seconds": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "contacts_enrichment": { "negative_cache_ttl_seconds": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "contacts_enrichment": { "max_cache_entries": 0 }
             }),
         ];
 
@@ -2083,7 +2552,12 @@ mod tests {
                 "dateCreated": 1_700_000_000_123_i64,
                 "chats": [{
                     "guid": "iMessage;+;chat123",
-                    "chatIdentifier": "Family"
+                    "chatIdentifier": "Family",
+                    "participants": [
+                        { "address": "+1 (555) 123-4567" },
+                        { "address": "self@example.com", "displayName": "Me", "isMe": true },
+                        { "address": "+15557654321", "displayName": "Bob" }
+                    ]
                 }],
                 "attachments": [{
                     "guid": "att-1",
@@ -2124,6 +2598,13 @@ mod tests {
             Some("photo.png")
         );
         assert_eq!(normalized.attachments[0].total_bytes, Some(123));
+        assert_eq!(normalized.participants.len(), 3);
+        assert_eq!(normalized.participants[0].address, "+1 (555) 123-4567");
+        assert!(normalized.participants[1].is_me);
+        assert_eq!(
+            normalized.participants[2].display_name.as_deref(),
+            Some("Bob")
+        );
         assert_eq!(normalized.reply_to_message_guid.as_deref(), Some("root-1"));
         assert_eq!(
             normalized.associated_message_guid.as_deref(),
@@ -2136,6 +2617,34 @@ mod tests {
         );
         assert!(!normalized.is_tapback);
         assert_eq!(normalized.source_message_ids, vec!["msg-002", "msg-003"]);
+    }
+
+    #[test]
+    fn normalize_webhook_payload_extracts_participants_and_infers_group() {
+        let payload = serde_json::json!({
+            "type": "new-message",
+            "data": {
+                "guid": "participant-msg",
+                "handle": { "address": "+15551234567" },
+                "participants": [
+                    "+15551234567",
+                    { "phoneNumber": "+1 (555) 765-4321", "displayName": "Alice" },
+                    { "email": "me@example.com", "isMe": true },
+                    { "handle": { "address": "+15551234567" } }
+                ],
+                "isFromMe": false
+            }
+        });
+
+        let normalized = normalize_bluebubbles_webhook_payload(&payload, None).unwrap();
+        assert!(normalized.is_group);
+        assert_eq!(normalized.participants.len(), 3);
+        assert_eq!(normalized.participants[0].address, "+15551234567");
+        assert_eq!(
+            normalized.participants[1].display_name.as_deref(),
+            Some("Alice")
+        );
+        assert!(normalized.participants[2].is_me);
     }
 
     #[test]

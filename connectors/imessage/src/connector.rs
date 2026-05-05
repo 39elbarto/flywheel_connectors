@@ -18,14 +18,16 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use fcp_sdk::prelude::*;
+use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
 use crate::types::{
-    BlueBubblesConfig, BlueBubblesReplyContext, BlueBubblesWebhookCoalescingConfig, Message,
-    NormalizedBlueBubblesWebhookMessage, QueryParams, bluebubbles_webhook_source_dedupe_ids,
-    default_webhook_events, normalize_bluebubbles_webhook_payload,
+    BlueBubblesConfig, BlueBubblesContactsEnrichmentConfig, BlueBubblesReplyContext,
+    BlueBubblesWebhookCoalescingConfig, Message, NormalizedBlueBubblesWebhookMessage, QueryParams,
+    bluebubbles_webhook_source_dedupe_ids, default_webhook_events,
+    normalize_bluebubbles_contact_phone_key, normalize_bluebubbles_webhook_payload,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -884,6 +886,261 @@ fn reply_message_scope_matches(event_chat_keys: &[String], message_chat_keys: &[
         })
 }
 
+#[derive(Debug, Clone)]
+struct BlueBubblesContactNameCacheEntry {
+    name: Option<String>,
+    expires_at_ms: i64,
+}
+
+#[derive(Debug, Clone)]
+enum BlueBubblesContactCacheLookup {
+    Hit(Option<String>),
+    Miss,
+}
+
+#[derive(Debug, Default)]
+struct BlueBubblesContactsEnrichmentCache {
+    entries: Mutex<BTreeMap<String, BlueBubblesContactNameCacheEntry>>,
+}
+
+impl BlueBubblesContactsEnrichmentCache {
+    fn get(&self, phone_key: &str, now_ms: i64) -> FcpResult<BlueBubblesContactCacheLookup> {
+        let mut entries = self.entries.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles Contacts enrichment cache lock was poisoned".into(),
+        })?;
+        let Some(entry) = entries.get(phone_key).cloned() else {
+            return Ok(BlueBubblesContactCacheLookup::Miss);
+        };
+        if entry.expires_at_ms <= now_ms {
+            entries.remove(phone_key);
+            return Ok(BlueBubblesContactCacheLookup::Miss);
+        }
+        entries.remove(phone_key);
+        entries.insert(phone_key.to_string(), entry.clone());
+        drop(entries);
+        Ok(BlueBubblesContactCacheLookup::Hit(entry.name))
+    }
+
+    fn insert(
+        &self,
+        phone_key: String,
+        name: Option<String>,
+        now_ms: i64,
+        config: &BlueBubblesContactsEnrichmentConfig,
+    ) -> FcpResult<()> {
+        let ttl_seconds = if name.is_some() {
+            config.positive_cache_ttl_seconds
+        } else {
+            config.negative_cache_ttl_seconds
+        };
+        let ttl_ms =
+            i64::try_from(Duration::from_secs(ttl_seconds).as_millis()).unwrap_or(i64::MAX);
+        let mut entries = self.entries.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles Contacts enrichment cache lock was poisoned".into(),
+        })?;
+        entries.retain(|_, entry| entry.expires_at_ms > now_ms);
+        entries.remove(&phone_key);
+        entries.insert(
+            phone_key,
+            BlueBubblesContactNameCacheEntry {
+                name,
+                expires_at_ms: now_ms.saturating_add(ttl_ms),
+            },
+        );
+        while entries.len() > config.max_cache_entries {
+            let Some(oldest_key) = entries.keys().next().cloned() else {
+                break;
+            };
+            entries.remove(&oldest_key);
+        }
+        drop(entries);
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BlueBubblesContactsEnrichmentResult {
+    enabled: bool,
+    status: &'static str,
+    reason: &'static str,
+    participant_count: usize,
+    lookup_count: usize,
+    enriched_count: usize,
+    cache_hit_count: usize,
+    negative_cache_hit_count: usize,
+    source_count: usize,
+}
+
+impl BlueBubblesContactsEnrichmentResult {
+    const fn disabled(reason: &'static str, participant_count: usize) -> Self {
+        Self {
+            enabled: false,
+            status: "disabled",
+            reason,
+            participant_count,
+            lookup_count: 0,
+            enriched_count: 0,
+            cache_hit_count: 0,
+            negative_cache_hit_count: 0,
+            source_count: 0,
+        }
+    }
+
+    const fn skipped(reason: &'static str, participant_count: usize) -> Self {
+        Self {
+            enabled: true,
+            status: "skipped",
+            reason,
+            participant_count,
+            lookup_count: 0,
+            enriched_count: 0,
+            cache_hit_count: 0,
+            negative_cache_hit_count: 0,
+            source_count: 0,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    const fn lookup_status(
+        status: &'static str,
+        reason: &'static str,
+        participant_count: usize,
+        lookup_count: usize,
+        enriched_count: usize,
+        cache_hit_count: usize,
+        negative_cache_hit_count: usize,
+        source_count: usize,
+    ) -> Self {
+        Self {
+            enabled: true,
+            status,
+            reason,
+            participant_count,
+            lookup_count,
+            enriched_count,
+            cache_hit_count,
+            negative_cache_hit_count,
+            source_count,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BlueBubblesContactsLookup {
+    status: &'static str,
+    reason: &'static str,
+    source_count: usize,
+    names: BTreeMap<String, String>,
+}
+
+fn contact_lookup_name_for_test_source(
+    config: &BlueBubblesContactsEnrichmentConfig,
+    phone_keys: &BTreeSet<String>,
+) -> Option<BlueBubblesContactsLookup> {
+    if config.test_contacts.is_empty() {
+        return None;
+    }
+    let names = phone_keys
+        .iter()
+        .filter_map(|phone_key| {
+            config
+                .test_contacts
+                .get(phone_key)
+                .cloned()
+                .map(|name| (phone_key.clone(), name))
+        })
+        .collect();
+    Some(BlueBubblesContactsLookup {
+        status: "resolved",
+        reason: "test_contacts_configured",
+        source_count: 1,
+        names,
+    })
+}
+
+fn discover_contact_database_paths(
+    config: &BlueBubblesContactsEnrichmentConfig,
+) -> Result<Vec<PathBuf>, &'static str> {
+    if !config.database_paths.is_empty() {
+        return Ok(config.database_paths.iter().map(PathBuf::from).collect());
+    }
+
+    let Some(home_dir) = config
+        .home_dir
+        .as_deref()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    else {
+        return Err("home_unavailable");
+    };
+
+    let sources_dir = home_dir
+        .join("Library")
+        .join("Application Support")
+        .join("AddressBook")
+        .join("Sources");
+    let entries = fs::read_dir(sources_dir).map_err(|_| "address_book_sources_unreadable")?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path().join("AddressBook-v22.abcddb"))
+        .filter(|path| path.is_file())
+        .collect())
+}
+
+fn query_contact_database(
+    database_path: &Path,
+    phone_keys: &BTreeSet<String>,
+) -> Result<BTreeMap<String, String>, rusqlite::Error> {
+    if phone_keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let placeholders = vec!["?"; phone_keys.len()].join(", ");
+    let sql = format!(
+        "SELECT digits, name \
+         FROM ( \
+           SELECT \
+             CASE \
+               WHEN length(raw_digits) = 11 AND substr(raw_digits, 1, 1) = '1' THEN substr(raw_digits, 2) \
+               ELSE raw_digits \
+             END AS digits, \
+             name \
+           FROM ( \
+             SELECT \
+               REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(REPLACE(COALESCE(p.ZFULLNUMBER, ''), ' ', ''), '(', ''), ')', ''), '-', ''), '+', ''), '.', ''), char(10), ''), char(13), '') AS raw_digits, \
+             TRIM(CASE \
+               WHEN TRIM(COALESCE(r.ZFIRSTNAME, '') || ' ' || COALESCE(r.ZLASTNAME, '')) != '' \
+                 THEN TRIM(COALESCE(r.ZFIRSTNAME, '') || ' ' || COALESCE(r.ZLASTNAME, '')) \
+               ELSE COALESCE(r.ZORGANIZATION, '') \
+             END) AS name \
+           FROM ZABCDRECORD r \
+           JOIN ZABCDPHONENUMBER p ON p.ZOWNER = r.Z_PK \
+           WHERE p.ZFULLNUMBER IS NOT NULL \
+           ) \
+         ) \
+         WHERE digits IN ({placeholders}) AND name != ''"
+    );
+    let connection = Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    let mut statement = connection.prepare(&sql)?;
+    let rows = statement.query_map(params_from_iter(phone_keys.iter()), |row| {
+        let digits: String = row.get(0)?;
+        let name: String = row.get(1)?;
+        Ok((digits, name))
+    })?;
+
+    let mut names = BTreeMap::new();
+    for row in rows {
+        let (digits, name) = row?;
+        let Some(phone_key) = normalize_bluebubbles_contact_phone_key(&digits) else {
+            continue;
+        };
+        let name = name.trim();
+        if !name.is_empty() {
+            names.entry(phone_key).or_insert_with(|| name.to_string());
+        }
+    }
+    Ok(names)
+}
+
 /// `BlueBubbles` `iMessage` connector state.
 #[derive(Debug)]
 struct BlueBubblesState {
@@ -893,6 +1150,7 @@ struct BlueBubblesState {
     webhook_dedupe: BlueBubblesInboundDedupeStore,
     webhook_coalescer: BlueBubblesWebhookCoalescer,
     reply_context_cache: BlueBubblesReplyContextCache,
+    contacts_enrichment_cache: BlueBubblesContactsEnrichmentCache,
 }
 
 impl BlueBubblesState {
@@ -908,6 +1166,7 @@ impl BlueBubblesState {
         let webhook_dedupe = BlueBubblesInboundDedupeStore::from_config(&config)?;
         let webhook_coalescer = BlueBubblesWebhookCoalescer::default();
         let reply_context_cache = BlueBubblesReplyContextCache::default();
+        let contacts_enrichment_cache = BlueBubblesContactsEnrichmentCache::default();
 
         Ok(Self {
             config,
@@ -916,7 +1175,251 @@ impl BlueBubblesState {
             webhook_dedupe,
             webhook_coalescer,
             reply_context_cache,
+            contacts_enrichment_cache,
         })
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn enrich_group_participants(
+        &self,
+        account_id: &str,
+        event: &mut NormalizedBlueBubblesWebhookMessage,
+    ) -> BlueBubblesContactsEnrichmentResult {
+        let participant_count = event.participants.len();
+        let chat_keys = event.conversation_keys();
+        let normalized_account_id = normalized_reply_account_id(account_id);
+
+        if !self
+            .config
+            .contacts_enrichment
+            .enabled_for(normalized_account_id, &chat_keys)
+        {
+            return BlueBubblesContactsEnrichmentResult::disabled(
+                "config_disabled_for_scope",
+                participant_count,
+            );
+        }
+        if !event.is_group {
+            return BlueBubblesContactsEnrichmentResult::skipped(
+                "not_group_conversation",
+                participant_count,
+            );
+        }
+        if event.participants.is_empty() {
+            return BlueBubblesContactsEnrichmentResult::skipped(
+                "no_participants",
+                participant_count,
+            );
+        }
+
+        let now_ms = Utc::now().timestamp_millis();
+        let mut lookup_participants = BTreeMap::<String, Vec<usize>>::new();
+        let mut enriched_count = 0;
+        let mut cache_hit_count = 0;
+        let mut negative_cache_hit_count = 0;
+
+        for (index, participant) in event.participants.iter_mut().enumerate() {
+            if participant.is_me
+                || participant
+                    .display_name
+                    .as_deref()
+                    .is_some_and(|name| !name.trim().is_empty())
+                || participant.address.contains('@')
+            {
+                continue;
+            }
+
+            let Some(phone_key) = normalize_bluebubbles_contact_phone_key(&participant.address)
+            else {
+                continue;
+            };
+
+            match self.contacts_enrichment_cache.get(&phone_key, now_ms) {
+                Ok(BlueBubblesContactCacheLookup::Hit(Some(name))) => {
+                    participant.display_name = Some(name);
+                    participant.contact_name_enriched = true;
+                    cache_hit_count += 1;
+                    enriched_count += 1;
+                }
+                Ok(BlueBubblesContactCacheLookup::Hit(None)) => {
+                    negative_cache_hit_count += 1;
+                }
+                Ok(BlueBubblesContactCacheLookup::Miss) => {
+                    lookup_participants
+                        .entry(phone_key)
+                        .or_default()
+                        .push(index);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        "BlueBubbles Contacts enrichment cache read failed; preserving participants"
+                    );
+                    return BlueBubblesContactsEnrichmentResult::lookup_status(
+                        "degraded",
+                        "cache_read_failed",
+                        participant_count,
+                        lookup_participants.len(),
+                        enriched_count,
+                        cache_hit_count,
+                        negative_cache_hit_count,
+                        0,
+                    );
+                }
+            }
+        }
+
+        if lookup_participants.is_empty() {
+            let status = if enriched_count > 0 {
+                "cache_hit"
+            } else {
+                "skipped"
+            };
+            let reason = if enriched_count > 0 {
+                "all_names_cached"
+            } else {
+                "no_lookup_candidates"
+            };
+            return BlueBubblesContactsEnrichmentResult::lookup_status(
+                status,
+                reason,
+                participant_count,
+                0,
+                enriched_count,
+                cache_hit_count,
+                negative_cache_hit_count,
+                0,
+            );
+        }
+
+        let phone_keys = lookup_participants.keys().cloned().collect::<BTreeSet<_>>();
+        let lookup = self.lookup_contact_names(&phone_keys);
+        let lookup_count = phone_keys.len();
+        for phone_key in phone_keys {
+            let name = lookup.names.get(&phone_key).cloned();
+            if let Err(error) = self.contacts_enrichment_cache.insert(
+                phone_key.clone(),
+                name.clone(),
+                now_ms,
+                &self.config.contacts_enrichment,
+            ) {
+                tracing::warn!(
+                    error = %error,
+                    "BlueBubbles Contacts enrichment cache write failed"
+                );
+            }
+            let Some(name) = name else {
+                continue;
+            };
+            if let Some(indices) = lookup_participants.get(&phone_key) {
+                for index in indices {
+                    let Some(participant) = event.participants.get_mut(*index) else {
+                        continue;
+                    };
+                    participant.display_name = Some(name.clone());
+                    participant.contact_name_enriched = true;
+                    enriched_count += 1;
+                }
+            }
+        }
+
+        let status = if enriched_count > 0 {
+            "enriched"
+        } else {
+            lookup.status
+        };
+        let reason = if enriched_count > 0 {
+            "contacts_resolved"
+        } else {
+            lookup.reason
+        };
+
+        BlueBubblesContactsEnrichmentResult::lookup_status(
+            status,
+            reason,
+            participant_count,
+            lookup_count,
+            enriched_count,
+            cache_hit_count,
+            negative_cache_hit_count,
+            lookup.source_count,
+        )
+    }
+
+    fn lookup_contact_names(&self, phone_keys: &BTreeSet<String>) -> BlueBubblesContactsLookup {
+        if let Some(lookup) =
+            contact_lookup_name_for_test_source(&self.config.contacts_enrichment, phone_keys)
+        {
+            return lookup;
+        }
+        if !cfg!(target_os = "macos") && self.config.contacts_enrichment.database_paths.is_empty() {
+            return BlueBubblesContactsLookup {
+                status: "skipped",
+                reason: "platform_unsupported",
+                source_count: 0,
+                names: BTreeMap::new(),
+            };
+        }
+
+        let database_paths = match discover_contact_database_paths(&self.config.contacts_enrichment)
+        {
+            Ok(paths) if !paths.is_empty() => paths,
+            Ok(_) => {
+                return BlueBubblesContactsLookup {
+                    status: "skipped",
+                    reason: "no_contacts_database",
+                    source_count: 0,
+                    names: BTreeMap::new(),
+                };
+            }
+            Err(reason) => {
+                return BlueBubblesContactsLookup {
+                    status: "skipped",
+                    reason,
+                    source_count: 0,
+                    names: BTreeMap::new(),
+                };
+            }
+        };
+
+        let mut unresolved = phone_keys.clone();
+        let mut names = BTreeMap::new();
+        let mut query_failed = false;
+        for database_path in &database_paths {
+            if unresolved.is_empty() {
+                break;
+            }
+            match query_contact_database(database_path, &unresolved) {
+                Ok(resolved) => {
+                    for (phone_key, name) in resolved {
+                        if unresolved.remove(&phone_key) {
+                            names.insert(phone_key, name);
+                        }
+                    }
+                }
+                Err(error) => {
+                    query_failed = true;
+                    tracing::warn!(
+                        error = %error,
+                        database = %database_path.display(),
+                        "BlueBubbles Contacts enrichment database query failed"
+                    );
+                }
+            }
+        }
+
+        let (status, reason) = if names.is_empty() && query_failed {
+            ("degraded", "lookup_failed")
+        } else {
+            ("resolved", "contacts_query_completed")
+        };
+
+        BlueBubblesContactsLookup {
+            status,
+            reason,
+            source_count: database_paths.len(),
+            names,
+        }
     }
 
     async fn resolve_reply_context(
@@ -1183,6 +1686,7 @@ impl BlueBubblesConnector {
             push_webhook_inbound_doctor_checks(&mut checks, config);
             push_webhook_coalescing_doctor_checks(&mut checks, config);
             push_reply_context_api_fallback_doctor_checks(&mut checks, config);
+            push_contacts_enrichment_doctor_checks(&mut checks, config);
         }
 
         DoctorResult::from_checks(checks)
@@ -1261,6 +1765,31 @@ fn push_reply_context_api_fallback_doctor_checks(
             fallback.chat_override_count,
             fallback.max_reply_id_chars,
             fallback.max_response_bytes
+        )),
+        critical: false,
+    });
+}
+
+fn push_contacts_enrichment_doctor_checks(
+    checks: &mut Vec<DoctorCheck>,
+    config: &BlueBubblesConfig,
+) {
+    let enrichment = config.contacts_enrichment.summary();
+    checks.push(DoctorCheck {
+        name: "contacts_participant_enrichment".into(),
+        passed: true,
+        message: Some(format!(
+            "Contacts enrichment: enabled={}, default_enabled={}, account_overrides={}, chat_overrides={}, explicit_databases={}, home_dir_configured={}, test_contacts={}, positive_ttl={}s, negative_ttl={}s, cache_cap={}",
+            enrichment.enabled,
+            enrichment.default_enabled,
+            enrichment.account_override_count,
+            enrichment.chat_override_count,
+            enrichment.explicit_database_count,
+            enrichment.home_dir_configured,
+            enrichment.test_contact_count,
+            enrichment.positive_cache_ttl_seconds,
+            enrichment.negative_cache_ttl_seconds,
+            enrichment.max_cache_entries
         )),
         critical: false,
     });
@@ -1732,7 +2261,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_INGEST_WEBHOOK_EVENT),
             summary: "Accept and normalize a BlueBubbles webhook event".into(),
             description: Some(
-                "Normalizes a host-delivered BlueBubbles webhook payload, applies connector-local sender/conversation policy, optionally resolves scoped reply context, and atomically claims all account-scoped source replay-dedupe keys".into(),
+                "Normalizes a host-delivered BlueBubbles webhook payload, applies connector-local sender/conversation policy, optionally enriches accepted group participants from Contacts, optionally resolves scoped reply context, and atomically claims all account-scoped source replay-dedupe keys".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -1774,6 +2303,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "policy": { "type": "object" },
                     "coalescing": { "type": "object" },
                     "reply_context_lookup": { "type": "object" },
+                    "contacts_enrichment": { "type": "object" },
                     "event": { "type": "object" },
                     "events": { "type": "array", "items": { "type": "object" } }
                 }
@@ -1783,10 +2313,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, optional reply-context fallback, optional DM split-send coalescing, and duplicate replay suppression".into(),
+                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, optional privacy-gated Contacts enrichment for group participants, optional reply-context fallback, optional DM split-send coalescing, and duplicate replay suppression".into(),
                 common_mistakes: vec![
                     "Leaving webhook_inbound sender/chat policy empty and expecting external senders to be accepted".into(),
                     "Assuming memory-only dedupe survives connector restart; configure webhook_inbound.dedupe_state_path when restart replay suppression is required".into(),
+                    "Expecting Contacts participant enrichment to be enabled by default; FCP keeps it opt-in because it reads local Contacts metadata".into(),
                     "Expecting reply-context API fallback to be enabled by default; it is opt-in and scoped by account/chat overrides".into(),
                     "Enabling webhook_coalescing without arranging a host-side flush after debounce_ms; buffered events are emitted on later ingest or explicit flush".into(),
                 ],
@@ -1929,6 +2460,7 @@ pub fn events_info() -> Vec<EventInfo> {
             "is_from_me": { "type": "boolean" },
             "is_group": { "type": "boolean" },
             "attachments": { "type": "array", "items": { "type": "object" } },
+            "participants": { "type": "array", "items": { "type": "object" } },
             "reply_to_message_guid": { "type": "string" },
             "associated_message_guid": { "type": "string" },
             "associated_message_type": { "type": "integer" },
@@ -2458,6 +2990,7 @@ impl BlueBubblesConnector {
                             "policy": state.config.webhook_inbound.summary(),
                             "coalescing": outcome.summary,
                             "reply_context_lookup": null,
+                            "contacts_enrichment": null,
                             "event": first_event,
                             "events": outcome.events,
                         }),
@@ -2492,37 +3025,46 @@ impl BlueBubblesConnector {
                     .and_then(Value::as_i64)
                     .or(event.date_created_ms)
                     .unwrap_or_else(|| Utc::now().timestamp_millis());
-                let (status, duplicate_id, coalescing, reply_context_lookup, events) =
-                    if acceptance.accepted {
-                        match state.webhook_dedupe.claim(&dedupe_ids)? {
-                            BlueBubblesDedupeClaim::Claimed => {
-                                if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
-                                    let _ = state.webhook_dedupe.release(&dedupe_ids);
-                                    return Err(error);
-                                }
-                                let reply_context_lookup =
-                                    state.resolve_reply_context(account_id, &mut event).await;
-                                let outcome = state.webhook_coalescer.ingest(
-                                    &state.config.webhook_coalescing,
-                                    account_id,
-                                    event.clone(),
-                                    observed_at_ms,
-                                )?;
-                                (
-                                    outcome.status,
-                                    None,
-                                    Some(outcome.summary),
-                                    Some(reply_context_lookup),
-                                    outcome.events,
-                                )
+                let (
+                    status,
+                    duplicate_id,
+                    coalescing,
+                    reply_context_lookup,
+                    contacts_enrichment,
+                    events,
+                ) = if acceptance.accepted {
+                    match state.webhook_dedupe.claim(&dedupe_ids)? {
+                        BlueBubblesDedupeClaim::Claimed => {
+                            if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
+                                let _ = state.webhook_dedupe.release(&dedupe_ids);
+                                return Err(error);
                             }
-                            BlueBubblesDedupeClaim::Duplicate { matched_id } => {
-                                ("duplicate", Some(matched_id), None, None, Vec::new())
-                            }
+                            let contacts_enrichment =
+                                state.enrich_group_participants(account_id, &mut event);
+                            let reply_context_lookup =
+                                state.resolve_reply_context(account_id, &mut event).await;
+                            let outcome = state.webhook_coalescer.ingest(
+                                &state.config.webhook_coalescing,
+                                account_id,
+                                event.clone(),
+                                observed_at_ms,
+                            )?;
+                            (
+                                outcome.status,
+                                None,
+                                Some(outcome.summary),
+                                Some(reply_context_lookup),
+                                Some(contacts_enrichment),
+                                outcome.events,
+                            )
                         }
-                    } else {
-                        ("rejected", None, None, None, Vec::new())
-                    };
+                        BlueBubblesDedupeClaim::Duplicate { matched_id } => {
+                            ("duplicate", Some(matched_id), None, None, None, Vec::new())
+                        }
+                    }
+                } else {
+                    ("rejected", None, None, None, None, Vec::new())
+                };
                 let emitted_event = events.first().cloned();
                 let correlation_id = req
                     .correlation_id
@@ -2541,6 +3083,9 @@ impl BlueBubblesConnector {
                     inbound_acceptance = %acceptance.reason,
                     reply_context_status = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.status),
                     reply_context_reason = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.reason),
+                    contacts_enrichment_status = %contacts_enrichment.as_ref().map_or("none", |summary| summary.status),
+                    contacts_enrichment_reason = %contacts_enrichment.as_ref().map_or("none", |summary| summary.reason),
+                    contacts_enrichment_enriched_count = contacts_enrichment.as_ref().map_or(0, |summary| summary.enriched_count),
                     coalescing_decision = %coalescing.as_ref().map_or("none", |summary| summary.decision),
                     coalescing_emitted_count = coalescing.as_ref().map_or(0, |summary| summary.emitted_count),
                     coalescing_buffered_count = coalescing.as_ref().map_or(0, |summary| summary.buffered_count),
@@ -2562,6 +3107,7 @@ impl BlueBubblesConnector {
                     "policy": policy,
                     "coalescing": coalescing,
                     "reply_context_lookup": reply_context_lookup,
+                    "contacts_enrichment": contacts_enrichment,
                     "event": emitted_event,
                     "events": events,
                 })
@@ -2693,6 +3239,24 @@ mod tests {
             "enabled": true,
             "max_reply_id_chars": 128,
             "max_response_bytes": 4096
+        });
+        config
+    }
+
+    fn test_config_with_contacts_enrichment() -> serde_json::Value {
+        let mut config = test_config();
+        config["webhook_inbound"] = json!({
+            "allowed_chat_guids": ["iMessage;+;family"],
+            "allow_group_chats": true
+        });
+        config["contacts_enrichment"] = json!({
+            "enabled": true,
+            "test_contacts": {
+                "+1 (555) 123-4567": "Alice Example"
+            },
+            "positive_cache_ttl_seconds": 3600,
+            "negative_cache_ttl_seconds": 300,
+            "max_cache_entries": 16
         });
         config
     }
@@ -4068,6 +4632,189 @@ mod tests {
         );
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_contacts_disabled_by_default() {
+        let mut config = test_config();
+        config["webhook_inbound"] = json!({
+            "allowed_chat_guids": ["iMessage;+;family"],
+            "allow_group_chats": true
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let result = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-contacts-disabled",
+                        "chats": [{
+                            "guid": "iMessage;+;family",
+                            "participants": [
+                                { "address": "+1 (555) 123-4567" },
+                                { "address": "me@example.com", "isMe": true },
+                                { "address": "+15557654321", "displayName": "Bob" }
+                            ]
+                        }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(result["status"], "accepted");
+        assert_eq!(result["contacts_enrichment"]["status"], "disabled");
+        assert_eq!(
+            result["contacts_enrichment"]["reason"],
+            "config_disabled_for_scope"
+        );
+        assert!(result["event"]["participants"][0]["display_name"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_enriches_group_participants_from_contacts_cache() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_contacts_enrichment())
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-contacts-1",
+                        "chats": [{
+                            "guid": "iMessage;+;family",
+                            "participants": [
+                                { "address": "+1 (555) 123-4567" },
+                                { "address": "me@example.com", "displayName": "Me", "isMe": true },
+                                { "address": "+15557654321", "displayName": "Bob" }
+                            ]
+                        }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(first["status"], "accepted");
+        assert_eq!(first["contacts_enrichment"]["status"], "enriched");
+        assert_eq!(first["contacts_enrichment"]["lookup_count"], 1);
+        assert_eq!(first["contacts_enrichment"]["enriched_count"], 1);
+        assert_eq!(
+            first["event"]["participants"][0]["display_name"],
+            "Alice Example"
+        );
+        assert_eq!(
+            first["event"]["participants"][0]["contact_name_enriched"],
+            true
+        );
+        assert!(
+            !serde_json::to_string(&first["contacts_enrichment"])
+                .unwrap()
+                .contains("Alice Example")
+        );
+
+        let second = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-contacts-2",
+                        "chats": [{
+                            "guid": "iMessage;+;family",
+                            "participants": [
+                                { "address": "555.123.4567" },
+                                { "address": "me@example.com", "displayName": "Me", "isMe": true },
+                                { "address": "+15557654321", "displayName": "Bob" }
+                            ]
+                        }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(second["status"], "accepted");
+        assert_eq!(second["contacts_enrichment"]["status"], "cache_hit");
+        assert_eq!(second["contacts_enrichment"]["cache_hit_count"], 1);
+        assert_eq!(
+            second["event"]["participants"][0]["display_name"],
+            "Alice Example"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_contacts_run_only_after_policy_acceptance() {
+        let mut config = test_config_with_contacts_enrichment();
+        config["webhook_inbound"] = json!({
+            "allowed_chat_guids": ["iMessage;+;other-family"],
+            "allow_group_chats": true
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let result = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-contacts-rejected",
+                        "chats": [{
+                            "guid": "iMessage;+;family",
+                            "participants": [
+                                { "address": "+1 (555) 123-4567" },
+                                { "address": "me@example.com", "isMe": true },
+                                { "address": "+15557654321" }
+                            ]
+                        }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+
+        assert_eq!(result["status"], "rejected");
+        assert_eq!(result["acceptance"]["reason"], "conversation_not_bound");
+        assert!(result["contacts_enrichment"].is_null());
+        assert!(result["event"].is_null());
+    }
+
     #[test]
     fn canonical_reply_message_id_accepts_part_alias_and_rejects_path_inputs() {
         assert_eq!(
@@ -4089,6 +4836,43 @@ mod tests {
         assert_eq!(
             canonical_reply_message_id("root/1", 128).unwrap_err(),
             "reply_id_path_unsafe"
+        );
+    }
+
+    #[test]
+    fn contacts_database_lookup_normalizes_us_phone_numbers() {
+        let db_path = std::env::temp_dir().join(format!(
+            "fcp-imessage-contacts-{}.abcddb",
+            uuid::Uuid::new_v4()
+        ));
+        let connection = Connection::open(&db_path).unwrap();
+        connection
+            .execute_batch(
+                "
+                CREATE TABLE ZABCDRECORD (
+                    Z_PK INTEGER PRIMARY KEY,
+                    ZFIRSTNAME TEXT,
+                    ZLASTNAME TEXT,
+                    ZORGANIZATION TEXT
+                );
+                CREATE TABLE ZABCDPHONENUMBER (
+                    ZOWNER INTEGER,
+                    ZFULLNUMBER TEXT
+                );
+                INSERT INTO ZABCDRECORD (Z_PK, ZFIRSTNAME, ZLASTNAME, ZORGANIZATION)
+                    VALUES (1, 'Alice', 'Example', '');
+                INSERT INTO ZABCDPHONENUMBER (ZOWNER, ZFULLNUMBER)
+                    VALUES (1, '+1 (555) 123-4567');
+                ",
+            )
+            .unwrap();
+        drop(connection);
+
+        let keys = BTreeSet::from(["5551234567".to_string()]);
+        let names = query_contact_database(&db_path, &keys).unwrap();
+        assert_eq!(
+            names.get("5551234567").map(String::as_str),
+            Some("Alice Example")
         );
     }
 

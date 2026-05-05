@@ -4224,6 +4224,7 @@ dependencies = [
  "fcp-webhook",
  "hex",
  "reqwest 0.13.2",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2 0.10.9",

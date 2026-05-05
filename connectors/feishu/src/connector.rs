@@ -1,8 +1,12 @@
 //! Feishu connector implementation.
 
 use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+    sync::Mutex,
     sync::atomic::Ordering,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -43,6 +47,8 @@ const VERIFY_COMMANDS: [&str; 7] = [
 ];
 const MAX_CHATS_PAGE_SIZE: u32 = 200;
 const FEISHU_WEBHOOK_MAX_BODY_BYTES: usize = 1024 * 1024;
+const FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS: u64 = 24 * 60 * 60;
+const FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES: usize = 10_000;
 const ALLOWED_RECEIVE_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id", "email", "chat_id"];
 const ALLOWED_USER_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id"];
 
@@ -79,6 +85,8 @@ struct FeishuConfig {
     retry: HttpRetryConfig,
     #[serde(default = "default_request_timeout_ms")]
     request_timeout_ms: u64,
+    #[serde(default)]
+    webhook_state: FeishuWebhookStateConfig,
 }
 
 impl std::fmt::Debug for FeishuConfig {
@@ -89,8 +97,78 @@ impl std::fmt::Debug for FeishuConfig {
             .field("app_secret", &"[REDACTED]")
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("webhook_state", &self.webhook_state.summary())
             .finish()
     }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct FeishuWebhookStateConfig {
+    #[serde(default)]
+    dedupe_state_path: Option<String>,
+    #[serde(default = "default_webhook_dedupe_ttl_seconds")]
+    dedupe_ttl_seconds: u64,
+    #[serde(default = "default_webhook_dedupe_max_entries")]
+    dedupe_max_entries: usize,
+}
+
+impl Default for FeishuWebhookStateConfig {
+    fn default() -> Self {
+        Self {
+            dedupe_state_path: None,
+            dedupe_ttl_seconds: default_webhook_dedupe_ttl_seconds(),
+            dedupe_max_entries: default_webhook_dedupe_max_entries(),
+        }
+    }
+}
+
+impl FeishuWebhookStateConfig {
+    fn validate(mut self) -> FcpResult<Self> {
+        self.dedupe_state_path = self
+            .dedupe_state_path
+            .map(|path| path.trim().to_owned())
+            .filter(|path| !path.is_empty());
+        if self.dedupe_ttl_seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "webhook_state.dedupe_ttl_seconds must be greater than zero".into(),
+            });
+        }
+        if self.dedupe_max_entries == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "webhook_state.dedupe_max_entries must be greater than zero".into(),
+            });
+        }
+        Ok(self)
+    }
+
+    fn summary(&self) -> FeishuWebhookStateSummary {
+        FeishuWebhookStateSummary {
+            persistent_dedupe: self.dedupe_state_path.is_some(),
+            dedupe_ttl_seconds: self.dedupe_ttl_seconds,
+            dedupe_max_entries: self.dedupe_max_entries,
+            entries: 0,
+            finalized_entries: 0,
+            in_flight_entries: 0,
+            policy_cache_generation: 0,
+            comment_session_count: 0,
+            paired_user_count: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct FeishuWebhookStateSummary {
+    persistent_dedupe: bool,
+    dedupe_ttl_seconds: u64,
+    dedupe_max_entries: usize,
+    entries: usize,
+    finalized_entries: usize,
+    in_flight_entries: usize,
+    policy_cache_generation: u64,
+    comment_session_count: usize,
+    paired_user_count: usize,
 }
 
 fn default_base_url() -> String {
@@ -99,6 +177,14 @@ fn default_base_url() -> String {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+const fn default_webhook_dedupe_ttl_seconds() -> u64 {
+    FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS
+}
+
+const fn default_webhook_dedupe_max_entries() -> usize {
+    FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES
 }
 
 fn is_local_test_host(host: &str) -> bool {
@@ -187,6 +273,7 @@ fn validate_config(config: &FeishuConfig) -> FcpResult<()> {
             message: "request_timeout_ms must be greater than zero".into(),
         });
     }
+    config.webhook_state.clone().validate()?;
 
     let base_url = parse_base_url(&config.base_url)?;
     validate_base_url(&base_url)
@@ -208,6 +295,372 @@ fn base_url_diagnostic(base_url: &str) -> (bool, String) {
         }
         Err(FcpError::InvalidRequest { message, .. }) => (false, message),
         Err(err) => (false, err.to_string()),
+    }
+}
+
+fn current_time_millis() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| i64::try_from(duration.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FeishuWebhookDedupeClaim {
+    Claimed,
+    Duplicate,
+    InFlight,
+}
+
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+struct FeishuWebhookStateFile {
+    entries: BTreeMap<String, FeishuWebhookDedupeEntry>,
+    policy_cache_generation: u64,
+    comment_sessions: BTreeMap<String, FeishuCommentSessionEntry>,
+    paired_open_ids: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FeishuWebhookDedupeEntry {
+    claimed_at_ms: i64,
+    finalized_at_ms: Option<i64>,
+    event_type: String,
+    event_id: String,
+    outcome: Option<String>,
+    policy_reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct FeishuCommentSessionEntry {
+    file_token: Option<String>,
+    file_type: Option<String>,
+    comment_id: Option<String>,
+    reply_id: Option<String>,
+    actor_open_id: Option<String>,
+    last_seen_at_ms: i64,
+    policy_reason_code: String,
+}
+
+#[derive(Debug)]
+struct FeishuWebhookStateStore {
+    path: Option<PathBuf>,
+    ttl: Duration,
+    max_entries: usize,
+    state: Mutex<FeishuWebhookStateFile>,
+}
+
+impl FeishuWebhookStateStore {
+    fn memory() -> Self {
+        Self {
+            path: None,
+            ttl: Duration::from_secs(FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS),
+            max_entries: FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES,
+            state: Mutex::new(FeishuWebhookStateFile::default()),
+        }
+    }
+
+    fn from_config(config: &FeishuWebhookStateConfig) -> FcpResult<Self> {
+        let config = config.clone().validate()?;
+        let path = config.dedupe_state_path.as_ref().map(PathBuf::from);
+        let state = match path.as_deref() {
+            Some(path) => Self::load_state(path)?,
+            None => FeishuWebhookStateFile::default(),
+        };
+        let store = Self {
+            path,
+            ttl: Duration::from_secs(config.dedupe_ttl_seconds),
+            max_entries: config.dedupe_max_entries,
+            state: Mutex::new(state),
+        };
+        store.prune_and_persist()?;
+        Ok(store)
+    }
+
+    fn claim(
+        &self,
+        dedupe_key: &str,
+        event_type: &str,
+        event_id: &str,
+    ) -> FcpResult<FeishuWebhookDedupeClaim> {
+        if dedupe_key.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "Feishu webhook dedupe key must not be empty".into(),
+            });
+        }
+        let now_ms = current_time_millis();
+        let (claim, snapshot) = {
+            let mut state = self.lock_state()?;
+            self.prune_expired_locked(&mut state, now_ms);
+            let claim = match state.entries.get(dedupe_key) {
+                Some(entry) if entry.finalized_at_ms.is_some() => {
+                    FeishuWebhookDedupeClaim::Duplicate
+                }
+                Some(_) => FeishuWebhookDedupeClaim::InFlight,
+                None => {
+                    state.entries.insert(
+                        dedupe_key.to_owned(),
+                        FeishuWebhookDedupeEntry {
+                            claimed_at_ms: now_ms,
+                            finalized_at_ms: None,
+                            event_type: event_type.to_owned(),
+                            event_id: event_id.to_owned(),
+                            outcome: None,
+                            policy_reason_code: None,
+                        },
+                    );
+                    self.prune_size_locked(&mut state);
+                    FeishuWebhookDedupeClaim::Claimed
+                }
+            };
+            (claim, state.clone())
+        };
+        self.persist_locked(&snapshot)?;
+        Ok(claim)
+    }
+
+    fn finalize(
+        &self,
+        dedupe_key: &str,
+        event_type: &str,
+        event_id: &str,
+        event: &Value,
+        policy_decision: &Value,
+        outcome: &str,
+    ) -> FcpResult<FeishuWebhookStateSummary> {
+        let now_ms = current_time_millis();
+        let (summary, snapshot) = {
+            let mut state = self.lock_state()?;
+            let entry = state
+                .entries
+                .entry(dedupe_key.to_owned())
+                .or_insert_with(|| FeishuWebhookDedupeEntry {
+                    claimed_at_ms: now_ms,
+                    finalized_at_ms: None,
+                    event_type: event_type.to_owned(),
+                    event_id: event_id.to_owned(),
+                    outcome: None,
+                    policy_reason_code: None,
+                });
+            entry.finalized_at_ms = Some(now_ms);
+            entry.event_type = event_type.to_owned();
+            entry.event_id = event_id.to_owned();
+            entry.outcome = Some(outcome.to_owned());
+            entry.policy_reason_code = policy_decision
+                .get("reason_code")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            state.policy_cache_generation = state.policy_cache_generation.saturating_add(1);
+            self.record_comment_session_locked(
+                &mut state,
+                event_type,
+                event,
+                policy_decision,
+                now_ms,
+            );
+            self.prune_expired_locked(&mut state, now_ms);
+            self.prune_size_locked(&mut state);
+            (self.summary_locked(&state), state.clone())
+        };
+        self.persist_locked(&snapshot)?;
+        Ok(summary)
+    }
+
+    #[cfg(test)]
+    fn release(&self, dedupe_key: &str) -> FcpResult<()> {
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            state.entries.remove(dedupe_key);
+            state.clone()
+        };
+        self.persist_locked(&snapshot)
+    }
+
+    fn summary(&self) -> FcpResult<FeishuWebhookStateSummary> {
+        let state = self.lock_state()?;
+        Ok(self.summary_locked(&state))
+    }
+
+    fn prune_and_persist(&self) -> FcpResult<()> {
+        let now_ms = current_time_millis();
+        let snapshot = {
+            let mut state = self.lock_state()?;
+            self.prune_expired_locked(&mut state, now_ms);
+            self.prune_size_locked(&mut state);
+            state.clone()
+        };
+        self.persist_locked(&snapshot)
+    }
+
+    fn load_state(path: &Path) -> FcpResult<FeishuWebhookStateFile> {
+        if !path.exists() {
+            return Ok(FeishuWebhookStateFile::default());
+        }
+        let bytes = fs::read(path).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to read Feishu webhook state '{}': {error}",
+                path.display()
+            ),
+        })?;
+        serde_json::from_slice(&bytes).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to parse Feishu webhook state '{}': {error}",
+                path.display()
+            ),
+        })
+    }
+
+    fn lock_state(&self) -> FcpResult<std::sync::MutexGuard<'_, FeishuWebhookStateFile>> {
+        self.state.lock().map_err(|_| FcpError::Internal {
+            message: "Feishu webhook state lock was poisoned".into(),
+        })
+    }
+
+    fn summary_locked(&self, state: &FeishuWebhookStateFile) -> FeishuWebhookStateSummary {
+        let finalized_entries = state
+            .entries
+            .values()
+            .filter(|entry| entry.finalized_at_ms.is_some())
+            .count();
+        FeishuWebhookStateSummary {
+            persistent_dedupe: self.path.is_some(),
+            dedupe_ttl_seconds: self.ttl.as_secs(),
+            dedupe_max_entries: self.max_entries,
+            entries: state.entries.len(),
+            finalized_entries,
+            in_flight_entries: state.entries.len().saturating_sub(finalized_entries),
+            policy_cache_generation: state.policy_cache_generation,
+            comment_session_count: state.comment_sessions.len(),
+            paired_user_count: state.paired_open_ids.len(),
+        }
+    }
+
+    fn record_comment_session_locked(
+        &self,
+        state: &mut FeishuWebhookStateFile,
+        event_type: &str,
+        event: &Value,
+        policy_decision: &Value,
+        now_ms: i64,
+    ) {
+        if event_type != "drive.notice.comment_add_v1" {
+            return;
+        }
+        let reason_code = policy_decision
+            .get("reason_code")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_owned();
+        let document_ref = event
+            .get("file_token")
+            .and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["file", "token"]))
+            .map(str::to_owned);
+        let comment_id = event
+            .get("comment_id")
+            .and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["comment", "comment_id"]))
+            .map(str::to_owned);
+        let session_key = match (&document_ref, &comment_id) {
+            (Some(document_ref), Some(comment_id)) => format!("{document_ref}:{comment_id}"),
+            (Some(document_ref), None) => document_ref.clone(),
+            (None, Some(comment_id)) => comment_id.clone(),
+            (None, None) => return,
+        };
+        let actor_open_id = actor_open_id(event).map(str::to_owned);
+        if reason_code == "comment_pairing_match"
+            && let Some(actor_open_id) = &actor_open_id
+        {
+            state.paired_open_ids.insert(actor_open_id.clone());
+        }
+        state.comment_sessions.insert(
+            session_key,
+            FeishuCommentSessionEntry {
+                file_token: document_ref,
+                file_type: event
+                    .get("file_type")
+                    .and_then(Value::as_str)
+                    .or_else(|| string_at_path(event, &["file", "type"]))
+                    .map(str::to_owned),
+                comment_id,
+                reply_id: event
+                    .get("reply_id")
+                    .and_then(Value::as_str)
+                    .or_else(|| string_at_path(event, &["comment", "reply_id"]))
+                    .map(str::to_owned),
+                actor_open_id,
+                last_seen_at_ms: now_ms,
+                policy_reason_code: reason_code,
+            },
+        );
+    }
+
+    fn prune_expired_locked(&self, state: &mut FeishuWebhookStateFile, now_ms: i64) {
+        let ttl_ms = i64::try_from(self.ttl.as_millis()).unwrap_or(i64::MAX);
+        state
+            .entries
+            .retain(|_, entry| now_ms.saturating_sub(entry.claimed_at_ms) < ttl_ms);
+    }
+
+    fn prune_size_locked(&self, state: &mut FeishuWebhookStateFile) {
+        if state.entries.len() <= self.max_entries {
+            return;
+        }
+        let remove_count = state.entries.len() - self.max_entries;
+        let mut keys_by_age = state
+            .entries
+            .iter()
+            .map(|(key, entry)| {
+                (
+                    key.clone(),
+                    entry.claimed_at_ms,
+                    entry.finalized_at_ms.is_none(),
+                )
+            })
+            .collect::<Vec<_>>();
+        keys_by_age.sort_by_key(|(_, claimed_at_ms, in_flight)| (*claimed_at_ms, *in_flight));
+        for (key, _, _) in keys_by_age.into_iter().take(remove_count) {
+            state.entries.remove(&key);
+        }
+    }
+
+    fn persist_locked(&self, state: &FeishuWebhookStateFile) -> FcpResult<()> {
+        let Some(path) = &self.path else {
+            return Ok(());
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent).map_err(|error| FcpError::Internal {
+                message: format!(
+                    "Failed to create Feishu webhook state directory '{}': {error}",
+                    parent.display()
+                ),
+            })?;
+        }
+        let bytes = serde_json::to_vec_pretty(state).map_err(|error| FcpError::Internal {
+            message: format!("Failed to serialize Feishu webhook state: {error}"),
+        })?;
+        let tmp_path = path.with_extension(format!(
+            "{}.tmp",
+            path.extension()
+                .and_then(|value| value.to_str())
+                .unwrap_or("json")
+        ));
+        fs::write(&tmp_path, bytes).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to write Feishu webhook state '{}': {error}",
+                tmp_path.display()
+            ),
+        })?;
+        fs::rename(&tmp_path, path).map_err(|error| FcpError::Internal {
+            message: format!(
+                "Failed to commit Feishu webhook state '{}': {error}",
+                path.display()
+            ),
+        })?;
+        Ok(())
     }
 }
 
@@ -470,6 +923,7 @@ fn webhook_response(
         "dedupe_key": Value::Null,
         "normalized_event": Value::Null,
         "policy_decision": Value::Null,
+        "state_summary": Value::Null,
         "response_body": response_body,
         "body_bytes": body_bytes,
         "request_region": {
@@ -489,6 +943,30 @@ fn webhook_rejection(
     logs: Vec<Value>,
 ) -> Value {
     webhook_response(status_code, reason_code, body_bytes, logs, json!({}))
+}
+
+fn attach_webhook_event_identity(
+    response: &mut Value,
+    event_type: &str,
+    event_id: &str,
+    dedupe_key: &str,
+) {
+    response["event_id"] = json!(event_id);
+    response["event_type"] = json!(event_type);
+    response["dedupe_key"] = json!(dedupe_key);
+}
+
+fn attach_webhook_state_summary(
+    response: &mut Value,
+    summary: Option<FeishuWebhookStateSummary>,
+) -> FcpResult<()> {
+    if let Some(summary) = summary {
+        response["state_summary"] =
+            serde_json::to_value(summary).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize Feishu webhook state summary: {error}"),
+            })?;
+    }
+    Ok(())
 }
 
 fn webhook_event_id(payload: &Value, raw_body: &str) -> String {
@@ -854,7 +1332,15 @@ fn feishu_events_info() -> Vec<EventInfo> {
     ]
 }
 
+#[cfg(test)]
 fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
+    invoke_webhook_ingest_request_with_state(input, None)
+}
+
+fn invoke_webhook_ingest_request_with_state(
+    input: &Value,
+    webhook_state: Option<&FeishuWebhookStateStore>,
+) -> FcpResult<Value> {
     validate_webhook_input(input)?;
     let method = required_string_input(input, "method")?;
     let headers = required_object_input(input, "headers")?;
@@ -969,10 +1455,44 @@ fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
             "mode": "caller_supplied_seen_event_ids",
         }));
         let mut duplicate = webhook_response(200, "duplicate_event", body_bytes, logs, json!({}));
-        duplicate["event_id"] = json!(event_id);
-        duplicate["event_type"] = json!(event_type);
-        duplicate["dedupe_key"] = json!(dedupe_key);
+        attach_webhook_event_identity(&mut duplicate, event_type, &event_id, &dedupe_key);
         return Ok(duplicate);
+    }
+
+    if let Some(webhook_state) = webhook_state {
+        match webhook_state.claim(&dedupe_key, event_type, &event_id)? {
+            FeishuWebhookDedupeClaim::Claimed => {
+                logs.push(json!({
+                    "layer": "dedupe",
+                    "code": "event_claimed",
+                    "mode": "connector_owned_state",
+                }));
+            }
+            FeishuWebhookDedupeClaim::Duplicate => {
+                logs.push(json!({
+                    "layer": "dedupe",
+                    "code": "duplicate_event",
+                    "mode": "connector_owned_state",
+                }));
+                let mut duplicate =
+                    webhook_response(200, "duplicate_event", body_bytes, logs, json!({}));
+                attach_webhook_event_identity(&mut duplicate, event_type, &event_id, &dedupe_key);
+                attach_webhook_state_summary(&mut duplicate, Some(webhook_state.summary()?))?;
+                return Ok(duplicate);
+            }
+            FeishuWebhookDedupeClaim::InFlight => {
+                logs.push(json!({
+                    "layer": "dedupe",
+                    "code": "inflight_event",
+                    "mode": "connector_owned_state",
+                }));
+                let mut in_flight =
+                    webhook_response(200, "inflight_event", body_bytes, logs, json!({}));
+                attach_webhook_event_identity(&mut in_flight, event_type, &event_id, &dedupe_key);
+                attach_webhook_state_summary(&mut in_flight, Some(webhook_state.summary()?))?;
+                return Ok(in_flight);
+            }
+        }
     }
 
     let normalized_event = normalize_webhook_event(event_type, &event_id, event);
@@ -980,6 +1500,18 @@ fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
         webhook_policy_decision(event_type, event, &Value::Object(policy.clone()));
     if !allowed {
         logs.push(json!({"layer": "policy", "code": "event_denied"}));
+        let state_summary = webhook_state
+            .map(|state| {
+                state.finalize(
+                    &dedupe_key,
+                    event_type,
+                    &event_id,
+                    event,
+                    &policy_decision,
+                    "denied",
+                )
+            })
+            .transpose()?;
         let mut denied = webhook_response(
             200,
             policy_decision
@@ -990,16 +1522,27 @@ fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
             logs,
             json!({}),
         );
-        denied["event_id"] = json!(event_id);
-        denied["event_type"] = json!(event_type);
-        denied["dedupe_key"] = json!(dedupe_key);
+        attach_webhook_event_identity(&mut denied, event_type, &event_id, &dedupe_key);
         denied["normalized_event"] = normalized_event;
         denied["policy_decision"] = policy_decision;
+        attach_webhook_state_summary(&mut denied, state_summary)?;
         return Ok(denied);
     }
 
+    let state_summary = webhook_state
+        .map(|state| {
+            state.finalize(
+                &dedupe_key,
+                event_type,
+                &event_id,
+                event,
+                &policy_decision,
+                "accepted",
+            )
+        })
+        .transpose()?;
     logs.push(json!({"layer": "dispatcher", "code": "event_normalized"}));
-    Ok(json!({
+    let mut response = json!({
         "accepted": true,
         "status_code": 200,
         "reason_code": "event_accepted",
@@ -1018,7 +1561,9 @@ fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
             "transport": "host_forwarded_request",
         },
         "logs": logs,
-    }))
+    });
+    attach_webhook_state_summary(&mut response, state_summary)?;
+    Ok(response)
 }
 
 // Doctor types
@@ -1169,6 +1714,7 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "user_impersonation_supported": false,
             "webhook_receiver_included": true,
             "webhook_transport": "host_forwarded_request_operation",
+            "webhook_state": config.map(|cfg| cfg.webhook_state.summary()),
             "websocket_events_included": false,
         },
         "service_inventory": {
@@ -1199,6 +1745,7 @@ pub struct FeishuConnector {
     client: Option<FeishuClient>,
     runtime: Option<ConnectorRuntime>,
     retry_config: HttpRetryConfig,
+    webhook_state: FeishuWebhookStateStore,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
 }
@@ -1213,6 +1760,7 @@ impl FeishuConnector {
             client: None,
             runtime: None,
             retry_config: HttpRetryConfig::default(),
+            webhook_state: FeishuWebhookStateStore::memory(),
             started_at: Instant::now(),
             verifier: None,
         }
@@ -1285,6 +1833,7 @@ impl FeishuConnector {
             "verification_script": VERIFICATION_SCRIPT_PATH,
             "artifact_root_hint": ARTIFACT_ROOT_HINT,
             "provisioning": self.provisioning_readiness(),
+            "webhook_state": self.webhook_state.summary().ok(),
             "operator_guidance": operator_guidance(),
             "contract": contract_details(self.config.as_ref()),
             "live_probe": live_probe,
@@ -1822,7 +2371,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_WEBHOOK_INGEST_REQUEST),
             summary: "Ingest a host-forwarded Feishu webhook request".into(),
             description: Some(
-                "Validates a Feishu/Lark webhook request already accepted by host ingress, verifies token and signature, rejects encrypted payloads, normalizes supported message/read/reaction/document-comment events, and applies caller-supplied sender/chat/comment policy before returning an event record.".into(),
+                "Validates a Feishu/Lark webhook request already accepted by host ingress, verifies token and signature, rejects encrypted payloads, claims connector-owned dedupe state, normalizes supported message/read/reaction/document-comment events, and applies sender/chat/comment policy before returning an event record.".into(),
             ),
             input_schema: json!({
                 "type": "object",
@@ -1834,7 +2383,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "verification_token": { "type": "string", "description": "Configured Feishu verification token" },
                     "encrypt_key": { "type": "string", "description": "Configured Feishu encrypt key used by Feishu signature construction; encrypted payloads are still rejected by this slice" },
                     "policy": { "type": "object", "description": "Sender/chat/mention/comment policy evaluated before event emission" },
-                    "seen_event_ids": { "type": "array", "items": { "type": "string" }, "description": "Caller-supplied dedupe set for idempotent retry handling" },
+                    "seen_event_ids": { "type": "array", "items": { "type": "string" }, "description": "Legacy caller-supplied dedupe set; connector-owned state is used when configured on the connector instance" },
                     "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": FEISHU_WEBHOOK_MAX_BODY_BYTES },
                     "deadline_exceeded": { "type": "boolean", "description": "Host request-region timeout signal for deterministic tests and admission handling" },
                     "rate_limited": { "type": "boolean", "description": "Host request-region rate-limit signal for deterministic tests and admission handling" }
@@ -1853,6 +2402,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "dedupe_key": { "type": ["string", "null"] },
                     "normalized_event": { "type": ["object", "null"] },
                     "policy_decision": { "type": ["object", "null"] },
+                    "state_summary": { "type": ["object", "null"] },
                     "response_body": { "type": "object" },
                     "logs": { "type": "array" }
                 }
@@ -1866,6 +2416,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![
                     "Pass the exact raw JSON body string used for signature verification.".into(),
                     "Do not use this operation as an embedded HTTP listener; host ingress owns the socket.".into(),
+                    "Configure webhook_state.dedupe_state_path when restart replay suppression is required.".into(),
                     "Encrypted Feishu webhook payloads are deliberately rejected in this slice.".into(),
                 ],
                 examples: Vec::new(),
@@ -1914,17 +2465,19 @@ impl FcpConnector for FeishuConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: FeishuConfig =
+        let mut config: FeishuConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid Feishu config: {e}"),
             })?;
         validate_config(&config)?;
+        config.webhook_state = config.webhook_state.clone().validate()?;
 
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let runtime = ConnectorRuntime::new(
             ConnectorRuntimeConfig::default().with_request_timeout(request_timeout),
         );
+        let webhook_state = FeishuWebhookStateStore::from_config(&config.webhook_state)?;
 
         let client = FeishuClient::new(
             &config.base_url,
@@ -1955,6 +2508,7 @@ impl FcpConnector for FeishuConnector {
         self.retry_config = config.retry.clone();
         self.runtime = Some(runtime);
         self.client = Some(client);
+        self.webhook_state = webhook_state;
         self.config = Some(config);
         self.verifier = None;
         self.base.set_configured(true);
@@ -2163,6 +2717,7 @@ impl FcpConnector for FeishuConnector {
         }
         self.client = None;
         self.config = None;
+        self.webhook_state = FeishuWebhookStateStore::memory();
         self.verifier = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
@@ -2403,7 +2958,9 @@ impl FeishuConnector {
                     message: format!("Failed to serialize response: {e}"),
                 })?
             }
-            OP_WEBHOOK_INGEST_REQUEST => invoke_webhook_ingest_request(&req.input)?,
+            OP_WEBHOOK_INGEST_REQUEST => {
+                invoke_webhook_ingest_request_with_state(&req.input, Some(&self.webhook_state))?
+            }
             OP_HEALTH => {
                 client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "healthy" })
@@ -2915,6 +3472,7 @@ mod tests {
             app_secret: "secret_value_here".into(),
             retry: HttpRetryConfig::default(),
             request_timeout_ms: 30_000,
+            webhook_state: FeishuWebhookStateConfig::default(),
         };
         let debug_output = format!("{config:?}");
         assert!(!debug_output.contains("secret_value_here"));
@@ -3061,6 +3619,7 @@ mod tests {
             app_secret: "app_secret".into(),
             retry: HttpRetryConfig::default(),
             request_timeout_ms: default_request_timeout_ms(),
+            webhook_state: FeishuWebhookStateConfig::default(),
         });
         connector.client = Some(
             FeishuClient::new(
@@ -3139,6 +3698,20 @@ mod tests {
             }
         }))
         .unwrap()
+    }
+
+    fn unique_webhook_state_path(label: &str) -> String {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir()
+            .join(format!(
+                "fcp-feishu-{label}-{}-{nanos}.json",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .into_owned()
     }
 
     #[test]
@@ -3244,6 +3817,149 @@ mod tests {
     }
 
     #[test]
+    fn test_webhook_connector_owned_dedupe_suppresses_duplicate() {
+        let store = FeishuWebhookStateStore::memory();
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let input = signed_webhook_input(raw_body, json!({}));
+
+        let first = invoke_webhook_ingest_request_with_state(&input, Some(&store))
+            .expect("first event should be accepted");
+        assert_eq!(first["reason_code"], "event_accepted");
+        assert_eq!(first["event_emitted"], true);
+        assert_eq!(first["state_summary"]["entries"], 1);
+        assert_eq!(first["state_summary"]["finalized_entries"], 1);
+        assert_eq!(first["state_summary"]["in_flight_entries"], 0);
+
+        let second = invoke_webhook_ingest_request_with_state(&input, Some(&store))
+            .expect("duplicate should be suppressed");
+        assert_eq!(second["reason_code"], "duplicate_event");
+        assert_eq!(second["event_emitted"], false);
+        assert_eq!(second["state_summary"]["finalized_entries"], 1);
+        assert!(
+            second["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|log| log["code"] == "duplicate_event"
+                    && log["mode"] == "connector_owned_state")
+        );
+    }
+
+    #[test]
+    fn test_webhook_inflight_claim_suppresses_concurrent_duplicate_and_release_retries() {
+        let store = FeishuWebhookStateStore::memory();
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let input = signed_webhook_input(raw_body, json!({}));
+        let dedupe_key = "feishu:im.message.receive_v1:evt-message-1";
+        assert_eq!(
+            store
+                .claim(dedupe_key, "im.message.receive_v1", "evt-message-1")
+                .unwrap(),
+            FeishuWebhookDedupeClaim::Claimed
+        );
+
+        let in_flight = invoke_webhook_ingest_request_with_state(&input, Some(&store))
+            .expect("in-flight duplicate should return a response");
+        assert_eq!(in_flight["reason_code"], "inflight_event");
+        assert_eq!(in_flight["event_emitted"], false);
+        assert_eq!(in_flight["state_summary"]["in_flight_entries"], 1);
+
+        store.release(dedupe_key).unwrap();
+        let retried = invoke_webhook_ingest_request_with_state(&input, Some(&store))
+            .expect("released claim should allow retry");
+        assert_eq!(retried["reason_code"], "event_accepted");
+        assert_eq!(retried["event_emitted"], true);
+    }
+
+    #[test]
+    fn test_webhook_dedupe_ttl_and_size_cap() {
+        let store = FeishuWebhookStateStore {
+            path: None,
+            ttl: Duration::from_millis(1),
+            max_entries: 1,
+            state: Mutex::new(FeishuWebhookStateFile::default()),
+        };
+        assert_eq!(
+            store.claim("old", "im.message.receive_v1", "old").unwrap(),
+            FeishuWebhookDedupeClaim::Claimed
+        );
+        std::thread::sleep(Duration::from_millis(3));
+        assert_eq!(
+            store.claim("old", "im.message.receive_v1", "old").unwrap(),
+            FeishuWebhookDedupeClaim::Claimed
+        );
+        store
+            .finalize(
+                "old",
+                "im.message.receive_v1",
+                "old",
+                &json!({}),
+                &json!({"reason_code": "policy_allowed"}),
+                "accepted",
+            )
+            .unwrap();
+        assert_eq!(
+            store.claim("new", "im.message.receive_v1", "new").unwrap(),
+            FeishuWebhookDedupeClaim::Claimed
+        );
+        assert_eq!(store.summary().unwrap().entries, 1);
+        assert!(store.lock_state().unwrap().entries.contains_key("new"));
+    }
+
+    #[test]
+    fn test_webhook_dedupe_state_persists_across_store_reopen() {
+        let path = unique_webhook_state_path("dedupe");
+        let config = FeishuWebhookStateConfig {
+            dedupe_state_path: Some(path),
+            dedupe_ttl_seconds: FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS,
+            dedupe_max_entries: FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES,
+        };
+        let store = FeishuWebhookStateStore::from_config(&config).unwrap();
+        assert_eq!(
+            store
+                .claim("persisted", "im.message.receive_v1", "persisted")
+                .unwrap(),
+            FeishuWebhookDedupeClaim::Claimed
+        );
+        store
+            .finalize(
+                "persisted",
+                "im.message.receive_v1",
+                "persisted",
+                &json!({}),
+                &json!({"reason_code": "policy_allowed"}),
+                "accepted",
+            )
+            .unwrap();
+
+        let reopened = FeishuWebhookStateStore::from_config(&config).unwrap();
+        assert_eq!(
+            reopened
+                .claim("persisted", "im.message.receive_v1", "persisted")
+                .unwrap(),
+            FeishuWebhookDedupeClaim::Duplicate
+        );
+        assert_eq!(reopened.summary().unwrap().finalized_entries, 1);
+    }
+
+    #[test]
+    fn test_webhook_corrupt_state_fails_closed() {
+        let path = unique_webhook_state_path("corrupt");
+        fs::write(&path, b"{not-json").unwrap();
+        let config = FeishuWebhookStateConfig {
+            dedupe_state_path: Some(path),
+            dedupe_ttl_seconds: FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS,
+            dedupe_max_entries: FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES,
+        };
+        let error = FeishuWebhookStateStore::from_config(&config).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to parse Feishu webhook state")
+        );
+    }
+
+    #[test]
     fn test_webhook_comment_policy_pairing() {
         let raw_body = serde_json::to_string(&json!({
             "schema": "2.0",
@@ -3284,6 +4000,47 @@ mod tests {
             allowed["normalized_event"]["topic"],
             "feishu.webhook.document_comment_added"
         );
+    }
+
+    #[test]
+    fn test_webhook_comment_state_tracks_policy_cache_and_pairing_session() {
+        let store = FeishuWebhookStateStore::memory();
+        let raw_body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-comment-state-1",
+                "event_type": "drive.notice.comment_add_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "file_token": "doc_state",
+                "file_type": "docx",
+                "comment_id": "comment_state",
+                "reply_id": "reply_state",
+                "user_id": { "open_id": "ou_commenter" }
+            }
+        }))
+        .unwrap();
+        let output = invoke_webhook_ingest_request_with_state(
+            &signed_webhook_input(
+                raw_body,
+                json!({
+                    "comment": {
+                        "enabled": true,
+                        "policy": "pairing",
+                        "document_allowlist": ["doc_state"],
+                        "paired_open_ids": ["ou_commenter"]
+                    }
+                }),
+            ),
+            Some(&store),
+        )
+        .expect("paired comment should pass and update state");
+
+        assert_eq!(output["reason_code"], "event_accepted");
+        assert_eq!(output["state_summary"]["policy_cache_generation"], 1);
+        assert_eq!(output["state_summary"]["comment_session_count"], 1);
+        assert_eq!(output["state_summary"]["paired_user_count"], 1);
     }
 
     #[test]

@@ -407,18 +407,20 @@ async fn invoke_webhook_ingest_validates_and_normalizes_event_evidence() {
     }))
     .unwrap();
 
+    let webhook_input = signed_webhook_input(
+        raw_body,
+        json!({
+            "allowed_sender_open_ids": ["ou_allowed"],
+            "allowed_chat_ids": ["oc_allowed"],
+            "require_mention": true,
+            "bot_open_id": "ou_bot",
+        }),
+    );
+
     let response = connector
         .invoke(invoke_req(
             OP_WEBHOOK_INGEST_REQUEST,
-            signed_webhook_input(
-                raw_body,
-                json!({
-                    "allowed_sender_open_ids": ["ou_allowed"],
-                    "allowed_chat_ids": ["oc_allowed"],
-                    "require_mention": true,
-                    "bot_open_id": "ou_bot",
-                }),
-            ),
+            webhook_input.clone(),
             generate_valid_token(
                 &signing_key,
                 OP_WEBHOOK_INGEST_REQUEST,
@@ -442,6 +444,23 @@ async fn invoke_webhook_ingest_validates_and_normalizes_event_evidence() {
         "feishu_webhook_ingest_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
     );
+
+    let duplicate = connector
+        .invoke(invoke_req(
+            OP_WEBHOOK_INGEST_REQUEST,
+            webhook_input,
+            generate_valid_token(
+                &signing_key,
+                OP_WEBHOOK_INGEST_REQUEST,
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .unwrap();
+    let duplicate = duplicate.result.expect("duplicate result");
+    assert_eq!(duplicate["reason_code"], "duplicate_event");
+    assert_eq!(duplicate["event_emitted"], false);
+    assert_eq!(duplicate["state_summary"]["finalized_entries"], 1);
 }
 
 #[test]

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:20f0d1193d050f03701b945eca709681a3110f36f8a8643e5d253fd1c8985240"
+interface_hash = "blake3-256:fcp.interface.v2:ae0157b5814918fac9c9622c7c0a72110f86c3c1c307c5e8257711be40900bcd"
 
 [connector]
 id = "fcp.feishu"
@@ -16,9 +16,9 @@ archetypes = ["operational"]
 format = "native"
 
 [connector.state]
-model = "stateless"
-state_schema_version = "1"
-migration_hint = "One connector instance binds to one installed Feishu/Lark tenant app via runtime-injected app_id, app_secret, base_url, retry, and request_timeout_ms settings."
+model = "singleton_writer"
+state_schema_version = "2"
+migration_hint = "One connector instance binds to one installed Feishu/Lark tenant app via runtime-injected app_id, app_secret, base_url, retry, request_timeout_ms, and optional webhook_state.dedupe_state_path settings."
 
 # Auth and scope model:
 # - One connector instance is bound to one installed Feishu/Lark tenant app.
@@ -29,8 +29,9 @@ migration_hint = "One connector instance binds to one installed Feishu/Lark tena
 # - Mainland China traffic uses https://open.feishu.cn; global traffic uses
 #   https://open.larksuite.com.
 # - Localhost and 127.0.0.1 are allowed only for deterministic verification harnesses.
-# - Host-forwarded webhook request ingestion validates Feishu challenge/token/signature
-#   and normalizes plaintext events without opening a listener socket.
+# - Host-forwarded webhook request ingestion validates Feishu challenge/token/signature,
+#   claims connector-owned dedupe state, and normalizes plaintext events without opening
+#   a listener socket.
 # - User-delegated OAuth, cross-tenant brokering, embedded listener lifecycle,
 #   websocket event delivery, encrypted webhook payload decryption, Drive
 #   search/export/write, and calendar mutations are explicit non-goals for this
@@ -222,19 +223,19 @@ examples = []
 related = []
 
 [provides.operations."feishu.webhook.ingest_request"]
-description = "Validate and normalize one Feishu/Lark webhook request already forwarded by host ingress."
+description = "Validate, connector-dedupe, policy-gate, and normalize one Feishu/Lark webhook request already forwarded by host ingress."
 capability = "feishu.webhook.ingest"
 risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "best_effort"
 input_schema = { type = "object", required = ["method", "headers", "raw_body", "verification_token", "encrypt_key", "policy"] }
-output_schema = { type = "object", required = ["accepted", "status_code", "reason_code", "event_emitted", "logs"] }
+output_schema = { type = "object", required = ["accepted", "status_code", "reason_code", "event_emitted", "logs"], properties = { state_summary = { type = ["object", "null"] } } }
 network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
 
 [provides.operations."feishu.webhook.ingest_request".ai_hints]
-when_to_use = "Use when host ingress forwards a Feishu/Lark webhook request and the connector must verify signature/token, apply policy, and return a normalized event record."
-common_mistakes = ["Pass the exact raw JSON body string used for Feishu signature verification.", "Do not use this operation as an embedded HTTP listener; network.listen remains forbidden.", "Encrypted Feishu webhook payloads are rejected by this slice."]
+when_to_use = "Use when host ingress forwards a Feishu/Lark webhook request and the connector must verify signature/token, claim dedupe state, apply policy, and return a normalized event record."
+common_mistakes = ["Pass the exact raw JSON body string used for Feishu signature verification.", "Do not use this operation as an embedded HTTP listener; network.listen remains forbidden.", "Configure webhook_state.dedupe_state_path when restart replay suppression is required.", "Encrypted Feishu webhook payloads are rejected by this slice."]
 examples = []
 related = []
 

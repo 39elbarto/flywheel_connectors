@@ -12,7 +12,7 @@
 
 This document fixes the accepted first V3 slice for `fcp.feishu` so the connector stays bounded to one tenant-installed Feishu/Lark app instead of drifting into a generic collaboration-platform SDK.
 
-The connector is a request-response Feishu/Lark Open Platform surface for outbound bot messaging, chat lookup, user-directory reads, known-token docs and sheets reads, known-calendar event listing, and health verification. It is not a webhook receiver, websocket event consumer, drive crawler, or user-impersonation bridge.
+The connector is a request-response Feishu/Lark Open Platform surface for outbound bot messaging, chat lookup, user-directory reads, known-token docs and sheets reads, known-calendar event listing, host-forwarded webhook ingestion, and health verification. It is not an embedded webhook listener, websocket event consumer, drive crawler, or user-impersonation bridge.
 
 ## Current Runtime Snapshot
 
@@ -27,16 +27,17 @@ The current crate exposes these operations:
 - `feishu.docs.get`
 - `feishu.sheets.get`
 - `feishu.calendar.events`
+- `feishu.webhook.ingest_request`
 - `feishu.health`
 
 Important runtime truths from `connector.rs`, `client.rs`, and `manifest.toml`:
 
-- Configuration is `base_url`, `app_id`, `app_secret`, retry policy, and bounded `request_timeout_ms`.
+- Configuration is `base_url`, `app_id`, `app_secret`, retry policy, bounded `request_timeout_ms`, and optional `webhook_state` settings for connector-owned dedupe persistence.
 - One connector instance is bound to one installed tenant app and one tenant access token flow.
 - Production roots are `https://open.feishu.cn` and `https://open.larksuite.com`; localhost and `127.0.0.1` overrides are allowed only for deterministic test harnesses.
 - `health` and `self_check()` are grounded in the tenant-access-token internal auth endpoint and now emit operator guidance, verification-script references, provisioning details, and structured self-check evidence.
 - Docs, sheets, and calendar reads are known-resource operations. This connector does not search Drive, enumerate arbitrary docs, or mutate calendar state.
-- Webhook delivery, websocket events, cross-tenant brokering, and user-delegated OAuth remain explicit non-goals in the current slice.
+- Webhook ingestion is host-forwarded request processing only. It validates signature/token, applies sender/chat/comment policy, and uses connector-owned dedupe state before event emission. Embedded listener lifecycle, websocket events, cross-tenant brokering, and user-delegated OAuth remain explicit non-goals in the current slice.
 
 ## First-Slice Scope
 
@@ -50,6 +51,7 @@ The accepted first Feishu/Lark slice is intentionally narrow:
 - Read one known docx document by token.
 - Read one known spreadsheet by token.
 - List events from one known calendar.
+- Ingest one host-forwarded Feishu/Lark webhook request with policy gating and dedupe state.
 - Expose safe readiness, doctor, and self-check surfaces backed by the auth endpoint.
 
 This slice is intentionally closer to "tenant app request-response automation" than to "full workplace platform coverage."
@@ -64,7 +66,7 @@ This slice is intentionally closer to "tenant app request-response automation" t
 | User directory lookup | In scope | User lookup is limited to one tenant user ID at a time. |
 | Docs and Sheets reads | Partial | Known-token reads are implemented; Drive search/export/write remain out of scope. |
 | Calendar reads | Partial | Event listing for one known calendar is implemented; mutations and subscriptions are out of scope. |
-| Webhook ingestion | Out of scope | No webhook verification, replay handling, or persistence exists in this connector. |
+| Webhook ingestion | In scope | Host-forwarded request validation with signature/token checks, policy gating, and optional persistent dedupe state. |
 | Websocket events | Out of scope | No long-lived event stream is exposed. |
 
 ## Auth And Scope Boundary
@@ -87,7 +89,7 @@ This slice is intentionally closer to "tenant app request-response automation" t
 - `deny_tailnet_ranges = true`
 - `deny_ip_literals = true`
 - Localhost overrides are allowed only for deterministic tests
-- The connector remains request-response only; it does not expose a streaming, replay, or inbound listener surface
+- The connector remains request-response only; webhook ingestion is a host-forwarded operation and does not open a listener socket
 
 ## Capability Families
 
@@ -113,13 +115,14 @@ This slice is intentionally closer to "tenant app request-response automation" t
 | `feishu.docs.get` | `GET /open-apis/docx/v1/documents/{document_id}/raw_content` | `feishu.docs.read` | `Safe` | `Low` | `Strict` | Reads one known docx document token. |
 | `feishu.sheets.get` | `GET /open-apis/sheets/v3/spreadsheets/{spreadsheet_token}` | `feishu.docs.read` | `Safe` | `Low` | `Strict` | Reads one known spreadsheet token. |
 | `feishu.calendar.events` | `GET /open-apis/calendar/v4/calendars/{calendar_id}/events` | `feishu.calendar.read` | `Safe` | `Low` | `Strict` | Lists events for one known calendar with pagination. |
+| `feishu.webhook.ingest_request` | host-forwarded request | `feishu.webhook.ingest` | `Risky` | `Medium` | `BestEffort` | Validates, dedupes, policy-gates, and normalizes one webhook request. |
 | `feishu.health` | `POST /open-apis/auth/v3/tenant_access_token/internal` | `feishu.users.read` | `Safe` | `Low` | `Strict` | Safe tenant-app reachability and credential probe used by readiness surfaces. |
 
 ## Explicit Non-Goals
 
 The accepted first Feishu/Lark slice does not include:
 
-- webhook ingestion, signature verification, replay handling, or event persistence
+- embedded webhook listener lifecycle or direct public HTTP serving
 - websocket event streams
 - cross-tenant brokering or arbitrary user impersonation
 - Drive search, export, folder traversal, or write operations

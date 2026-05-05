@@ -1536,10 +1536,17 @@ pub struct RevocationPushFanoutPlan {
     pub fanout_cap: usize,
     /// Redaction-safe explanation for the selected fanout behavior.
     pub decision: FanoutDecision,
+    /// Whether the adaptive direct-push gate was enabled for this attempt.
+    pub adaptive_enabled: bool,
+    /// Candidate cap computed by the adaptive gate, when it was active.
+    pub adaptive_candidate_cap: Option<usize>,
+    /// Reason the planner used static or non-direct behavior.
+    pub fallback_reason: Option<FanoutFallbackReason>,
 }
 
 /// Redaction-safe direct-push fanout decision.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum FanoutDecision {
     /// Policy does not use direct push.
     IntervalOnly,
@@ -1551,8 +1558,78 @@ pub enum FanoutDecision {
     FullPeerSet,
     /// Direct push was capped by the configured amplification limit.
     Capped,
+    /// Direct push was capped by the enabled adaptive safety gate.
+    AdaptiveCapped,
     /// Emergency path selected peers using the emergency burst cap.
     EmergencyBurst,
+}
+
+/// Redaction-safe reason for falling back from adaptive direct push.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FanoutFallbackReason {
+    /// Adaptive fanout is disabled in configuration.
+    AdaptiveDisabled,
+    /// Policy does not allow direct push.
+    PolicyDoesNotDirectPush,
+    /// Emergency revocation bypasses adaptive fanout.
+    EmergencyBypass,
+    /// Offered peer count is below the configured adaptive floor.
+    PeerCountBelowAdaptiveFloor,
+    /// Adaptive settings were invalid and static fanout was safer.
+    InvalidAdaptiveConfig,
+    /// Adaptive candidate matched the static cap and would not change behavior.
+    AdaptiveMatchesStaticCap,
+}
+
+/// Redaction-safe evidence row for operator dashboards and JSONL harnesses.
+///
+/// This deliberately omits peer IDs, object IDs, payload digests, and zone IDs;
+/// it reports only counts, policy, timing, and bounded decision reasons.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RevocationPushFanoutEvidence {
+    /// Policy used to plan the fanout.
+    pub policy: PriorityGossipPolicy,
+    /// Planner decision.
+    pub decision: FanoutDecision,
+    /// Offered peer count before filtering.
+    pub requested_peer_count: usize,
+    /// Selected peer count after filtering.
+    pub selected_peer_count: usize,
+    /// Offered peers not selected for direct push.
+    pub suppressed_peer_count: usize,
+    /// Effective cap used for the attempt.
+    pub fanout_cap: usize,
+    /// Whether adaptive direct-push fanout was enabled.
+    pub adaptive_enabled: bool,
+    /// Candidate cap computed by the adaptive gate, when active.
+    pub adaptive_candidate_cap: Option<usize>,
+    /// Static fallback or bypass reason, when any.
+    pub fallback_reason: Option<FanoutFallbackReason>,
+    /// Earliest millisecond timestamp for another direct push in the zone.
+    pub next_allowed_at_ms: Option<u64>,
+}
+
+impl RevocationPushFanoutPlan {
+    /// Return a redaction-safe evidence row for this fanout plan.
+    #[must_use]
+    pub fn redacted_evidence(&self) -> RevocationPushFanoutEvidence {
+        let selected_peer_count = self.selected_peers.len();
+        RevocationPushFanoutEvidence {
+            policy: self.policy,
+            decision: self.decision,
+            requested_peer_count: self.requested_peer_count,
+            selected_peer_count,
+            suppressed_peer_count: self
+                .requested_peer_count
+                .saturating_sub(selected_peer_count),
+            fanout_cap: self.fanout_cap,
+            adaptive_enabled: self.adaptive_enabled,
+            adaptive_candidate_cap: self.adaptive_candidate_cap,
+            fallback_reason: self.fallback_reason,
+            next_allowed_at_ms: self.next_allowed_at_ms,
+        }
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1685,6 +1762,15 @@ pub struct GossipConfig {
     /// Bounds the amplification factor: at most this many direct pushes
     /// per revocation event. Default: 32.
     pub max_revocation_push_peers: usize,
+    /// Disabled-by-default adaptive direct-push fanout gate.
+    ///
+    /// When enabled, ordinary `DirectPush` revocations may select fewer
+    /// peers than [`Self::max_revocation_push_peers`] in large swarms. The
+    /// adaptive cap is never allowed to exceed the static cap, so the
+    /// existing static behavior remains the safety fallback. Emergency
+    /// revocations bypass this gate and continue to use
+    /// [`PriorityGossipPolicy::EMERGENCY_BURST_FANOUT`].
+    pub adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig,
     /// Maximum distinct peer gossip states retained in memory.
     ///
     /// Every accepted summary with a never-seen `summary.from` inserts a
@@ -1712,7 +1798,58 @@ impl Default for GossipConfig {
             reconciliation_batch_size: DEFAULT_RECONCILIATION_BATCH_SIZE,
             priority_gossip_interval_ms: 100,
             max_revocation_push_peers: 32,
+            adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig::default(),
             max_peer_states: 4096,
+        }
+    }
+}
+
+/// Safety gate for adaptive direct revocation-push fanout.
+///
+/// The gate is disabled by default. When explicitly enabled, it only applies to
+/// [`PriorityGossipPolicy::DirectPush`], requires a minimum observed peer count,
+/// and computes a deterministic cap from the offered peer count. The computed
+/// cap is then clamped to the static cap so adaptive behavior cannot increase
+/// amplification beyond the pre-existing bound.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdaptiveRevocationPushFanoutConfig {
+    /// Whether adaptive direct-push fanout is enabled.
+    pub enabled: bool,
+    /// Minimum offered peers before adaptive selection is considered.
+    pub min_observed_peers: usize,
+    /// Lower bound for selected peers once the gate is active.
+    pub min_selected_peers: usize,
+    /// Divisor used to compute `ceil(offered_peers / target_peer_divisor)`.
+    pub target_peer_divisor: usize,
+    /// Additional hard cap for the adaptive candidate.
+    pub max_selected_peers: usize,
+}
+
+impl Default for AdaptiveRevocationPushFanoutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            min_observed_peers: 16,
+            min_selected_peers: 4,
+            target_peer_divisor: 4,
+            max_selected_peers: 32,
+        }
+    }
+}
+
+impl AdaptiveRevocationPushFanoutConfig {
+    /// Return a disabled gate with the standard safety parameters retained.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self::default()
+    }
+
+    /// Return an enabled gate with the standard safety parameters.
+    #[must_use]
+    pub fn enabled() -> Self {
+        Self {
+            enabled: true,
+            ..Self::default()
         }
     }
 }
@@ -1777,6 +1914,94 @@ impl GossipConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RevocationFanoutGate {
+    fanout_cap: usize,
+    adaptive_enabled: bool,
+    adaptive_candidate_cap: Option<usize>,
+    fallback_reason: Option<FanoutFallbackReason>,
+}
+
+fn evaluate_revocation_fanout_gate(
+    policy: PriorityGossipPolicy,
+    requested_peer_count: usize,
+    config: &GossipConfig,
+) -> RevocationFanoutGate {
+    let static_cap = policy.fanout_cap(config);
+    let adaptive = config.adaptive_revocation_push_fanout;
+
+    if !policy.uses_direct_push() {
+        return RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: adaptive.enabled,
+            adaptive_candidate_cap: None,
+            fallback_reason: Some(FanoutFallbackReason::PolicyDoesNotDirectPush),
+        };
+    }
+
+    if policy.is_emergency() {
+        return RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: adaptive.enabled,
+            adaptive_candidate_cap: None,
+            fallback_reason: Some(FanoutFallbackReason::EmergencyBypass),
+        };
+    }
+
+    if !adaptive.enabled {
+        return RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: false,
+            adaptive_candidate_cap: None,
+            fallback_reason: Some(FanoutFallbackReason::AdaptiveDisabled),
+        };
+    }
+
+    if requested_peer_count < adaptive.min_observed_peers {
+        return RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: true,
+            adaptive_candidate_cap: None,
+            fallback_reason: Some(FanoutFallbackReason::PeerCountBelowAdaptiveFloor),
+        };
+    }
+
+    if adaptive.target_peer_divisor == 0
+        || adaptive.min_selected_peers == 0
+        || adaptive.max_selected_peers == 0
+    {
+        return RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: true,
+            adaptive_candidate_cap: None,
+            fallback_reason: Some(FanoutFallbackReason::InvalidAdaptiveConfig),
+        };
+    }
+
+    let static_effective_cap = requested_peer_count.min(static_cap);
+    let adaptive_candidate_cap = requested_peer_count
+        .div_ceil(adaptive.target_peer_divisor)
+        .max(adaptive.min_selected_peers)
+        .min(adaptive.max_selected_peers)
+        .min(static_effective_cap);
+
+    if adaptive_candidate_cap >= static_effective_cap {
+        RevocationFanoutGate {
+            fanout_cap: static_cap,
+            adaptive_enabled: true,
+            adaptive_candidate_cap: Some(adaptive_candidate_cap),
+            fallback_reason: Some(FanoutFallbackReason::AdaptiveMatchesStaticCap),
+        }
+    } else {
+        RevocationFanoutGate {
+            fanout_cap: adaptive_candidate_cap,
+            adaptive_enabled: true,
+            adaptive_candidate_cap: Some(adaptive_candidate_cap),
+            fallback_reason: None,
+        }
+    }
+}
+
 impl MeshGossip {
     /// Create a new gossip controller.
     #[must_use]
@@ -1831,15 +2056,18 @@ impl MeshGossip {
         now_ms: u64,
     ) -> RevocationPushFanoutPlan {
         let requested_peer_count = peers.len();
-        let fanout_cap = policy.fanout_cap(&self.config);
+        let gate = evaluate_revocation_fanout_gate(policy, requested_peer_count, &self.config);
         if !policy.uses_direct_push() {
             return RevocationPushFanoutPlan {
                 selected_peers: Vec::new(),
                 next_allowed_at_ms: None,
                 policy,
                 requested_peer_count,
-                fanout_cap,
+                fanout_cap: gate.fanout_cap,
                 decision: FanoutDecision::IntervalOnly,
+                adaptive_enabled: gate.adaptive_enabled,
+                adaptive_candidate_cap: gate.adaptive_candidate_cap,
+                fallback_reason: gate.fallback_reason,
             };
         }
 
@@ -1852,17 +2080,29 @@ impl MeshGossip {
                     next_allowed_at_ms: Some(next_allowed_at_ms),
                     policy,
                     requested_peer_count,
-                    fanout_cap,
+                    fanout_cap: gate.fanout_cap,
                     decision: FanoutDecision::RateLimited,
+                    adaptive_enabled: gate.adaptive_enabled,
+                    adaptive_candidate_cap: gate.adaptive_candidate_cap,
+                    fallback_reason: gate.fallback_reason,
                 };
             }
         }
 
-        let selected_peers = peers.iter().take(fanout_cap).cloned().collect::<Vec<_>>();
+        let selected_peers = peers
+            .iter()
+            .take(gate.fanout_cap)
+            .cloned()
+            .collect::<Vec<_>>();
         let decision = if selected_peers.is_empty() {
             FanoutDecision::EmptyPeerSet
         } else if policy.is_emergency() {
             FanoutDecision::EmergencyBurst
+        } else if gate.adaptive_candidate_cap.is_some()
+            && gate.fallback_reason.is_none()
+            && selected_peers.len() < requested_peer_count
+        {
+            FanoutDecision::AdaptiveCapped
         } else if selected_peers.len() < requested_peer_count {
             FanoutDecision::Capped
         } else {
@@ -1878,8 +2118,11 @@ impl MeshGossip {
             next_allowed_at_ms: Some(now_ms.saturating_add(interval_ms)),
             policy,
             requested_peer_count,
-            fanout_cap,
+            fanout_cap: gate.fanout_cap,
             decision,
+            adaptive_enabled: gate.adaptive_enabled,
+            adaptive_candidate_cap: gate.adaptive_candidate_cap,
+            fallback_reason: gate.fallback_reason,
         }
     }
 
@@ -5257,6 +5500,12 @@ mod tests {
         assert_eq!(plan.requested_peer_count, 3);
         assert_eq!(plan.fanout_cap, 2);
         assert_eq!(plan.decision, FanoutDecision::Capped);
+        assert!(!plan.adaptive_enabled);
+        assert_eq!(plan.adaptive_candidate_cap, None);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(FanoutFallbackReason::AdaptiveDisabled)
+        );
         assert_eq!(plan.next_allowed_at_ms, Some(1_100));
     }
 
@@ -5265,6 +5514,7 @@ mod tests {
         let mut gossip = MeshGossip::new(
             test_node("local-node"),
             GossipConfig {
+                adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig::enabled(),
                 max_revocation_push_peers: 2,
                 ..GossipConfig::default()
             },
@@ -5291,6 +5541,12 @@ mod tests {
             PriorityGossipPolicy::EMERGENCY_BURST_FANOUT
         );
         assert_eq!(plan.decision, FanoutDecision::EmergencyBurst);
+        assert!(plan.adaptive_enabled);
+        assert_eq!(plan.adaptive_candidate_cap, None);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(FanoutFallbackReason::EmergencyBypass)
+        );
         assert_eq!(plan.next_allowed_at_ms, Some(1_100));
     }
 
@@ -5311,6 +5567,10 @@ mod tests {
         assert_eq!(plan.requested_peer_count, 1);
         assert_eq!(plan.fanout_cap, 0);
         assert_eq!(plan.decision, FanoutDecision::IntervalOnly);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(FanoutFallbackReason::PolicyDoesNotDirectPush)
+        );
         assert_eq!(plan.next_allowed_at_ms, None);
     }
 
@@ -5341,7 +5601,83 @@ mod tests {
             GossipConfig::default().max_revocation_push_peers
         );
         assert_eq!(limited.decision, FanoutDecision::RateLimited);
+        assert_eq!(
+            limited.fallback_reason,
+            Some(FanoutFallbackReason::AdaptiveDisabled)
+        );
         assert_eq!(limited.next_allowed_at_ms, Some(1_100));
+    }
+
+    #[test]
+    fn adaptive_direct_push_gate_caps_large_swarm_with_redacted_evidence() {
+        let mut gossip = MeshGossip::new(
+            test_node("local-node"),
+            GossipConfig {
+                max_revocation_push_peers: 32,
+                adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig::enabled(),
+                ..GossipConfig::default()
+            },
+        );
+        let peers = (0..100)
+            .map(|index| test_node(&format!("peer-{index}")))
+            .collect::<Vec<_>>();
+
+        let plan = gossip.plan_revocation_push_fanout(
+            &test_zone(),
+            &peers,
+            PriorityGossipPolicy::DirectPush,
+            1_000,
+        );
+
+        assert_eq!(plan.selected_peers, peers[..25].to_vec());
+        assert_eq!(plan.fanout_cap, 25);
+        assert_eq!(plan.decision, FanoutDecision::AdaptiveCapped);
+        assert!(plan.adaptive_enabled);
+        assert_eq!(plan.adaptive_candidate_cap, Some(25));
+        assert_eq!(plan.fallback_reason, None);
+
+        let evidence = plan.redacted_evidence();
+        assert_eq!(evidence.requested_peer_count, 100);
+        assert_eq!(evidence.selected_peer_count, 25);
+        assert_eq!(evidence.suppressed_peer_count, 75);
+        let encoded = serde_json::to_string(&evidence).expect("evidence serializes");
+        assert!(encoded.contains("\"decision\":\"adaptive_capped\""));
+        assert!(
+            !encoded.contains("peer-"),
+            "redacted evidence must not expose peer labels: {encoded}"
+        );
+    }
+
+    #[test]
+    fn adaptive_direct_push_below_floor_uses_static_fallback() {
+        let mut gossip = MeshGossip::new(
+            test_node("local-node"),
+            GossipConfig {
+                max_revocation_push_peers: 8,
+                adaptive_revocation_push_fanout: AdaptiveRevocationPushFanoutConfig::enabled(),
+                ..GossipConfig::default()
+            },
+        );
+        let peers = (0..10)
+            .map(|index| test_node(&format!("peer-{index}")))
+            .collect::<Vec<_>>();
+
+        let plan = gossip.plan_revocation_push_fanout(
+            &test_zone(),
+            &peers,
+            PriorityGossipPolicy::DirectPush,
+            1_000,
+        );
+
+        assert_eq!(plan.selected_peers, peers[..8].to_vec());
+        assert_eq!(plan.fanout_cap, 8);
+        assert_eq!(plan.decision, FanoutDecision::Capped);
+        assert!(plan.adaptive_enabled);
+        assert_eq!(plan.adaptive_candidate_cap, None);
+        assert_eq!(
+            plan.fallback_reason,
+            Some(FanoutFallbackReason::PeerCountBelowAdaptiveFloor)
+        );
     }
 
     // Regression: MeshGossip::handle_summary is a public lower-level mutator

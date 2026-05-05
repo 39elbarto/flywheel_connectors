@@ -139,6 +139,25 @@ const DEFAULT_BLUEBUBBLES_INGRESS_TIMEOUT_MS: u64 = 5_000;
 const DEFAULT_BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
 const DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX: u64 = 120;
 const DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
+const TELEGRAM_WEBHOOK_INGRESS_ROUTE: &str = "/telegram-webhook";
+const TELEGRAM_WEBHOOK_INGRESS_OPERATION: &str = "telegram.ingest_webhook_update";
+const TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID_ENV: &str =
+    "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID";
+const TELEGRAM_WEBHOOK_INGRESS_ZONE_ID_ENV: &str = "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_ZONE_ID";
+const TELEGRAM_WEBHOOK_INGRESS_TOKEN_B64_ENV: &str =
+    "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_CAPABILITY_TOKEN_B64";
+const TELEGRAM_WEBHOOK_INGRESS_TOKEN_FILE_ENV: &str =
+    "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_CAPABILITY_TOKEN_FILE";
+const TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES_ENV: &str =
+    "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES";
+const TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS_ENV: &str =
+    "FCP_HOST_TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS";
+const TELEGRAM_WEBHOOK_SECRET_HEADER: &str = "x-telegram-bot-api-secret-token";
+const TELEGRAM_WEBHOOK_DELIVERY_ID_HEADER: &str = "x-fcp-delivery-id";
+const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID: &str = "fcp.telegram";
+const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_ZONE_ID: &str = "z:community";
+const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 1024 * 1024;
+const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HybridOwnerInvokeEvidence {
@@ -4261,6 +4280,10 @@ async fn async_main() -> HostResult<()> {
             BLUEBUBBLES_INGRESS_ROUTE,
             post(bluebubbles_webhook_ingress_handler),
         )
+        .route(
+            TELEGRAM_WEBHOOK_INGRESS_ROUTE,
+            post(telegram_webhook_ingress_handler),
+        )
         .route("/doctor", post(doctor_handler))
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/connectors/{connector_id}", get(connector_handler))
@@ -6142,6 +6165,229 @@ fn bluebubbles_ingress_admission_response(
             "body_bytes": body_bytes,
             "tainted": true,
             "clean_shutdown": true,
+        })),
+    )
+}
+
+#[derive(Debug, Clone)]
+struct TelegramWebhookIngressConfig {
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    capability_token: fcp_core::CapabilityToken,
+    max_body_bytes: usize,
+    timeout_ms: u64,
+}
+
+async fn telegram_webhook_ingress_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
+    let config = resolve_telegram_webhook_ingress_config().map_err(map_host_error)?;
+    if body.len() > config.max_body_bytes {
+        return Ok(telegram_webhook_ingress_admission_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "Telegram webhook body exceeds configured host ingress maximum",
+            body.len(),
+        ));
+    }
+
+    let payload = match std::str::from_utf8(body.as_ref()) {
+        Ok(payload) => payload,
+        Err(error) => {
+            return Ok(telegram_webhook_ingress_admission_response(
+                StatusCode::BAD_REQUEST,
+                "malformed_payload",
+                &format!("Telegram webhook body must be UTF-8 JSON: {error}"),
+                body.len(),
+            ));
+        }
+    };
+    if let Err(error) = serde_json::from_str::<Value>(payload) {
+        return Ok(telegram_webhook_ingress_admission_response(
+            StatusCode::BAD_REQUEST,
+            "malformed_payload",
+            &format!("Telegram webhook body must be valid JSON: {error}"),
+            body.len(),
+        ));
+    }
+
+    let delivery_id = telegram_webhook_ingress_delivery_id(&headers);
+    let received_at = Utc::now().timestamp();
+    let request = telegram_webhook_ingress_invoke_request(
+        &config,
+        &headers,
+        payload.to_string(),
+        delivery_id,
+        received_at,
+    )
+    .map_err(map_host_error)?;
+
+    // External Telegram headers are not forwarded wholesale. The connector sees
+    // only the raw Update payload plus the optional Telegram secret-token header
+    // it knows how to verify; FCP authorization stays host-provisioned.
+    let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request)).await?;
+    let fallback_status = if matches!(response.status, InvokeStatus::Ok) {
+        StatusCode::OK
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let output = response.result.unwrap_or_else(|| {
+        json!({
+            "accepted": false,
+            "event_emitted": false,
+            "status_code": fallback_status.as_u16(),
+            "reason_code": "invoke_error",
+            "reason": response
+                .error
+                .map_or_else(|| "Telegram webhook ingress invoke failed".to_string(), |error| error.to_string()),
+            "body_bytes": body.len(),
+        })
+    });
+    let status = telegram_webhook_ingress_status_from_output(&output, fallback_status);
+    Ok((status, Json(output)))
+}
+
+fn resolve_telegram_webhook_ingress_config() -> HostResult<TelegramWebhookIngressConfig> {
+    let connector_id = read_optional_trimmed_env_string(TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID_ENV)?
+        .unwrap_or_else(|| DEFAULT_TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID.to_string())
+        .parse()
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid {TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID_ENV}: {error}"
+            ))
+        })?;
+    let zone_id = read_optional_trimmed_env_string(TELEGRAM_WEBHOOK_INGRESS_ZONE_ID_ENV)?
+        .unwrap_or_else(|| DEFAULT_TELEGRAM_WEBHOOK_INGRESS_ZONE_ID.to_string())
+        .parse()
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid {TELEGRAM_WEBHOOK_INGRESS_ZONE_ID_ENV}: {error}"
+            ))
+        })?;
+    let token_b64 = read_telegram_webhook_ingress_token_b64()?;
+    let capability_token =
+        capability_token_from_cbor_b64(&token_b64, TELEGRAM_WEBHOOK_INGRESS_TOKEN_B64_ENV)?;
+    Ok(TelegramWebhookIngressConfig {
+        connector_id,
+        zone_id,
+        capability_token,
+        max_body_bytes: read_env_usize(TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES_ENV)?
+            .unwrap_or(DEFAULT_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES),
+        timeout_ms: read_env_u64(TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS_ENV)?
+            .unwrap_or(DEFAULT_TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS),
+    })
+}
+
+fn read_telegram_webhook_ingress_token_b64() -> HostResult<String> {
+    if let Some(path) = read_optional_trimmed_env_string(TELEGRAM_WEBHOOK_INGRESS_TOKEN_FILE_ENV)? {
+        let token = std::fs::read_to_string(&path).map_err(|error| {
+            HostError::Unavailable(format!(
+                "failed to read {TELEGRAM_WEBHOOK_INGRESS_TOKEN_FILE_ENV} '{}': {error}",
+                path
+            ))
+        })?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(HostError::Unavailable(format!(
+                "{TELEGRAM_WEBHOOK_INGRESS_TOKEN_FILE_ENV} '{}' is empty",
+                path
+            )));
+        }
+        return Ok(token.to_string());
+    }
+
+    read_optional_trimmed_env_string(TELEGRAM_WEBHOOK_INGRESS_TOKEN_B64_ENV)?.ok_or_else(|| {
+        HostError::Unavailable(format!(
+            "Telegram webhook host ingress requires {TELEGRAM_WEBHOOK_INGRESS_TOKEN_FILE_ENV} or {TELEGRAM_WEBHOOK_INGRESS_TOKEN_B64_ENV}"
+        ))
+    })
+}
+
+fn telegram_webhook_ingress_invoke_request(
+    config: &TelegramWebhookIngressConfig,
+    headers: &HeaderMap,
+    payload: String,
+    delivery_id: String,
+    received_at: i64,
+) -> HostResult<InvokeRequest> {
+    let input = telegram_webhook_ingress_input(headers, payload, &delivery_id, received_at);
+    Ok(InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::random(),
+        connector_id: config.connector_id.clone(),
+        operation: OperationId::from_static(TELEGRAM_WEBHOOK_INGRESS_OPERATION),
+        zone_id: config.zone_id.clone(),
+        input,
+        capability_token: config.capability_token.clone(),
+        holder_proof: None,
+        context: None,
+        idempotency_key: Some(delivery_id),
+        lease_seq: None,
+        deadline_ms: Some(config.timeout_ms),
+        correlation_id: Some(CorrelationId::new()),
+        provenance: None,
+        approval_tokens: Vec::new(),
+    })
+}
+
+fn telegram_webhook_ingress_input(
+    headers: &HeaderMap,
+    payload: String,
+    delivery_id: &str,
+    received_at: i64,
+) -> Value {
+    let mut input = serde_json::Map::new();
+    input.insert("payload".to_string(), Value::String(payload));
+    input.insert(
+        "delivery_id".to_string(),
+        Value::String(delivery_id.to_string()),
+    );
+    input.insert(
+        "received_at".to_string(),
+        Value::Number(serde_json::Number::from(received_at)),
+    );
+    if let Some(secret_token) = header_value(headers, TELEGRAM_WEBHOOK_SECRET_HEADER) {
+        input.insert(
+            "secret_token".to_string(),
+            Value::String(secret_token.to_string()),
+        );
+    }
+    Value::Object(input)
+}
+
+fn telegram_webhook_ingress_delivery_id(headers: &HeaderMap) -> String {
+    header_value(headers, TELEGRAM_WEBHOOK_DELIVERY_ID_HEADER)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("telegram-webhook-{}", RequestId::random()))
+}
+
+fn telegram_webhook_ingress_status_from_output(output: &Value, fallback: StatusCode) -> StatusCode {
+    output
+        .get("status_code")
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .filter(|status| (100..=599).contains(status))
+        .and_then(|status| StatusCode::from_u16(status).ok())
+        .unwrap_or(fallback)
+}
+
+fn telegram_webhook_ingress_admission_response(
+    status: StatusCode,
+    reason_code: &str,
+    reason: &str,
+    body_bytes: usize,
+) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "accepted": false,
+            "event_emitted": false,
+            "status_code": status.as_u16(),
+            "reason_code": reason_code,
+            "reason": reason,
+            "body_bytes": body_bytes,
         })),
     )
 }
@@ -12239,6 +12485,218 @@ done"#;
         assert!(
             stopped_accepting,
             "host ingress listener still accepted connections after shutdown"
+        );
+    }
+
+    fn test_telegram_webhook_ingress_config() -> TelegramWebhookIngressConfig {
+        TelegramWebhookIngressConfig {
+            connector_id: ConnectorId::from_static("fcp.telegram"),
+            zone_id: "z:community".parse().expect("community zone should parse"),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            max_body_bytes: 1024 * 1024,
+            timeout_ms: 1500,
+        }
+    }
+
+    #[test]
+    fn telegram_webhook_ingress_input_forwards_only_connector_contract_fields() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            TELEGRAM_WEBHOOK_SECRET_HEADER,
+            HeaderValue::from_static("telegram-webhook-fixture"),
+        );
+        headers.insert(
+            "x-unrelated-provider-header",
+            HeaderValue::from_static("must-not-forward"),
+        );
+        let payload = json!({
+            "update_id": 2007,
+            "message": {
+                "message_id": 17,
+                "chat": { "id": 208214988, "type": "private" },
+                "date": 1700000020,
+                "text": "/new"
+            }
+        })
+        .to_string();
+
+        let input =
+            telegram_webhook_ingress_input(&headers, payload.clone(), "delivery-2007", 1700000021);
+
+        assert_eq!(input["payload"], payload);
+        assert_eq!(input["secret_token"], "telegram-webhook-fixture");
+        assert_eq!(input["delivery_id"], "delivery-2007");
+        assert_eq!(input["received_at"], 1700000021);
+        assert!(input.get("headers").is_none());
+        assert!(input.get("x-unrelated-provider-header").is_none());
+    }
+
+    #[test]
+    fn telegram_webhook_ingress_invoke_request_targets_connector_operation() {
+        let config = test_telegram_webhook_ingress_config();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            TELEGRAM_WEBHOOK_SECRET_HEADER,
+            HeaderValue::from_static("telegram-webhook-fixture"),
+        );
+        let payload = json!({"update_id": 2008, "message": {"message_id": 18}}).to_string();
+
+        let request = telegram_webhook_ingress_invoke_request(
+            &config,
+            &headers,
+            payload.clone(),
+            "delivery-2008".to_string(),
+            1700000022,
+        )
+        .expect("telegram invoke request should build");
+
+        assert_eq!(
+            request.connector_id,
+            ConnectorId::from_static("fcp.telegram")
+        );
+        assert_eq!(
+            request.operation.as_str(),
+            TELEGRAM_WEBHOOK_INGRESS_OPERATION
+        );
+        assert_eq!(request.zone_id.to_string(), "z:community");
+        assert_eq!(request.deadline_ms, Some(1500));
+        assert_eq!(request.idempotency_key.as_deref(), Some("delivery-2008"));
+        assert_eq!(request.input["payload"], payload);
+        assert_eq!(request.input["secret_token"], "telegram-webhook-fixture");
+        assert_eq!(request.input["delivery_id"], "delivery-2008");
+        assert_eq!(request.input["received_at"], 1700000022);
+    }
+
+    #[test]
+    fn telegram_webhook_ingress_delivery_id_uses_header_or_host_generated_fallback() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            TELEGRAM_WEBHOOK_DELIVERY_ID_HEADER,
+            HeaderValue::from_static("delivery-from-proxy"),
+        );
+        assert_eq!(
+            telegram_webhook_ingress_delivery_id(&headers),
+            "delivery-from-proxy"
+        );
+
+        let generated = telegram_webhook_ingress_delivery_id(&HeaderMap::new());
+        assert!(generated.starts_with("telegram-webhook-"));
+    }
+
+    #[test]
+    fn telegram_webhook_ingress_status_uses_connector_output_code() {
+        assert_eq!(
+            telegram_webhook_ingress_status_from_output(
+                &json!({"status_code": 409}),
+                StatusCode::OK
+            ),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            telegram_webhook_ingress_status_from_output(
+                &json!({"status_code": 799}),
+                StatusCode::ACCEPTED
+            ),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[test]
+    fn telegram_webhook_ingress_admission_response_is_machine_readable() {
+        let (status, Json(body)) = telegram_webhook_ingress_admission_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "too large",
+            5000,
+        );
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["accepted"], false);
+        assert_eq!(body["event_emitted"], false);
+        assert_eq!(body["status_code"], 413);
+        assert_eq!(body["reason_code"], "payload_too_large");
+        assert_eq!(body["reason"], "too large");
+        assert_eq!(body["body_bytes"], 5000);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn telegram_webhook_ingress_route_accept_loop_stops_on_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind host ingress listener");
+        let addr = listener.local_addr().expect("listener should expose addr");
+        let app = axum::Router::new().route(
+            TELEGRAM_WEBHOOK_INGRESS_ROUTE,
+            post(|| async {
+                (
+                    StatusCode::ACCEPTED,
+                    Json(json!({
+                        "accepted": true,
+                        "route": TELEGRAM_WEBHOOK_INGRESS_ROUTE,
+                        "source": "fcp_host_telegram_accept_loop"
+                    })),
+                )
+            }),
+        );
+        let (shutdown_tx, shutdown_rx) = fcp_async_core::channel::watch::channel(false);
+        let server = task::spawn(async move { serve_tcp(listener, app, shutdown_rx).await });
+
+        let mut stream = fcp_async_core::net::TcpStream::connect(addr)
+            .await
+            .expect("connect to host ingress listener");
+        let request = format!(
+            "POST {TELEGRAM_WEBHOOK_INGRESS_ROUTE} HTTP/1.1\r\n\
+             Host: {addr}\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: 2\r\n\
+             Connection: close\r\n\
+             \r\n\
+             {{}}"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write ingress request");
+        stream.flush().await.expect("flush ingress request");
+
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read ingress response");
+        let response = String::from_utf8(response).expect("http response should be utf-8");
+        assert!(
+            response.contains("202 Accepted"),
+            "expected route response over host accept loop, got {response}"
+        );
+        assert!(
+            response.contains("fcp_host_telegram_accept_loop"),
+            "expected route body from Telegram accept-loop app, got {response}"
+        );
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+
+        shutdown_tx
+            .send(true)
+            .expect("shutdown receiver should still be live");
+        let server_result = server.await.expect("serve_tcp task should join");
+        server_result.expect("serve_tcp should exit cleanly after shutdown");
+
+        let mut stopped_accepting = false;
+        for _ in 0..5 {
+            match fcp_async_core::net::TcpStream::connect(addr).await {
+                Ok(stream) => {
+                    let _ = stream.shutdown(std::net::Shutdown::Both);
+                }
+                Err(_) => {
+                    stopped_accepting = true;
+                    break;
+                }
+            }
+            fcp_async_core::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            stopped_accepting,
+            "Telegram host ingress listener still accepted connections after shutdown"
         );
     }
 

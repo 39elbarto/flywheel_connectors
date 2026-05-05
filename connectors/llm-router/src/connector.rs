@@ -1573,13 +1573,16 @@ impl LlmRouterConnector {
         match parsed.host() {
             Some(Host::Domain(host)) => {
                 let host = host.trim_end_matches('.').to_ascii_lowercase();
+                let has_local_tld = host
+                    .rsplit_once('.')
+                    .is_some_and(|(_, suffix)| suffix == "local");
                 host == "localhost"
                     || host.ends_with(".localhost")
                     || host == "local"
-                    || host.ends_with(".local")
+                    || has_local_tld
                     || !host.contains('.')
             }
-            Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
+            Some(Host::Ipv4(_) | Host::Ipv6(_)) => true,
             None => true,
         }
     }

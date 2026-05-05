@@ -373,9 +373,11 @@ mod tests {
     use fcp_sdk::migration::ConnectorRuntimeConfig;
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    };
     use std::thread::{self, JoinHandle};
-    use std::time::Instant;
 
     fn test_provider(name: &str, base_url: &str) -> ProviderConfig {
         ProviderConfig {
@@ -458,6 +460,7 @@ mod tests {
     struct LoopbackServer {
         base_url: String,
         requests: Arc<Mutex<Vec<RecordedRequest>>>,
+        stop: Arc<AtomicBool>,
         handle: Option<JoinHandle<()>>,
     }
 
@@ -468,25 +471,27 @@ mod tests {
             let base_url = format!("http://{}", listener.local_addr().unwrap());
             let requests = Arc::new(Mutex::new(Vec::new()));
             let recorded = Arc::clone(&requests);
+            let stop = Arc::new(AtomicBool::new(false));
+            let stop_requested = Arc::clone(&stop);
             let handle = thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(3);
                 let mut responses = responses.into_iter();
-                while Instant::now() < deadline {
+                while !stop_requested.load(Ordering::Relaxed) {
                     let Some(response) = responses.next() else {
                         break;
                     };
                     loop {
+                        if stop_requested.load(Ordering::Relaxed) {
+                            return;
+                        }
                         match listener.accept() {
                             Ok((stream, _)) => {
                                 handle_loopback_stream(stream, response, &recorded);
                                 break;
                             }
                             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                                if Instant::now() >= deadline {
-                                    return;
-                                }
                                 thread::sleep(Duration::from_millis(5));
                             }
+                            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                             Err(_) => return,
                         }
                     }
@@ -496,6 +501,7 @@ mod tests {
             Self {
                 base_url,
                 requests,
+                stop,
                 handle: Some(handle),
             }
         }
@@ -509,6 +515,7 @@ mod tests {
         }
 
         fn wait(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.handle.take() {
                 handle.join().unwrap();
             }
@@ -517,6 +524,7 @@ mod tests {
 
     impl Drop for LoopbackServer {
         fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
             if let Some(handle) = self.handle.take() {
                 let _ = handle.join();
             }

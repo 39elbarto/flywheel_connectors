@@ -12,6 +12,9 @@ authors.workspace = true
 name = "fcp_telegram"
 path = "src/lib.rs"
 
+[features]
+test-support = []
+
 [[bin]]
 name = "fcp-telegram"
 path = "src/main.rs"

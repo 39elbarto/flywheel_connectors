@@ -5,7 +5,7 @@ use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 #[cfg(unix)]
 use std::path::Path as FsPath;
-use std::path::PathBuf;
+use std::path::{Path as StdPath, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -115,6 +115,8 @@ use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitEx
 
 type ConnectorConfig = ManagedConnectorConfig;
 
+const CONNECTOR_STATE_DIR_ENV: &str = "FCP_CONNECTOR_STATE";
+const FCP_CONFIG_DIR_ENV: &str = "FCP_CONFIG_DIR";
 const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
 const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
 const BLUEBUBBLES_INGRESS_ROUTE: &str = "/bluebubbles-webhook";
@@ -262,6 +264,7 @@ struct SubprocessConnector {
     _runner_task: JoinHandle<()>,
     resilience: Arc<ResilienceLayer>,
     capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+    state_root: Option<PathBuf>,
     handshaken_zone: Mutex<Option<ZoneId>>,
 }
 
@@ -311,6 +314,7 @@ impl SubprocessConnector {
         let runner = ConnectorProcessRunner::spawn(&config.binary, &config.args, &config.env)
             .await
             .map_err(|err| HostError::Internal(format!("spawn failed: {err}")))?;
+        let state_root = configured_connector_state_root(&config);
         let (runner_tx, mut runner_rx) =
             mpsc::channel::<ConnectorRpcRequest>(CONNECTOR_RPC_QUEUE_CAPACITY);
         let runner_task = task::spawn(async move {
@@ -327,6 +331,7 @@ impl SubprocessConnector {
             _runner_task: runner_task,
             resilience,
             capability_verifying_key,
+            state_root,
             handshaken_zone: Mutex::new(None),
         };
         connector.resilience.ensure_connector(&connector.summary.id);
@@ -445,7 +450,7 @@ impl SubprocessConnector {
             let request = HandshakeRequest {
                 protocol_version: "1.0.0".to_string(),
                 zone: zone.clone(),
-                zone_dir: None,
+                zone_dir: Some(self.zone_dir_for(zone)),
                 host_public_key,
                 nonce,
                 capabilities_requested: Vec::new(),
@@ -476,6 +481,16 @@ impl SubprocessConnector {
         }
 
         self.rpc(method, params).await
+    }
+
+    fn zone_dir_for(&self, zone: &ZoneId) -> String {
+        let state_root = self
+            .state_root
+            .clone()
+            .unwrap_or_else(connector_state_root_dir);
+        connector_zone_state_dir(&state_root, &self.summary.id, zone)
+            .to_string_lossy()
+            .into_owned()
     }
 
     async fn self_check(&self) -> HostResult<SelfCheckReport> {
@@ -1305,6 +1320,56 @@ fn configured_subprocess_rate_limits(config: &ConnectorConfig) -> Option<RateLim
             );
             None
         }
+    }
+}
+
+fn configured_connector_state_root(config: &ConnectorConfig) -> Option<PathBuf> {
+    config
+        .env
+        .get(CONNECTOR_STATE_DIR_ENV)
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn connector_state_root_dir() -> PathBuf {
+    if let Some(path) = non_empty_os_env(CONNECTOR_STATE_DIR_ENV) {
+        return PathBuf::from(path);
+    }
+    if let Some(path) = non_empty_os_env(FCP_CONFIG_DIR_ENV) {
+        return PathBuf::from(path).join("state");
+    }
+    if let Some(home) = non_empty_os_env("HOME") {
+        return PathBuf::from(home).join(".fcp").join("state");
+    }
+    PathBuf::from(".fcp").join("state")
+}
+
+fn non_empty_os_env(key: &str) -> Option<OsString> {
+    std::env::var_os(key).filter(|value| !value.is_empty())
+}
+
+fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
+    root.join(sanitize_state_path_segment(connector_id.as_str()))
+        .join(sanitize_state_path_segment(&zone.to_string()))
+}
+
+fn sanitize_state_path_segment(value: &str) -> String {
+    let segment = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if segment.is_empty() || segment == "." || segment == ".." {
+        "_".to_string()
+    } else {
+        segment
     }
 }
 
@@ -6184,6 +6249,15 @@ async fn telegram_webhook_ingress_handler(
     body: Bytes,
 ) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
     let config = resolve_telegram_webhook_ingress_config().map_err(map_host_error)?;
+    telegram_webhook_ingress_handler_with_config(state, headers, body, config).await
+}
+
+async fn telegram_webhook_ingress_handler_with_config(
+    state: Arc<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+    config: TelegramWebhookIngressConfig,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
     if body.len() > config.max_body_bytes {
         return Ok(telegram_webhook_ingress_admission_response(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -7684,7 +7758,13 @@ fn map_host_error(err: HostError) -> (StatusCode, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+    use std::sync::atomic::AtomicBool;
+    use std::thread;
+
     use chrono::TimeZone;
+    use fcp_core::FcpConnector;
     use fcp_host::{CancelReason, CleanupBehavior};
     use fcp_kernel::{
         AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
@@ -7693,6 +7773,7 @@ mod tests {
     };
     use fcp_policy::OperationalModelVersion;
     use fcp_prelude::{CapabilityId, RiskLevel};
+    use fcp_telegram::connector::TelegramConnector;
 
     fn maybe_compiled_test_connector_binary() -> Option<std::path::PathBuf> {
         if let Some(path) = option_env!("CARGO_BIN_EXE_fcp-test-connector") {
@@ -7828,6 +7909,7 @@ mod tests {
             _runner_task: runner_task,
             resilience: Arc::new(ResilienceLayer::default()),
             capability_verifying_key: None,
+            state_root: None,
             handshaken_zone: Mutex::new(None),
         });
         connector.resilience.ensure_connector(&connector.summary.id);
@@ -8015,6 +8097,32 @@ mod tests {
                 .issuer("node:test")
                 .audience("*")
                 .operations(&[operation_id])
+                .validity(now, now + chrono::Duration::hours(1))
+                .try_constraints_cbor(&constraints)
+                .expect("test constraints CBOR should be valid")
+                .sign(signing_key)
+                .expect("test capability token should sign"),
+        )
+    }
+
+    fn test_capability_token_for_instance(
+        signing_key: &fcp_crypto::ed25519::Ed25519SigningKey,
+        capability_id: &str,
+        operation_id: &str,
+        zone_id: &str,
+        instance_id: &fcp_core::InstanceId,
+    ) -> fcp_core::CapabilityToken {
+        let now = Utc::now();
+        let constraints = wildcard_constraints_cbor();
+        fcp_core::CapabilityToken::from_raw(
+            fcp_crypto::cose::CapabilityTokenBuilder::new()
+                .capability_id(capability_id)
+                .zone_id(zone_id)
+                .principal("user:test")
+                .issuer("node:test")
+                .audience("*")
+                .operations(&[operation_id])
+                .target_instance(instance_id.as_str())
                 .validity(now, now + chrono::Duration::hours(1))
                 .try_constraints_cbor(&constraints)
                 .expect("test constraints CBOR should be valid")
@@ -11314,6 +11422,7 @@ done"#
             _runner_task: runner_task,
             resilience: Arc::new(ResilienceLayer::default()),
             capability_verifying_key: None,
+            state_root: None,
             handshaken_zone: Mutex::new(None),
         };
         connector.resilience.ensure_connector(&connector.summary.id);
@@ -12488,6 +12597,178 @@ done"#;
         );
     }
 
+    const HOST_TELEGRAM_TEST_BOT_ID: &str = "123456";
+    const HOST_TELEGRAM_TEST_BOT_SECRET: &str = "ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
+
+    fn host_telegram_test_bot_credential() -> String {
+        format!("{HOST_TELEGRAM_TEST_BOT_ID}:{HOST_TELEGRAM_TEST_BOT_SECRET}")
+    }
+
+    fn host_telegram_token_path(method: &str) -> String {
+        format!("/bot{}/{method}", host_telegram_test_bot_credential())
+    }
+
+    struct HostTelegramLoopbackServer {
+        base_url: String,
+        addr: std::net::SocketAddr,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<()>,
+        request_paths: Arc<StdMutex<Vec<String>>>,
+    }
+
+    impl HostTelegramLoopbackServer {
+        fn start() -> Self {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("bind host Telegram loopback server");
+            let addr = listener
+                .local_addr()
+                .expect("host Telegram loopback address");
+            let stop = Arc::new(AtomicBool::new(false));
+            let request_paths = Arc::new(StdMutex::new(Vec::new()));
+            let thread_stop = Arc::clone(&stop);
+            let thread_paths = Arc::clone(&request_paths);
+            let handle = thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if thread_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match stream {
+                        Ok(mut stream) => {
+                            handle_host_telegram_loopback_request(&mut stream, &thread_paths);
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                addr,
+                stop,
+                handle,
+                request_paths,
+            }
+        }
+
+        fn request_paths_snapshot(&self) -> Vec<String> {
+            self.request_paths
+                .lock()
+                .expect("request path log lock")
+                .clone()
+        }
+
+        fn shutdown(self) -> Vec<String> {
+            self.stop.store(true, Ordering::SeqCst);
+            if let Ok(mut stream) = StdTcpStream::connect(self.addr) {
+                let _ = stream.write_all(
+                    b"GET /__shutdown HTTP/1.1\r\nHost: loopback\r\nConnection: close\r\n\r\n",
+                );
+            }
+            self.handle
+                .join()
+                .expect("host Telegram loopback thread joins");
+            self.request_paths
+                .lock()
+                .expect("request path log lock")
+                .clone()
+        }
+    }
+
+    fn handle_host_telegram_loopback_request(
+        stream: &mut StdTcpStream,
+        request_paths: &Arc<StdMutex<Vec<String>>>,
+    ) {
+        let Some((method, path)) = read_host_telegram_loopback_request(stream) else {
+            return;
+        };
+        request_paths
+            .lock()
+            .expect("request path log lock")
+            .push(path.clone());
+
+        let path_without_query = path.split('?').next().unwrap_or(path.as_str());
+        let get_me_path = host_telegram_token_path("getMe");
+        let get_updates_path = host_telegram_token_path("getUpdates");
+        let body = if method == "GET" && path_without_query == get_me_path {
+            json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Host Loopback Bot",
+                    "username": "host_loopback_bot"
+                }
+            })
+        } else if method == "POST" && path_without_query == get_updates_path {
+            json!({ "ok": true, "result": [] })
+        } else {
+            json!({
+                "ok": false,
+                "description": format!("unexpected host Telegram loopback route: {method} {path}")
+            })
+        };
+        write_host_telegram_loopback_response(stream, &body);
+    }
+
+    fn read_host_telegram_loopback_request(stream: &mut StdTcpStream) -> Option<(String, String)> {
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut buffer = Vec::new();
+        let mut chunk = [0u8; 1024];
+        let header_end = loop {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                return None;
+            }
+            buffer.extend_from_slice(&chunk[..read]);
+            if let Some(position) = buffer.windows(4).position(|window| window == b"\r\n\r\n") {
+                break position + 4;
+            }
+            if buffer.len() > 16 * 1024 {
+                return None;
+            }
+        };
+
+        let headers = String::from_utf8_lossy(&buffer[..header_end]);
+        let request_line = headers.lines().next()?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?.to_string();
+        let path = parts.next()?.to_string();
+        let content_length = headers.lines().find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())
+                .flatten()
+        });
+        if let Some(content_length) = content_length {
+            while buffer.len().saturating_sub(header_end) < content_length {
+                let read = stream.read(&mut chunk).ok()?;
+                if read == 0 {
+                    break;
+                }
+                buffer.extend_from_slice(&chunk[..read]);
+            }
+        }
+        Some((method, path))
+    }
+
+    fn write_host_telegram_loopback_response(stream: &mut StdTcpStream, body: &Value) {
+        let body = body.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+
+    fn telegram_connector_rpc_result(result: fcp_core::FcpResult<Value>) -> Value {
+        match result {
+            Ok(value) => json!({ "result": value }),
+            Err(error) => json!({ "error": { "message": error.to_string() } }),
+        }
+    }
+
     fn test_telegram_webhook_ingress_config() -> TelegramWebhookIngressConfig {
         TelegramWebhookIngressConfig {
             connector_id: ConnectorId::from_static("fcp.telegram"),
@@ -12617,6 +12898,299 @@ done"#;
         assert_eq!(body["reason_code"], "payload_too_large");
         assert_eq!(body["reason"], "too large");
         assert_eq!(body["body_bytes"], 5000);
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn telegram_webhook_ingress_reaches_real_telegram_connector() {
+        let loopback = HostTelegramLoopbackServer::start();
+        let state_root = tempfile::tempdir().expect("host connector state tempdir");
+        let mut telegram = TelegramConnector::new();
+        let webhook_secret = "telegram-webhook-fixture";
+        telegram
+            .handle_configure(json!({
+                "credential": host_telegram_test_bot_credential(),
+                "base_url": loopback.base_url,
+                "poll_timeout": 1,
+                "webhook_secret_token": webhook_secret,
+                "inbound_policy": {
+                    "mode": "allowlist",
+                    "allowed_user_ids": [208214988]
+                }
+            }))
+            .await
+            .expect("configure real Telegram connector against loopback server");
+        let mut event_rx = telegram.subscribe_events_for_test();
+        let instance_id = telegram.instance_id();
+        let telegram = Arc::new(Mutex::new(telegram));
+        let observed_zone_dir = Arc::new(StdMutex::new(None::<String>));
+        let (runner_tx, mut runner_rx) =
+            mpsc::channel::<ConnectorRpcRequest>(CONNECTOR_RPC_QUEUE_CAPACITY);
+        let runner_task = task::spawn(async {});
+
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let connector_id = ConnectorId::from_static("fcp.telegram");
+        let zone_id: ZoneId = "z:community".parse().expect("community zone should parse");
+        let expected_zone_dir =
+            connector_zone_state_dir(state_root.path(), &connector_id, &zone_id)
+                .to_string_lossy()
+                .into_owned();
+        let subprocess = Arc::new(SubprocessConnector {
+            summary: ConnectorSummary {
+                id: connector_id.clone(),
+                name: connector_id.to_string(),
+                description: Some("in-process Telegram connector test".to_string()),
+                version: semver::Version::new(1, 0, 0),
+                categories: vec!["telegram".to_string()],
+                tool_count: 0,
+                max_safety_tier: SafetyTier::Safe,
+                enabled: true,
+                health: ConnectorHealth::healthy(),
+                last_health_check: None,
+            },
+            runner_tx,
+            _runner_task: runner_task,
+            resilience: Arc::new(ResilienceLayer::default()),
+            capability_verifying_key: Some(signing_key.verifying_key().to_bytes()),
+            state_root: Some(state_root.path().to_path_buf()),
+            handshaken_zone: Mutex::new(None),
+        });
+        subprocess
+            .resilience
+            .ensure_connector(&subprocess.summary.id);
+
+        let connector_config = ConnectorConfig {
+            id: connector_id.to_string(),
+            binary: "in-process-telegram-test".to_string(),
+            name: Some("Telegram".to_string()),
+            description: Some("Telegram webhook ingress test connector".to_string()),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: vec!["telegram".to_string()],
+            version: Some("1.0.0".to_string()),
+            allowed_zones: vec![zone_id.to_string()],
+            allowed_operations: vec![TELEGRAM_WEBHOOK_INGRESS_OPERATION.to_string()],
+            enforce_empty_allow_lists: true,
+        };
+        let registry =
+            dispatcher_registry_with_connector("fcp.telegram", subprocess, connector_config);
+        let mut zone_policies = HashMap::new();
+        zone_policies.insert(zone_id.clone(), host_runtime_policy(zone_id.clone()));
+        let state = dispatcher_app_state(
+            registry,
+            Arc::new(HostAdminStateStore::default()),
+            Some(signing_key.verifying_key()),
+            zone_policies,
+        );
+        let capability_token = test_capability_token_for_instance(
+            &signing_key,
+            "telegram.webhook",
+            TELEGRAM_WEBHOOK_INGRESS_OPERATION,
+            zone_id.as_str(),
+            &instance_id,
+        );
+        let config = TelegramWebhookIngressConfig {
+            connector_id,
+            zone_id,
+            capability_token,
+            max_body_bytes: DEFAULT_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES,
+            timeout_ms: 1500,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            TELEGRAM_WEBHOOK_SECRET_HEADER,
+            HeaderValue::from_static(webhook_secret),
+        );
+        headers.insert(
+            TELEGRAM_WEBHOOK_DELIVERY_ID_HEADER,
+            HeaderValue::from_static("telegram-delivery-host-2010"),
+        );
+        let payload = json!({
+            "update_id": 2010,
+            "message": {
+                "message_id": 20,
+                "message_thread_id": 17585,
+                "from": {
+                    "id": 208214988,
+                    "is_bot": false,
+                    "first_name": "Topic",
+                    "username": "topic_user"
+                },
+                "chat": {
+                    "id": 208214988,
+                    "type": "private",
+                    "first_name": "Topic",
+                    "username": "topic_user"
+                },
+                "date": 1700000040,
+                "text": "/new from host ingress"
+            }
+        })
+        .to_string();
+
+        let handler_done = Arc::new(AtomicBool::new(false));
+        let handler_done_for_runner = Arc::clone(&handler_done);
+        let telegram_for_runner = Arc::clone(&telegram);
+        let observed_zone_dir_for_runner = Arc::clone(&observed_zone_dir);
+        let runner = async move {
+            loop {
+                match fcp_async_core::time::timeout(Duration::from_millis(10), runner_rx.recv())
+                    .await
+                {
+                    Ok(Some(request)) => {
+                        let response = {
+                            let mut connector = telegram_for_runner.lock().await;
+                            match request.method.as_str() {
+                                "handshake" => {
+                                    *observed_zone_dir_for_runner
+                                        .lock()
+                                        .expect("observed zone_dir lock") = request
+                                        .params
+                                        .get("zone_dir")
+                                        .and_then(Value::as_str)
+                                        .map(str::to_string);
+                                    Ok(telegram_connector_rpc_result(
+                                        connector.handle_handshake(request.params).await,
+                                    ))
+                                }
+                                "health" => Ok(telegram_connector_rpc_result(
+                                    connector.handle_health().await,
+                                )),
+                                "introspect" => Ok(telegram_connector_rpc_result(
+                                    connector.handle_introspect().await,
+                                )),
+                                "invoke" => {
+                                    let result =
+                                        match serde_json::from_value::<InvokeRequest>(
+                                            request.params,
+                                        ) {
+                                            Ok(invoke_request) => {
+                                                FcpConnector::invoke(&*connector, invoke_request)
+                                                    .await
+                                                    .and_then(|response| {
+                                                        serde_json::to_value(response).map_err(
+                                                            |error| fcp_core::FcpError::Internal {
+                                                                message: format!(
+                                                                    "failed to encode Telegram invoke response: {error}"
+                                                                ),
+                                                            },
+                                                        )
+                                                    })
+                                            }
+                                            Err(error) => {
+                                                Err(fcp_core::FcpError::InvalidRequest {
+                                                    code: 1003,
+                                                    message: format!(
+                                                        "invalid Telegram invoke request: {error}"
+                                                    ),
+                                                })
+                                            }
+                                        };
+                                    Ok(telegram_connector_rpc_result(result))
+                                }
+                                "shutdown" => Ok(telegram_connector_rpc_result(
+                                    connector.handle_shutdown(request.params).await,
+                                )),
+                                other => Ok(json!({
+                                    "error": { "message": format!("unsupported Telegram test RPC: {other}") }
+                                })),
+                            }
+                        };
+                        let _ = request.response_tx.send(response);
+                    }
+                    Ok(None) => break,
+                    Err(_) if handler_done_for_runner.load(Ordering::SeqCst) => break,
+                    Err(_) => {}
+                }
+            }
+        };
+        let handler = async {
+            let result = telegram_webhook_ingress_handler_with_config(
+                state,
+                headers,
+                Bytes::from(payload),
+                config,
+            )
+            .await;
+            handler_done.store(true, Ordering::SeqCst);
+            result
+        };
+        let (handler_result, ()) = futures_util::future::join(handler, runner).await;
+        let (status, Json(body)) =
+            handler_result.expect("host Telegram ingress should reach connector");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["accepted"], true);
+        assert_eq!(body["event_emitted"], true);
+        assert_eq!(body["secret_verified"], true);
+        assert_eq!(body["update_id"], 2010);
+        assert_eq!(body["delivery_id"], "telegram-delivery-host-2010");
+        assert_eq!(body["topic"], "telegram.message.new");
+        assert_eq!(
+            body["resource_uris"],
+            json!([
+                "telegram:chat:208214988:topic:17585",
+                "telegram:chat:208214988",
+                "telegram:user:208214988"
+            ])
+        );
+        assert_eq!(
+            observed_zone_dir
+                .lock()
+                .expect("observed zone_dir lock")
+                .as_deref(),
+            Some(expected_zone_dir.as_str())
+        );
+
+        let event = fcp_async_core::time::timeout(Duration::from_secs(3), event_rx.recv())
+            .await
+            .expect("timed out waiting for Telegram connector event")
+            .expect("Telegram connector event receiver should stay active")
+            .expect("Telegram connector event should be ok");
+        assert_eq!(event.seq, 2010);
+        assert_eq!(
+            event.data.resource_uris,
+            vec![
+                "telegram:chat:208214988:topic:17585".to_string(),
+                "telegram:chat:208214988".to_string(),
+                "telegram:user:208214988".to_string(),
+            ]
+        );
+
+        let get_updates_path = host_telegram_token_path("getUpdates");
+        let mut saw_get_updates = false;
+        for _ in 0..20 {
+            if loopback
+                .request_paths_snapshot()
+                .iter()
+                .any(|path| path.split('?').next() == Some(get_updates_path.as_str()))
+            {
+                saw_get_updates = true;
+                break;
+            }
+            fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            saw_get_updates,
+            "real Telegram connector handshake should start the polling lifecycle"
+        );
+
+        telegram
+            .lock()
+            .await
+            .handle_shutdown(json!({}))
+            .await
+            .expect("Telegram connector shutdown should stop polling");
+        let request_paths = loopback.shutdown();
+        let get_me_path = host_telegram_token_path("getMe");
+        assert!(
+            request_paths
+                .iter()
+                .filter(|path| path.split('?').next() == Some(get_me_path.as_str()))
+                .count()
+                >= 2,
+            "configure and handshake should both verify the Telegram bot against loopback"
+        );
     }
 
     #[fcp_async_core::runtime::test]

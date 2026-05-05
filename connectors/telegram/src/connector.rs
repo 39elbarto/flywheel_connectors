@@ -457,6 +457,13 @@ impl TelegramConnector {
         self.base.instance_id.clone()
     }
 
+    /// Subscribe to raw connector events for cross-crate integration tests.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn subscribe_events_for_test(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());

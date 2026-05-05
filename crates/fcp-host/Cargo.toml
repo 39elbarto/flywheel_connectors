@@ -26,6 +26,7 @@ fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }
 fcp-ratelimit = { path = "../fcp-ratelimit" }
 fcp-store = { path = "../fcp-store" }
+fcp-tailscale = { path = "../fcp-tailscale" }
 
 # Async runtime
 async-trait = "0.1"
@@ -67,6 +68,7 @@ mach2 = "0.4"
 
 [dev-dependencies]
 fcp-testkit = { path = "../fcp-testkit" }
+fcp-telegram = { path = "../../connectors/telegram", features = ["test-support"] }
 reqwest.workspace = true
 tempfile = "3"
 insta.workspace = true

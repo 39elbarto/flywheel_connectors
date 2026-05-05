@@ -162,6 +162,58 @@ related = ["chat.list_messages"]
 
 # ------------------------------------------------------------------------------
 
+[provides.operations."chat.reply_message"]
+description = "Send a threaded reply to a Google Chat space"
+capability = "chat.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."chat.reply_message".input_schema]
+required = ["space_name", "text"]
+type = "object"
+[provides.operations."chat.reply_message".input_schema.properties.space_name]
+type = "string"
+[provides.operations."chat.reply_message".input_schema.properties.text]
+type = "string"
+[provides.operations."chat.reply_message".input_schema.properties.thread_name]
+type = "string"
+[provides.operations."chat.reply_message".input_schema.properties.thread_key]
+type = "string"
+[provides.operations."chat.reply_message".input_schema.properties.message_reply_option]
+type = "string"
+enum = ["REPLY_MESSAGE_OR_FAIL", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"]
+
+[provides.operations."chat.reply_message".output_schema]
+required = ["message"]
+type = "object"
+[provides.operations."chat.reply_message".output_schema.properties.message]
+type = "object"
+
+[provides.operations."chat.reply_message".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."chat.reply_message".ai_hints]
+when_to_use = "Reply to an existing Google Chat thread by thread resource name or thread key."
+common_mistakes = ["Set exactly one of thread_name or thread_key", "Use REPLY_MESSAGE_OR_FAIL when policy requires surfacing missing-thread errors"]
+examples = ['{"space_name": "spaces/AAAA", "text": "Acknowledged", "thread_name": "spaces/AAAA/threads/thread1"}']
+related = ["chat.send_message", "chat.list_messages"]
+
+# ------------------------------------------------------------------------------
+
 [provides.operations."chat.list_messages"]
 description = "List messages in a space"
 capability = "chat.read"
@@ -248,6 +300,51 @@ related = ["chat.list_messages"]
 
 # ------------------------------------------------------------------------------
 
+[provides.operations."chat.add_reaction"]
+description = "Add a Unicode emoji reaction to a Google Chat message"
+capability = "chat.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."chat.add_reaction".input_schema]
+required = ["message_name", "unicode"]
+type = "object"
+[provides.operations."chat.add_reaction".input_schema.properties.message_name]
+type = "string"
+[provides.operations."chat.add_reaction".input_schema.properties.unicode]
+type = "string"
+
+[provides.operations."chat.add_reaction".output_schema]
+required = ["reaction"]
+type = "object"
+[provides.operations."chat.add_reaction".output_schema.properties.reaction]
+type = "object"
+
+[provides.operations."chat.add_reaction".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."chat.add_reaction".ai_hints]
+when_to_use = "Acknowledge or classify a Google Chat message with a standard Unicode emoji reaction."
+common_mistakes = ["Pass the Unicode emoji string, not a textual emoji name"]
+examples = ['{"message_name": "spaces/AAAA/messages/msg1", "unicode": "\uD83D\uDC4D"}']
+related = ["chat.get_message"]
+
+# ------------------------------------------------------------------------------
+
 [provides.operations."chat.list_members"]
 description = "List members of a space"
 capability = "chat.read"
@@ -328,6 +425,8 @@ scope = "instance"
 "chat.list_spaces" = ["chat.read"]
 "chat.get_space" = ["chat.read"]
 "chat.send_message" = ["chat.write"]
+"chat.reply_message" = ["chat.write"]
 "chat.list_messages" = ["chat.read"]
 "chat.get_message" = ["chat.read"]
+"chat.add_reaction" = ["chat.write"]
 "chat.list_members" = ["chat.read"]

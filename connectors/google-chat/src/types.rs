@@ -82,6 +82,29 @@ pub struct User {
     pub type_field: String,
 }
 
+/// An emoji used as a Google Chat reaction.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Emoji {
+    /// Unicode emoji string for a standard reaction emoji.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub unicode: String,
+}
+
+/// A Google Chat reaction on a message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Reaction {
+    /// Resource name of the reaction.
+    #[serde(default)]
+    pub name: String,
+    /// The user who created the reaction.
+    #[serde(default)]
+    pub user: Option<User>,
+    /// Emoji used in the reaction.
+    pub emoji: Emoji,
+}
+
 /// A membership in a Google Chat space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -278,6 +301,35 @@ mod tests {
         assert_eq!(user.name, "users/456");
         assert_eq!(user.display_name, "Bob");
         assert_eq!(user.type_field, "BOT");
+    }
+
+    #[test]
+    fn reaction_serde() {
+        let json = r#"{
+            "name": "spaces/AAAA/messages/msg1/reactions/r1",
+            "user": {
+                "name": "users/456",
+                "displayName": "Bob",
+                "type": "HUMAN"
+            },
+            "emoji": {
+                "unicode": "\uD83D\uDC4D"
+            }
+        }"#;
+        let reaction: Reaction = serde_json::from_str(json).unwrap();
+        assert_eq!(reaction.name, "spaces/AAAA/messages/msg1/reactions/r1");
+        assert_eq!(reaction.emoji.unicode, "\u{1f44d}");
+        let user = reaction.user.unwrap();
+        assert_eq!(user.display_name, "Bob");
+    }
+
+    #[test]
+    fn emoji_serializes_unicode_payload() {
+        let emoji = Emoji {
+            unicode: "\u{1f44d}".into(),
+        };
+        let json = serde_json::to_value(emoji).unwrap();
+        assert_eq!(json["unicode"], "\u{1f44d}");
     }
 
     #[test]

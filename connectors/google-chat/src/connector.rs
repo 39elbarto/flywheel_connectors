@@ -12,7 +12,7 @@ use reqwest::Url;
 use serde_json::json;
 use tracing::info;
 
-use crate::client::ChatClient;
+use crate::client::{ChatClient, MessageReplyOption, MessageThreadTarget};
 
 /// FCP Google Chat Connector.
 pub struct ChatConnector {
@@ -296,6 +296,47 @@ impl ChatConnector {
                     },
                 ),
                 op_info(
+                    "chat.reply_message",
+                    "Send a threaded reply to a Google Chat space",
+                    json!({
+                        "type": "object",
+                        "required": ["space_name", "text"],
+                        "properties": {
+                            "space_name": { "type": "string", "description": "Resource name of the space" },
+                            "text": { "type": "string", "description": "Plain-text reply body" },
+                            "thread_name": { "type": "string", "description": "Existing thread resource name" },
+                            "thread_key": { "type": "string", "description": "Opaque thread key for routing the reply" },
+                            "message_reply_option": {
+                                "type": "string",
+                                "enum": ["REPLY_MESSAGE_OR_FAIL", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"],
+                                "description": "Google Chat reply behavior; defaults to REPLY_MESSAGE_OR_FAIL"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "object" }
+                        }
+                    }),
+                    "chat.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Reply to an existing Google Chat thread by thread resource name or thread key.".into(),
+                        common_mistakes: vec![
+                            "Providing both thread_name and thread_key; exactly one must be set".into(),
+                            "Using fallback mode when policy requires surfacing missing-thread errors".into(),
+                        ],
+                        examples: vec![
+                            r#"{"space_name": "spaces/AAAA", "text": "Acknowledged", "thread_name": "spaces/AAAA/threads/thread1"}"#.into(),
+                            r#"{"space_name": "spaces/AAAA", "text": "Acknowledged", "thread_key": "incident-42", "message_reply_option": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("chat.send_message")],
+                    },
+                ),
+                op_info(
                     "chat.list_messages",
                     "List messages in a space",
                     json!({
@@ -349,6 +390,38 @@ impl ChatConnector {
                         ],
                         examples: vec![r#"{"message_name": "spaces/AAAA/messages/msg1"}"#.into()],
                         related: vec![CapabilityId::from_static("chat.list_messages")],
+                    },
+                ),
+                op_info(
+                    "chat.add_reaction",
+                    "Add a Unicode emoji reaction to a Google Chat message",
+                    json!({
+                        "type": "object",
+                        "required": ["message_name", "unicode"],
+                        "properties": {
+                            "message_name": { "type": "string", "description": "Message resource name (e.g. spaces/AAAA/messages/msg1)" },
+                            "unicode": { "type": "string", "description": "Unicode emoji string" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "reaction": { "type": "object" }
+                        }
+                    }),
+                    "chat.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Acknowledge or classify a Google Chat message with a standard Unicode emoji reaction.".into(),
+                        common_mistakes: vec![
+                            "Passing a textual emoji name instead of the Unicode emoji string".into(),
+                        ],
+                        examples: vec![
+                            r#"{"message_name": "spaces/AAAA/messages/msg1", "unicode": "\uD83D\uDC4D"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("chat.get_message")],
                     },
                 ),
                 op_info(
@@ -432,6 +505,17 @@ impl ChatConnector {
                     .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "message": message }))
             }
+            "chat.reply_message" => {
+                let space_name = require_str(&input, "space_name")?;
+                let text = require_str(&input, "text")?;
+                let thread = reply_thread_target(&input)?;
+                let reply_option = reply_option_from_input(&input)?;
+                let message = client
+                    .reply_message(space_name, text, thread, reply_option)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                Ok(json!({ "message": message }))
+            }
             "chat.list_messages" => {
                 let space_name = require_str(&input, "space_name")?;
                 let messages = client
@@ -447,6 +531,15 @@ impl ChatConnector {
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "message": message }))
+            }
+            "chat.add_reaction" => {
+                let message_name = require_str(&input, "message_name")?;
+                let unicode = require_str(&input, "unicode")?;
+                let reaction = client
+                    .create_reaction(message_name, unicode)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                Ok(json!({ "reaction": reaction }))
             }
             "chat.list_members" => {
                 let space_name = require_str(&input, "space_name")?;
@@ -570,6 +663,46 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         })
 }
 
+fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<Option<&'a str>> {
+    match input.get(field) {
+        Some(value) => value
+            .as_str()
+            .map(Some)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("'{field}' must be a string"),
+            }),
+        None => Ok(None),
+    }
+}
+
+fn reply_thread_target(input: &serde_json::Value) -> FcpResult<MessageThreadTarget<'_>> {
+    match (
+        optional_str(input, "thread_name")?,
+        optional_str(input, "thread_key")?,
+    ) {
+        (Some(thread_name), None) => Ok(MessageThreadTarget::Name(thread_name)),
+        (None, Some(thread_key)) => Ok(MessageThreadTarget::Key(thread_key)),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Provide exactly one of 'thread_name' or 'thread_key'".into(),
+        }),
+    }
+}
+
+fn reply_option_from_input(input: &serde_json::Value) -> FcpResult<MessageReplyOption> {
+    match optional_str(input, "message_reply_option")? {
+        None | Some("REPLY_MESSAGE_OR_FAIL") => Ok(MessageReplyOption::OrFail),
+        Some("REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD") => Ok(MessageReplyOption::FallbackToNewThread),
+        Some(value) => Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!(
+                "Unsupported message_reply_option {value:?}; expected REPLY_MESSAGE_OR_FAIL or REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+            ),
+        }),
+    }
+}
+
 fn op_info(
     id: &'static str,
     summary: &str,
@@ -601,7 +734,7 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{header, method, path_regex};
+    use wiremock::matchers::{body_partial_json, header, method, path_regex, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
@@ -713,8 +846,10 @@ mod tests {
         assert!(op_ids.contains(&"chat.list_spaces"));
         assert!(op_ids.contains(&"chat.get_space"));
         assert!(op_ids.contains(&"chat.send_message"));
+        assert!(op_ids.contains(&"chat.reply_message"));
         assert!(op_ids.contains(&"chat.list_messages"));
         assert!(op_ids.contains(&"chat.get_message"));
+        assert!(op_ids.contains(&"chat.add_reaction"));
         assert!(op_ids.contains(&"chat.list_members"));
     }
 
@@ -837,6 +972,82 @@ mod tests {
     }
 
     #[test]
+    fn invoke_reply_message_requires_one_thread_target() {
+        let result = run_async_test(async {
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({ "access_token": "test" }))
+                .await
+                .unwrap();
+            connector
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "reply"
+                    }
+                }))
+                .await
+        });
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1001, .. })
+        ));
+    }
+
+    #[test]
+    fn invoke_reply_message_rejects_both_thread_targets() {
+        let result = run_async_test(async {
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({ "access_token": "test" }))
+                .await
+                .unwrap();
+            connector
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "reply",
+                        "thread_name": "spaces/AAAA/threads/thread1",
+                        "thread_key": "incident-42"
+                    }
+                }))
+                .await
+        });
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1001, .. })
+        ));
+    }
+
+    #[test]
+    fn invoke_reply_message_rejects_unknown_reply_option() {
+        let result = run_async_test(async {
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({ "access_token": "test" }))
+                .await
+                .unwrap();
+            connector
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "reply",
+                        "thread_name": "spaces/AAAA/threads/thread1",
+                        "message_reply_option": "MESSAGE_REPLY_OPTION_UNSPECIFIED"
+                    }
+                }))
+                .await
+        });
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1001, .. })
+        ));
+    }
+
+    #[test]
     fn invoke_list_messages_missing_space_name() {
         let result = run_async_test(async {
             let mut connector = ChatConnector::new();
@@ -869,6 +1080,29 @@ mod tests {
                 .handle_invoke(json!({
                     "operation": "chat.get_message",
                     "input": {}
+                }))
+                .await
+        });
+        assert!(matches!(
+            result,
+            Err(FcpError::InvalidRequest { code: 1001, .. })
+        ));
+    }
+
+    #[test]
+    fn invoke_add_reaction_missing_unicode() {
+        let result = run_async_test(async {
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({ "access_token": "test" }))
+                .await
+                .unwrap();
+            connector
+                .handle_invoke(json!({
+                    "operation": "chat.add_reaction",
+                    "input": {
+                        "message_name": "spaces/AAAA/messages/msg1"
+                    }
                 }))
                 .await
         });
@@ -969,6 +1203,104 @@ mod tests {
                 .unwrap();
             assert_eq!(result["message"]["name"], "spaces/AAAA/messages/msg1");
             assert_eq!(result["message"]["text"], "Hello!");
+        });
+    }
+
+    #[test]
+    fn reply_message_via_mock() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/.+/messages$"))
+                .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(body_partial_json(json!({
+                    "text": "Thread reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/msg2",
+                    "text": "Thread reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "Thread reply",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await
+                .unwrap();
+            assert_eq!(result["message"]["name"], "spaces/AAAA/messages/msg2");
+            assert_eq!(
+                result["message"]["thread"]["name"],
+                "spaces/AAAA/threads/thread1"
+            );
+        });
+    }
+
+    #[test]
+    fn add_reaction_via_mock() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/.+/messages/.+/reactions$"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(body_partial_json(json!({
+                    "emoji": {
+                        "unicode": "\u{1f44d}"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/msg1/reactions/r1",
+                    "emoji": {
+                        "unicode": "\u{1f44d}"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": "chat.add_reaction",
+                    "input": {
+                        "message_name": "spaces/AAAA/messages/msg1",
+                        "unicode": "\u{1f44d}"
+                    }
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                result["reaction"]["name"],
+                "spaces/AAAA/messages/msg1/reactions/r1"
+            );
+            assert_eq!(result["reaction"]["emoji"]["unicode"], "\u{1f44d}");
         });
     }
 }

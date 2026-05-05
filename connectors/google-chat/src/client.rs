@@ -12,10 +12,38 @@ use tracing::{instrument, warn};
 use crate::error::{ChatError, ChatResult};
 use crate::types::{
     ApiErrorDetail, ApiErrorResponse, ListMembershipsResponse, ListMessagesResponse,
-    ListSpacesResponse, Membership, Message, Space,
+    ListSpacesResponse, Membership, Message, Reaction, Space,
 };
 
 const DEFAULT_BASE_URL: &str = "https://chat.googleapis.com/v1";
+
+/// Thread target for creating a Google Chat reply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageThreadTarget<'a> {
+    /// Reply to an existing thread resource name.
+    Name(&'a str),
+    /// Reply to or create the thread identified by an opaque thread key.
+    Key(&'a str),
+}
+
+/// Google Chat reply behavior for message creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageReplyOption {
+    /// Reply to the requested thread or start a new thread if Google Chat cannot attach it.
+    FallbackToNewThread,
+    /// Reply to the requested thread and surface the Google Chat error on failure.
+    OrFail,
+}
+
+impl MessageReplyOption {
+    #[must_use]
+    pub const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::FallbackToNewThread => "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+            Self::OrFail => "REPLY_MESSAGE_OR_FAIL",
+        }
+    }
+}
 
 /// Validate a Google Chat resource name (e.g. `spaces/ABC` or `spaces/ABC/messages/XYZ`).
 ///
@@ -33,6 +61,27 @@ fn validate_resource_name(name: &str, field: &str) -> ChatResult<()> {
         return Err(ChatError::Api {
             status_code: 0,
             message: format!("{field} contains invalid characters: {name:?}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_thread_key(thread_key: &str) -> ChatResult<()> {
+    if thread_key.is_empty() || thread_key.len() > 4_000 || thread_key.chars().any(char::is_control)
+    {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: "thread_key must be non-empty, at most 4000 bytes, and contain no control characters".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_unicode_emoji(unicode: &str) -> ChatResult<()> {
+    if unicode.trim().is_empty() || unicode.len() > 64 || unicode.chars().any(char::is_control) {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: "unicode emoji must be non-empty, at most 64 bytes, and contain no control characters".into(),
         });
     }
     Ok(())
@@ -130,6 +179,38 @@ impl ChatClient {
         self.post_json(&url, &body).await
     }
 
+    /// Create a reply in a Google Chat message thread.
+    #[instrument(skip(self), fields(space_name))]
+    pub async fn reply_message(
+        &self,
+        space_name: &str,
+        text: &str,
+        thread: MessageThreadTarget<'_>,
+        reply_option: MessageReplyOption,
+    ) -> ChatResult<Message> {
+        validate_resource_name(space_name, "space_name")?;
+        let thread_body = match thread {
+            MessageThreadTarget::Name(thread_name) => {
+                validate_resource_name(thread_name, "thread_name")?;
+                serde_json::json!({ "name": thread_name })
+            }
+            MessageThreadTarget::Key(thread_key) => {
+                validate_thread_key(thread_key)?;
+                serde_json::json!({ "threadKey": thread_key })
+            }
+        };
+        let url = format!(
+            "{}/{space_name}/messages?messageReplyOption={}",
+            self.base_url,
+            reply_option.as_query_value()
+        );
+        let body = serde_json::json!({
+            "text": text,
+            "thread": thread_body
+        });
+        self.post_json(&url, &body).await
+    }
+
     /// List messages in a space.
     #[instrument(skip(self), fields(space_name))]
     pub async fn list_messages(&self, space_name: &str) -> ChatResult<Vec<Message>> {
@@ -154,6 +235,24 @@ impl ChatClient {
         let url = format!("{}/{space_name}/members", self.base_url);
         let resp: ListMembershipsResponse = self.get_json(&url).await?;
         Ok(resp.memberships)
+    }
+
+    /// Add a Unicode emoji reaction to a Google Chat message.
+    #[instrument(skip(self), fields(message_name))]
+    pub async fn create_reaction(
+        &self,
+        message_name: &str,
+        unicode_emoji: &str,
+    ) -> ChatResult<Reaction> {
+        validate_resource_name(message_name, "message_name")?;
+        validate_unicode_emoji(unicode_emoji)?;
+        let url = format!("{}/{message_name}/reactions", self.base_url);
+        let body = serde_json::json!({
+            "emoji": {
+                "unicode": unicode_emoji
+            }
+        });
+        self.post_json(&url, &body).await
     }
 
     /// Shut down the runtime.
@@ -247,7 +346,7 @@ mod tests {
         FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
     };
     use std::future::Future;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
@@ -391,6 +490,187 @@ mod tests {
 
             let spaces = client.list_spaces().await.unwrap();
             assert_eq!(spaces[0].name, "spaces/BBBB");
+        });
+    }
+
+    #[test]
+    fn reply_message_posts_thread_name_and_or_fail_query() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/spaces/AAAA/messages"))
+                .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .and(body_partial_json(serde_json::json!({
+                    "text": "thread reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "spaces/AAAA/messages/msg2",
+                    "text": "thread reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v1", server.uri()));
+
+            let message = client
+                .reply_message(
+                    "spaces/AAAA",
+                    "thread reply",
+                    MessageThreadTarget::Name("spaces/AAAA/threads/thread1"),
+                    MessageReplyOption::OrFail,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(message.name, "spaces/AAAA/messages/msg2");
+            assert_eq!(message.thread.unwrap().name, "spaces/AAAA/threads/thread1");
+        });
+    }
+
+    #[test]
+    fn reply_message_posts_thread_key_with_fallback_query() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/spaces/AAAA/messages"))
+                .and(query_param(
+                    "messageReplyOption",
+                    "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                ))
+                .and(body_partial_json(serde_json::json!({
+                    "text": "thread key reply",
+                    "thread": {
+                        "threadKey": "incident-42"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "spaces/AAAA/messages/msg3",
+                    "text": "thread key reply",
+                    "thread": {
+                        "threadKey": "incident-42"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v1", server.uri()));
+
+            let message = client
+                .reply_message(
+                    "spaces/AAAA",
+                    "thread key reply",
+                    MessageThreadTarget::Key("incident-42"),
+                    MessageReplyOption::FallbackToNewThread,
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(message.name, "spaces/AAAA/messages/msg3");
+            assert_eq!(message.thread.unwrap().thread_key, "incident-42");
+        });
+    }
+
+    #[test]
+    fn create_reaction_posts_unicode_payload() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/spaces/AAAA/messages/msg1/reactions"))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .and(body_partial_json(serde_json::json!({
+                    "emoji": {
+                        "unicode": "\u{1f44d}"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "spaces/AAAA/messages/msg1/reactions/r1",
+                    "emoji": {
+                        "unicode": "\u{1f44d}"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v1", server.uri()));
+
+            let reaction = client
+                .create_reaction("spaces/AAAA/messages/msg1", "\u{1f44d}")
+                .await
+                .unwrap();
+
+            assert_eq!(reaction.name, "spaces/AAAA/messages/msg1/reactions/r1");
+            assert_eq!(reaction.emoji.unicode, "\u{1f44d}");
+        });
+    }
+
+    #[test]
+    fn reply_message_rejects_invalid_thread_key() {
+        run_async_test(async {
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap();
+
+            let err = client
+                .reply_message(
+                    "spaces/AAAA",
+                    "reply",
+                    MessageThreadTarget::Key("bad\nkey"),
+                    MessageReplyOption::OrFail,
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ChatError::Api { status_code: 0, .. }));
+        });
+    }
+
+    #[test]
+    fn create_reaction_rejects_empty_unicode() {
+        run_async_test(async {
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap();
+
+            let err = client
+                .create_reaction("spaces/AAAA/messages/msg1", " ")
+                .await
+                .unwrap_err();
+            assert!(matches!(err, ChatError::Api { status_code: 0, .. }));
         });
     }
 }

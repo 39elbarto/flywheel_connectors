@@ -67,6 +67,7 @@ const LIVE_STATUS_OP: &str = "gmeet.live.status";
 const LIVE_TRANSCRIPT_OP: &str = "gmeet.live.transcript";
 const LIVE_LEAVE_OP: &str = "gmeet.live.leave";
 const LIVE_SAY_OP: &str = "gmeet.live.say";
+const LIVE_BRIDGE_EVENT_OP: &str = "gmeet.live.bridge_event";
 const DEFAULT_PAGE_SIZE: u32 = 100;
 const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
 const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
@@ -91,6 +92,7 @@ const DEFAULT_VOICE_CALL_DTMF_DELAY_MS: u64 = 2_500;
 const DEFAULT_VOICE_CALL_POST_DTMF_SPEECH_DELAY_MS: u64 = 5_000;
 const MAX_VOICE_CALL_DELAY_MS: u64 = 30_000;
 const MAX_LIVE_SPEECH_TEXT_BYTES: usize = 8_192;
+const MAX_LIVE_TRANSCRIPT_TEXT_BYTES: usize = 16_384;
 const MEETINGS_SPACE_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.readonly";
 const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
@@ -1239,6 +1241,7 @@ impl GoogleMeetConnector {
             LIVE_TRANSCRIPT_OP => self.invoke_live_transcript(&input),
             LIVE_LEAVE_OP => self.invoke_live_leave(&input),
             LIVE_SAY_OP => self.invoke_live_say(&input),
+            LIVE_BRIDGE_EVENT_OP => self.invoke_live_bridge_event(&input),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1510,6 +1513,145 @@ impl GoogleMeetConnector {
         };
 
         Ok(response)
+    }
+
+    fn invoke_live_bridge_event(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let session_filter = require_str(input, "session_id")?;
+        let event = input
+            .get("event")
+            .ok_or_else(|| invalid_request("Missing required field: event"))?;
+        let event_object = event
+            .as_object()
+            .ok_or_else(|| invalid_request("`event` must be an object"))?;
+        let event_type = require_str(event, "type")?;
+        let source = optional_str(event, "source")?.unwrap_or("browser_control_loopback");
+        validate_live_bridge_label(source, "event.source")?;
+        let sequence = parse_optional_u64(event, "sequence", 0, u64::MAX)?;
+        let received_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+
+        {
+            let mut state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            let Some(session) = state.active.as_mut() else {
+                return Err(invalid_request(
+                    "No active Google Meet live session is available for bridge events",
+                ));
+            };
+            if session.session_id != session_filter {
+                return Err(invalid_request(format!(
+                    "session_id {session_filter} does not match active Google Meet live session"
+                )));
+            }
+
+            let response = match event_type {
+                "transcript" => {
+                    let text = require_str(event, "text")?;
+                    if text.len() > MAX_LIVE_TRANSCRIPT_TEXT_BYTES {
+                        return Err(invalid_request(format!(
+                            "`event.text` must be at most {MAX_LIVE_TRANSCRIPT_TEXT_BYTES} bytes"
+                        )));
+                    }
+                    let speaker = optional_str(event, "speaker")?;
+                    if let Some(speaker) = speaker {
+                        validate_live_bridge_label(speaker, "event.speaker")?;
+                    }
+                    let final_event = parse_optional_bool(event, "final")?.unwrap_or(true);
+                    let event_id = format!("live-transcript-{}", session.transcript.len() + 1);
+                    let entry = json!({
+                        "schema_version": "google_meet_live_transcript_event.v1",
+                        "event_id": event_id,
+                        "session_id": &session.session_id,
+                        "source": source,
+                        "received_at": received_at,
+                        "sequence": sequence,
+                        "speaker": speaker,
+                        "text": text,
+                        "text_bytes": text.len(),
+                        "final": final_event,
+                        "redaction": "transcript_text_returned_only_by_live_transcript",
+                    });
+                    session.transcript.push(entry.clone());
+                    session.status_transitions.push(live_status_transition(
+                        "transcript_event_received",
+                        "active",
+                        &json!({
+                            "source": source,
+                            "sequence": sequence,
+                            "transcript_event_count": session.transcript.len(),
+                            "text_bytes": text.len(),
+                            "text_logged": false,
+                            "final": final_event,
+                        }),
+                    ));
+                    Ok(json!({
+                        "accepted": true,
+                        "status": "recorded",
+                        "event_type": event_type,
+                        "session_id": &session.session_id,
+                        "transcript_event_count": session.transcript.len(),
+                        "entry": entry,
+                    }))
+                }
+                "status" => {
+                    let status = require_str(event, "status")?;
+                    validate_live_bridge_label(status, "event.status")?;
+                    let details = event_object
+                        .get("details")
+                        .cloned()
+                        .unwrap_or_else(|| json!({}));
+                    if !details.is_object() {
+                        return Err(invalid_request("`event.details` must be an object"));
+                    }
+                    let transition = live_status_transition(
+                        "browser_status",
+                        status,
+                        &json!({
+                            "source": source,
+                            "sequence": sequence,
+                            "details": details,
+                        }),
+                    );
+                    session.status_transitions.push(transition.clone());
+                    Ok(json!({
+                        "accepted": true,
+                        "status": "recorded",
+                        "event_type": event_type,
+                        "session_id": &session.session_id,
+                        "status_transition": transition,
+                        "transcript_event_count": session.transcript.len(),
+                    }))
+                }
+                "cancellation_checkpoint" => {
+                    let reason = optional_str(event, "reason")?.unwrap_or("browser_checkpoint");
+                    validate_live_bridge_label(reason, "event.reason")?;
+                    let transition = live_status_transition(
+                        "cancellation_checkpoint",
+                        "active",
+                        &json!({
+                            "source": source,
+                            "sequence": sequence,
+                            "reason": reason,
+                        }),
+                    );
+                    session.status_transitions.push(transition.clone());
+                    Ok(json!({
+                        "accepted": true,
+                        "status": "recorded",
+                        "event_type": event_type,
+                        "session_id": &session.session_id,
+                        "status_transition": transition,
+                        "transcript_event_count": session.transcript.len(),
+                    }))
+                }
+                _ => Err(invalid_request(format!(
+                    "`event.type` must be one of transcript, status, or cancellation_checkpoint (got {event_type})"
+                ))),
+            };
+
+            drop(state);
+            response
+        }
     }
 
     fn ensure_configured_scopes(
@@ -2043,7 +2185,31 @@ impl GoogleMeetConnector {
         if let Some(client) = &self.client {
             client.shutdown();
         }
-        Ok(json!({ "status": "shutdown" }))
+        let stopped_session = {
+            let mut state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            state.active.take().map(|active| {
+                let stopped = GoogleMeetStoppedSession {
+                    session: active,
+                    stop_reason: stop_reason(
+                        "connector_shutdown",
+                        "Live session was stopped by connector shutdown",
+                    ),
+                };
+                let value = stopped_session_json(&stopped);
+                state.last_stopped = Some(stopped);
+                value
+            })
+        };
+        Ok(json!({
+            "status": "shutdown",
+            "live_session_cleanup": {
+                "active_cleared": stopped_session.is_some(),
+                "stopped_session": stopped_session,
+                "no_orphan_supervised_tasks": true
+            }
+        }))
     }
 }
 
@@ -2871,6 +3037,7 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                 }
             }),
         ),
+        live_bridge_event_op_info(),
         live_say_op_info(),
         live_leave_op_info(),
     ]
@@ -3129,6 +3296,73 @@ fn live_say_op_info() -> OperationInfo {
         },
     );
     info.requires_approval = Some(ApprovalMode::Interactive);
+    info
+}
+
+fn live_bridge_event_op_info() -> OperationInfo {
+    let mut info = op_info(
+        LIVE_BRIDGE_EVENT_OP,
+        "Record a delegated browser/session bridge event for an active Google Meet live session",
+        json!({
+            "type": "object",
+            "required": ["session_id", "event"],
+            "properties": {
+                "session_id": { "type": "string" },
+                "event": {
+                    "type": "object",
+                    "required": ["type"],
+                    "properties": {
+                        "type": {
+                            "type": "string",
+                            "enum": ["transcript", "status", "cancellation_checkpoint"]
+                        },
+                        "source": { "type": "string" },
+                        "sequence": { "type": "integer" },
+                        "text": { "type": "string", "maxLength": MAX_LIVE_TRANSCRIPT_TEXT_BYTES },
+                        "speaker": { "type": "string" },
+                        "final": { "type": "boolean" },
+                        "status": { "type": "string" },
+                        "details": { "type": "object" },
+                        "reason": { "type": "string" }
+                    }
+                }
+            }
+        }),
+        json!({
+            "type": "object",
+            "required": ["accepted", "status", "event_type", "session_id"],
+            "properties": {
+                "accepted": { "type": "boolean" },
+                "status": { "type": "string" },
+                "event_type": { "type": "string" },
+                "session_id": { "type": "string" },
+                "transcript_event_count": { "type": "integer" },
+                "entry": { "type": "object" },
+                "status_transition": { "type": "object" }
+            }
+        }),
+        MEET_LIVE_JOIN_CAP,
+        RiskLevel::Medium,
+        SafetyTier::Risky,
+        IdempotencyClass::BestEffort,
+        AgentHint {
+            when_to_use: "Record audit-safe events from the delegated browser/session worker for a consented live join.".into(),
+            common_mistakes: vec![
+                "Calling this without an active live session or with a stale session_id.".into(),
+                "Using it as browser control; the connector still only records events from a delegated worker.".into(),
+                "Sending arbitrary event types; unsupported realtime events are rejected and logged by the harness.".into(),
+            ],
+            examples: vec![
+                r#"{"session_id":"<session-id>","event":{"type":"transcript","text":"Hello","speaker":"Alice"}}"#.into(),
+                r#"{"session_id":"<session-id>","event":{"type":"status","status":"browser_ready"}}"#.into(),
+            ],
+            related: vec![
+                CapabilityId::from_static(LIVE_JOIN_OP),
+                CapabilityId::from_static(LIVE_TRANSCRIPT_OP),
+            ],
+        },
+    );
+    info.requires_approval = Some(ApprovalMode::Policy);
     info
 }
 
@@ -3604,7 +3838,7 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         | DRIVE_DOCUMENT_TEXT_EXPORT_OP => {
             Ok(CapabilityId::from_static(MEET_DRIVE_ARTIFACT_READ_CAP))
         }
-        LIVE_JOIN_OP => Ok(CapabilityId::from_static(MEET_LIVE_JOIN_CAP)),
+        LIVE_JOIN_OP | LIVE_BRIDGE_EVENT_OP => Ok(CapabilityId::from_static(MEET_LIVE_JOIN_CAP)),
         LIVE_STATUS_OP | LIVE_TRANSCRIPT_OP => Ok(CapabilityId::from_static(MEET_LIVE_READ_CAP)),
         LIVE_LEAVE_OP => Ok(CapabilityId::from_static(MEET_LIVE_LEAVE_CAP)),
         LIVE_SAY_OP => Ok(CapabilityId::from_static(MEET_LIVE_SPEAK_CAP)),
@@ -3707,6 +3941,19 @@ fn parse_optional_bool(input: &serde_json::Value, field: &str) -> FcpResult<Opti
         .transpose()
 }
 
+fn validate_live_bridge_label(value: &str, field: &str) -> FcpResult<()> {
+    if value.len() > 128
+        || value
+            .chars()
+            .any(|char| char.is_control() || matches!(char, '"' | '\'' | '\\'))
+    {
+        return Err(invalid_request(format!(
+            "`{field}` must be a short audit label without control characters or quotes"
+        )));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn op_info(
     id: &'static str,
@@ -3806,6 +4053,40 @@ mod tests {
         missing_prerequisite: String,
         reason: String,
         outcome: String,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct GoogleMeetLiveHarnessLog {
+        schema_version: String,
+        bead_id: String,
+        connector_id: String,
+        correlation_id: String,
+        operation: String,
+        session_id: Option<String>,
+        normalized_meet_url: String,
+        mode: String,
+        capability_decision: String,
+        provider_selections: serde_json::Value,
+        status_transition: Option<serde_json::Value>,
+        transcript_event_count: usize,
+        speech_queue_event: Option<serde_json::Value>,
+        cancellation_checkpoint: String,
+        latency_ms: u64,
+        cleanup_outcome: String,
+        final_result: String,
+        skip_reason: Option<String>,
+        supervision: serde_json::Value,
+    }
+
+    struct LiveHarnessInvoke<'a> {
+        connector: &'a GoogleMeetConnector,
+        signing_key: &'a Ed25519SigningKey,
+        operation: &'static str,
+        capability_id: &'static str,
+        input: serde_json::Value,
+        normalized_meet_url: &'static str,
+        mode: &'static str,
+        expected_result: &'static str,
     }
 
     struct HarnessInvoke<'a> {
@@ -4271,6 +4552,292 @@ mod tests {
         assert_eq!(entry.outcome, "skip");
         assert!(!entry.missing_prerequisite.trim().is_empty());
         assert!(!entry.reason.trim().is_empty());
+    }
+
+    fn live_harness_supervision_contract() -> serde_json::Value {
+        json!({
+            "runtime": "fcp_async_core",
+            "child_scope": "google_meet_live_session_scope",
+            "watch_status_shutdown_config": true,
+            "broadcast_authorized_transcript_status": true,
+            "actor_owned_session_state": true,
+            "no_detached_workers": true,
+            "fake_browser_endpoint": "browser_handoff_loopback_contract",
+            "fake_realtime_bridge": "connector_boundary_bridge_event_operation",
+        })
+    }
+
+    fn live_harness_provider_selections(result: &serde_json::Value) -> serde_json::Value {
+        result
+            .pointer("/session/provider_policy")
+            .or_else(|| result.pointer("/session/provider_policy"))
+            .or_else(|| result.pointer("/status/session/provider_policy"))
+            .or_else(|| result.pointer("/stopped_session/session/provider_policy"))
+            .cloned()
+            .unwrap_or_else(|| json!({}))
+    }
+
+    fn live_harness_session_id(result: &serde_json::Value) -> Option<String> {
+        result
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| {
+                result
+                    .get("session")
+                    .and_then(|session| session.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                result
+                    .get("stopped_session")
+                    .and_then(|stopped| stopped.get("session"))
+                    .and_then(|session| session.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .or_else(|| {
+                result
+                    .get("queue_event")
+                    .and_then(|event| event.get("session_id"))
+                    .and_then(serde_json::Value::as_str)
+            })
+            .map(str::to_string)
+    }
+
+    fn live_harness_status_transition(result: &serde_json::Value) -> Option<serde_json::Value> {
+        result.get("status_transition").cloned().or_else(|| {
+            result
+                .get("session")
+                .and_then(|session| session.get("status_transitions"))
+                .and_then(serde_json::Value::as_array)
+                .and_then(|transitions| transitions.last())
+                .cloned()
+        })
+    }
+
+    fn live_harness_transcript_event_count(result: &serde_json::Value) -> usize {
+        result
+            .get("transcript_event_count")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| {
+                result
+                    .get("entry_count")
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .or_else(|| {
+                result
+                    .get("session")
+                    .and_then(|session| session.get("transcript_entry_count"))
+                    .and_then(serde_json::Value::as_u64)
+            })
+            .and_then(|value| usize::try_from(value).ok())
+            .unwrap_or(0)
+    }
+
+    fn live_harness_cleanup_outcome(result: &serde_json::Value) -> String {
+        if result
+            .pointer("/live_session_cleanup/no_orphan_supervised_tasks")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+        {
+            return "shutdown_no_orphan_supervised_tasks".to_string();
+        }
+        if result.get("stopped_session").is_some() {
+            return "live_session_stopped".to_string();
+        }
+        if result.get("active").and_then(serde_json::Value::as_bool) == Some(false) {
+            return "no_active_session".to_string();
+        }
+        "not_cleanup_operation".to_string()
+    }
+
+    fn live_harness_log_for_result(
+        spec: &LiveHarnessInvoke<'_>,
+        correlation_id: &str,
+        latency_ms: u64,
+        result: Option<&serde_json::Value>,
+        error: Option<&FcpError>,
+    ) -> GoogleMeetLiveHarnessLog {
+        let provider_selections =
+            result.map_or_else(|| json!({}), live_harness_provider_selections);
+        let status_transition = result.and_then(live_harness_status_transition);
+        let transcript_event_count = result.map_or(0, live_harness_transcript_event_count);
+        let speech_queue_event = result.and_then(|value| value.get("queue_event").cloned());
+        let session_id = result.and_then(live_harness_session_id).or_else(|| {
+            spec.input
+                .get("session_id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        let cleanup_outcome = result.map_or_else(
+            || "not_cleanup_operation".to_string(),
+            live_harness_cleanup_outcome,
+        );
+        let capability_decision = error.map_or("allowed", |err| {
+            if matches!(
+                err,
+                FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+            ) {
+                "denied"
+            } else {
+                "allowed"
+            }
+        });
+        let cancellation_checkpoint = status_transition
+            .as_ref()
+            .filter(|transition| transition["event"] == "cancellation_checkpoint")
+            .and(Some("browser_checkpoint_recorded"))
+            .unwrap_or("connector_boundary_checkpoint");
+
+        GoogleMeetLiveHarnessLog {
+            schema_version: "google_meet_live_session_loopback.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.2.3".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: spec.operation.to_string(),
+            session_id,
+            normalized_meet_url: spec.normalized_meet_url.to_string(),
+            mode: spec.mode.to_string(),
+            capability_decision: capability_decision.to_string(),
+            provider_selections,
+            status_transition,
+            transcript_event_count,
+            speech_queue_event,
+            cancellation_checkpoint: cancellation_checkpoint.to_string(),
+            latency_ms,
+            cleanup_outcome,
+            final_result: spec.expected_result.to_string(),
+            skip_reason: None,
+            supervision: live_harness_supervision_contract(),
+        }
+    }
+
+    async fn invoke_live_harness_operation(
+        logs: &mut Vec<GoogleMeetLiveHarnessLog>,
+        correlation_id: &str,
+        spec: LiveHarnessInvoke<'_>,
+    ) -> Option<serde_json::Value> {
+        let start = Instant::now();
+        let result = spec
+            .connector
+            .handle_invoke(json!({
+                "operation": spec.operation,
+                "input": spec.input,
+                "capability_token": capability_for_cap(
+                    spec.connector,
+                    spec.signing_key,
+                    spec.operation,
+                    spec.capability_id
+                ),
+            }))
+            .await;
+        let latency_ms = elapsed_millis(start);
+        match result {
+            Ok(value) => {
+                logs.push(live_harness_log_for_result(
+                    &spec,
+                    correlation_id,
+                    latency_ms,
+                    Some(&value),
+                    None,
+                ));
+                assert_eq!(
+                    spec.expected_result, "pass",
+                    "unexpected pass for {}",
+                    spec.operation
+                );
+                Some(value)
+            }
+            Err(error) => {
+                logs.push(live_harness_log_for_result(
+                    &spec,
+                    correlation_id,
+                    latency_ms,
+                    None,
+                    Some(&error),
+                ));
+                assert_ne!(
+                    spec.expected_result, "pass",
+                    "unexpected error for {}",
+                    spec.operation
+                );
+                None
+            }
+        }
+    }
+
+    fn live_harness_skip(
+        correlation_id: &str,
+        operation: &str,
+        reason: &str,
+    ) -> GoogleMeetLiveHarnessLog {
+        GoogleMeetLiveHarnessLog {
+            schema_version: "google_meet_live_session_loopback.skip.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.2.3".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: operation.to_string(),
+            session_id: None,
+            normalized_meet_url: "not_applicable".to_string(),
+            mode: "not_applicable".to_string(),
+            capability_decision: "not_applicable".to_string(),
+            provider_selections: json!({}),
+            status_transition: None,
+            transcript_event_count: 0,
+            speech_queue_event: None,
+            cancellation_checkpoint: "not_started".to_string(),
+            latency_ms: 0,
+            cleanup_outcome: "skip".to_string(),
+            final_result: "skip".to_string(),
+            skip_reason: Some(reason.to_string()),
+            supervision: live_harness_supervision_contract(),
+        }
+    }
+
+    fn assert_live_harness_log_schema(entry: &GoogleMeetLiveHarnessLog) {
+        let value = serde_json::to_value(entry).expect("live harness log JSON");
+        for field in [
+            "schema_version",
+            "bead_id",
+            "connector_id",
+            "correlation_id",
+            "operation",
+            "session_id",
+            "normalized_meet_url",
+            "mode",
+            "capability_decision",
+            "provider_selections",
+            "status_transition",
+            "transcript_event_count",
+            "speech_queue_event",
+            "cancellation_checkpoint",
+            "latency_ms",
+            "cleanup_outcome",
+            "final_result",
+            "skip_reason",
+            "supervision",
+        ] {
+            assert!(
+                value.get(field).is_some(),
+                "missing live harness field {field}"
+            );
+        }
+        assert!(
+            entry
+                .schema_version
+                .starts_with("google_meet_live_session_loopback.")
+        );
+        assert_eq!(entry.bead_id, "flywheel_connectors-4kw5f.5.1.1.2.3");
+        assert_eq!(entry.connector_id, CONNECTOR_ID);
+        assert!(!entry.correlation_id.trim().is_empty());
+        assert!(!entry.operation.trim().is_empty());
+        assert!(!entry.normalized_meet_url.trim().is_empty());
+        assert!(!entry.mode.trim().is_empty());
+        assert!(!entry.capability_decision.trim().is_empty());
+        assert!(!entry.cancellation_checkpoint.trim().is_empty());
+        assert!(!entry.cleanup_outcome.trim().is_empty());
+        assert!(!entry.final_result.trim().is_empty());
+        assert_eq!(entry.supervision["no_detached_workers"], true);
+        assert_eq!(entry.supervision["actor_owned_session_state"], true);
     }
 
     #[test]
@@ -4807,6 +5374,7 @@ mod tests {
                 LIVE_JOIN_OP,
                 LIVE_STATUS_OP,
                 LIVE_TRANSCRIPT_OP,
+                LIVE_BRIDGE_EVENT_OP,
                 LIVE_SAY_OP,
                 LIVE_LEAVE_OP,
             ]
@@ -4852,6 +5420,7 @@ mod tests {
                 LIVE_JOIN_OP,
                 LIVE_STATUS_OP,
                 LIVE_TRANSCRIPT_OP,
+                LIVE_BRIDGE_EVENT_OP,
                 LIVE_SAY_OP,
                 LIVE_LEAVE_OP,
             ]
@@ -4876,6 +5445,13 @@ mod tests {
             .expect("live status op");
         assert_eq!(live_status["capability"], MEET_LIVE_READ_CAP);
         assert_eq!(live_status["requires_approval"], "policy");
+        let live_bridge = ops
+            .iter()
+            .find(|op| op["id"] == LIVE_BRIDGE_EVENT_OP)
+            .expect("live bridge event op");
+        assert_eq!(live_bridge["capability"], MEET_LIVE_JOIN_CAP);
+        assert_eq!(live_bridge["safety_tier"], "risky");
+        assert_eq!(live_bridge["requires_approval"], "policy");
         let live_say = ops
             .iter()
             .find(|op| op["id"] == LIVE_SAY_OP)
@@ -5279,6 +5855,166 @@ mod tests {
             .expect_err("speech queue denied after stop");
         assert!(
             matches!(after_stop, FcpError::InvalidRequest { message, .. } if message.contains("No active Google Meet realtime live session"))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn live_bridge_event_records_transcript_status_and_cancellation_checkpoints() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config())
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_LIVE_JOIN_CAP, MEET_LIVE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+
+        let joined = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/abc-defg-hij",
+                    "mode": "realtime",
+                    "realtime": {
+                        "transcriptionProvider": "openai",
+                        "voiceProvider": "google"
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("join");
+        let session_id = joined["session"]["session_id"]
+            .as_str()
+            .expect("session id");
+
+        let status_event = connector
+            .handle_invoke(json!({
+                "operation": LIVE_BRIDGE_EVENT_OP,
+                "input": {
+                    "session_id": session_id,
+                    "event": {
+                        "type": "status",
+                        "status": "browser_ready",
+                        "source": "fake_browser_endpoint",
+                        "sequence": 1,
+                        "details": { "selector": "[data-meeting-ready]" }
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_BRIDGE_EVENT_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("status event");
+        assert_eq!(status_event["event_type"], "status");
+        assert_eq!(status_event["status_transition"]["event"], "browser_status");
+
+        let transcript_event = connector
+            .handle_invoke(json!({
+                "operation": LIVE_BRIDGE_EVENT_OP,
+                "input": {
+                    "session_id": session_id,
+                    "event": {
+                        "type": "transcript",
+                        "source": "fake_realtime_bridge",
+                        "sequence": 2,
+                        "speaker": "Alice",
+                        "text": "live transcript text",
+                        "final": true
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_BRIDGE_EVENT_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("transcript event");
+        assert_eq!(transcript_event["transcript_event_count"], 1);
+        assert_eq!(
+            transcript_event["entry"]["redaction"],
+            "transcript_text_returned_only_by_live_transcript"
+        );
+
+        let cancellation = connector
+            .handle_invoke(json!({
+                "operation": LIVE_BRIDGE_EVENT_OP,
+                "input": {
+                    "session_id": session_id,
+                    "event": {
+                        "type": "cancellation_checkpoint",
+                        "source": "fake_realtime_bridge",
+                        "sequence": 3,
+                        "reason": "test_cancel_signal"
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_BRIDGE_EVENT_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("cancellation checkpoint");
+        assert_eq!(
+            cancellation["status_transition"]["event"],
+            "cancellation_checkpoint"
+        );
+
+        let transcript = connector
+            .handle_invoke(json!({
+                "operation": LIVE_TRANSCRIPT_OP,
+                "input": { "session_id": session_id },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_TRANSCRIPT_OP,
+                    MEET_LIVE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("transcript read");
+        assert_eq!(transcript["entry_count"], 1);
+        assert_eq!(transcript["entries"][0]["text"], "live transcript text");
+
+        let malformed = connector
+            .handle_invoke(json!({
+                "operation": LIVE_BRIDGE_EVENT_OP,
+                "input": {
+                    "session_id": session_id,
+                    "event": { "type": "transcript" }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_BRIDGE_EVENT_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect_err("malformed transcript event should fail");
+        assert!(
+            matches!(malformed, FcpError::InvalidRequest { message, .. } if message.contains("Missing required field: text"))
         );
     }
 
@@ -6798,6 +7534,488 @@ mod tests {
         assert!(wire.contains("flywheel_connectors-4kw5f.5.1.1.1.5"));
     }
 
+    #[test]
+    fn google_meet_live_loopback_log_schema_is_machine_readable_and_redacted() {
+        let connector = GoogleMeetConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let spec = LiveHarnessInvoke {
+            connector: &connector,
+            signing_key: &signing_key,
+            operation: LIVE_SAY_OP,
+            capability_id: MEET_LIVE_SPEAK_CAP,
+            input: json!({
+                "session_id": "session-1",
+                "text": "spoken text must not enter harness logs"
+            }),
+            normalized_meet_url: "https://meet.google.com/abc-defg-hij",
+            mode: "realtime",
+            expected_result: "pass",
+        };
+        let entry = live_harness_log_for_result(
+            &spec,
+            "gmeet-live-schema",
+            12,
+            Some(&json!({
+                "accepted": true,
+                "queued": true,
+                "session_id": "session-1",
+                "queue_event": {
+                    "schema_version": "google_meet_live_speech_queue.v1",
+                    "session_id": "session-1",
+                    "redaction": "text_not_logged",
+                    "text_bytes": 36,
+                    "voice_provider": "google"
+                }
+            })),
+            None,
+        );
+
+        assert_live_harness_log_schema(&entry);
+        assert_eq!(entry.schema_version, "google_meet_live_session_loopback.v1");
+        assert_eq!(
+            entry.speech_queue_event.as_ref().expect("queue event")["redaction"],
+            "text_not_logged"
+        );
+        let wire = serde_json::to_string(&entry).expect("live log JSON");
+        assert!(!wire.contains("spoken text must not enter harness logs"));
+
+        let skip = live_harness_skip(
+            "gmeet-live-schema",
+            "gmeet.live.timeout",
+            "short_timeout_injection_hook",
+        );
+        assert_live_harness_log_schema(&skip);
+        assert_eq!(
+            skip.schema_version,
+            "google_meet_live_session_loopback.skip.v1"
+        );
+        assert_eq!(
+            skip.skip_reason.as_deref(),
+            Some("short_timeout_injection_hook")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn google_meet_live_session_loopback_harness_exercises_connector_boundary_and_emits_jsonl()
+     {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config())
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_LIVE_JOIN_CAP,
+                    MEET_LIVE_READ_CAP,
+                    MEET_LIVE_LEAVE_CAP,
+                    MEET_LIVE_SPEAK_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let correlation_id = "gmeet-live-loopback-e2e";
+        let mut logs = Vec::new();
+
+        let transcribe_join = invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_JOIN_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "meeting_url": "https://meet.google.com/abc-defg-hij",
+                    "mode": "transcribe"
+                }),
+                normalized_meet_url: "https://meet.google.com/abc-defg-hij",
+                mode: "transcribe",
+                expected_result: "pass",
+            },
+        )
+        .await
+        .expect("transcribe join");
+        let transcribe_session_id = transcribe_join["session"]["session_id"]
+            .as_str()
+            .expect("transcribe session id")
+            .to_string();
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_SAY_OP,
+                capability_id: MEET_LIVE_SPEAK_CAP,
+                input: json!({
+                    "session_id": transcribe_session_id,
+                    "text": "transcribe-only spoken text must not be logged"
+                }),
+                normalized_meet_url: "https://meet.google.com/abc-defg-hij",
+                mode: "transcribe",
+                expected_result: "transcribe_speak_denied",
+            },
+        )
+        .await;
+
+        let realtime_join = invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_JOIN_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "meeting_url": "https://meet.google.com/xyz-abcd-efg",
+                    "mode": "realtime",
+                    "realtime": {
+                        "transcriptionProvider": "openai",
+                        "voiceProvider": "google",
+                        "transcriptionModel": "gpt-4o-transcribe",
+                        "voiceModel": "gemini-live-voice",
+                        "audioFormat": "pcm16_16000"
+                    }
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await
+        .expect("realtime join");
+        assert_eq!(
+            realtime_join["replaced_session"]["stop_reason"]["code"],
+            "replaced_by_new_join"
+        );
+        let realtime_session_id = realtime_join["session"]["session_id"]
+            .as_str()
+            .expect("realtime session id")
+            .to_string();
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_STATUS_OP,
+                capability_id: MEET_LIVE_READ_CAP,
+                input: json!({}),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await;
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_BRIDGE_EVENT_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "session_id": realtime_session_id,
+                    "event": {
+                        "type": "status",
+                        "status": "browser_ready",
+                        "source": "fake_browser_endpoint",
+                        "sequence": 1,
+                        "details": {
+                            "node_bind": "loopback_only",
+                            "control_binding": "owner_only"
+                        }
+                    }
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await;
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_BRIDGE_EVENT_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "session_id": realtime_session_id,
+                    "event": {
+                        "type": "transcript",
+                        "source": "fake_realtime_bridge",
+                        "sequence": 2,
+                        "speaker": "Alice",
+                        "text": "hello from the fake bridge",
+                        "final": true
+                    }
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await;
+
+        let transcript = invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_TRANSCRIPT_OP,
+                capability_id: MEET_LIVE_READ_CAP,
+                input: json!({ "session_id": realtime_session_id }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await
+        .expect("transcript read");
+        assert_eq!(transcript["entry_count"], 1);
+        assert_eq!(
+            transcript["entries"][0]["text"],
+            "hello from the fake bridge"
+        );
+
+        let say = invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_SAY_OP,
+                capability_id: MEET_LIVE_SPEAK_CAP,
+                input: json!({
+                    "session_id": realtime_session_id,
+                    "text": "private speech text"
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await
+        .expect("say");
+        assert_eq!(say["queue_event"]["redaction"], "text_not_logged");
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_BRIDGE_EVENT_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "session_id": realtime_session_id,
+                    "event": {
+                        "type": "transcript",
+                        "source": "fake_realtime_bridge"
+                    }
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "malformed_realtime_event",
+            },
+        )
+        .await;
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_STATUS_OP,
+                capability_id: MEET_SPACE_READ_CAP,
+                input: json!({}),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "capability_denied",
+            },
+        )
+        .await;
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_BRIDGE_EVENT_OP,
+                capability_id: MEET_LIVE_JOIN_CAP,
+                input: json!({
+                    "session_id": realtime_session_id,
+                    "event": {
+                        "type": "cancellation_checkpoint",
+                        "source": "fake_realtime_bridge",
+                        "sequence": 3,
+                        "reason": "operator_cancelled_test"
+                    }
+                }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await;
+
+        invoke_live_harness_operation(
+            &mut logs,
+            correlation_id,
+            LiveHarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: LIVE_LEAVE_OP,
+                capability_id: MEET_LIVE_LEAVE_CAP,
+                input: json!({ "session_id": realtime_session_id }),
+                normalized_meet_url: "https://meet.google.com/xyz-abcd-efg",
+                mode: "realtime",
+                expected_result: "pass",
+            },
+        )
+        .await;
+
+        let shutdown_join = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/shu-tdow-nzz",
+                    "mode": "realtime"
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("shutdown join");
+        assert_eq!(shutdown_join["accepted"], true);
+
+        let shutdown_started = Instant::now();
+        let shutdown = connector
+            .handle_shutdown(json!({ "reason": "loopback_e2e_complete" }))
+            .await
+            .expect("shutdown");
+        assert_eq!(
+            shutdown["live_session_cleanup"]["no_orphan_supervised_tasks"],
+            true
+        );
+        logs.push(GoogleMeetLiveHarnessLog {
+            schema_version: "google_meet_live_session_loopback.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.2.3".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: "gmeet.connector.shutdown".to_string(),
+            session_id:
+                shutdown["live_session_cleanup"]["stopped_session"]["session"]["session_id"]
+                    .as_str()
+                    .map(str::to_string),
+            normalized_meet_url: "https://meet.google.com/shu-tdow-nzz".to_string(),
+            mode: "realtime".to_string(),
+            capability_decision: "allowed".to_string(),
+            provider_selections:
+                shutdown["live_session_cleanup"]["stopped_session"]["session"]["provider_policy"]
+                    .clone(),
+            status_transition: None,
+            transcript_event_count: 0,
+            speech_queue_event: None,
+            cancellation_checkpoint: "clean_shutdown_completed".to_string(),
+            latency_ms: elapsed_millis(shutdown_started),
+            cleanup_outcome: live_harness_cleanup_outcome(&shutdown),
+            final_result: "pass".to_string(),
+            skip_reason: None,
+            supervision: live_harness_supervision_contract(),
+        });
+
+        let timeout_skip = live_harness_skip(
+            correlation_id,
+            "gmeet.live.timeout",
+            "short_timeout_injection_hook",
+        );
+        logs.push(timeout_skip);
+
+        for operation in [
+            LIVE_JOIN_OP,
+            LIVE_STATUS_OP,
+            LIVE_BRIDGE_EVENT_OP,
+            LIVE_TRANSCRIPT_OP,
+            LIVE_SAY_OP,
+            LIVE_LEAVE_OP,
+            "gmeet.connector.shutdown",
+        ] {
+            assert!(
+                logs.iter().any(|entry| entry.operation == operation),
+                "missing live harness operation {operation}"
+            );
+        }
+        assert!(
+            logs.iter().any(|entry| {
+                entry.final_result == "transcribe_speak_denied"
+                    && entry.capability_decision == "allowed"
+            }),
+            "transcribe-only say denial should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.final_result == "capability_denied"
+                    && entry.capability_decision == "denied"),
+            "capability denial should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.final_result == "malformed_realtime_event"),
+            "malformed realtime event should be logged"
+        );
+        assert!(
+            logs.iter().any(|entry| entry.transcript_event_count == 1),
+            "transcript event count should be logged"
+        );
+        assert!(
+            logs.iter().any(|entry| entry.speech_queue_event.is_some()),
+            "speech queue event should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.cancellation_checkpoint == "browser_checkpoint_recorded"),
+            "cancellation checkpoint should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.cleanup_outcome == "shutdown_no_orphan_supervised_tasks"),
+            "shutdown cleanup/no-orphan outcome should be logged"
+        );
+
+        for entry in &logs {
+            assert_live_harness_log_schema(entry);
+            println!(
+                "{}",
+                serde_json::to_string(entry).expect("serialize live JSONL log entry")
+            );
+        }
+        let wire_logs = serde_json::to_string(&logs).expect("serialize live log bundle");
+        assert!(!wire_logs.contains("private speech text"));
+        assert!(!wire_logs.contains("transcribe-only spoken text"));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn google_meet_artifact_loopback_harness_exercises_connector_boundary_and_emits_jsonl() {
         let (base_url, requests, server) = spawn_loopback(vec![
@@ -7501,13 +8719,14 @@ mod tests {
                         | LIVE_JOIN_OP
                         | LIVE_STATUS_OP
                         | LIVE_TRANSCRIPT_OP
+                        | LIVE_BRIDGE_EVENT_OP
                         | LIVE_SAY_OP
                         | LIVE_LEAVE_OP
                 )
             }),
             "manifest should advertise only the space, conference-read, artifact, Drive artifact, and live policy operations"
         );
-        assert_eq!(manifest.provides.operations.len(), 22);
+        assert_eq!(manifest.provides.operations.len(), 23);
         assert_eq!(
             manifest
                 .provides
@@ -7579,6 +8798,18 @@ mod tests {
                 .capability
                 .as_str(),
             MEET_LIVE_READ_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == LIVE_BRIDGE_EVENT_OP)
+                .map(|(_id, operation)| operation)
+                .expect("live bridge event op")
+                .capability
+                .as_str(),
+            MEET_LIVE_JOIN_CAP
         );
         assert_eq!(
             manifest

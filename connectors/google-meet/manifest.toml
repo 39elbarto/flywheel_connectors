@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1947131d879e0699521ed5f20e633faed0d9aa3123cfb613ec8ddb4e3c2e2787"
+interface_hash = "blake3-256:fcp.interface.v2:dc9b6630cd30b4f461013b9afaae937ef43b4ec34abfe64cb0b8fc8c501c9399"
 
 [connector]
 id = "fcp.google-meet"
@@ -1026,6 +1026,82 @@ common_mistakes = ["Using completed-conference transcript operations for an acti
 examples = ['{"session_id":"<session-id>"}']
 related = ["gmeet.live.join", "gmeet.live.status"]
 
+[provides.operations."gmeet.live.bridge_event"]
+description = "Record a delegated browser/session bridge event for an active Google Meet live session"
+capability = "meeting.live_join"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.live.bridge_event".input_schema]
+required = ["session_id", "event"]
+type = "object"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.session_id]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event]
+type = "object"
+required = ["type"]
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.type]
+type = "string"
+enum = ["transcript", "status", "cancellation_checkpoint"]
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.source]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.sequence]
+type = "integer"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.text]
+type = "string"
+maxLength = 16384
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.speaker]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.final]
+type = "boolean"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.status]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.details]
+type = "object"
+[provides.operations."gmeet.live.bridge_event".input_schema.properties.event.properties.reason]
+type = "string"
+
+[provides.operations."gmeet.live.bridge_event".output_schema]
+required = ["accepted", "status", "event_type", "session_id"]
+type = "object"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.accepted]
+type = "boolean"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.status]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.event_type]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.session_id]
+type = "string"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.transcript_event_count]
+type = "integer"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.entry]
+type = "object"
+[provides.operations."gmeet.live.bridge_event".output_schema.properties.status_transition]
+type = "object"
+
+[provides.operations."gmeet.live.bridge_event".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.bridge_event".ai_hints]
+when_to_use = "Record audit-safe events from the delegated browser/session worker for a consented live join."
+common_mistakes = ["Calling this without an active live session or with a stale session_id", "Using it as browser control; the connector only records events from a delegated worker", "Sending unsupported realtime event types instead of transcript/status/cancellation_checkpoint"]
+examples = ['{"session_id":"<session-id>","event":{"type":"transcript","text":"Hello","speaker":"Alice"}}']
+related = ["gmeet.live.join", "gmeet.live.transcript"]
+
 [provides.operations."gmeet.live.say"]
 description = "Queue policy-gated speech for an active realtime Google Meet live session"
 capability = "meeting.live_speak"
@@ -1228,5 +1304,6 @@ scope = "instance"
 "gmeet.live.join" = ["meeting.live_join"]
 "gmeet.live.status" = ["meeting.live_read"]
 "gmeet.live.transcript" = ["meeting.live_read"]
+"gmeet.live.bridge_event" = ["meeting.live_join"]
 "gmeet.live.say" = ["meeting.live_speak"]
 "gmeet.live.leave" = ["meeting.live_leave"]

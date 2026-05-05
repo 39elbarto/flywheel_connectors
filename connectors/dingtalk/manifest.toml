@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.dingtalk"
 name = "DingTalk Enterprise Robot"
 version = "0.1.0"
-description = "Tenant-scoped DingTalk robot connector for DM or group sends, link or file delivery, media upload, and health verification"
+description = "Tenant-scoped DingTalk robot connector for DM or group sends, link or file delivery, media upload, Stream Mode frame supervision, session-webhook replies, and health verification"
 archetype = "operational"
 homepage = "https://open.dingtalk.com/"
 
@@ -55,6 +55,20 @@ capability = "dingtalk.messages.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.stream_ingest_message]
+summary = "Policy-gate and normalize one host-forwarded DingTalk Stream Mode message frame"
+capability = "dingtalk.messages.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.stream_reply]
+summary = "Reply through a validated DingTalk Stream Mode session webhook"
+capability = "dingtalk.messages.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
 
 [provides.operations.health]
 summary = "Verify DingTalk credentials and token issuance"

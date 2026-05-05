@@ -6,6 +6,10 @@ pub const DEFAULT_BASE_URL: &str = "https://api.dingtalk.com";
 pub const DEFAULT_MEDIA_BASE_URL: &str = "https://oapi.dingtalk.com";
 pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
 pub const TOKEN_REFRESH_SAFETY_MARGIN_SECS: u64 = 60;
+pub const DEFAULT_STREAM_REPLAY_CACHE_ENTRIES: usize = 1_000;
+pub const DEFAULT_STREAM_SESSION_WEBHOOK_CACHE_ENTRIES: usize = 500;
+pub const DEFAULT_STREAM_SESSION_WEBHOOK_EXPIRY_SAFETY_MS: u64 = 5 * 60 * 1_000;
+pub const DEFAULT_STREAM_REPLY_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Clone, Deserialize)]
 pub struct DingTalkConfig {
@@ -17,6 +21,28 @@ pub struct DingTalkConfig {
     pub client_secret: String,
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+    #[serde(default)]
+    pub stream_mode_enabled: bool,
+    #[serde(default = "default_true")]
+    pub stream_dm_allowed: bool,
+    #[serde(default = "default_true")]
+    pub stream_group_allowed: bool,
+    #[serde(default = "default_true")]
+    pub stream_require_mention: bool,
+    #[serde(default)]
+    pub stream_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub stream_free_response_chats: Vec<String>,
+    #[serde(default)]
+    pub stream_mention_patterns: Vec<String>,
+    #[serde(default = "default_stream_replay_cache_entries")]
+    pub stream_replay_cache_entries: usize,
+    #[serde(default = "default_stream_session_webhook_cache_entries")]
+    pub stream_session_webhook_cache_entries: usize,
+    #[serde(default = "default_stream_session_webhook_expiry_safety_ms")]
+    pub stream_session_webhook_expiry_safety_ms: u64,
+    #[serde(default = "default_stream_reply_timeout_ms")]
+    pub stream_reply_timeout_ms: u64,
 }
 
 impl DingTalkConfig {
@@ -28,7 +54,34 @@ impl DingTalkConfig {
         let trimmed_auth_material = self.client_secret.trim().to_string();
         self.client_secret.clear();
         self.client_secret.push_str(&trimmed_auth_material);
+        normalize_string_list(&mut self.stream_allowed_users, true);
+        normalize_string_list(&mut self.stream_free_response_chats, false);
+        normalize_string_list(&mut self.stream_mention_patterns, false);
         self
+    }
+}
+
+impl Default for DingTalkConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_base_url(),
+            media_base_url: default_media_base_url(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            stream_mode_enabled: false,
+            stream_dm_allowed: true,
+            stream_group_allowed: true,
+            stream_require_mention: true,
+            stream_allowed_users: Vec::new(),
+            stream_free_response_chats: Vec::new(),
+            stream_mention_patterns: Vec::new(),
+            stream_replay_cache_entries: DEFAULT_STREAM_REPLAY_CACHE_ENTRIES,
+            stream_session_webhook_cache_entries: DEFAULT_STREAM_SESSION_WEBHOOK_CACHE_ENTRIES,
+            stream_session_webhook_expiry_safety_ms:
+                DEFAULT_STREAM_SESSION_WEBHOOK_EXPIRY_SAFETY_MS,
+            stream_reply_timeout_ms: DEFAULT_STREAM_REPLY_TIMEOUT_MS,
+        }
     }
 }
 
@@ -41,6 +94,29 @@ impl std::fmt::Debug for DingTalkConfig {
             .field("client_id", &self.client_id)
             .field("client_secret", &"[REDACTED]")
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("stream_mode_enabled", &self.stream_mode_enabled)
+            .field("stream_dm_allowed", &self.stream_dm_allowed)
+            .field("stream_group_allowed", &self.stream_group_allowed)
+            .field("stream_require_mention", &self.stream_require_mention)
+            .field("stream_allowed_users", &self.stream_allowed_users)
+            .field(
+                "stream_free_response_chats",
+                &self.stream_free_response_chats,
+            )
+            .field("stream_mention_patterns", &self.stream_mention_patterns)
+            .field(
+                "stream_replay_cache_entries",
+                &self.stream_replay_cache_entries,
+            )
+            .field(
+                "stream_session_webhook_cache_entries",
+                &self.stream_session_webhook_cache_entries,
+            )
+            .field(
+                "stream_session_webhook_expiry_safety_ms",
+                &self.stream_session_webhook_expiry_safety_ms,
+            )
+            .field("stream_reply_timeout_ms", &self.stream_reply_timeout_ms)
             .finish()
     }
 }
@@ -55,6 +131,38 @@ fn default_media_base_url() -> String {
 
 const fn default_timeout_ms() -> u64 {
     DEFAULT_TIMEOUT_MS
+}
+
+const fn default_true() -> bool {
+    true
+}
+
+const fn default_stream_replay_cache_entries() -> usize {
+    DEFAULT_STREAM_REPLAY_CACHE_ENTRIES
+}
+
+const fn default_stream_session_webhook_cache_entries() -> usize {
+    DEFAULT_STREAM_SESSION_WEBHOOK_CACHE_ENTRIES
+}
+
+const fn default_stream_session_webhook_expiry_safety_ms() -> u64 {
+    DEFAULT_STREAM_SESSION_WEBHOOK_EXPIRY_SAFETY_MS
+}
+
+const fn default_stream_reply_timeout_ms() -> u64 {
+    DEFAULT_STREAM_REPLY_TIMEOUT_MS
+}
+
+fn normalize_string_list(values: &mut Vec<String>, lowercase: bool) {
+    for value in values.iter_mut() {
+        *value = value.trim().to_string();
+        if lowercase {
+            *value = value.to_lowercase();
+        }
+    }
+    values.retain(|value| !value.is_empty());
+    values.sort();
+    values.dedup();
 }
 
 #[derive(Deserialize)]
@@ -233,6 +341,7 @@ mod tests {
             client_id: " ding-app ".into(),
             client_secret: " secret ".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..Default::default()
         }
         .normalized();
         assert_eq!(config.base_url, "https://api.dingtalk.com");

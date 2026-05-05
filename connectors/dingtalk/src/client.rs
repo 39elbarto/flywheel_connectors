@@ -78,6 +78,7 @@ impl DingTalkClient {
                 "request_timeout_ms must be greater than zero".into(),
             ));
         }
+        validate_stream_config(&config)?;
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
@@ -265,6 +266,48 @@ impl DingTalkClient {
         let body: Value = response.json().await.map_err(DingTalkError::Http)?;
         ensure_media_success(body)
     }
+
+    /// Send a markdown reply to a `DingTalk` Stream Mode session webhook.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the webhook URL is outside DingTalk's allowed
+    /// reply hosts, the request fails, or the reply endpoint rejects the
+    /// payload.
+    pub async fn post_session_webhook(
+        &self,
+        session_webhook: &str,
+        content: &str,
+    ) -> DingTalkResult<Value> {
+        validate_session_webhook_url(session_webhook)?;
+        let response = self
+            .client
+            .post(session_webhook.trim())
+            .timeout(Duration::from_millis(self.config.stream_reply_timeout_ms))
+            .json(&json!({
+                "msgtype": "markdown",
+                "markdown": {
+                    "title": title_for_reply(content),
+                    "text": content,
+                }
+            }))
+            .send()
+            .await
+            .map_err(DingTalkError::Http)?;
+
+        if !response.status().is_success() {
+            let status = response.status().as_u16();
+            let headers = response.headers().clone();
+            let body = response.text().await.unwrap_or_default();
+            return Err(http_status_error(status, &headers, body));
+        }
+
+        let body = response
+            .json()
+            .await
+            .unwrap_or_else(|_| json!({"status": "ok"}));
+        ensure_webhook_success(body)
+    }
 }
 
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> DingTalkResult<()> {
@@ -287,6 +330,42 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> DingTalkResult<()> {
     Ok(())
 }
 
+fn validate_stream_config(config: &DingTalkConfig) -> DingTalkResult<()> {
+    if config.stream_replay_cache_entries == 0 {
+        return Err(DingTalkError::Config(
+            "stream_replay_cache_entries must be greater than zero".into(),
+        ));
+    }
+    if config.stream_session_webhook_cache_entries == 0 {
+        return Err(DingTalkError::Config(
+            "stream_session_webhook_cache_entries must be greater than zero".into(),
+        ));
+    }
+    if config.stream_session_webhook_expiry_safety_ms == 0 {
+        return Err(DingTalkError::Config(
+            "stream_session_webhook_expiry_safety_ms must be greater than zero".into(),
+        ));
+    }
+    if config.stream_reply_timeout_ms == 0 {
+        return Err(DingTalkError::Config(
+            "stream_reply_timeout_ms must be greater than zero".into(),
+        ));
+    }
+    Ok(())
+}
+
+pub fn validate_session_webhook_url(raw: &str) -> DingTalkResult<()> {
+    validate_host(
+        raw,
+        &[
+            "api.dingtalk.com",
+            "oapi.dingtalk.com",
+            "localhost",
+            "127.0.0.1",
+        ],
+    )
+}
+
 fn ensure_media_success(body: Value) -> DingTalkResult<Value> {
     let errcode = body.get("errcode").and_then(Value::as_i64).unwrap_or(0);
     if errcode == 0 {
@@ -298,6 +377,32 @@ fn ensure_media_success(body: Value) -> DingTalkResult<Value> {
             .unwrap_or("unknown DingTalk media upload error")
             .to_string();
         Err(DingTalkError::Media { errcode, errmsg })
+    }
+}
+
+fn ensure_webhook_success(body: Value) -> DingTalkResult<Value> {
+    let errcode = body.get("errcode").and_then(Value::as_i64).unwrap_or(0);
+    if errcode == 0 {
+        Ok(body)
+    } else {
+        let errmsg = body
+            .get("errmsg")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown DingTalk session webhook error")
+            .to_string();
+        Err(DingTalkError::Api {
+            code: u32::try_from(errcode).unwrap_or(u32::MAX),
+            message: errmsg,
+        })
+    }
+}
+
+fn title_for_reply(content: &str) -> String {
+    let title: String = content.chars().take(32).collect();
+    if title.trim().is_empty() {
+        "Flywheel".into()
+    } else {
+        title
     }
 }
 
@@ -456,6 +561,7 @@ mod tests {
             client_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..Default::default()
         }
     }
 
@@ -466,6 +572,7 @@ mod tests {
             client_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..Default::default()
         }
     }
 
@@ -498,6 +605,7 @@ mod tests {
             client_id: " test-app ".into(),
             client_secret: " test-secret ".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..Default::default()
         };
         let client = DingTalkClient::new(config).unwrap();
         assert_eq!(client.config().base_url, "http://localhost:9999");
@@ -520,6 +628,7 @@ mod tests {
             client_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            ..Default::default()
         };
         assert!(DingTalkClient::new(config).is_err());
     }

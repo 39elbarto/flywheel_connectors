@@ -1,22 +1,26 @@
 //! `DingTalk` enterprise robot connector.
 
-use std::time::Instant;
+use std::collections::BTreeMap;
+use std::sync::Mutex;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    ConnectorId, ConnectorMetrics, EventCaps, EventData, EventEnvelope, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
+    Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest,
+    SimulateResponse, SubscribeRequest, SubscribeResponse, TrustLevel, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::client::{DingTalkClient, default_mime_type, normalize_callback_event};
-use crate::types::{DingTalkConfig, ParsedTarget};
+use crate::client::{
+    DingTalkClient, default_mime_type, normalize_callback_event, validate_session_webhook_url,
+};
+use crate::types::{DingTalkCallbackEvent, DingTalkConfig, NormalizedDingTalkEvent, ParsedTarget};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -25,12 +29,17 @@ const OP_SEND_LINK: &str = "dingtalk.messages.send_link";
 const OP_SEND_FILE: &str = "dingtalk.messages.send_file";
 const OP_UPLOAD_MEDIA: &str = "dingtalk.media.upload";
 const OP_NORMALIZE_EVENT: &str = "dingtalk.events.normalize";
+const OP_STREAM_INGEST: &str = "dingtalk.stream.ingest_message";
+const OP_STREAM_REPLY: &str = "dingtalk.stream.reply";
 const OP_HEALTH: &str = "dingtalk.health";
 
 const CAP_MESSAGES_WRITE: &str = "dingtalk.messages.write";
 const CAP_MESSAGES_READ: &str = "dingtalk.messages.read";
 const CAP_MEDIA_WRITE: &str = "dingtalk.media.write";
 const CAP_HEALTH_READ: &str = "dingtalk.health.read";
+const DINGTALK_STREAM_POLICY_MODEL: &str = "host_forwarded_stream_frame_supervision";
+const MAX_STREAM_MEDIA_FIELD_LEN: usize = 2_048;
+const MAX_REPLY_CONTENT_LEN: usize = 20_000;
 
 // ─────────────────────────────────────────────────────────────────
 // Doctor types (V3 requirement)
@@ -61,7 +70,66 @@ pub struct DingTalkConnector {
     base: BaseConnector,
     client: Option<DingTalkClient>,
     verifier: Option<CapabilityVerifier>,
+    zone: Option<ZoneId>,
+    stream_state: Mutex<DingTalkStreamState>,
     started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct DingTalkSessionWebhook {
+    url: String,
+    expires_at_ms: Option<i64>,
+    cached_at_ms: i64,
+}
+
+#[derive(Debug, Default)]
+struct DingTalkStreamState {
+    seen_messages: BTreeMap<String, i64>,
+    session_webhooks: BTreeMap<String, DingTalkSessionWebhook>,
+    accepted_events: u64,
+    rejected_events: u64,
+    duplicate_events: u64,
+    last_decision: Option<String>,
+    last_reason: Option<String>,
+}
+
+#[derive(Debug)]
+struct DingTalkStreamIngestRequest<'a> {
+    event: &'a Value,
+    is_in_at_list: bool,
+    session_webhook: Option<&'a str>,
+    session_webhook_expired_time_ms: Option<i64>,
+}
+
+#[derive(Debug)]
+struct DingTalkStreamSecurityOutcome {
+    decision: &'static str,
+    reason: String,
+    duplicate: bool,
+    emit_event: bool,
+    message_key_hash: String,
+    sender_hash: Option<String>,
+    sender_staff_hash: Option<String>,
+    conversation_hash: Option<String>,
+    session_webhook_hash: Option<String>,
+    session_webhook_cached: bool,
+    state_counts: DingTalkStreamStateCounts,
+}
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+struct DingTalkStreamStateCounts {
+    seen_messages: usize,
+    cached_session_webhooks: usize,
+    accepted_events: u64,
+    rejected_events: u64,
+    duplicate_events: u64,
+}
+
+#[derive(Debug)]
+struct DingTalkSessionReplyTarget {
+    chat_id: String,
+    session_webhook: String,
+    source: &'static str,
 }
 
 impl DingTalkConnector {
@@ -71,6 +139,8 @@ impl DingTalkConnector {
             base: BaseConnector::new(ConnectorId::from_static("fcp.dingtalk")),
             client: None,
             verifier: None,
+            zone: None,
+            stream_state: Mutex::new(DingTalkStreamState::default()),
             started_at: Instant::now(),
         }
     }
@@ -219,6 +289,47 @@ impl DingTalkConnector {
                     }
                 }),
                 "Use to normalize an inbound DingTalk robot callback event for downstream processing.",
+            ),
+            operation(
+                OP_STREAM_INGEST,
+                "Policy-gate and normalize one DingTalk Stream Mode message frame",
+                CAP_MESSAGES_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({
+                    "type": "object",
+                    "required": ["event"],
+                    "properties": {
+                        "event": {
+                            "type": "object",
+                            "description": "Raw DingTalk Stream Mode ChatbotMessage payload"
+                        },
+                        "is_in_at_list": { "type": "boolean" },
+                        "session_webhook": { "type": "string" },
+                        "session_webhook_expired_time_ms": { "type": "integer" }
+                    }
+                }),
+                "Use when the host's DingTalk Stream Mode bridge forwards one signed SDK frame into FCP for policy, dedupe, and EventEnvelope construction.",
+            ),
+            operation(
+                OP_STREAM_REPLY,
+                "Reply to a DingTalk Stream Mode session webhook",
+                CAP_MESSAGES_WRITE,
+                RiskLevel::Medium,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                json!({
+                    "type": "object",
+                    "required": ["chat_id", "content"],
+                    "properties": {
+                        "chat_id": { "type": "string" },
+                        "content": { "type": "string" },
+                        "session_webhook": { "type": "string" },
+                        "reply_to": { "type": "string" }
+                    }
+                }),
+                "Use only after an accepted stream ingest cached a valid DingTalk session_webhook for the conversation, or when the host forwards a fresh webhook explicitly.",
             ),
             operation(
                 OP_HEALTH,
@@ -385,6 +496,74 @@ impl DingTalkConnector {
                     message: format!("failed to serialize normalized event: {e}"),
                 })?
             }
+            OP_STREAM_INGEST => {
+                let request = DingTalkStreamIngestRequest::from_input(&req.input)?;
+                let normalized =
+                    normalize_callback_event(request.event).map_err(|e| e.to_fcp_error())?;
+                let raw_event: DingTalkCallbackEvent =
+                    serde_json::from_value(request.event.clone()).map_err(|error| {
+                        FcpError::InvalidRequest {
+                            code: 1005,
+                            message: format!("invalid DingTalk stream event payload: {error}"),
+                        }
+                    })?;
+                let outcome = evaluate_stream_frame(self, client.config(), &raw_event, &request)?;
+                let event = outcome.emit_event.then(|| {
+                    dingtalk_event_envelope(
+                        self,
+                        &normalized,
+                        request.event,
+                        &outcome,
+                        req.correlation_id.clone(),
+                    )
+                });
+                json!({
+                    "stream": {
+                        "model": DINGTALK_STREAM_POLICY_MODEL,
+                        "transport_boundary": "host_forwarded_stream_frame",
+                        "connector_owned_websocket": false,
+                        "supervised_state": true,
+                    },
+                    "delivery": {
+                        "id": stream_delivery_id(&raw_event, request.event),
+                        "message_key_hash": outcome.message_key_hash,
+                        "sender_hash": outcome.sender_hash,
+                        "sender_staff_hash": outcome.sender_staff_hash,
+                        "conversation_hash": outcome.conversation_hash,
+                        "session_webhook_hash": outcome.session_webhook_hash,
+                        "session_webhook_cached": outcome.session_webhook_cached,
+                        "duplicate": outcome.duplicate,
+                    },
+                    "policy": {
+                        "model": DINGTALK_STREAM_POLICY_MODEL,
+                        "decision": outcome.decision,
+                        "reason": outcome.reason,
+                        "redaction_status": "sender_conversation_and_webhook_metadata_hashed_or_omitted",
+                    },
+                    "state": outcome.state_counts,
+                    "normalized": if outcome.emit_event { json!(normalized) } else { json!(null) },
+                    "event": event,
+                })
+            }
+            OP_STREAM_REPLY => {
+                let chat_id = required_string(&req.input, "chat_id")?;
+                let content = required_string(&req.input, "content")?;
+                let target = resolve_session_reply_target(self, chat_id, &req.input)?;
+                let content = truncate_reply_content(content);
+                let response = client
+                    .post_session_webhook(&target.session_webhook, &content)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "status": "sent",
+                    "chat_id_hash": redacted_hash(&target.chat_id),
+                    "session_webhook_hash": redacted_hash(&target.session_webhook),
+                    "session_webhook_source": target.source,
+                    "reply_to_hash": optional_string(&req.input, "reply_to")?.map(redacted_hash),
+                    "response": response,
+                    "redaction_status": "chat_and_webhook_metadata_hashed",
+                })
+            }
             OP_HEALTH => {
                 let _auth_material = client.access_token().await.map_err(|e| e.to_fcp_error())?;
                 json!({
@@ -392,6 +571,9 @@ impl DingTalkConnector {
                     "base_url": client.config().base_url,
                     "media_base_url": client.config().media_base_url,
                     "client_id": client.config().client_id,
+                    "stream_policy_model": DINGTALK_STREAM_POLICY_MODEL,
+                    "stream_mode_enabled": client.config().stream_mode_enabled,
+                    "stream_state": stream_state_counts(self)?,
                     "manifest_hash": Self::manifest_hash(),
                 })
             }
@@ -428,9 +610,16 @@ impl FcpConnector for DingTalkConnector {
                 message: format!("invalid DingTalk configuration: {error}"),
             })?;
         self.client = Some(DingTalkClient::new(config).map_err(|e| e.to_fcp_error())?);
+        *self
+            .stream_state
+            .get_mut()
+            .map_err(|_| FcpError::Internal {
+                message: "DingTalk stream state lock is poisoned".into(),
+            })? = DingTalkStreamState::default();
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
+        self.zone = None;
         Ok(())
     }
 
@@ -444,6 +633,7 @@ impl FcpConnector for DingTalkConnector {
             req.zone.clone(),
             self.base.instance_id.clone(),
         ));
+        self.zone = Some(req.zone);
         Ok(HandshakeResponse {
             status: "accepted".into(),
             capabilities_granted: granted_capabilities(req.capabilities_requested),
@@ -452,8 +642,15 @@ impl FcpConnector for DingTalkConnector {
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
-                replay: false,
-                min_buffer_events: 0,
+                replay: true,
+                min_buffer_events: self
+                    .client
+                    .as_ref()
+                    .map(|client| {
+                        u32::try_from(client.config().stream_replay_cache_entries)
+                            .unwrap_or(u32::MAX)
+                    })
+                    .unwrap_or(0),
                 requires_ack: false,
             }),
             auth_caps: None,
@@ -475,6 +672,9 @@ impl FcpConnector for DingTalkConnector {
                     "base_url": c.config().base_url,
                     "media_base_url": c.config().media_base_url,
                     "client_id": c.config().client_id,
+                    "stream_policy_model": DINGTALK_STREAM_POLICY_MODEL,
+                    "stream_mode_enabled": c.config().stream_mode_enabled,
+                    "stream_state": stream_state_counts_lossy(self),
                 })
             }),
             rate_limit: None,
@@ -504,6 +704,13 @@ impl FcpConnector for DingTalkConnector {
         }
         self.client = None;
         self.verifier = None;
+        self.zone = None;
+        *self
+            .stream_state
+            .get_mut()
+            .map_err(|_| FcpError::Internal {
+                message: "DingTalk stream state lock is poisoned".into(),
+            })? = DingTalkStreamState::default();
         self.base.set_handshaken(false);
         self.base.set_configured(false);
         Ok(())
@@ -517,8 +724,15 @@ impl FcpConnector for DingTalkConnector {
             auth_caps: None,
             event_caps: Some(EventCaps {
                 streaming: false,
-                replay: false,
-                min_buffer_events: 0,
+                replay: true,
+                min_buffer_events: self
+                    .client
+                    .as_ref()
+                    .map(|client| {
+                        u32::try_from(client.config().stream_replay_cache_entries)
+                            .unwrap_or(u32::MAX)
+                    })
+                    .unwrap_or(0),
                 requires_ack: false,
             }),
         }
@@ -667,6 +881,15 @@ fn validate_operation_input(operation: &str, input: &Value) -> FcpResult<()> {
                 message: "event is required".into(),
             })?;
         }
+        OP_STREAM_INGEST => {
+            DingTalkStreamIngestRequest::from_input(input)?;
+        }
+        OP_STREAM_REPLY => {
+            required_string(input, "chat_id")?;
+            required_string(input, "content")?;
+            optional_string(input, "session_webhook")?;
+            optional_string(input, "reply_to")?;
+        }
         OP_HEALTH => {}
         _ => {
             return Err(FcpError::InvalidRequest {
@@ -679,10 +902,487 @@ fn validate_operation_input(operation: &str, input: &Value) -> FcpResult<()> {
     Ok(())
 }
 
+impl<'a> DingTalkStreamIngestRequest<'a> {
+    fn from_input(input: &'a Value) -> FcpResult<Self> {
+        let event = input.get("event").ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "event is required".into(),
+        })?;
+        if !event.is_object() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "event must be an object".into(),
+            });
+        }
+        let is_in_at_list = input
+            .get("is_in_at_list")
+            .or_else(|| input.get("isInAtList"))
+            .and_then(Value::as_bool)
+            .or_else(|| {
+                event
+                    .get("isInAtList")
+                    .or_else(|| event.get("is_in_at_list"))
+                    .and_then(Value::as_bool)
+            })
+            .unwrap_or(false);
+        let session_webhook = optional_string(input, "session_webhook")?
+            .or_else(|| optional_string(input, "sessionWebhook").ok().flatten())
+            .or_else(|| event.get("sessionWebhook").and_then(Value::as_str))
+            .or_else(|| event.get("session_webhook").and_then(Value::as_str))
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let session_webhook_expired_time_ms = input
+            .get("session_webhook_expired_time_ms")
+            .or_else(|| input.get("sessionWebhookExpiredTime"))
+            .and_then(Value::as_i64)
+            .or_else(|| {
+                event
+                    .get("sessionWebhookExpiredTime")
+                    .or_else(|| event.get("session_webhook_expired_time_ms"))
+                    .and_then(Value::as_i64)
+            });
+
+        Ok(Self {
+            event,
+            is_in_at_list,
+            session_webhook,
+            session_webhook_expired_time_ms,
+        })
+    }
+}
+
+fn evaluate_stream_frame(
+    connector: &DingTalkConnector,
+    config: &DingTalkConfig,
+    event: &DingTalkCallbackEvent,
+    request: &DingTalkStreamIngestRequest<'_>,
+) -> FcpResult<DingTalkStreamSecurityOutcome> {
+    let now_ms = now_ms();
+    let message_key = stream_message_key(event, request.event);
+    let message_key_hash = redacted_hash(&message_key);
+    let sender_hash = event.sender_id.as_deref().map(redacted_hash);
+    let sender_staff_hash = event.sender_staff_id.as_deref().map(redacted_hash);
+    let conversation_hash = stream_chat_id(event).map(|chat| redacted_hash(&chat));
+    let session_webhook_hash = request.session_webhook.map(redacted_hash);
+
+    let mut state = connector
+        .stream_state
+        .lock()
+        .map_err(|_| FcpError::Internal {
+            message: "DingTalk stream state lock is poisoned".into(),
+        })?;
+    prune_stream_state(&mut state, config, now_ms);
+
+    if state.seen_messages.contains_key(&message_key) {
+        state.duplicate_events = state.duplicate_events.saturating_add(1);
+        state.last_decision = Some("duplicate".into());
+        state.last_reason = Some("message_replay".into());
+        return Ok(DingTalkStreamSecurityOutcome {
+            decision: "duplicate",
+            reason: "message_replay".into(),
+            duplicate: true,
+            emit_event: false,
+            message_key_hash,
+            sender_hash,
+            sender_staff_hash,
+            conversation_hash,
+            session_webhook_hash,
+            session_webhook_cached: false,
+            state_counts: state.counts(),
+        });
+    }
+
+    let (accepted, reason) = stream_policy_accepts(config, event, request);
+    state.seen_messages.insert(message_key, now_ms);
+    let mut session_webhook_cached = false;
+    if accepted
+        && let (Some(chat_id), Some(session_webhook)) =
+            (stream_chat_id(event), request.session_webhook)
+        && validate_session_webhook_url(session_webhook).is_ok()
+        && !session_webhook_expired(
+            request.session_webhook_expired_time_ms,
+            config.stream_session_webhook_expiry_safety_ms,
+            now_ms,
+        )
+    {
+        state.session_webhooks.insert(
+            chat_id,
+            DingTalkSessionWebhook {
+                url: session_webhook.to_string(),
+                expires_at_ms: request.session_webhook_expired_time_ms,
+                cached_at_ms: now_ms,
+            },
+        );
+        session_webhook_cached = true;
+    }
+    enforce_stream_capacity(&mut state, config);
+    if accepted {
+        state.accepted_events = state.accepted_events.saturating_add(1);
+        state.last_decision = Some("accepted".into());
+    } else {
+        state.rejected_events = state.rejected_events.saturating_add(1);
+        state.last_decision = Some("rejected".into());
+    }
+    state.last_reason = Some(reason.clone());
+
+    Ok(DingTalkStreamSecurityOutcome {
+        decision: if accepted { "accepted" } else { "rejected" },
+        reason,
+        duplicate: false,
+        emit_event: accepted,
+        message_key_hash,
+        sender_hash,
+        sender_staff_hash,
+        conversation_hash,
+        session_webhook_hash,
+        session_webhook_cached,
+        state_counts: state.counts(),
+    })
+}
+
+impl DingTalkStreamState {
+    fn counts(&self) -> DingTalkStreamStateCounts {
+        DingTalkStreamStateCounts {
+            seen_messages: self.seen_messages.len(),
+            cached_session_webhooks: self.session_webhooks.len(),
+            accepted_events: self.accepted_events,
+            rejected_events: self.rejected_events,
+            duplicate_events: self.duplicate_events,
+        }
+    }
+}
+
+fn stream_policy_accepts(
+    config: &DingTalkConfig,
+    event: &DingTalkCallbackEvent,
+    request: &DingTalkStreamIngestRequest<'_>,
+) -> (bool, String) {
+    let conversation_type =
+        crate::client::normalize_conversation_type(event.conversation_type.as_deref());
+    if conversation_type == "private" && !config.stream_dm_allowed {
+        return (false, "dm_stream_disabled".into());
+    }
+    if conversation_type == "group" && !config.stream_group_allowed {
+        return (false, "group_stream_disabled".into());
+    }
+    if !stream_user_allowed(config, event) {
+        return (false, "sender_not_allowed".into());
+    }
+    if stream_media_field_too_large(request.event) {
+        return (false, "media_field_too_large".into());
+    }
+    if conversation_type == "group" && config.stream_require_mention {
+        if stream_chat_id(event).as_deref().is_some_and(|chat_id| {
+            config
+                .stream_free_response_chats
+                .iter()
+                .any(|id| id == chat_id)
+        }) {
+            return (true, "accepted".into());
+        }
+        if request.is_in_at_list || crate::client::detect_at_bot(event) {
+            return (true, "accepted".into());
+        }
+        let text = event
+            .text
+            .as_ref()
+            .and_then(|text| text.content.as_deref())
+            .unwrap_or_default();
+        if stream_text_matches_patterns(text, &config.stream_mention_patterns) {
+            return (true, "accepted".into());
+        }
+        return (false, "mention_required".into());
+    }
+    (true, "accepted".into())
+}
+
+fn stream_user_allowed(config: &DingTalkConfig, event: &DingTalkCallbackEvent) -> bool {
+    if config.stream_allowed_users.is_empty()
+        || config.stream_allowed_users.iter().any(|value| value == "*")
+    {
+        return true;
+    }
+    let sender_id = event
+        .sender_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let sender_staff_id = event
+        .sender_staff_id
+        .as_deref()
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    config
+        .stream_allowed_users
+        .iter()
+        .any(|allowed| allowed == &sender_id || allowed == &sender_staff_id)
+}
+
+fn stream_text_matches_patterns(text: &str, patterns: &[String]) -> bool {
+    let lower = text.to_lowercase();
+    patterns
+        .iter()
+        .any(|pattern| lower.contains(&pattern.to_lowercase()))
+}
+
+fn stream_media_field_too_large(value: &Value) -> bool {
+    match value {
+        Value::String(raw) => raw.len() > MAX_STREAM_MEDIA_FIELD_LEN,
+        Value::Array(items) => items.iter().any(stream_media_field_too_large),
+        Value::Object(map) => map.iter().any(|(key, value)| {
+            matches!(
+                key.as_str(),
+                "downloadCode"
+                    | "download_code"
+                    | "mediaId"
+                    | "media_id"
+                    | "pictureUrl"
+                    | "picUrl"
+                    | "fileName"
+                    | "file_name"
+            ) && stream_media_field_too_large(value)
+        }),
+        _ => false,
+    }
+}
+
+fn stream_message_key(event: &DingTalkCallbackEvent, raw: &Value) -> String {
+    event
+        .msg_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || {
+                let digest = Sha256::digest(raw.to_string().as_bytes());
+                format!("raw:{}", hex::encode(digest))
+            },
+            |msg_id| format!("msg:{msg_id}"),
+        )
+}
+
+fn stream_delivery_id(event: &DingTalkCallbackEvent, raw: &Value) -> String {
+    redacted_hash(&stream_message_key(event, raw))
+}
+
+fn stream_chat_id(event: &DingTalkCallbackEvent) -> Option<String> {
+    event
+        .conversation_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or_else(|| {
+            event
+                .sender_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+        .map(str::to_string)
+}
+
+fn session_webhook_expired(expires_at_ms: Option<i64>, safety_ms: u64, now_ms: i64) -> bool {
+    let Some(expires_at_ms) = expires_at_ms else {
+        return false;
+    };
+    if expires_at_ms <= 0 {
+        return false;
+    }
+    now_ms.saturating_add(i64::try_from(safety_ms).unwrap_or(i64::MAX)) >= expires_at_ms
+}
+
+fn prune_stream_state(state: &mut DingTalkStreamState, config: &DingTalkConfig, now_ms: i64) {
+    state.session_webhooks.retain(|_, webhook| {
+        !session_webhook_expired(
+            webhook.expires_at_ms,
+            config.stream_session_webhook_expiry_safety_ms,
+            now_ms,
+        )
+    });
+    enforce_stream_capacity(state, config);
+}
+
+fn enforce_stream_capacity(state: &mut DingTalkStreamState, config: &DingTalkConfig) {
+    prune_oldest(&mut state.seen_messages, config.stream_replay_cache_entries);
+    while state.session_webhooks.len() > config.stream_session_webhook_cache_entries {
+        let Some(key) = state
+            .session_webhooks
+            .iter()
+            .min_by_key(|(_, value)| value.cached_at_ms)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        state.session_webhooks.remove(&key);
+    }
+}
+
+fn prune_oldest(values: &mut BTreeMap<String, i64>, max_entries: usize) {
+    while values.len() > max_entries {
+        let Some(key) = values
+            .iter()
+            .min_by_key(|(_, seen_at)| *seen_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        values.remove(&key);
+    }
+}
+
+fn resolve_session_reply_target(
+    connector: &DingTalkConnector,
+    chat_id: &str,
+    input: &Value,
+) -> FcpResult<DingTalkSessionReplyTarget> {
+    if let Some(session_webhook) = optional_string(input, "session_webhook")? {
+        validate_session_webhook_url(session_webhook).map_err(|error| {
+            FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("invalid DingTalk session_webhook: {error}"),
+            }
+        })?;
+        return Ok(DingTalkSessionReplyTarget {
+            chat_id: chat_id.to_string(),
+            session_webhook: session_webhook.to_string(),
+            source: "request",
+        });
+    }
+
+    let state = connector
+        .stream_state
+        .lock()
+        .map_err(|_| FcpError::Internal {
+            message: "DingTalk stream state lock is poisoned".into(),
+        })?;
+    let Some(cached) = state.session_webhooks.get(chat_id) else {
+        return Err(FcpError::InvalidRequest {
+            code: 1006,
+            message: "no valid DingTalk session_webhook is cached for chat_id".into(),
+        });
+    };
+    Ok(DingTalkSessionReplyTarget {
+        chat_id: chat_id.to_string(),
+        session_webhook: cached.url.clone(),
+        source: "cache",
+    })
+}
+
+fn dingtalk_event_envelope(
+    connector: &DingTalkConnector,
+    normalized: &NormalizedDingTalkEvent,
+    raw: &Value,
+    outcome: &DingTalkStreamSecurityOutcome,
+    correlation_id: Option<fcp_prelude::CorrelationId>,
+) -> EventEnvelope {
+    let principal = Principal {
+        kind: "user".into(),
+        id: normalized
+            .sender_id
+            .clone()
+            .unwrap_or_else(|| "unknown".into()),
+        trust: TrustLevel::Paired,
+        display: normalized.sender_name.clone(),
+    };
+    let zone = connector.zone.clone().unwrap_or_else(ZoneId::work);
+    let resource_uris = dingtalk_event_resource_uris(normalized);
+    let payload = json!({
+        "normalized": normalized,
+        "raw": raw,
+        "policy": {
+            "model": DINGTALK_STREAM_POLICY_MODEL,
+            "decision": outcome.decision,
+            "reason": outcome.reason,
+            "message_key_hash": outcome.message_key_hash,
+            "sender_hash": outcome.sender_hash,
+            "conversation_hash": outcome.conversation_hash,
+        }
+    });
+    let mut data = EventData::new(
+        connector.base.id.clone(),
+        connector.base.instance_id.clone(),
+        zone,
+        principal,
+        payload,
+    )
+    .with_resource_uris(resource_uris);
+    if let Some(correlation_id) = correlation_id {
+        data = data.with_correlation_id(correlation_id);
+    }
+    let stream_key = normalized
+        .conversation_id
+        .clone()
+        .or_else(|| normalized.sender_id.clone());
+    let mut envelope =
+        EventEnvelope::new("dingtalk.message", data).with_ordering(OrderingPolicy::PerKey);
+    if let Some(stream_key) = stream_key {
+        envelope = envelope.with_stream_key(stream_key);
+    }
+    envelope
+}
+
+fn dingtalk_event_resource_uris(normalized: &NormalizedDingTalkEvent) -> Vec<String> {
+    let mut uris = Vec::new();
+    if let Some(conversation_id) = &normalized.conversation_id {
+        uris.push(format!("dingtalk:conversation:{conversation_id}"));
+    }
+    if let Some(sender_id) = &normalized.sender_id {
+        uris.push(format!("dingtalk:user:{sender_id}"));
+    }
+    if let Some(message_id) = &normalized.message_id {
+        uris.push(format!("dingtalk:message:{message_id}"));
+    }
+    uris
+}
+
+fn stream_state_counts(connector: &DingTalkConnector) -> FcpResult<DingTalkStreamStateCounts> {
+    connector
+        .stream_state
+        .lock()
+        .map(|state| state.counts())
+        .map_err(|_| FcpError::Internal {
+            message: "DingTalk stream state lock is poisoned".into(),
+        })
+}
+
+fn stream_state_counts_lossy(connector: &DingTalkConnector) -> DingTalkStreamStateCounts {
+    connector
+        .stream_state
+        .lock()
+        .map(|state| state.counts())
+        .unwrap_or(DingTalkStreamStateCounts {
+            seen_messages: 0,
+            cached_session_webhooks: 0,
+            accepted_events: 0,
+            rejected_events: 0,
+            duplicate_events: 0,
+        })
+}
+
+fn truncate_reply_content(content: &str) -> String {
+    content.chars().take(MAX_REPLY_CONTENT_LEN).collect()
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+fn redacted_hash(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    let encoded = hex::encode(digest);
+    format!("sha256:{}", &encoded[..16])
+}
+
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
-        OP_SEND_TEXT | OP_SEND_LINK | OP_SEND_FILE => CAP_MESSAGES_WRITE,
-        OP_NORMALIZE_EVENT => CAP_MESSAGES_READ,
+        OP_SEND_TEXT | OP_SEND_LINK | OP_SEND_FILE | OP_STREAM_REPLY => CAP_MESSAGES_WRITE,
+        OP_NORMALIZE_EVENT | OP_STREAM_INGEST => CAP_MESSAGES_READ,
         OP_UPLOAD_MEDIA => CAP_MEDIA_WRITE,
         OP_HEALTH => CAP_HEALTH_READ,
         _ => {

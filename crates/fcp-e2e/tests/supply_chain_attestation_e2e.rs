@@ -156,6 +156,11 @@ fn hex_lower(bytes: &[u8]) -> String {
     out
 }
 
+fn tuf_metadata_signature(signed: &Value, signing_key: &Ed25519SigningKey) -> String {
+    let signed_bytes = serde_json::to_vec(signed).expect("canonical TUF signed bytes");
+    hex_lower(&signing_key.sign(&signed_bytes).to_bytes())
+}
+
 fn find_cosign() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("COSIGN_BIN") {
         let path = PathBuf::from(path);
@@ -164,31 +169,36 @@ fn find_cosign() -> Option<PathBuf> {
         }
     }
 
-    let mut candidates = vec![
+    let candidates = vec![
         PathBuf::from("cosign"),
         PathBuf::from("/opt/homebrew/bin/cosign"),
         PathBuf::from("/usr/local/bin/cosign"),
         PathBuf::from("/usr/bin/cosign"),
-        PathBuf::from("/tmp/fcp-cosign-bin/cosign"),
     ];
-    if let Some(home) = std::env::var_os("HOME") {
-        candidates.push(PathBuf::from(home).join("go/bin/cosign"));
-    }
 
-    for candidate in candidates {
-        if command_succeeds(&candidate, &["version"]) {
-            return Some(candidate);
-        }
-    }
-
-    None
+    candidates
+        .into_iter()
+        .find(|candidate| command_succeeds(candidate, &["version"]))
 }
 
 fn command_succeeds(program: &Path, args: &[&str]) -> bool {
-    Command::new(program)
+    let Some(mut command) = cosign_command(program) else {
+        return false;
+    };
+    command
         .args(args)
         .output()
         .is_ok_and(|output| output.status.success())
+}
+
+fn cosign_command(program: &Path) -> Option<Command> {
+    match program.to_str()? {
+        "cosign" => Some(Command::new("cosign")),
+        "/opt/homebrew/bin/cosign" => Some(Command::new("/opt/homebrew/bin/cosign")),
+        "/usr/local/bin/cosign" => Some(Command::new("/usr/local/bin/cosign")),
+        "/usr/bin/cosign" => Some(Command::new("/usr/bin/cosign")),
+        _ => None,
+    }
 }
 
 fn run_command(trail: &mut AuditTrail, phase: &str, command: &mut Command) {
@@ -217,7 +227,7 @@ fn run_command(trail: &mut AuditTrail, phase: &str, command: &mut Command) {
 
 fn sign_with_cosign(paths: &ScenarioPaths, cosign: &Path, trail: &mut AuditTrail) {
     let passphrase = "fcp-e2e-cosign";
-    let mut keygen = Command::new(cosign);
+    let mut keygen = cosign_command(cosign).expect("cosign path came from allowlist");
     keygen
         .arg("generate-key-pair")
         .arg("--output-key-prefix")
@@ -225,7 +235,7 @@ fn sign_with_cosign(paths: &ScenarioPaths, cosign: &Path, trail: &mut AuditTrail
         .env("COSIGN_PASSWORD", passphrase);
     run_command(trail, "cosign_generate_key_pair", &mut keygen);
 
-    let mut sign = Command::new(cosign);
+    let mut sign = cosign_command(cosign).expect("cosign path came from allowlist");
     sign.arg("sign-blob")
         .arg("--key")
         .arg(&paths.cosign_key)
@@ -338,46 +348,58 @@ fn write_tuf_metadata(
         .to_string();
     let target_len = u64::try_from(binary_bytes.len()).expect("binary length fits u64");
     let key_id = "tuf-root-e2e";
+    let tuf_signing_key = Ed25519SigningKey::generate();
+    let public_hex = hex_lower(&tuf_signing_key.verifying_key().to_bytes());
 
+    let mut keys = serde_json::Map::new();
+    keys.insert(
+        key_id.to_string(),
+        json!({
+            "keytype": "ed25519",
+            "scheme": "ed25519",
+            "keyval": { "public": public_hex }
+        }),
+    );
+    let mut roles = serde_json::Map::new();
+    roles.insert(
+        "root".to_string(),
+        json!({ "keyids": [key_id], "threshold": 1 }),
+    );
+    roles.insert(
+        "targets".to_string(),
+        json!({ "keyids": [key_id], "threshold": 1 }),
+    );
+
+    let root_signed = json!({
+        "_type": "root",
+        "version": 1,
+        "expires": expires.clone(),
+        "keys": keys,
+        "roles": roles,
+    });
+    let root_signature = tuf_metadata_signature(&root_signed, &tuf_signing_key);
     let root_json = json!({
-        "signed": {
-            "_type": "root",
-            "version": 1,
-            "expires": expires,
-            "keys": {
-                key_id: {
-                    "keytype": "ed25519",
-                    "scheme": "ed25519",
-                    "keyval": { "public": "e2e-local-root" }
-                }
-            },
-            "roles": {
-                "root": { "keyids": [key_id], "threshold": 1 },
-                "targets": { "keyids": [key_id], "threshold": 1 }
-            }
-        },
-        "signatures": [
-            { "keyid": key_id, "sig": "local-e2e-root-signature" }
-        ]
+        "signed": root_signed,
+        "signatures": [{ "keyid": key_id, "sig": root_signature }]
     });
     let root_bytes = serde_json::to_vec_pretty(&root_json).expect("root json");
     std::fs::write(metadata_dir.join("root.json"), &root_bytes).expect("write root metadata");
 
-    let targets_json = json!({
-        "signed": {
-            "_type": "targets",
-            "version": 1,
-            "expires": expires,
-            "targets": {
-                target_path: {
-                    "length": target_len,
-                    "hashes": { "sha256": binary_sha256_hex }
-                }
+    let targets_signed = json!({
+        "_type": "targets",
+        "version": 1,
+        "expires": expires,
+        "targets": {
+            target_path: {
+                "length": target_len,
+                "hashes": { "sha256": binary_sha256_hex }
             }
-        },
-        "signatures": [
-            { "keyid": key_id, "sig": "local-e2e-targets-signature" }
-        ]
+        }
+    });
+    let targets_signature = tuf_metadata_signature(&targets_signed, &tuf_signing_key);
+    let targets_json = json!({
+        "signed": targets_signed,
+        "signatures": [{ "keyid": key_id, "sig": targets_signature }]
     });
     std::fs::write(
         metadata_dir.join("targets.json"),
@@ -548,7 +570,7 @@ fn supply_chain_attestation_e2e() {
     let paths = ScenarioPaths::create();
     let cosign = find_cosign().expect(
         "supply_chain_attestation_e2e requires the real cosign CLI on PATH, \
-         in $HOME/go/bin, or COSIGN_BIN pointing to it",
+         an allowed system path, or COSIGN_BIN set to one of those locations",
     );
     trail.record(
         "setup",

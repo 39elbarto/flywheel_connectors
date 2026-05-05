@@ -100,7 +100,7 @@ fn rejected_external_source(
         .arg("--manifest-path")
         .arg(crate_dir.join("Cargo.toml"))
         .env("CARGO_TARGET_DIR", &target_dir)
-        .current_dir(&registry_root)
+        .current_dir(registry_root)
         .output()
         .expect("run external cargo check");
 

@@ -26,7 +26,7 @@ pub use fcp_core::{
     ConnectorBinaryObject, ConnectorBinarySymbolSet, ConnectorBinaryTransmissionInfo,
     ConnectorManifestObject, ConnectorTarget,
 };
-use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey};
+use fcp_crypto::ed25519::{Ed25519Signature, Ed25519VerifyingKey, PUBLIC_KEY_SIZE, SIGNATURE_SIZE};
 use fcp_manifest::{
     AttestationType, Base64Bytes, ConnectorManifest, ManifestError, SignatureEntry,
     SignaturesSection,
@@ -661,6 +661,14 @@ pub enum SupplyChainVerificationError {
     TufRollback { current: u32, got: u32 },
     #[error("TUF freeze attack detected: timestamp metadata unchanged")]
     TufFreeze,
+    #[error("TUF metadata signature invalid")]
+    TufSignatureInvalid,
+    #[error("TUF {role} metadata signature threshold unmet (required {required}, valid {valid})")]
+    TufSignatureThreshold {
+        role: String,
+        required: u8,
+        valid: usize,
+    },
     #[error("Sigstore signature invalid")]
     SigstoreSignatureInvalid,
     #[error("Sigstore certificate expired or not yet valid")]
@@ -809,7 +817,8 @@ impl SigstoreVerifier for NoOpSigstoreVerifier {
 ///
 /// The verifier reads real TUF role files (`root.json` and `targets.json`)
 /// from `metadata_dir`, validates root pinning, expiry, rollback, target
-/// length, and SHA-256 target hash, then returns a private
+/// length, SHA-256 target hash, and Ed25519 role-signature thresholds,
+/// then returns a private
 /// [`TufVerificationResult`] that can promote [`SupplyChainEvidence`].
 #[derive(Debug, Clone)]
 pub struct LocalTufVerifier {
@@ -867,6 +876,7 @@ impl LocalTufVerifier {
                     root_path.display()
                 ))
             })?;
+        let root_signed_bytes = tuf_signed_bytes(&root_bytes, "root")?;
         root.require_role("root")?;
         ensure_not_expired(&root.signed.expires)?;
         if root.signed.version < pinned_root.version {
@@ -875,27 +885,33 @@ impl LocalTufVerifier {
                 got: root.signed.version,
             });
         }
-        if let Some(root_role) = root.signed.roles.get("root") {
-            if root_role.threshold != pinned_root.threshold
-                || !pinned_root
-                    .key_ids
-                    .iter()
-                    .all(|key_id| root_role.keyids.iter().any(|candidate| candidate == key_id))
-            {
-                return Err(SupplyChainVerificationError::TufRootMismatch {
-                    expected: format!(
-                        "threshold={} keyids={}",
-                        pinned_root.threshold,
-                        pinned_root.key_ids.join(",")
-                    ),
-                    actual: format!(
-                        "threshold={} keyids={}",
-                        root_role.threshold,
-                        root_role.keyids.join(",")
-                    ),
-                });
-            }
+        let root_role = required_tuf_role(&root.signed.roles, "root")?;
+        if root_role.threshold != pinned_root.threshold
+            || !pinned_root
+                .key_ids
+                .iter()
+                .all(|key_id| root_role.keyids.iter().any(|candidate| candidate == key_id))
+        {
+            return Err(SupplyChainVerificationError::TufRootMismatch {
+                expected: format!(
+                    "threshold={} keyids={}",
+                    pinned_root.threshold,
+                    pinned_root.key_ids.join(",")
+                ),
+                actual: format!(
+                    "threshold={} keyids={}",
+                    root_role.threshold,
+                    root_role.keyids.join(",")
+                ),
+            });
         }
+        verify_tuf_role_signatures(
+            "root",
+            root_role,
+            &root.signed.keys,
+            &root.signatures,
+            &root_signed_bytes,
+        )?;
 
         let targets_path = self.metadata_dir.join("targets.json");
         let targets_bytes = std::fs::read(&targets_path).map_err(|source| {
@@ -911,8 +927,17 @@ impl LocalTufVerifier {
                 targets_path.display()
             ))
         })?;
+        let targets_signed_bytes = tuf_signed_bytes(&targets_bytes, "targets")?;
         targets.require_role("targets")?;
         ensure_not_expired(&targets.signed.expires)?;
+        let targets_role = required_tuf_role(&root.signed.roles, "targets")?;
+        verify_tuf_role_signatures(
+            "targets",
+            targets_role,
+            &root.signed.keys,
+            &targets.signatures,
+            &targets_signed_bytes,
+        )?;
 
         let target = targets.signed.targets.get(target_path).ok_or_else(|| {
             SupplyChainVerificationError::TufTargetNotFound {
@@ -989,15 +1014,23 @@ impl TufVerifier for LocalTufVerifier {
                     root_path.display()
                 ))
             })?;
-        let root_role = root.signed.roles.get("root");
+        let root_signed_bytes = tuf_signed_bytes(&root_bytes, "root")?;
+        root.require_role("root")?;
+        ensure_not_expired(&root.signed.expires)?;
+        let root_role = required_tuf_role(&root.signed.roles, "root")?;
+        verify_tuf_role_signatures(
+            "root",
+            root_role,
+            &root.signed.keys,
+            &root.signatures,
+            &root_signed_bytes,
+        )?;
         Ok(TufRootMetadata {
             version: root.signed.version,
             root_hash: hash_bytes(&root_bytes),
             expires: unix_expiry(&root.signed.expires)?,
-            key_ids: root_role
-                .map(|role| role.keyids.clone())
-                .unwrap_or_default(),
-            threshold: root_role.map_or(1, |role| role.threshold),
+            key_ids: root_role.keyids.clone(),
+            threshold: root_role.threshold,
         })
     }
 }
@@ -1057,7 +1090,7 @@ impl CosignBlobVerifier {
             return Err(SupplyChainVerificationError::SigstoreSignatureInvalid);
         }
 
-        let mut command = Command::new(&self.cosign_binary);
+        let mut command = cosign_command(&self.cosign_binary)?;
         command
             .arg("verify-blob")
             .arg("--key")
@@ -1090,6 +1123,24 @@ impl CosignBlobVerifier {
             issuer,
             rekor_log_index: None,
         })
+    }
+}
+
+fn cosign_command(cosign_binary: &Path) -> Result<Command, SupplyChainVerificationError> {
+    let Some(candidate) = cosign_binary.to_str() else {
+        return Err(SupplyChainVerificationError::Network(
+            "cosign executable path is not valid UTF-8".to_string(),
+        ));
+    };
+    match candidate {
+        "cosign" => Ok(Command::new("cosign")),
+        "/opt/homebrew/bin/cosign" => Ok(Command::new("/opt/homebrew/bin/cosign")),
+        "/usr/local/bin/cosign" => Ok(Command::new("/usr/local/bin/cosign")),
+        "/usr/bin/cosign" => Ok(Command::new("/usr/bin/cosign")),
+        _ => Err(SupplyChainVerificationError::Network(format!(
+            "unsupported cosign executable `{}`; use `cosign` on PATH or a fixed system path",
+            cosign_binary.display()
+        ))),
     }
 }
 
@@ -1146,6 +1197,8 @@ struct TufRootSigned {
     version: u32,
     expires: String,
     #[serde(default)]
+    keys: HashMap<String, TufKeyMetadata>,
+    #[serde(default)]
     roles: HashMap<String, TufRoleMetadata>,
 }
 
@@ -1160,6 +1213,18 @@ struct TufRoleMetadata {
     #[serde(default)]
     keyids: Vec<String>,
     threshold: u8,
+}
+
+#[derive(Debug, Deserialize)]
+struct TufKeyMetadata {
+    keytype: String,
+    scheme: String,
+    keyval: TufKeyValue,
+}
+
+#[derive(Debug, Deserialize)]
+struct TufKeyValue {
+    public: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1190,6 +1255,145 @@ fn normalize_sha256(value: &str) -> String {
     } else {
         format!("sha256:{value}")
     }
+}
+
+fn required_tuf_role<'a>(
+    roles: &'a HashMap<String, TufRoleMetadata>,
+    role_name: &str,
+) -> Result<&'a TufRoleMetadata, SupplyChainVerificationError> {
+    roles.get(role_name).ok_or_else(|| {
+        SupplyChainVerificationError::Network(format!(
+            "TUF root metadata does not declare `{role_name}` role"
+        ))
+    })
+}
+
+fn tuf_signed_bytes(
+    metadata_bytes: &[u8],
+    role_name: &str,
+) -> Result<Vec<u8>, SupplyChainVerificationError> {
+    let metadata: serde_json::Value = serde_json::from_slice(metadata_bytes).map_err(|source| {
+        SupplyChainVerificationError::Network(format!(
+            "failed to parse TUF {role_name} metadata for signing bytes: {source}"
+        ))
+    })?;
+    let signed = metadata.get("signed").ok_or_else(|| {
+        SupplyChainVerificationError::Network(format!(
+            "TUF {role_name} metadata missing signed payload"
+        ))
+    })?;
+    serde_json::to_vec(signed).map_err(|source| {
+        SupplyChainVerificationError::Network(format!(
+            "failed to canonicalize TUF {role_name} signed payload: {source}"
+        ))
+    })
+}
+
+fn verify_tuf_role_signatures(
+    role_name: &str,
+    role: &TufRoleMetadata,
+    keys: &HashMap<String, TufKeyMetadata>,
+    signatures: &[TufMetadataSignature],
+    signed_bytes: &[u8],
+) -> Result<(), SupplyChainVerificationError> {
+    if role.threshold == 0 {
+        return Err(SupplyChainVerificationError::Network(format!(
+            "TUF {role_name} role has zero signature threshold"
+        )));
+    }
+    if role.keyids.is_empty() {
+        return Err(SupplyChainVerificationError::Network(format!(
+            "TUF {role_name} role has no signing key IDs"
+        )));
+    }
+    for key_id in &role.keyids {
+        if !keys.contains_key(key_id) {
+            return Err(SupplyChainVerificationError::Network(format!(
+                "TUF {role_name} role references missing key `{key_id}`"
+            )));
+        }
+    }
+
+    let allowed_key_ids: HashSet<&str> = role.keyids.iter().map(String::as_str).collect();
+    let mut valid_key_ids = HashSet::new();
+    for signature in signatures {
+        if !allowed_key_ids.contains(signature.keyid.as_str()) {
+            continue;
+        }
+        let Some(key) = keys.get(&signature.keyid) else {
+            continue;
+        };
+        if verify_tuf_ed25519_signature(key, signed_bytes, &signature.sig).is_ok() {
+            valid_key_ids.insert(signature.keyid.as_str());
+        }
+    }
+
+    let required = usize::from(role.threshold);
+    if valid_key_ids.len() < required {
+        return Err(SupplyChainVerificationError::TufSignatureThreshold {
+            role: role_name.to_string(),
+            required: role.threshold,
+            valid: valid_key_ids.len(),
+        });
+    }
+    Ok(())
+}
+
+fn verify_tuf_ed25519_signature(
+    key: &TufKeyMetadata,
+    signed_bytes: &[u8],
+    signature: &str,
+) -> Result<(), SupplyChainVerificationError> {
+    if !key.keytype.trim().eq_ignore_ascii_case("ed25519")
+        || !key.scheme.trim().eq_ignore_ascii_case("ed25519")
+    {
+        return Err(SupplyChainVerificationError::Network(format!(
+            "unsupported TUF key type `{}` / scheme `{}`",
+            key.keytype, key.scheme
+        )));
+    }
+
+    let public_hex = key
+        .keyval
+        .public
+        .trim()
+        .strip_prefix("ed25519:")
+        .unwrap_or_else(|| key.keyval.public.trim());
+    let public_bytes = hex::decode(public_hex).map_err(|source| {
+        SupplyChainVerificationError::Network(format!(
+            "invalid TUF Ed25519 public key encoding: {source}"
+        ))
+    })?;
+    let public_bytes: [u8; PUBLIC_KEY_SIZE] = public_bytes.as_slice().try_into().map_err(|_| {
+        SupplyChainVerificationError::Network(format!(
+            "invalid TUF Ed25519 public key length: expected {PUBLIC_KEY_SIZE}"
+        ))
+    })?;
+    let verifying_key = Ed25519VerifyingKey::from_bytes(&public_bytes).map_err(|source| {
+        SupplyChainVerificationError::Network(format!("invalid TUF Ed25519 public key: {source}"))
+    })?;
+
+    let signature_hex = signature
+        .trim()
+        .strip_prefix("ed25519:")
+        .unwrap_or_else(|| signature.trim());
+    let signature_bytes = hex::decode(signature_hex).map_err(|source| {
+        SupplyChainVerificationError::Network(format!(
+            "invalid TUF Ed25519 signature encoding: {source}"
+        ))
+    })?;
+    if signature_bytes.len() != SIGNATURE_SIZE {
+        return Err(SupplyChainVerificationError::Network(format!(
+            "invalid TUF Ed25519 signature length: expected {SIGNATURE_SIZE}, got {}",
+            signature_bytes.len()
+        )));
+    }
+    let signature = Ed25519Signature::try_from_slice(&signature_bytes).map_err(|source| {
+        SupplyChainVerificationError::Network(format!("invalid TUF Ed25519 signature: {source}"))
+    })?;
+    verifying_key
+        .verify(signed_bytes, &signature)
+        .map_err(|_| SupplyChainVerificationError::TufSignatureInvalid)
 }
 
 fn ensure_not_expired(expires: &str) -> Result<(), SupplyChainVerificationError> {
@@ -3156,7 +3360,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         binary_hash: &str,
     ) -> Base64Bytes {
-        let manifest = ConnectorManifest::parse_str(manifest_toml).expect("manifest");
+        let manifest = ConnectorManifest::parse_str_unchecked(manifest_toml).expect("manifest");
         let signing_bytes = manifest_signing_bytes(&manifest).expect("signing bytes");
         let message = signature_message(&signing_bytes, binary_hash);
         let signature = signing_key.sign_with_context(MANIFEST_SIGNATURE_CONTEXT, &message);
@@ -3165,6 +3369,95 @@ mod tests {
             base64::engine::general_purpose::STANDARD.encode(signature.to_bytes())
         ))
         .expect("base64 sig")
+    }
+
+    fn sign_tuf_signed_payload(
+        signed: &serde_json::Value,
+        signing_key: &Ed25519SigningKey,
+    ) -> String {
+        let signed_bytes = serde_json::to_vec(signed).expect("canonical TUF signed bytes");
+        hex::encode(signing_key.sign(&signed_bytes).to_bytes())
+    }
+
+    fn write_test_tuf_metadata(
+        metadata_dir: &Path,
+        target_path: &str,
+        target_bytes: &[u8],
+        signing_key: &Ed25519SigningKey,
+    ) -> TufRootMetadata {
+        let key_id = "tuf-ed25519-test";
+        let expires = (Utc::now() + chrono::Duration::days(7)).to_rfc3339();
+        let public_hex = hex::encode(signing_key.verifying_key().to_bytes());
+        let target_hash = hash_bytes(target_bytes)
+            .strip_prefix("sha256:")
+            .expect("sha256 prefix")
+            .to_string();
+        let target_len = u64::try_from(target_bytes.len()).expect("target length fits u64");
+
+        let mut keys = serde_json::Map::new();
+        keys.insert(
+            key_id.to_string(),
+            json!({
+                "keytype": "ed25519",
+                "scheme": "ed25519",
+                "keyval": { "public": public_hex }
+            }),
+        );
+        let mut roles = serde_json::Map::new();
+        roles.insert(
+            "root".to_string(),
+            json!({ "keyids": [key_id], "threshold": 1 }),
+        );
+        roles.insert(
+            "targets".to_string(),
+            json!({ "keyids": [key_id], "threshold": 1 }),
+        );
+
+        let root_signed = json!({
+            "_type": "root",
+            "version": 1,
+            "expires": expires.clone(),
+            "keys": keys,
+            "roles": roles,
+        });
+        let root_signature = sign_tuf_signed_payload(&root_signed, signing_key);
+        let root_json = json!({
+            "signed": root_signed,
+            "signatures": [{ "keyid": key_id, "sig": root_signature }],
+        });
+        let root_bytes = serde_json::to_vec_pretty(&root_json).expect("root json");
+        std::fs::write(metadata_dir.join("root.json"), &root_bytes).expect("write root metadata");
+
+        let targets_signed = json!({
+            "_type": "targets",
+            "version": 1,
+            "expires": expires,
+            "targets": {
+                target_path: {
+                    "length": target_len,
+                    "hashes": { "sha256": target_hash },
+                },
+            },
+        });
+        let targets_signature = sign_tuf_signed_payload(&targets_signed, signing_key);
+        let targets_json = json!({
+            "signed": targets_signed,
+            "signatures": [{ "keyid": key_id, "sig": targets_signature }],
+        });
+        std::fs::write(
+            metadata_dir.join("targets.json"),
+            serde_json::to_vec_pretty(&targets_json).expect("targets json"),
+        )
+        .expect("write targets metadata");
+
+        TufRootMetadata {
+            version: 1,
+            root_hash: hash_bytes(&root_bytes),
+            expires: u64::try_from((Utc::now() + chrono::Duration::days(7)).timestamp())
+                .expect("future timestamp"),
+            key_ids: vec![key_id.to_string()],
+            threshold: 1,
+        }
     }
 
     fn publisher_signature_section(kid: &str, sig: &Base64Bytes) -> String {
@@ -3998,7 +4291,10 @@ require_transparency_log = true
                 let err = verifier
                     .verify_bundle(&bundle, None, None, None)
                     .expect_err("missing transparency entry");
-                assert!(matches!(err, RegistryError::TransparencyLogMissing));
+                assert!(
+                    matches!(&err, RegistryError::ManifestParse(_))
+                        && err.to_string().contains("transparency_log_entry")
+                );
 
                 RegistryLogData {
                     reason_code: Some("transparency_log_missing".to_string()),
@@ -5653,6 +5949,162 @@ sig = "base64:{sig_b64}"
 
                 RegistryLogData {
                     reason_code: Some("tuf_expired_detected".to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn local_tuf_verifier_accepts_valid_signed_metadata() {
+        run_registry_test(
+            "local_tuf_verifier_accepts_valid_signed_metadata",
+            "verify",
+            "tuf-adapter",
+            4,
+            || async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let signing_key = Ed25519SigningKey::generate();
+                let target_path = "connectors/fcp.test-1.0.0.tar.gz";
+                let target_bytes = b"test connector binary";
+                let pinned =
+                    write_test_tuf_metadata(dir.path(), target_path, target_bytes, &signing_key);
+                let verifier = LocalTufVerifier::new(dir.path());
+
+                let root = verifier.fetch_root().await.expect("signed root verifies");
+                assert_eq!(root.key_ids, pinned.key_ids);
+
+                let result = verifier
+                    .verify_target_bytes(&pinned, target_path, target_bytes)
+                    .expect("signed target metadata verifies");
+                assert!(result.verified());
+                assert_eq!(result.root_version(), 1);
+                assert_eq!(
+                    result.target().map(|target| target.target_path.as_str()),
+                    Some(target_path)
+                );
+
+                RegistryLogData {
+                    reason_code: Some("local_tuf_signed_metadata_verified".to_string()),
+                    target: Some(target_path.to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn local_tuf_verifier_rejects_tampered_targets_metadata_with_nonempty_signature() {
+        run_registry_test(
+            "local_tuf_verifier_rejects_tampered_targets_metadata_with_nonempty_signature",
+            "verify",
+            "tuf-adapter",
+            2,
+            || async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let signing_key = Ed25519SigningKey::generate();
+                let target_path = "connectors/fcp.test-1.0.0.tar.gz";
+                let target_bytes = b"test connector binary";
+                let pinned =
+                    write_test_tuf_metadata(dir.path(), target_path, target_bytes, &signing_key);
+
+                let targets_path = dir.path().join("targets.json");
+                let mut targets_json: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&targets_path).expect("targets json"))
+                        .expect("parse targets json");
+                let target_sha256 = targets_json
+                    .get_mut("signed")
+                    .and_then(|signed| signed.get_mut("targets"))
+                    .and_then(|targets| targets.get_mut(target_path))
+                    .and_then(|target| target.get_mut("hashes"))
+                    .and_then(|hashes| hashes.get_mut("sha256"))
+                    .expect("target sha256 slot");
+                *target_sha256 =
+                    json!("0000000000000000000000000000000000000000000000000000000000000000");
+                let target_signature = targets_json
+                    .get_mut("signatures")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|signatures| signatures.first_mut())
+                    .and_then(|signature| signature.get_mut("sig"))
+                    .expect("target signature slot");
+                *target_signature = json!(hex::encode([0x42_u8; 64]));
+                std::fs::write(
+                    &targets_path,
+                    serde_json::to_vec_pretty(&targets_json).expect("tampered targets json"),
+                )
+                .expect("write tampered targets");
+
+                let verifier = LocalTufVerifier::new(dir.path());
+                let err = verifier
+                    .verify_target(&pinned, target_path)
+                    .await
+                    .expect_err("tampered targets metadata must fail signature threshold");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TufSignatureThreshold {
+                        ref role,
+                        required: 1,
+                        valid: 0,
+                    } if role == "targets"
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("local_tuf_tampered_targets_refused".to_string()),
+                    target: Some(target_path.to_string()),
+                    ..RegistryLogData::default()
+                }
+            },
+        );
+    }
+
+    #[test]
+    fn local_tuf_verifier_rejects_root_metadata_signed_by_wrong_key_id() {
+        run_registry_test(
+            "local_tuf_verifier_rejects_root_metadata_signed_by_wrong_key_id",
+            "verify",
+            "tuf-adapter",
+            1,
+            || async {
+                let dir = tempfile::tempdir().expect("tempdir");
+                let signing_key = Ed25519SigningKey::generate();
+                let target_path = "connectors/fcp.test-1.0.0.tar.gz";
+                let target_bytes = b"test connector binary";
+                let _pinned =
+                    write_test_tuf_metadata(dir.path(), target_path, target_bytes, &signing_key);
+
+                let root_path = dir.path().join("root.json");
+                let mut root_json: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(&root_path).expect("root json"))
+                        .expect("parse root json");
+                let root_signature_key = root_json
+                    .get_mut("signatures")
+                    .and_then(serde_json::Value::as_array_mut)
+                    .and_then(|signatures| signatures.first_mut())
+                    .and_then(|signature| signature.get_mut("keyid"))
+                    .expect("root signature keyid slot");
+                *root_signature_key = json!("attacker-key");
+                std::fs::write(
+                    &root_path,
+                    serde_json::to_vec_pretty(&root_json).expect("tampered root json"),
+                )
+                .expect("write tampered root");
+
+                let verifier = LocalTufVerifier::new(dir.path());
+                let err = verifier
+                    .fetch_root()
+                    .await
+                    .expect_err("root signature key ID outside root role must fail");
+                assert!(matches!(
+                    err,
+                    SupplyChainVerificationError::TufSignatureThreshold {
+                        ref role,
+                        required: 1,
+                        valid: 0,
+                    } if role == "root"
+                ));
+
+                RegistryLogData {
+                    reason_code: Some("local_tuf_wrong_root_key_refused".to_string()),
                     ..RegistryLogData::default()
                 }
             },

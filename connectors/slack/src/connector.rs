@@ -1611,6 +1611,7 @@ fn normalize_monitor_policy_id(field: &str, value: &str) -> FcpResult<Option<Str
     if value.is_empty() {
         return Ok(None);
     }
+    let value = normalize_monitor_policy_identifier(field, value);
     if value.len() > MONITOR_POLICY_ID_MAX_CHARS {
         return Err(invalid_monitor_policy(format!(
             "{field} entries must be at most {MONITOR_POLICY_ID_MAX_CHARS} characters"
@@ -1627,7 +1628,48 @@ fn normalize_monitor_policy_id(field: &str, value: &str) -> FcpResult<Option<Str
         )));
     }
 
-    Ok(Some(value.to_string()))
+    Ok(Some(value))
+}
+
+fn normalize_monitor_policy_identifier(field: &str, value: &str) -> String {
+    if field.ends_with(".allowed_users") || field.ends_with(".bot_user_id") {
+        return normalize_slack_user_policy_id(value);
+    }
+    if field.ends_with(".allowed_channels") || field.ends_with(".free_response_channels") {
+        return normalize_slack_channel_policy_id(value);
+    }
+    value.to_string()
+}
+
+fn normalize_slack_user_policy_id(value: &str) -> String {
+    let unwrapped = unwrap_slack_mention(value, '@').unwrap_or(value);
+    unwrapped
+        .strip_prefix("slack:")
+        .or_else(|| unwrapped.strip_prefix("user:"))
+        .unwrap_or(unwrapped)
+        .to_string()
+}
+
+fn normalize_slack_channel_policy_id(value: &str) -> String {
+    let unwrapped = unwrap_slack_mention(value, '#').unwrap_or(value);
+    unwrapped
+        .strip_prefix("slack:channel:")
+        .or_else(|| unwrapped.strip_prefix("channel:"))
+        .or_else(|| unwrapped.strip_prefix("slack:"))
+        .unwrap_or(unwrapped)
+        .to_string()
+}
+
+fn unwrap_slack_mention(value: &str, sigil: char) -> Option<&str> {
+    let prefix = match sigil {
+        '@' => "<@",
+        '#' => "<#",
+        _ => return None,
+    };
+    let inner = value.strip_prefix(prefix)?.strip_suffix('>')?;
+    inner
+        .split_once('|')
+        .map_or(Some(inner), |(id, _)| (!id.is_empty()).then_some(id))
 }
 
 fn policy_set_allows(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
@@ -1785,6 +1827,13 @@ fn socket_payload_channel(payload: &Value) -> Option<&str> {
                 .get("event")
                 .and_then(|event| event.get("previous_message"))
                 .and_then(|message| message.get("channel"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("channel_id").and_then(Value::as_str))
+        .or_else(|| {
+            payload
+                .get("channel")
+                .and_then(|channel| channel.get("id"))
                 .and_then(Value::as_str)
         })
         .or_else(|| payload.get("channel").and_then(Value::as_str))
@@ -3492,6 +3541,40 @@ mod tests {
     }
 
     #[test]
+    fn test_monitor_policy_normalizes_prefixed_ids_and_mentions() {
+        let policy = SlackMonitorPolicy::from_config(Some(&json!({
+            "bot_user_id": "<@U_BOT|bot>",
+            "allowed_channels": [
+                "slack:channel:C_ALLOWED",
+                "channel:C_OTHER",
+                "<#C_THIRD|ops>",
+                " slack:C_FOURTH "
+            ],
+            "allowed_users": [
+                "slack:U_ALLOWED",
+                "user:U_OTHER",
+                "<@U_THIRD|third>"
+            ],
+            "free_response_channels": ["<#C_FREE|free>"]
+        })))
+        .unwrap();
+
+        assert_eq!(policy.bot_user_id.as_deref(), Some("U_BOT"));
+        assert!(policy.allowed_channels.contains("C_ALLOWED"));
+        assert!(policy.allowed_channels.contains("C_OTHER"));
+        assert!(policy.allowed_channels.contains("C_THIRD"));
+        assert!(policy.allowed_channels.contains("C_FOURTH"));
+        assert!(policy.allowed_users.contains("U_ALLOWED"));
+        assert!(policy.allowed_users.contains("U_OTHER"));
+        assert!(policy.allowed_users.contains("U_THIRD"));
+        assert!(policy.free_response_channels.contains("C_FREE"));
+
+        let redacted = policy.to_redacted_json().to_string();
+        assert!(!redacted.contains("U_BOT"));
+        assert!(!redacted.contains("C_ALLOWED"));
+    }
+
+    #[test]
     fn test_monitor_policy_rejects_invalid_values() {
         let invalid_bool = SlackMonitorPolicy::from_config(Some(&json!({
             "require_mention": "maybe"
@@ -3638,6 +3721,49 @@ mod tests {
                     "user": "U_DENIED",
                     "text": "wrong user"
                 }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_monitor_policy_authorizes_slash_and_interactive_payload_channels() {
+        let policy = SlackMonitorPolicy::from_config(Some(&json!({
+            "require_mention": false,
+            "allowed_channels": ["channel:C_CMD"],
+            "allowed_users": ["user:U_CMD"]
+        })))
+        .unwrap();
+
+        assert!(policy.allows_payload(
+            "slack.command",
+            &json!({
+                "channel_id": "C_CMD",
+                "user_id": "U_CMD",
+                "command": "/deploy"
+            })
+        ));
+        assert!(!policy.allows_payload(
+            "slack.command",
+            &json!({
+                "channel_id": "C_OTHER",
+                "user_id": "U_CMD",
+                "command": "/deploy"
+            })
+        ));
+        assert!(!policy.allows_payload(
+            "slack.command",
+            &json!({
+                "channel_id": "C_CMD",
+                "user_id": "U_OTHER",
+                "command": "/deploy"
+            })
+        ));
+        assert!(policy.allows_payload(
+            "slack.interactive",
+            &json!({
+                "channel": { "id": "C_CMD" },
+                "user": { "id": "U_CMD" },
+                "type": "block_actions"
             })
         ));
     }

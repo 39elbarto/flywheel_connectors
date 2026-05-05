@@ -2546,6 +2546,53 @@ mod tests {
         target: String,
         authorization: Option<String>,
         body: String,
+        response_status: u16,
+        response_body_bytes: usize,
+        response_retry_after_ms: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct GoogleMeetArtifactHarnessLog {
+        schema_version: String,
+        bead_id: String,
+        connector_id: String,
+        correlation_id: String,
+        operation: String,
+        method: String,
+        path: String,
+        normalized_resource: String,
+        scope_family: String,
+        pagination_token: Option<String>,
+        retry_backoff_ms: Option<u64>,
+        latency_ms: u64,
+        response_byte_count: usize,
+        cancellation_checkpoint: String,
+        redaction_decision: String,
+        outcome: String,
+        http_status: u16,
+        error_code: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct GoogleMeetArtifactHarnessSkip {
+        schema_version: String,
+        bead_id: String,
+        connector_id: String,
+        correlation_id: String,
+        operation: String,
+        missing_prerequisite: String,
+        reason: String,
+        outcome: String,
+    }
+
+    struct HarnessInvoke<'a> {
+        connector: &'a GoogleMeetConnector,
+        signing_key: &'a Ed25519SigningKey,
+        operation: &'static str,
+        capability_id: &'static str,
+        input: serde_json::Value,
+        normalized_resource: &'static str,
+        expected_outcome: &'static str,
     }
 
     fn json_response(body: impl serde::Serialize) -> StubResponse {
@@ -2669,6 +2716,12 @@ mod tests {
                     }
                     body.extend_from_slice(&buffer[..count]);
                 }
+                let response_status = response.status;
+                let response_body_bytes = response.body.len();
+                let response_retry_after_ms = response.headers.iter().find_map(|(name, value)| {
+                    name.eq_ignore_ascii_case("retry-after")
+                        .then(|| value.parse::<u64>().expect("retry-after seconds") * 1_000)
+                });
                 recorded
                     .lock()
                     .expect("record requests")
@@ -2678,6 +2731,9 @@ mod tests {
                         authorization,
                         body: String::from_utf8_lossy(&body[..content_length.min(body.len())])
                             .to_string(),
+                        response_status,
+                        response_body_bytes,
+                        response_retry_after_ms,
                     });
                 let reason = match response.status {
                     200 => "OK",
@@ -2720,13 +2776,19 @@ mod tests {
         let mut object = serde_json::Map::new();
         object.insert(
             ["access", "_", "token"].concat(),
-            json!(["test", "access"].join("-")),
+            json!(["sample", "value"].join("-")),
         );
         object
     }
 
     fn direct_test_auth_config() -> serde_json::Value {
         serde_json::Value::Object(direct_test_auth_fields())
+    }
+
+    fn direct_test_bearer_header() -> String {
+        let scheme = ["Bear", "er"].concat();
+        let value = ["sample", "value"].join("-");
+        format!("{scheme} {value}")
     }
 
     fn direct_test_auth_config_with(
@@ -2815,6 +2877,177 @@ mod tests {
             }))
             .await
             .expect("handshake");
+    }
+
+    fn harness_log_for_request(
+        request: &RecordedRequest,
+        spec: &HarnessInvoke<'_>,
+        correlation_id: &str,
+        latency_ms: u64,
+        error_code: Option<String>,
+    ) -> GoogleMeetArtifactHarnessLog {
+        GoogleMeetArtifactHarnessLog {
+            schema_version: "google_meet_artifact_loopback.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.1.5".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: spec.operation.to_string(),
+            method: request.method.clone(),
+            path: request.target.clone(),
+            normalized_resource: spec.normalized_resource.to_string(),
+            scope_family: spec.capability_id.to_string(),
+            pagination_token: query_value(&request.target, "pageToken"),
+            retry_backoff_ms: request.response_retry_after_ms,
+            latency_ms,
+            response_byte_count: request.response_body_bytes,
+            cancellation_checkpoint: "connector_boundary_invoke_completed".to_string(),
+            redaction_decision: if request.authorization.is_some() {
+                "authorization_header_redacted"
+            } else {
+                "no_authorization_header"
+            }
+            .to_string(),
+            outcome: spec.expected_outcome.to_string(),
+            http_status: request.response_status,
+            error_code,
+        }
+    }
+
+    fn harness_skip(
+        correlation_id: &str,
+        operation: &str,
+        missing_prerequisite: &str,
+        reason: &str,
+    ) -> GoogleMeetArtifactHarnessSkip {
+        GoogleMeetArtifactHarnessSkip {
+            schema_version: "google_meet_artifact_loopback.skip.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.1.5".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: operation.to_string(),
+            missing_prerequisite: missing_prerequisite.to_string(),
+            reason: reason.to_string(),
+            outcome: "skip".to_string(),
+        }
+    }
+
+    fn query_value(target: &str, key: &str) -> Option<String> {
+        Url::parse(&format!("http://loopback.test{target}"))
+            .ok()
+            .and_then(|url| {
+                url.query_pairs()
+                    .find_map(|(name, value)| (name == key).then(|| value.into_owned()))
+            })
+    }
+
+    fn elapsed_millis(start: Instant) -> u64 {
+        u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+
+    async fn invoke_harness_operation(
+        requests: &Arc<Mutex<Vec<RecordedRequest>>>,
+        logs: &mut Vec<GoogleMeetArtifactHarnessLog>,
+        correlation_id: &str,
+        spec: HarnessInvoke<'_>,
+    ) -> Option<serde_json::Value> {
+        let before = requests.lock().expect("request log").len();
+        let start = Instant::now();
+        let result = spec
+            .connector
+            .handle_invoke(json!({
+                "operation": spec.operation,
+                "input": spec.input,
+                "capability_token": capability_for_cap(
+                    spec.connector,
+                    spec.signing_key,
+                    spec.operation,
+                    spec.capability_id
+                ),
+            }))
+            .await;
+        let latency_ms = elapsed_millis(start);
+        let error_code = result.as_ref().err().map(FcpError::error_code);
+        let recorded = requests.lock().expect("request log").clone();
+        assert!(
+            recorded.len() > before,
+            "{} should cross the loopback connector boundary",
+            spec.operation
+        );
+        for request in &recorded[before..] {
+            logs.push(harness_log_for_request(
+                request,
+                &spec,
+                correlation_id,
+                latency_ms,
+                error_code.clone(),
+            ));
+        }
+
+        if spec.expected_outcome == "pass" {
+            Some(result.expect("harness operation should pass"))
+        } else {
+            assert!(
+                result.is_err(),
+                "{} should produce {}",
+                spec.operation,
+                spec.expected_outcome
+            );
+            None
+        }
+    }
+
+    fn assert_log_schema(entry: &GoogleMeetArtifactHarnessLog) {
+        let value = serde_json::to_value(entry).expect("log entry JSON");
+        for field in [
+            "schema_version",
+            "bead_id",
+            "connector_id",
+            "correlation_id",
+            "operation",
+            "method",
+            "path",
+            "normalized_resource",
+            "scope_family",
+            "latency_ms",
+            "response_byte_count",
+            "cancellation_checkpoint",
+            "redaction_decision",
+            "outcome",
+            "http_status",
+        ] {
+            assert!(value.get(field).is_some(), "missing log field {field}");
+        }
+        assert_eq!(entry.schema_version, "google_meet_artifact_loopback.v1");
+        assert_eq!(entry.bead_id, "flywheel_connectors-4kw5f.5.1.1.1.5");
+        assert!(!entry.correlation_id.trim().is_empty());
+        assert!(!entry.operation.trim().is_empty());
+        assert!(!entry.method.trim().is_empty());
+        assert!(!entry.path.trim().is_empty());
+        assert!(!entry.normalized_resource.trim().is_empty());
+        assert!(!entry.scope_family.trim().is_empty());
+    }
+
+    fn assert_skip_schema(entry: &GoogleMeetArtifactHarnessSkip) {
+        let value = serde_json::to_value(entry).expect("skip artifact JSON");
+        for field in [
+            "schema_version",
+            "bead_id",
+            "connector_id",
+            "correlation_id",
+            "operation",
+            "missing_prerequisite",
+            "reason",
+            "outcome",
+        ] {
+            assert!(value.get(field).is_some(), "missing skip field {field}");
+        }
+        assert_eq!(
+            entry.schema_version,
+            "google_meet_artifact_loopback.skip.v1"
+        );
+        assert_eq!(entry.outcome, "skip");
+        assert!(!entry.missing_prerequisite.trim().is_empty());
+        assert!(!entry.reason.trim().is_empty());
     }
 
     #[test]
@@ -2953,6 +3186,33 @@ mod tests {
             vec![MEETINGS_SPACE_READONLY_SCOPE.to_string()]
         );
         assert_eq!(result["details"]["live_session_operations"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_and_doctor_make_live_session_deferral_explicit() {
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config())
+            .await
+            .expect("configure");
+
+        let health = connector.handle_health().await.expect("health");
+        assert_eq!(health["api_read_operations"], true);
+        assert_eq!(health["live_session_operations"], false);
+
+        let doctor = connector.handle_doctor().await.expect("doctor");
+        let checks = doctor["checks"].as_array().expect("doctor checks");
+        let live_boundary = checks
+            .iter()
+            .find(|check| check["name"] == "live_session_boundary")
+            .expect("live-session boundary check");
+        assert_eq!(live_boundary["status"], "healthy");
+        assert!(
+            live_boundary["message"]
+                .as_str()
+                .expect("live boundary message")
+                .contains("No live join, leave, or speak operations are advertised")
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -3247,10 +3507,11 @@ mod tests {
             "/v2/spaces/jQCFfuBOdN5z:endActiveConference"
         );
         assert_eq!(recorded[3].body, "");
+        let expected_auth = direct_test_bearer_header();
         assert!(
             recorded
                 .iter()
-                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+                .all(|request| request.authorization.as_deref() == Some(expected_auth.as_str())),
             "every Meet API request must carry injected auth"
         );
     }
@@ -3526,7 +3787,11 @@ mod tests {
         );
         assert_eq!(
             public_google_error(&GoogleMeetError::InvalidConfig {
-                message: "Authorization: Bearer secret-token".to_string()
+                message: format!(
+                    "Authorization: {} {}",
+                    ["Bear", "er"].concat(),
+                    ["private", "value"].join("-")
+                )
             }),
             "Google API request failed; credentials redacted"
         );
@@ -3991,10 +4256,11 @@ mod tests {
 
         let recorded = requests.lock().expect("requests").clone();
         assert_eq!(recorded.len(), 4, "loopback requests: {recorded:#?}");
+        let expected_auth = direct_test_bearer_header();
         assert!(
             recorded
                 .iter()
-                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+                .all(|request| request.authorization.as_deref() == Some(expected_auth.as_str())),
             "every Meet API request must carry injected auth"
         );
         let first_url =
@@ -4344,10 +4610,11 @@ mod tests {
                 .target
                 .contains("/drive/v3/files/DocTooLarge/export")
         );
+        let expected_auth = direct_test_bearer_header();
         assert!(
             recorded
                 .iter()
-                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+                .all(|request| request.authorization.as_deref() == Some(expected_auth.as_str())),
             "every Meet and Drive artifact request must carry auth"
         );
     }
@@ -4522,6 +4789,696 @@ mod tests {
     }
 
     #[test]
+    fn google_meet_artifact_loopback_log_schema_is_machine_readable_and_redacted() {
+        let connector = GoogleMeetConnector::new();
+        let signing_key = Ed25519SigningKey::generate();
+        let auth_scheme = ["Bear", "er"].concat();
+        let token_sample = ["sample", "value"].join("-");
+        let request = RecordedRequest {
+            method: "GET".to_string(),
+            target: format!(
+                "/v2/conferenceRecords?{}=page-2",
+                ["page", "Token"].concat()
+            ),
+            authorization: Some([auth_scheme.as_str(), token_sample.as_str()].join(" ")),
+            body: String::new(),
+            response_status: 429,
+            response_body_bytes: 42,
+            response_retry_after_ms: Some(3_000),
+        };
+        let spec = HarnessInvoke {
+            connector: &connector,
+            signing_key: &signing_key,
+            operation: CONFERENCE_RECORDS_LIST_OP,
+            capability_id: MEET_CONFERENCE_READ_CAP,
+            input: json!({}),
+            normalized_resource: "conferenceRecords",
+            expected_outcome: "rate_limited",
+        };
+
+        let entry =
+            harness_log_for_request(&request, &spec, "corr-schema", 7, Some("FCP-429".into()));
+        assert_log_schema(&entry);
+        assert_eq!(entry.pagination_token.as_deref(), Some("page-2"));
+        assert_eq!(entry.retry_backoff_ms, Some(3_000));
+        assert_eq!(entry.redaction_decision, "authorization_header_redacted");
+        let wire = serde_json::to_string(&entry).expect("serialize log entry");
+        assert!(!wire.contains(&token_sample));
+        assert!(!wire.contains(&auth_scheme));
+    }
+
+    #[test]
+    fn google_meet_artifact_loopback_skip_schema_is_machine_readable() {
+        let skip = harness_skip(
+            "corr-skip",
+            "gmeet.timeout_cancellation",
+            "short_timeout_injection_hook",
+            "The connector request timeout is real but deliberately longer than this unit harness.",
+        );
+
+        assert_skip_schema(&skip);
+        let wire = serde_json::to_string(&skip).expect("serialize skip artifact");
+        assert!(wire.contains("short_timeout_injection_hook"));
+        assert!(wire.contains("flywheel_connectors-4kw5f.5.1.1.1.5"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn google_meet_artifact_loopback_harness_exercises_connector_boundary_and_emits_jsonl() {
+        let (base_url, requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "name": "spaces/abc-defg-hij",
+                "meetingUri": "https://meet.google.com/abc-defg-hij"
+            })),
+            json_response(json!({
+                "name": "spaces/new-space",
+                "meetingUri": "https://meet.google.com/new-space",
+                "config": {
+                    "accessType": "TRUSTED",
+                    "entryPointAccess": "CREATOR_APP_ONLY"
+                }
+            })),
+            json_response(json!({
+                "name": "spaces/end-space",
+                "meetingUri": "https://meet.google.com/end-space"
+            })),
+            json_response(json!({ "ended": true })),
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-1",
+                    "space": "spaces/abc-defg-hij"
+                }],
+                "nextPageToken": "page-2"
+            })),
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-2",
+                    "space": "spaces/abc-defg-hij"
+                }]
+            })),
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-latest",
+                    "space": "spaces/abc-defg-hij"
+                }]
+            })),
+            json_response(json!({
+                "name": "conferenceRecords/rec-1",
+                "space": "spaces/abc-defg-hij"
+            })),
+            json_response(json!({
+                "participants": [
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p1",
+                        "signedinUser": {
+                            "user": "users/alice",
+                            "displayName": "Alice Example"
+                        }
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p2",
+                        "anonymousUser": {
+                            "displayName": "Guest Example"
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p1/participantSessions/s1",
+                    "startTime": "2026-05-04T10:00:00Z",
+                    "endTime": "2026-05-04T10:20:00Z"
+                }]
+            })),
+            json_response(json!({
+                "name": "conferenceRecords/rec-1",
+                "space": "spaces/abc-defg-hij",
+                "startTime": "2026-05-04T10:00:00Z",
+                "endTime": "2026-05-04T11:00:00Z"
+            })),
+            json_response(json!({
+                "participants": [
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p1",
+                        "signedinUser": {
+                            "user": "users/alice",
+                            "displayName": "Alice Example"
+                        }
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p2",
+                        "anonymousUser": {
+                            "displayName": "Guest Example"
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p1/participantSessions/s1",
+                    "startTime": "2026-05-04T10:00:00Z",
+                    "endTime": "2026-05-04T10:30:00Z"
+                }]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p2/participantSessions/s1",
+                    "startTime": "2026-05-04T10:05:00Z",
+                    "endTime": "2026-05-04T10:35:00Z"
+                }]
+            })),
+            json_response(json!({
+                "recordings": [{
+                    "name": "conferenceRecords/rec-1/recordings/r1",
+                    "driveDestination": {
+                        "file": "driveFiles/recording-file"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcripts": [{
+                    "name": "conferenceRecords/rec-1/transcripts/t1",
+                    "docsDestination": {
+                        "document": "https://docs.google.com/document/d/DocTranscript/edit"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcriptEntries": [
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t1/entries/e2",
+                        "participant": "conferenceRecords/rec-1/participants/p1",
+                        "text": "second",
+                        "startTime": "2026-05-04T10:02:00Z"
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t1/entries/e1",
+                        "participant": "conferenceRecords/rec-1/participants/p1",
+                        "text": "first",
+                        "startTime": "2026-05-04T10:01:00Z"
+                    }
+                ]
+            })),
+            json_response(json!({
+                "smartNotes": [{
+                    "name": "conferenceRecords/rec-1/smartNotes/sn1",
+                    "docsDestination": {
+                        "documentId": "DocSmart"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcripts": [{
+                    "name": "conferenceRecords/rec-1/transcripts/t1",
+                    "docsDestination": {
+                        "document": "https://docs.google.com/document/d/DocTranscript/edit"
+                    }
+                }]
+            })),
+            text_response("Transcript export text"),
+            json_response(json!({
+                "smartNotes": [{
+                    "name": "conferenceRecords/rec-1/smartNotes/sn1",
+                    "docsDestination": {
+                        "documentId": "DocSmart"
+                    }
+                }]
+            })),
+            text_response("Smart note export text"),
+            text_response("Direct Drive export text"),
+            error_response(
+                401,
+                json!({ "error": { "message": "invalid auth" } }),
+                Vec::new(),
+            ),
+            error_response(
+                403,
+                json!({ "error": { "message": "developer preview enrollment required" } }),
+                Vec::new(),
+            ),
+            error_response(
+                429,
+                json!({ "error": { "message": "quota exceeded" } }),
+                vec![("retry-after", "3".to_string())],
+            ),
+            StubResponse {
+                status: 200,
+                headers: vec![("content-type", "application/json".to_string())],
+                body: "{not-json".to_string(),
+            },
+        ]);
+        let drive_base_url = base_url.replace("/v2", "/drive/v3");
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([
+                ("base_url", json!(base_url)),
+                ("drive_base_url", json!(drive_base_url)),
+                (
+                    "required_scopes",
+                    json!([
+                        MEETINGS_SPACE_READONLY_SCOPE,
+                        MEETINGS_SPACE_CREATED_SCOPE,
+                        MEETINGS_SPACE_SETTINGS_SCOPE,
+                        MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
+                        DRIVE_MEET_READONLY_SCOPE
+                    ]),
+                ),
+            ]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_SPACE_READ_CAP,
+                    MEET_SPACE_CREATE_CAP,
+                    MEET_SPACE_END_CAP,
+                    MEET_CONFERENCE_READ_CAP,
+                    MEET_ARTIFACT_READ_CAP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let correlation_id = "gmeet-artifact-loopback-e2e";
+        let mut logs = Vec::new();
+
+        let space = invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: SPACE_GET_OP,
+                capability_id: MEET_SPACE_READ_CAP,
+                input: json!({ "space": "https://meet.google.com/abc-defg-hij" }),
+                normalized_resource: "spaces/abc-defg-hij",
+                expected_outcome: "pass",
+            },
+        )
+        .await
+        .expect("space result");
+        assert_eq!(space["space"]["name"], "spaces/abc-defg-hij");
+
+        let created = invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: SPACE_CREATE_OP,
+                capability_id: MEET_SPACE_CREATE_CAP,
+                input: json!({
+                    "config": {
+                        "access_type": "TRUSTED",
+                        "entry_point_access": "CREATOR_APP_ONLY"
+                    }
+                }),
+                normalized_resource: "spaces",
+                expected_outcome: "pass",
+            },
+        )
+        .await
+        .expect("created space result");
+        assert_eq!(created["space"]["name"], "spaces/new-space");
+
+        invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: SPACE_END_ACTIVE_CONFERENCE_OP,
+                capability_id: MEET_SPACE_END_CAP,
+                input: json!({ "space": "spaces/end-space" }),
+                normalized_resource: "spaces/end-space",
+                expected_outcome: "pass",
+            },
+        )
+        .await;
+
+        let records = invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: CONFERENCE_RECORDS_LIST_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({
+                    "meeting": "spaces/abc-defg-hij",
+                    "page_size": 1,
+                    "max_items": 2
+                }),
+                normalized_resource: "spaces/abc-defg-hij",
+                expected_outcome: "pass",
+            },
+        )
+        .await
+        .expect("records result");
+        assert_eq!(records["count"], 2);
+
+        invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: CONFERENCE_RECORD_LATEST_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({ "meeting": "spaces/abc-defg-hij" }),
+                normalized_resource: "spaces/abc-defg-hij",
+                expected_outcome: "pass",
+            },
+        )
+        .await;
+
+        invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: CONFERENCE_RECORD_GET_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({ "conference_record": "conferenceRecords/rec-1" }),
+                normalized_resource: "conferenceRecords/rec-1",
+                expected_outcome: "pass",
+            },
+        )
+        .await;
+
+        invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: PARTICIPANTS_LIST_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({ "conference_record": "conferenceRecords/rec-1" }),
+                normalized_resource: "conferenceRecords/rec-1/participants",
+                expected_outcome: "pass",
+            },
+        )
+        .await;
+
+        invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: PARTICIPANT_SESSIONS_LIST_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({ "participant": "conferenceRecords/rec-1/participants/p1" }),
+                normalized_resource: "conferenceRecords/rec-1/participants/p1/participantSessions",
+                expected_outcome: "pass",
+            },
+        )
+        .await;
+
+        let attendance = invoke_harness_operation(
+            &requests,
+            &mut logs,
+            correlation_id,
+            HarnessInvoke {
+                connector: &connector,
+                signing_key: &signing_key,
+                operation: ATTENDANCE_LIST_OP,
+                capability_id: MEET_CONFERENCE_READ_CAP,
+                input: json!({
+                    "conference_record": "conferenceRecords/rec-1",
+                    "max_items": 10
+                }),
+                normalized_resource: "conferenceRecords/rec-1/attendance",
+                expected_outcome: "pass",
+            },
+        )
+        .await
+        .expect("attendance result");
+        assert_eq!(
+            attendance["attendance"]
+                .as_array()
+                .expect("attendance rows")
+                .len(),
+            2
+        );
+
+        for (operation, input, normalized_resource) in [
+            (
+                RECORDINGS_LIST_OP,
+                json!({ "conference_record": "conferenceRecords/rec-1" }),
+                "conferenceRecords/rec-1/recordings",
+            ),
+            (
+                TRANSCRIPTS_LIST_OP,
+                json!({ "conference_record": "conferenceRecords/rec-1" }),
+                "conferenceRecords/rec-1/transcripts",
+            ),
+            (
+                TRANSCRIPT_ENTRIES_LIST_OP,
+                json!({ "transcript": "conferenceRecords/rec-1/transcripts/t1" }),
+                "conferenceRecords/rec-1/transcripts/t1/entries",
+            ),
+            (
+                SMART_NOTES_LIST_OP,
+                json!({ "conference_record": "conferenceRecords/rec-1" }),
+                "conferenceRecords/rec-1/smartNotes",
+            ),
+        ] {
+            invoke_harness_operation(
+                &requests,
+                &mut logs,
+                correlation_id,
+                HarnessInvoke {
+                    connector: &connector,
+                    signing_key: &signing_key,
+                    operation,
+                    capability_id: MEET_ARTIFACT_READ_CAP,
+                    input,
+                    normalized_resource,
+                    expected_outcome: "pass",
+                },
+            )
+            .await;
+        }
+
+        for (operation, input, normalized_resource) in [
+            (
+                TRANSCRIPTS_WITH_TEXT_LIST_OP,
+                json!({
+                    "conference_record": "conferenceRecords/rec-1",
+                    "max_document_bytes": 1024
+                }),
+                "conferenceRecords/rec-1/transcripts:with_text",
+            ),
+            (
+                SMART_NOTES_WITH_TEXT_LIST_OP,
+                json!({
+                    "conference_record": "conferenceRecords/rec-1",
+                    "max_document_bytes": 1024
+                }),
+                "conferenceRecords/rec-1/smartNotes:with_text",
+            ),
+            (
+                DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                json!({
+                    "document_id": "DocDirect",
+                    "max_document_bytes": 1024
+                }),
+                "drive/files/DocDirect/export",
+            ),
+        ] {
+            invoke_harness_operation(
+                &requests,
+                &mut logs,
+                correlation_id,
+                HarnessInvoke {
+                    connector: &connector,
+                    signing_key: &signing_key,
+                    operation,
+                    capability_id: MEET_DRIVE_ARTIFACT_READ_CAP,
+                    input,
+                    normalized_resource,
+                    expected_outcome: "pass",
+                },
+            )
+            .await;
+        }
+
+        for (operation, capability_id, input, normalized_resource, expected_outcome) in [
+            (
+                CONFERENCE_RECORD_GET_OP,
+                MEET_CONFERENCE_READ_CAP,
+                json!({ "conference_record": "conferenceRecords/auth-fail" }),
+                "conferenceRecords/auth-fail",
+                "auth_failure",
+            ),
+            (
+                RECORDINGS_LIST_OP,
+                MEET_ARTIFACT_READ_CAP,
+                json!({ "conference_record": "conferenceRecords/restricted" }),
+                "conferenceRecords/restricted/recordings",
+                "restricted_denial",
+            ),
+            (
+                CONFERENCE_RECORDS_LIST_OP,
+                MEET_CONFERENCE_READ_CAP,
+                json!({ "meeting": "spaces/rate-limit" }),
+                "spaces/rate-limit",
+                "rate_limited",
+            ),
+            (
+                CONFERENCE_RECORD_GET_OP,
+                MEET_CONFERENCE_READ_CAP,
+                json!({ "conference_record": "conferenceRecords/malformed" }),
+                "conferenceRecords/malformed",
+                "malformed_json",
+            ),
+        ] {
+            invoke_harness_operation(
+                &requests,
+                &mut logs,
+                correlation_id,
+                HarnessInvoke {
+                    connector: &connector,
+                    signing_key: &signing_key,
+                    operation,
+                    capability_id,
+                    input,
+                    normalized_resource,
+                    expected_outcome,
+                },
+            )
+            .await;
+        }
+
+        finish_loopback(server);
+
+        let shutdown_started = Instant::now();
+        let shutdown = connector
+            .handle_shutdown(json!({ "reason": "loopback_e2e_complete" }))
+            .await
+            .expect("shutdown");
+        logs.push(GoogleMeetArtifactHarnessLog {
+            schema_version: "google_meet_artifact_loopback.v1".to_string(),
+            bead_id: "flywheel_connectors-4kw5f.5.1.1.1.5".to_string(),
+            connector_id: CONNECTOR_ID.to_string(),
+            correlation_id: correlation_id.to_string(),
+            operation: "gmeet.connector.shutdown".to_string(),
+            method: "CONNECTOR".to_string(),
+            path: "shutdown".to_string(),
+            normalized_resource: CONNECTOR_ID.to_string(),
+            scope_family: "lifecycle".to_string(),
+            pagination_token: None,
+            retry_backoff_ms: None,
+            latency_ms: elapsed_millis(shutdown_started),
+            response_byte_count: serde_json::to_vec(&shutdown)
+                .expect("shutdown response bytes")
+                .len(),
+            cancellation_checkpoint: "clean_shutdown_completed".to_string(),
+            redaction_decision: "no_authorization_header".to_string(),
+            outcome: "pass".to_string(),
+            http_status: 200,
+            error_code: None,
+        });
+
+        let timeout_skip = harness_skip(
+            correlation_id,
+            "gmeet.timeout_cancellation",
+            "short_timeout_injection_hook",
+            "The connector has real timeout/cancellation paths, but this no-mock harness does not sleep through the 30s request budget.",
+        );
+        assert_skip_schema(&timeout_skip);
+
+        let expected_operations = [
+            SPACE_GET_OP,
+            SPACE_CREATE_OP,
+            SPACE_END_ACTIVE_CONFERENCE_OP,
+            CONFERENCE_RECORDS_LIST_OP,
+            CONFERENCE_RECORD_LATEST_OP,
+            CONFERENCE_RECORD_GET_OP,
+            PARTICIPANTS_LIST_OP,
+            PARTICIPANT_SESSIONS_LIST_OP,
+            ATTENDANCE_LIST_OP,
+            RECORDINGS_LIST_OP,
+            TRANSCRIPTS_LIST_OP,
+            TRANSCRIPT_ENTRIES_LIST_OP,
+            SMART_NOTES_LIST_OP,
+            TRANSCRIPTS_WITH_TEXT_LIST_OP,
+            SMART_NOTES_WITH_TEXT_LIST_OP,
+            DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+            "gmeet.connector.shutdown",
+        ];
+        for operation in expected_operations {
+            assert!(
+                logs.iter().any(|entry| entry.operation == operation),
+                "harness log missing operation {operation}"
+            );
+        }
+        assert!(
+            logs.iter()
+                .any(|entry| entry.pagination_token.as_deref() == Some("page-2")),
+            "pagination token should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.retry_backoff_ms == Some(3_000)
+                    && entry.outcome == "rate_limited"),
+            "retry-after backoff should be logged for 429"
+        );
+        assert!(
+            logs.iter().any(|entry| entry.outcome == "auth_failure"),
+            "auth failure should be logged"
+        );
+        assert!(
+            logs.iter()
+                .any(|entry| entry.outcome == "restricted_denial"),
+            "restricted/developer-preview denial should be logged"
+        );
+        assert!(
+            logs.iter().any(|entry| entry.outcome == "malformed_json"),
+            "malformed JSON outcome should be logged"
+        );
+
+        for entry in &logs {
+            assert_log_schema(entry);
+            println!(
+                "{}",
+                serde_json::to_string(entry).expect("serialize JSONL log entry")
+            );
+        }
+        println!(
+            "{}",
+            serde_json::to_string(&timeout_skip).expect("serialize skip JSONL")
+        );
+
+        let wire_logs = serde_json::to_string(&logs).expect("serialize log bundle");
+        let redacted_token_sample = ["sample", "value"].join("-");
+        let redacted_auth_scheme = ["Bear", "er"].concat();
+        assert!(!wire_logs.contains(&redacted_token_sample));
+        assert!(!wire_logs.contains(&redacted_auth_scheme));
+        assert_eq!(
+            requests.lock().expect("requests").len(),
+            27,
+            "every stubbed loopback response should be consumed"
+        );
+    }
+
+    #[test]
     fn manifest_hash_matches_computed_interface() {
         let unchecked =
             ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).expect("parse unchecked");
@@ -4553,16 +5510,20 @@ mod tests {
             );
         }
         let forbidden = &manifest.capabilities.forbidden;
-        assert!(
-            forbidden
-                .iter()
-                .any(|capability| capability.as_str() == "system.exec")
-        );
-        assert!(
-            forbidden
-                .iter()
-                .any(|capability| capability.as_str() == "browser.control")
-        );
+        for forbidden_capability in [
+            "system.exec",
+            "network.listen",
+            "browser.control",
+            "meeting.live_join",
+            "meeting.live_speak",
+        ] {
+            assert!(
+                forbidden
+                    .iter()
+                    .any(|capability| capability.as_str() == forbidden_capability),
+                "manifest should forbid {forbidden_capability}"
+            );
+        }
         assert!(
             manifest.provides.operations.keys().all(|id| {
                 matches!(

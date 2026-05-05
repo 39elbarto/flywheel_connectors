@@ -10,10 +10,10 @@ use fcp_google_discovery::{
     provisioning::load_default_google_provisioning_bundle,
 };
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
+    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ use tracing::{info, instrument};
 
 use crate::client::{
     DEFAULT_BASE_URL, GoogleMeetAttendanceRow, GoogleMeetClient, GoogleMeetConferenceRecord,
-    GoogleMeetParticipant, GoogleMeetParticipantSession, google_auth_is_secretless,
-    google_auth_redacted_label,
+    GoogleMeetParticipant, GoogleMeetParticipantSession, GoogleMeetSpaceConfig,
+    google_auth_is_secretless, google_auth_redacted_label,
 };
 
 const CONNECTOR_ID: &str = "google-meet";
@@ -31,7 +31,12 @@ const SERVICE_SELECTOR: &str = "meet";
 const SERVICE_IDENTITY: &str = "meet:v2";
 const NORMALIZE_SPACE_OP: &str = "gmeet.normalize_space_name";
 const MEET_SPACE_READ_CAP: &str = "meet.space.read";
+const MEET_SPACE_CREATE_CAP: &str = "meet.space.create";
+const MEET_SPACE_END_CAP: &str = "meet.space.end";
 const MEET_CONFERENCE_READ_CAP: &str = "meet.conference.read";
+const SPACE_GET_OP: &str = "gmeet.space.get";
+const SPACE_CREATE_OP: &str = "gmeet.space.create";
+const SPACE_END_ACTIVE_CONFERENCE_OP: &str = "gmeet.space.end_active_conference";
 const CONFERENCE_RECORD_GET_OP: &str = "gmeet.conference_record.get";
 const CONFERENCE_RECORDS_LIST_OP: &str = "gmeet.conference_records.list";
 const CONFERENCE_RECORD_LATEST_OP: &str = "gmeet.conference_record.latest";
@@ -43,6 +48,11 @@ const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
 const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
 const DEFAULT_MAX_ITEMS: usize = 100;
 const MAX_ITEMS_CAP: usize = 1_000;
+const MEETINGS_SPACE_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/meetings.space.readonly";
+const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
+const MEETINGS_SPACE_SETTINGS_SCOPE: &str =
+    "https://www.googleapis.com/auth/meetings.space.settings";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -184,6 +194,96 @@ fn validate_space_suffix(value: &str, message: &'static str) -> FcpResult<()> {
         return Err(invalid_request(message));
     }
     Ok(())
+}
+
+fn normalize_space_config(input: &serde_json::Value) -> FcpResult<Option<GoogleMeetSpaceConfig>> {
+    let Some(value) = input.get("config") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let object = value
+        .as_object()
+        .ok_or_else(|| invalid_request("`config` must be an object when provided"))?;
+    let allowed = [
+        "access_type",
+        "accessType",
+        "entry_point_access",
+        "entryPointAccess",
+    ];
+    for key in object.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(invalid_request(format!(
+                "`config.{key}` is not supported for Google Meet space creation"
+            )));
+        }
+    }
+
+    let access_type = optional_config_enum(
+        object,
+        "access_type",
+        "accessType",
+        "config.access_type",
+        &["OPEN", "TRUSTED", "RESTRICTED"],
+    )?;
+    let entry_point_access = optional_config_enum(
+        object,
+        "entry_point_access",
+        "entryPointAccess",
+        "config.entry_point_access",
+        &["ALL", "CREATOR_APP_ONLY"],
+    )?;
+
+    if access_type.is_none() && entry_point_access.is_none() {
+        return Ok(None);
+    }
+
+    Ok(Some(GoogleMeetSpaceConfig {
+        access_type,
+        entry_point_access,
+    }))
+}
+
+fn optional_config_enum(
+    object: &serde_json::Map<String, serde_json::Value>,
+    snake_key: &str,
+    camel_key: &str,
+    label: &str,
+    allowed: &[&'static str],
+) -> FcpResult<Option<String>> {
+    let snake = object.get(snake_key);
+    let camel = object.get(camel_key);
+    if snake.is_some() && camel.is_some() {
+        return Err(invalid_request(format!(
+            "Provide only one of `{snake_key}` or `{camel_key}`"
+        )));
+    }
+    let Some(value) = snake.or(camel) else {
+        return Ok(None);
+    };
+    let raw = value
+        .as_str()
+        .ok_or_else(|| invalid_request(format!("`{label}` must be a string")))?;
+    let normalized = raw.trim().replace('-', "_").to_ascii_uppercase();
+    if allowed.contains(&normalized.as_str()) {
+        Ok(Some(normalized))
+    } else {
+        Err(invalid_request(format!(
+            "`{label}` must be one of {}",
+            allowed.join(", ")
+        )))
+    }
+}
+
+fn create_space_required_scopes(config: Option<&GoogleMeetSpaceConfig>) -> Vec<&'static str> {
+    let mut scopes = vec![MEETINGS_SPACE_CREATED_SCOPE];
+    if config
+        .is_some_and(|config| config.access_type.is_some() || config.entry_point_access.is_some())
+    {
+        scopes.push(MEETINGS_SPACE_SETTINGS_SCOPE);
+    }
+    scopes
 }
 
 #[derive(Clone)]
@@ -706,6 +806,9 @@ impl GoogleMeetConnector {
 
         match operation {
             NORMALIZE_SPACE_OP => invoke_normalize_space_name(&input),
+            SPACE_GET_OP => self.invoke_get_space(&input).await,
+            SPACE_CREATE_OP => self.invoke_create_space(&input).await,
+            SPACE_END_ACTIVE_CONFERENCE_OP => self.invoke_end_active_conference(&input).await,
             CONFERENCE_RECORD_GET_OP => self.invoke_get_conference_record(&input).await,
             CONFERENCE_RECORDS_LIST_OP => self.invoke_list_conference_records(&input).await,
             CONFERENCE_RECORD_LATEST_OP => self.invoke_latest_conference_record(&input).await,
@@ -716,6 +819,124 @@ impl GoogleMeetConnector {
                 operation: operation.into(),
             }),
         }
+    }
+
+    fn ensure_configured_scopes(
+        &self,
+        operation: &str,
+        required_scopes: &[&'static str],
+    ) -> FcpResult<()> {
+        let Some(config) = &self.config else {
+            return Err(FcpError::NotConfigured);
+        };
+        let missing: Vec<_> = required_scopes
+            .iter()
+            .copied()
+            .filter(|scope| {
+                !config
+                    .required_scopes
+                    .iter()
+                    .any(|configured| configured == scope)
+            })
+            .collect();
+        if missing.is_empty() {
+            Ok(())
+        } else {
+            Err(invalid_request(format!(
+                "{operation} requires Google OAuth scope(s): {}. Reconfigure with required_scopes or scope_triggers before invoking.",
+                missing.join(", ")
+            )))
+        }
+    }
+
+    fn ensure_any_configured_scope(
+        &self,
+        operation: &str,
+        allowed_scopes: &[&'static str],
+    ) -> FcpResult<()> {
+        let Some(config) = &self.config else {
+            return Err(FcpError::NotConfigured);
+        };
+        if allowed_scopes.iter().any(|scope| {
+            config
+                .required_scopes
+                .iter()
+                .any(|configured| configured == scope)
+        }) {
+            Ok(())
+        } else {
+            Err(invalid_request(format!(
+                "{operation} requires one configured Google OAuth scope from: {}. Reconfigure with required_scopes or scope_triggers before invoking.",
+                allowed_scopes.join(", ")
+            )))
+        }
+    }
+
+    async fn invoke_get_space(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_any_configured_scope(
+            SPACE_GET_OP,
+            &[
+                MEETINGS_SPACE_CREATED_SCOPE,
+                MEETINGS_SPACE_READONLY_SCOPE,
+                MEETINGS_SPACE_SETTINGS_SCOPE,
+            ],
+        )?;
+        let raw = require_space_input(input)?;
+        let normalized = normalize_meet_space_name(raw)?;
+        let space = client
+            .get_space(&normalized.space_name)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "input": raw,
+            "space_name": normalized.space_name,
+            "space": space,
+        }))
+    }
+
+    async fn invoke_create_space(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let config = normalize_space_config(input)?;
+        let required_scopes = create_space_required_scopes(config.as_ref());
+        self.ensure_configured_scopes(SPACE_CREATE_OP, &required_scopes)?;
+        let space = client
+            .create_space(config.clone())
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "space": space,
+            "requested_config": config,
+            "required_scopes": required_scopes,
+        }))
+    }
+
+    async fn invoke_end_active_conference(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            SPACE_END_ACTIVE_CONFERENCE_OP,
+            &[MEETINGS_SPACE_CREATED_SCOPE],
+        )?;
+        let raw = require_space_input(input)?;
+        let normalized = normalize_meet_space_name(raw)?;
+        let resolved_space = client
+            .get_space(&normalized.space_name)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let response = client
+            .end_active_conference(&resolved_space.name)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "input": raw,
+            "space_name": normalized.space_name,
+            "resolved_space": resolved_space,
+            "ended": true,
+            "response": response,
+        }))
     }
 
     async fn invoke_get_conference_record(
@@ -957,6 +1178,123 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                 related: vec![],
             },
         ),
+        op_info(
+            SPACE_GET_OP,
+            "Fetch one Google Meet meeting space by resource name, code, or URL",
+            json!({
+                "type": "object",
+                "required": ["space"],
+                "properties": {
+                    "space": {
+                        "type": "string",
+                        "description": "Google Meet URL, meeting code, or spaces/* resource name"
+                    }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["space_name", "space"],
+                "properties": {
+                    "input": { "type": "string" },
+                    "space_name": { "type": "string" },
+                    "space": { "type": "object" }
+                }
+            }),
+            MEET_SPACE_READ_CAP,
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use:
+                    "Resolve a Meet URL/code into the current Google Meet spaces/* resource details."
+                        .into(),
+                common_mistakes: vec![
+                    "Do not use meeting codes as durable identifiers; Google can reuse them.".into(),
+                    "This is a read-only space metadata lookup, not a live meeting join.".into(),
+                ],
+                examples: vec![r#"{"space":"https://meet.google.com/abc-defg-hij"}"#.into()],
+                related: vec![CapabilityId::from_static(NORMALIZE_SPACE_OP)],
+            },
+        ),
+        space_mutation_op_info(
+            SPACE_CREATE_OP,
+            "Create a Google Meet meeting space",
+            json!({
+                "type": "object",
+                "properties": {
+                    "config": {
+                        "type": "object",
+                        "properties": {
+                            "access_type": {
+                                "type": "string",
+                                "enum": ["OPEN", "TRUSTED", "RESTRICTED"]
+                            },
+                            "entry_point_access": {
+                                "type": "string",
+                                "enum": ["ALL", "CREATOR_APP_ONLY"]
+                            }
+                        }
+                    }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["space", "required_scopes"],
+                "properties": {
+                    "space": { "type": "object" },
+                    "requested_config": { "type": "object" },
+                    "required_scopes": { "type": "array" }
+                }
+            }),
+            MEET_SPACE_CREATE_CAP,
+            AgentHint {
+                when_to_use: "Create a Meet space through the Meet API before sharing its meetingUri.".into(),
+                common_mistakes: vec![
+                    "Creating with access/entry-point config needs the meetings.space.settings OAuth scope in addition to meetings.space.created.".into(),
+                    "This does not start or join a live conference.".into(),
+                ],
+                examples: vec![
+                    r#"{}"#.into(),
+                    r#"{"config":{"access_type":"TRUSTED","entry_point_access":"ALL"}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static(SPACE_GET_OP)],
+            },
+        ),
+        space_mutation_op_info(
+            SPACE_END_ACTIVE_CONFERENCE_OP,
+            "End the active conference for a Google Meet space",
+            json!({
+                "type": "object",
+                "required": ["space"],
+                "properties": {
+                    "space": {
+                        "type": "string",
+                        "description": "Google Meet spaces/* resource, meeting code, or meet.google.com URL"
+                    }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["resolved_space", "ended", "response"],
+                "properties": {
+                    "input": { "type": "string" },
+                    "space_name": { "type": "string" },
+                    "resolved_space": { "type": "object" },
+                    "ended": { "type": "boolean" },
+                    "response": { "type": "object" }
+                }
+            }),
+            MEET_SPACE_END_CAP,
+            AgentHint {
+                when_to_use: "Terminate the currently active conference for a space created/owned by the calling app.".into(),
+                common_mistakes: vec![
+                    "The connector resolves the space first; the Google API and meetings.space.created scope enforce created-space ownership.".into(),
+                    "This is a side-effecting operation and should stay approval-policy gated.".into(),
+                ],
+                examples: vec![r#"{"space":"spaces/jQCFfuBOdN5z"}"#.into()],
+                related: vec![CapabilityId::from_static(SPACE_GET_OP)],
+            },
+        ),
         read_api_op_info(
             CONFERENCE_RECORD_GET_OP,
             "Fetch one Google Meet conference record by resource name or id",
@@ -1060,6 +1398,29 @@ fn read_api_op_info(
             related: vec![],
         },
     )
+}
+
+fn space_mutation_op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+    output_schema: serde_json::Value,
+    capability: &'static str,
+    ai_hints: AgentHint,
+) -> OperationInfo {
+    let mut info = op_info(
+        id,
+        summary,
+        input_schema,
+        output_schema,
+        capability,
+        RiskLevel::High,
+        SafetyTier::Risky,
+        IdempotencyClass::BestEffort,
+        ai_hints,
+    );
+    info.requires_approval = Some(ApprovalMode::Policy);
+    info
 }
 
 fn invoke_normalize_space_name(input: &serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1301,7 +1662,9 @@ fn diff_ms(start: Option<&str>, end: Option<&str>) -> Option<u64> {
 
 fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        NORMALIZE_SPACE_OP => Ok(CapabilityId::from_static(MEET_SPACE_READ_CAP)),
+        NORMALIZE_SPACE_OP | SPACE_GET_OP => Ok(CapabilityId::from_static(MEET_SPACE_READ_CAP)),
+        SPACE_CREATE_OP => Ok(CapabilityId::from_static(MEET_SPACE_CREATE_CAP)),
+        SPACE_END_ACTIVE_CONFERENCE_OP => Ok(CapabilityId::from_static(MEET_SPACE_END_CAP)),
         CONFERENCE_RECORD_GET_OP
         | CONFERENCE_RECORDS_LIST_OP
         | CONFERENCE_RECORD_LATEST_OP
@@ -1319,6 +1682,12 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
         .get(field)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| invalid_request(format!("Missing required field: {field}")))
+}
+
+fn require_space_input(input: &serde_json::Value) -> FcpResult<&str> {
+    optional_str(input, "space")?
+        .or(optional_str(input, "meeting")?)
+        .ok_or_else(|| invalid_request("Missing required field: space"))
 }
 
 fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<Option<&'a str>> {
@@ -1459,8 +1828,10 @@ mod tests {
 
     #[derive(Debug, Clone)]
     struct RecordedRequest {
+        method: String,
         target: String,
         authorization: Option<String>,
+        body: String,
     }
 
     fn json_response(body: impl serde::Serialize) -> StubResponse {
@@ -1541,24 +1912,50 @@ mod tests {
                         break;
                     }
                 }
-                let request = String::from_utf8_lossy(&received);
-                let target = request
+                let header_end = received
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map(|index| index + 4)
+                    .expect("request headers terminator");
+                let header_bytes = &received[..header_end];
+                let mut body = received[header_end..].to_vec();
+                let request = String::from_utf8_lossy(header_bytes);
+                let mut request_line = request
                     .lines()
                     .next()
-                    .and_then(|line| line.split_whitespace().nth(1))
-                    .expect("request target")
-                    .to_string();
+                    .expect("request line")
+                    .split_whitespace();
+                let method = request_line.next().expect("request method").to_string();
+                let target = request_line.next().expect("request target").to_string();
                 let authorization = request.lines().find_map(|line| {
                     let (name, value) = line.split_once(':')?;
                     name.eq_ignore_ascii_case("authorization")
                         .then(|| value.trim().to_string())
                 });
+                let content_length = request
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().expect("content-length"))
+                    })
+                    .unwrap_or(0);
+                while body.len() < content_length {
+                    let count = stream.read(&mut buffer).expect("read request body");
+                    if count == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&buffer[..count]);
+                }
                 recorded
                     .lock()
                     .expect("record requests")
                     .push(RecordedRequest {
+                        method,
                         target,
                         authorization,
+                        body: String::from_utf8_lossy(&body[..content_length.min(body.len())])
+                            .to_string(),
                     });
                 let reason = match response.status {
                     200 => "OK",
@@ -1771,6 +2168,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn normalize_space_config_accepts_only_supported_access_and_entry_point_enums() {
+        let config = normalize_space_config(&json!({
+            "config": {
+                "access_type": "trusted",
+                "entryPointAccess": "creator-app-only"
+            }
+        }))
+        .expect("space config")
+        .expect("config present");
+        assert_eq!(config.access_type.as_deref(), Some("TRUSTED"));
+        assert_eq!(
+            config.entry_point_access.as_deref(),
+            Some("CREATOR_APP_ONLY")
+        );
+
+        for input in [
+            json!({ "config": { "accessType": "PUBLIC" } }),
+            json!({ "config": { "entry_point_access": "OWNER_ONLY" } }),
+            json!({ "config": { "moderation": "ON" } }),
+            json!({ "config": [] }),
+        ] {
+            assert!(
+                matches!(
+                    normalize_space_config(&input),
+                    Err(FcpError::InvalidRequest { .. })
+                ),
+                "config should be rejected: {input}"
+            );
+        }
+    }
+
+    #[test]
+    fn create_space_scope_requirements_depend_on_config_presence() {
+        assert_eq!(
+            create_space_required_scopes(None),
+            vec![MEETINGS_SPACE_CREATED_SCOPE]
+        );
+        let config = GoogleMeetSpaceConfig {
+            access_type: Some("OPEN".to_string()),
+            entry_point_access: None,
+        };
+        assert_eq!(
+            create_space_required_scopes(Some(&config)),
+            vec![MEETINGS_SPACE_CREATED_SCOPE, MEETINGS_SPACE_SETTINGS_SCOPE]
+        );
+    }
+
     #[fcp_async_core::runtime::test]
     async fn configure_with_token_uses_meet_default_scope() {
         let mut connector = GoogleMeetConnector::new();
@@ -1783,7 +2228,7 @@ mod tests {
         assert_eq!(config.service_identity, SERVICE_IDENTITY);
         assert_eq!(
             config.required_scopes,
-            vec!["https://www.googleapis.com/auth/meetings.space.readonly".to_string()]
+            vec![MEETINGS_SPACE_READONLY_SCOPE.to_string()]
         );
         assert_eq!(result["details"]["live_session_operations"], false);
     }
@@ -1806,8 +2251,8 @@ mod tests {
             config.required_scopes,
             vec![
                 "https://www.googleapis.com/auth/drive.meet.readonly".to_string(),
-                "https://www.googleapis.com/auth/meetings.space.created".to_string(),
-                "https://www.googleapis.com/auth/meetings.space.readonly".to_string()
+                MEETINGS_SPACE_CREATED_SCOPE.to_string(),
+                MEETINGS_SPACE_READONLY_SCOPE.to_string()
             ]
         );
     }
@@ -1840,7 +2285,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn introspection_advertises_space_and_conference_read_operations_only() {
+    async fn introspection_advertises_space_conference_and_space_mutation_operations() {
         let connector = GoogleMeetConnector::new();
         let result = connector.handle_introspect().await.expect("introspect");
         let ops = result["operations"].as_array().expect("operations");
@@ -1852,6 +2297,9 @@ mod tests {
             ids,
             vec![
                 NORMALIZE_SPACE_OP,
+                SPACE_GET_OP,
+                SPACE_CREATE_OP,
+                SPACE_END_ACTIVE_CONFERENCE_OP,
                 CONFERENCE_RECORD_GET_OP,
                 CONFERENCE_RECORDS_LIST_OP,
                 CONFERENCE_RECORD_LATEST_OP,
@@ -1867,15 +2315,21 @@ mod tests {
                     || id.contains("say")
                     || id.contains("transcript")
                     || id.contains("recording")
-                    || id.contains("space.create")
-                    || id.contains("space.end")
             }),
-            "conference read bead must not advertise live-session, artifact, or space mutation operations"
+            "spaces bead must not advertise live-session or artifact operations"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
         assert_eq!(ops[0]["safety_tier"], "safe");
         assert_eq!(ops[0]["idempotency"], "strict");
-        for op in &ops[1..] {
+        assert_eq!(ops[1]["capability"], MEET_SPACE_READ_CAP);
+        assert_eq!(ops[1]["safety_tier"], "safe");
+        assert_eq!(ops[2]["capability"], MEET_SPACE_CREATE_CAP);
+        assert_eq!(ops[2]["safety_tier"], "risky");
+        assert_eq!(ops[2]["requires_approval"], "policy");
+        assert_eq!(ops[3]["capability"], MEET_SPACE_END_CAP);
+        assert_eq!(ops[3]["safety_tier"], "risky");
+        assert_eq!(ops[3]["requires_approval"], "policy");
+        for op in &ops[4..] {
             assert_eq!(op["capability"], MEET_CONFERENCE_READ_CAP);
             assert_eq!(op["safety_tier"], "safe");
             assert_eq!(op["idempotency"], "strict");
@@ -1900,6 +2354,224 @@ mod tests {
 
         assert_eq!(result["space_name"], "spaces/abc-defg-hij");
         assert_eq!(result["live_session"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn space_operations_use_google_spaces_api_with_scope_and_config_guards() {
+        let (base_url, requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "name": "spaces/abc-defg-hij",
+                "meetingUri": "https://meet.google.com/abc-defg-hij",
+                "meetingCode": "abc-defg-hij"
+            })),
+            json_response(json!({
+                "name": "spaces/jQCFfuBOdN5z",
+                "meetingUri": "https://meet.google.com/new-meet-code",
+                "meetingCode": "new-meet-code",
+                "config": {
+                    "accessType": "TRUSTED",
+                    "entryPointAccess": "CREATOR_APP_ONLY"
+                }
+            })),
+            json_response(json!({
+                "name": "spaces/jQCFfuBOdN5z",
+                "meetingUri": "https://meet.google.com/new-meet-code",
+                "activeConference": {
+                    "conferenceRecord": "conferenceRecords/rec-active"
+                }
+            })),
+            json_response(json!({})),
+        ]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([
+                ("base_url", json!(base_url)),
+                (
+                    "required_scopes",
+                    json!([
+                        MEETINGS_SPACE_READONLY_SCOPE,
+                        MEETINGS_SPACE_CREATED_SCOPE,
+                        MEETINGS_SPACE_SETTINGS_SCOPE
+                    ]),
+                ),
+            ]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_SPACE_READ_CAP,
+                    MEET_SPACE_CREATE_CAP,
+                    MEET_SPACE_END_CAP,
+                    MEET_CONFERENCE_READ_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let get_result = connector
+            .handle_invoke(json!({
+                "operation": SPACE_GET_OP,
+                "input": { "space": "https://meet.google.com/abc-defg-hij" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SPACE_GET_OP,
+                    MEET_SPACE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("get space");
+        assert_eq!(get_result["space_name"], "spaces/abc-defg-hij");
+        assert_eq!(
+            get_result["space"]["meetingUri"],
+            "https://meet.google.com/abc-defg-hij"
+        );
+
+        let create_result = connector
+            .handle_invoke(json!({
+                "operation": SPACE_CREATE_OP,
+                "input": {
+                    "config": {
+                        "access_type": "trusted",
+                        "entryPointAccess": "creator_app_only"
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SPACE_CREATE_OP,
+                    MEET_SPACE_CREATE_CAP
+                ),
+            }))
+            .await
+            .expect("create space");
+        assert_eq!(create_result["space"]["name"], "spaces/jQCFfuBOdN5z");
+        assert_eq!(
+            create_result["required_scopes"],
+            json!([MEETINGS_SPACE_CREATED_SCOPE, MEETINGS_SPACE_SETTINGS_SCOPE])
+        );
+
+        let end_result = connector
+            .handle_invoke(json!({
+                "operation": SPACE_END_ACTIVE_CONFERENCE_OP,
+                "input": { "space": "spaces/jQCFfuBOdN5z" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SPACE_END_ACTIVE_CONFERENCE_OP,
+                    MEET_SPACE_END_CAP
+                ),
+            }))
+            .await
+            .expect("end active conference");
+        assert_eq!(end_result["ended"], true);
+        assert_eq!(
+            end_result["resolved_space"]["activeConference"]["conferenceRecord"],
+            "conferenceRecords/rec-active"
+        );
+        finish_loopback(server);
+
+        let recorded = requests.lock().expect("requests").clone();
+        assert_eq!(recorded.len(), 4, "loopback transcript: {recorded:#?}");
+        assert_eq!(recorded[0].method, "GET");
+        assert_eq!(recorded[0].target, "/v2/spaces/abc%2Ddefg%2Dhij");
+        assert_eq!(recorded[1].method, "POST");
+        assert_eq!(recorded[1].target, "/v2/spaces");
+        let create_body: serde_json::Value =
+            serde_json::from_str(&recorded[1].body).expect("create body JSON");
+        assert_eq!(create_body["config"]["accessType"], "TRUSTED");
+        assert_eq!(
+            create_body["config"]["entryPointAccess"],
+            "CREATOR_APP_ONLY"
+        );
+        assert_eq!(recorded[2].method, "GET");
+        assert_eq!(recorded[2].target, "/v2/spaces/jQCFfuBOdN5z");
+        assert_eq!(recorded[3].method, "POST");
+        assert_eq!(
+            recorded[3].target,
+            "/v2/spaces/jQCFfuBOdN5z:endActiveConference"
+        );
+        assert_eq!(recorded[3].body, "");
+        assert!(
+            recorded
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+            "every Meet API request must carry injected auth"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn space_mutations_reject_missing_scopes_before_network_io() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": SPACE_CREATE_OP,
+                "input": {},
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SPACE_CREATE_OP,
+                    MEET_SPACE_CREATE_CAP
+                ),
+            }))
+            .await
+            .expect_err("missing created scope should fail");
+        assert!(
+            matches!(err, FcpError::InvalidRequest { message, .. } if message.contains(MEETINGS_SPACE_CREATED_SCOPE))
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn space_create_rejects_missing_name_or_meeting_uri() {
+        let (base_url, _requests, server) = spawn_loopback(vec![json_response(json!({
+            "name": "spaces/jQCFfuBOdN5z"
+        }))]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([
+                ("base_url", json!(base_url)),
+                ("required_scopes", json!([MEETINGS_SPACE_CREATED_SCOPE])),
+            ]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_CREATE_CAP],
+            }))
+            .await
+            .expect("handshake");
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": SPACE_CREATE_OP,
+                "input": {},
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SPACE_CREATE_OP,
+                    MEET_SPACE_CREATE_CAP
+                ),
+            }))
+            .await
+            .expect_err("space without meetingUri must fail");
+        finish_loopback(server);
+        assert!(
+            matches!(err, FcpError::InvalidRequest { message, .. } if message.contains("without meetingUri"))
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2733,6 +3405,9 @@ mod tests {
                 matches!(
                     id.as_str(),
                     NORMALIZE_SPACE_OP
+                        | SPACE_GET_OP
+                        | SPACE_CREATE_OP
+                        | SPACE_END_ACTIVE_CONFERENCE_OP
                         | CONFERENCE_RECORD_GET_OP
                         | CONFERENCE_RECORDS_LIST_OP
                         | CONFERENCE_RECORD_LATEST_OP
@@ -2741,9 +3416,21 @@ mod tests {
                         | ATTENDANCE_LIST_OP
                 )
             }),
-            "manifest should advertise only the space-normalize and conference-read operations"
+            "manifest should advertise only the spaces and conference-read operations"
         );
-        assert_eq!(manifest.provides.operations.len(), 7);
+        assert_eq!(manifest.provides.operations.len(), 10);
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == SPACE_CREATE_OP)
+                .map(|(_id, operation)| operation)
+                .expect("space create op")
+                .capability
+                .as_str(),
+            MEET_SPACE_CREATE_CAP
+        );
         assert_eq!(
             manifest
                 .provides

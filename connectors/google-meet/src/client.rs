@@ -8,7 +8,7 @@ use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, Url, header};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::error::{GoogleMeetError, GoogleMeetResult};
 
@@ -115,6 +115,43 @@ impl GoogleMeetClient {
         } else {
             Ok(())
         }
+    }
+
+    /// Fetch one meeting space by resource name, meeting code, or Meet URL.
+    pub async fn get_space(&self, meeting: &str) -> GoogleMeetResult<GoogleMeetSpace> {
+        let name = normalize_meet_space_name(meeting)?;
+        let space = self
+            .get_json::<GoogleMeetSpace>(&encode_resource_name_for_path(&name), &[])
+            .await?;
+        ensure_named(&space, "spaces.get")?;
+        Ok(space)
+    }
+
+    /// Create a meeting space with optional Meet API `SpaceConfig`.
+    pub async fn create_space(
+        &self,
+        config: Option<GoogleMeetSpaceConfig>,
+    ) -> GoogleMeetResult<GoogleMeetSpace> {
+        let body = config.map_or_else(|| json!({}), |config| json!({ "config": config }));
+        let space = self.post_json::<GoogleMeetSpace>("spaces", &body).await?;
+        ensure_named(&space, "spaces.create")?;
+        if space.meeting_uri.as_deref().is_none_or(str::is_empty) {
+            return Err(GoogleMeetError::InvalidConfig {
+                message: "Google Meet spaces.create response included a space without meetingUri"
+                    .to_string(),
+            });
+        }
+        Ok(space)
+    }
+
+    /// End the currently active conference for a meeting space.
+    pub async fn end_active_conference(&self, space_name: &str) -> GoogleMeetResult<Value> {
+        let name = normalize_meet_space_name(space_name)?;
+        let path = format!(
+            "{}:endActiveConference",
+            encode_resource_name_for_path(&name)
+        );
+        self.post_empty_json(&path).await
     }
 
     /// Fetch one conference record by resource name or id.
@@ -252,6 +289,32 @@ impl GoogleMeetClient {
         decode_response(response).await
     }
 
+    async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        body: &Value,
+    ) -> GoogleMeetResult<T> {
+        let url = self.build_url(path, &[])?;
+        let mut request = self.http.post(url).json(body);
+        let auth_headers = auth_headers(&self.auth)?;
+        if !auth_headers.is_empty() {
+            request = request.headers(auth_headers);
+        }
+        let response = request.send().await.map_err(GoogleMeetError::Http)?;
+        decode_response(response).await
+    }
+
+    async fn post_empty_json<T: DeserializeOwned>(&self, path: &str) -> GoogleMeetResult<T> {
+        let url = self.build_url(path, &[])?;
+        let mut request = self.http.post(url);
+        let auth_headers = auth_headers(&self.auth)?;
+        if !auth_headers.is_empty() {
+            request = request.headers(auth_headers);
+        }
+        let response = request.send().await.map_err(GoogleMeetError::Http)?;
+        decode_response(response).await
+    }
+
     fn build_url(&self, path: &str, query: &[(&str, String)]) -> GoogleMeetResult<Url> {
         let base = format!("{}/", self.base_url.trim_end_matches('/'));
         let mut url = Url::parse(&base).map_err(|error| GoogleMeetError::InvalidConfig {
@@ -270,6 +333,51 @@ impl GoogleMeetClient {
         }
         Ok(url)
     }
+}
+
+/// Google Meet meeting space resource.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetSpace {
+    /// Resource name, `spaces/{space}`.
+    #[serde(default)]
+    pub name: String,
+    /// Join URI returned by Google Meet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting_uri: Option<String>,
+    /// Typeable meeting code alias.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meeting_code: Option<String>,
+    /// Meeting space configuration.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub config: Option<GoogleMeetSpaceConfig>,
+    /// Active conference pointer when one exists.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_conference: Option<GoogleMeetActiveConference>,
+    /// Preserve fields added by Google before FCP models them explicitly.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet meeting space configuration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetSpaceConfig {
+    /// Access type: OPEN, TRUSTED, or RESTRICTED.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub access_type: Option<String>,
+    /// Entry point policy: ALL or CREATOR_APP_ONLY.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub entry_point_access: Option<String>,
+}
+
+/// Google Meet active conference pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetActiveConference {
+    /// Conference record resource name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub conference_record: Option<String>,
 }
 
 /// Google Meet conference record resource.
@@ -411,6 +519,12 @@ pub struct GoogleMeetAttendanceRow {
 pub trait NamedGoogleMeetResource {
     /// Resource name.
     fn resource_name(&self) -> &str;
+}
+
+impl NamedGoogleMeetResource for GoogleMeetSpace {
+    fn resource_name(&self) -> &str {
+        &self.name
+    }
 }
 
 impl NamedGoogleMeetResource for GoogleMeetConferenceRecord {

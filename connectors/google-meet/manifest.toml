@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:e715a1b037536a2b2372914de8e4d8a83b0a6060f793a8bca0fa7e9df54bc45d"
+interface_hash = "blake3-256:fcp.interface.v2:5ab89ccd852176277eb5686e06d05c9fdcfb0db78ea641190b7ff950cf92d2fc"
 
 [connector]
 id = "fcp.google-meet"
@@ -87,6 +87,152 @@ when_to_use = "Validate and normalize a Google Meet identifier before calling Me
 common_mistakes = ["Passing a Calendar event link instead of a meet.google.com link", "Assuming this joins or controls a live meeting; it only normalizes the API space name"]
 examples = ['{"input":"https://meet.google.com/abc-defg-hij"}', '{"input":"spaces/abc-defg-hij"}']
 related = []
+
+[provides.operations."gmeet.space.get"]
+description = "Fetch one Google Meet meeting space by resource name, meeting code, or URL"
+capability = "meet.space.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.space.get".input_schema]
+required = ["space"]
+type = "object"
+[provides.operations."gmeet.space.get".input_schema.properties.space]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource name"
+
+[provides.operations."gmeet.space.get".output_schema]
+required = ["space_name", "space"]
+type = "object"
+[provides.operations."gmeet.space.get".output_schema.properties.input]
+type = "string"
+[provides.operations."gmeet.space.get".output_schema.properties.space_name]
+type = "string"
+[provides.operations."gmeet.space.get".output_schema.properties.space]
+type = "object"
+
+[provides.operations."gmeet.space.get".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.space.get".ai_hints]
+when_to_use = "Resolve a Google Meet URL or code into current Meet space metadata before mutating or reading related resources."
+common_mistakes = ["Storing meeting codes as durable IDs; Google can reuse or detach codes", "Assuming this joins or controls a live meeting"]
+examples = ['{"space":"https://meet.google.com/abc-defg-hij"}', '{"space":"spaces/jQCFfuBOdN5z"}']
+related = ["gmeet.normalize_space_name"]
+
+[provides.operations."gmeet.space.create"]
+description = "Create a Google Meet meeting space"
+capability = "meet.space.create"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.space.create".input_schema]
+type = "object"
+[provides.operations."gmeet.space.create".input_schema.properties.config]
+type = "object"
+[provides.operations."gmeet.space.create".input_schema.properties.config.properties.access_type]
+type = "string"
+enum = ["OPEN", "TRUSTED", "RESTRICTED"]
+[provides.operations."gmeet.space.create".input_schema.properties.config.properties.entry_point_access]
+type = "string"
+enum = ["ALL", "CREATOR_APP_ONLY"]
+
+[provides.operations."gmeet.space.create".output_schema]
+required = ["space", "required_scopes"]
+type = "object"
+[provides.operations."gmeet.space.create".output_schema.properties.space]
+type = "object"
+[provides.operations."gmeet.space.create".output_schema.properties.requested_config]
+type = "object"
+[provides.operations."gmeet.space.create".output_schema.properties.required_scopes]
+type = "array"
+
+[provides.operations."gmeet.space.create".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.space.create".ai_hints]
+when_to_use = "Create a Meet space through the Meet API before sharing the returned meetingUri."
+common_mistakes = ["Creating with access or entry-point config requires meetings.space.settings in addition to meetings.space.created", "Assuming this starts or joins a live conference"]
+examples = ['{}', '{"config":{"access_type":"TRUSTED","entry_point_access":"ALL"}}']
+related = ["gmeet.space.get"]
+
+[provides.operations."gmeet.space.end_active_conference"]
+description = "End the active conference for a Google Meet space created by the calling app"
+capability = "meet.space.end"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.space.end_active_conference".input_schema]
+required = ["space"]
+type = "object"
+[provides.operations."gmeet.space.end_active_conference".input_schema.properties.space]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource name"
+
+[provides.operations."gmeet.space.end_active_conference".output_schema]
+required = ["resolved_space", "ended", "response"]
+type = "object"
+[provides.operations."gmeet.space.end_active_conference".output_schema.properties.input]
+type = "string"
+[provides.operations."gmeet.space.end_active_conference".output_schema.properties.space_name]
+type = "string"
+[provides.operations."gmeet.space.end_active_conference".output_schema.properties.resolved_space]
+type = "object"
+[provides.operations."gmeet.space.end_active_conference".output_schema.properties.ended]
+type = "boolean"
+[provides.operations."gmeet.space.end_active_conference".output_schema.properties.response]
+type = "object"
+
+[provides.operations."gmeet.space.end_active_conference".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.space.end_active_conference".ai_hints]
+when_to_use = "Terminate an active conference for a space after explicit approval and created-space ownership."
+common_mistakes = ["Trying to end meetings not created by the calling app", "Skipping the returned resolved_space evidence when auditing a forced end"]
+examples = ['{"space":"spaces/jQCFfuBOdN5z"}']
+related = ["gmeet.space.get"]
 
 [provides.operations."gmeet.conference_record.get"]
 description = "Fetch one Google Meet conference record by resource name or id"
@@ -412,8 +558,25 @@ window_ms = 60000
 burst = 30
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "meet.space.create"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "meet.space.end"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "gmeet.normalize_space_name" = ["meet.space.read"]
+"gmeet.space.get" = ["meet.space.read"]
+"gmeet.space.create" = ["meet.space.create"]
+"gmeet.space.end_active_conference" = ["meet.space.end"]
 "gmeet.conference_record.get" = ["meet.conference.read"]
 "gmeet.conference_records.list" = ["meet.conference.read"]
 "gmeet.conference_record.latest" = ["meet.conference.read"]

@@ -31,6 +31,9 @@ pub const BROWSER_CONTROL_PROTOCOL_VERSION: u64 = 1;
 const CONTROL_RESPONSE_BYTES_SMALL: usize = 1_048_576;
 const CONTROL_RESPONSE_BYTES_STANDARD: usize = 10_485_760;
 const CONTROL_RESPONSE_BYTES_CAPTURE: usize = 52_428_800;
+const CONTROL_TIMEOUT_MS_SHORT: u64 = 10_000;
+const CONTROL_TIMEOUT_MS_STANDARD: u64 = 30_000;
+const CONTROL_TIMEOUT_MS_CAPTURE: u64 = 60_000;
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
@@ -38,6 +41,7 @@ struct BrowserControlOperation {
     method: &'static str,
     path: &'static str,
     max_response_bytes: usize,
+    timeout_ms: u64,
     implementation: BrowserControlImplementation,
 }
 
@@ -48,6 +52,7 @@ impl BrowserControlOperation {
             "method": self.method,
             "path": self.path,
             "max_response_bytes": self.max_response_bytes,
+            "timeout_ms": self.timeout_ms,
             "implementation": self.implementation.descriptor(),
         })
     }
@@ -105,6 +110,7 @@ const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/navigate",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
+    timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "Page.enable",
@@ -119,6 +125,7 @@ const WORKER_SCREENSHOT: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/screenshot",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
+    timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -134,6 +141,7 @@ const WORKER_RENDER_PDF: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/pdf",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
+    timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Page.printToPDF"],
     },
@@ -143,6 +151,7 @@ const WORKER_EXTRACT_TEXT: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/extract_text",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -152,6 +161,7 @@ const WORKER_EXTRACT_LINKS: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/extract_links",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -161,6 +171,7 @@ const WORKER_WAIT_FOR_SELECTOR: BrowserControlOperation = BrowserControlOperatio
     method: "POST",
     path: "/wait_for_selector",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -170,6 +181,7 @@ const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/click",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -184,6 +196,7 @@ const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/fill_form",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -199,6 +212,7 @@ const WORKER_EVALUATE_JS: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/evaluate",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
+    timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -208,6 +222,7 @@ const WORKER_GET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/cookies",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+    timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.getCookies"],
     },
@@ -217,6 +232,7 @@ const WORKER_SET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/set_cookies",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+    timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.setCookies"],
     },
@@ -226,6 +242,7 @@ const WORKER_SET_PROXY: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/proxy/set",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+    timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Apply connector-scoped proxy policy before browser target launch.",
     },
@@ -235,6 +252,7 @@ const WORKER_CLEAR_PROXY: BrowserControlOperation = BrowserControlOperation {
     method: "POST",
     path: "/proxy/clear",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+    timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Clear connector-scoped proxy policy for future browser targets.",
     },
@@ -473,8 +491,11 @@ impl BrowserClient {
     /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
         let url = format!("{}/health", self.browser_url);
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         match self
-            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || self.http.get(&url))
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || {
+                self.http.get(&url).timeout(timeout)
+            })
             .await
         {
             Ok(body) => validate_fcp_browser_control_health(&body).map_err(|reason| {
@@ -729,8 +750,9 @@ impl BrowserClient {
         body: &serde_json::Value,
     ) -> BrowserResult<serde_json::Value> {
         let url = self.worker_endpoint(operation);
+        let timeout = Duration::from_millis(operation.timeout_ms);
         self.execute(operation.max_response_bytes, || {
-            self.http.post(&url).json(body)
+            self.http.post(&url).timeout(timeout).json(body)
         })
         .await
     }
@@ -834,8 +856,11 @@ impl BrowserClient {
 
     async fn raw_chrome_cdp_endpoint_detected(&self) -> bool {
         let url = format!("{}/json/version", self.browser_url);
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         match self
-            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || self.http.get(&url))
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || {
+                self.http.get(&url).timeout(timeout)
+            })
             .await
         {
             Ok(body) => looks_like_chrome_cdp_version(&body),
@@ -1025,16 +1050,21 @@ fn validate_browser_control_operation(
             .and_then(serde_json::Value::as_u64)
             .and_then(|limit| usize::try_from(limit).ok())
             .is_some_and(|limit| limit == required.max_response_bytes)
+        && operation
+            .get("timeout_ms")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|timeout_ms| timeout_ms == required.timeout_ms)
         && browser_control_implementation_matches(operation, required)
     {
         Ok(())
     } else {
         Err(format!(
-            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {} and implementation {}",
+            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {}, timeout_ms {}, and implementation {}",
             required.id,
             required.method,
             required.path,
             required.max_response_bytes,
+            required.timeout_ms,
             required.implementation.summary()
         ))
     }
@@ -1124,6 +1154,7 @@ mod tests {
                         && operation["path"] == required.path
                         && operation["max_response_bytes"]
                             == serde_json::json!(required.max_response_bytes)
+                        && operation["timeout_ms"] == serde_json::json!(required.timeout_ms)
                 }),
                 "missing {} {} {}",
                 required.method,
@@ -1208,7 +1239,9 @@ mod tests {
             let kind = implementation["kind"].as_str().unwrap();
             let methods = implementation["methods"].as_array().unwrap();
             let max_response_bytes = operation["max_response_bytes"].as_u64().unwrap();
+            let timeout_ms = operation["timeout_ms"].as_u64().unwrap();
             assert!(max_response_bytes > 0, "{id} must expose a response cap");
+            assert!(timeout_ms > 0, "{id} must expose a timeout budget");
 
             assert!(
                 matches!(kind, "cdp" | "worker_policy"),
@@ -1320,6 +1353,18 @@ mod tests {
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("max_response_bytes"));
         assert!(err.contains(&CONTROL_RESPONSE_BYTES_CAPTURE.to_string()));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_operation_timeout_budget() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["timeout_ms"] = serde_json::json!(CONTROL_TIMEOUT_MS_SHORT);
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("timeout_ms"));
+        assert!(err.contains(&CONTROL_TIMEOUT_MS_CAPTURE.to_string()));
     }
 
     #[test]
@@ -1669,6 +1714,43 @@ mod tests {
         assert!(!result.enabled);
         assert_eq!(result.mode, "direct");
         assert!(result.server.is_none());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_worker_operation_timeout_budget_is_applied_to_request() {
+        const SLOW_OPERATION: BrowserControlOperation = BrowserControlOperation {
+            id: "browser.test_timeout",
+            method: "POST",
+            path: "/slow",
+            max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
+            timeout_ms: 20,
+            implementation: BrowserControlImplementation::Cdp {
+                methods: &["Runtime.evaluate"],
+            },
+        };
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/slow"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(std::time::Duration::from_millis(250))
+                    .set_body_json(serde_json::json!({ "ok": true })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let err = client
+            .post_json(SLOW_OPERATION, &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, BrowserError::Http(err) if err.is_timeout()));
     }
 
     #[fcp_async_core::runtime::test]

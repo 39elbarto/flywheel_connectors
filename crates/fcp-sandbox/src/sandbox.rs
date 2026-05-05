@@ -306,6 +306,201 @@ pub struct WindowsAppContainerProfile {
     pub capabilities: Vec<String>,
 }
 
+/// Result from attempting to create a Windows `AppContainer` profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsAppContainerCreateOutcome {
+    /// A new per-user profile was created.
+    Created,
+    /// The profile already existed and should be resolved by name.
+    AlreadyExists,
+}
+
+/// High-level lifecycle action taken for a Windows `AppContainer` profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsAppContainerLifecycleAction {
+    /// The operator has not enabled the Windows `AppContainer` launch path.
+    SkippedInactive,
+    /// A new profile was created.
+    Created,
+    /// An existing profile SID was resolved and reused.
+    ReusedExisting,
+}
+
+/// Cleanup decision for a Windows `AppContainer` lifecycle attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WindowsAppContainerCleanupDecision {
+    /// No profile was created or opened.
+    None,
+    /// The profile is retained for deterministic connector-instance reuse.
+    RetainProfile,
+}
+
+/// Fakeable profile API used by the Windows backend lifecycle controller.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) trait WindowsAppContainerProfileApi {
+    /// Create the profile, or report that it already exists.
+    fn create_profile(
+        &mut self,
+        profile: &WindowsAppContainerProfile,
+    ) -> Result<WindowsAppContainerCreateOutcome, SandboxError>;
+
+    /// Resolve the SID for an existing profile.
+    fn derive_profile_sid(&mut self, profile_name: &str) -> Result<(), SandboxError>;
+}
+
+/// Structured report for Windows `AppContainer` profile preparation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WindowsAppContainerLifecycleReport {
+    /// Profile metadata used by the lifecycle operation.
+    pub profile: WindowsAppContainerProfile,
+    /// Lifecycle action taken.
+    pub action: WindowsAppContainerLifecycleAction,
+    /// Whether an `AppContainer` SID was obtained or resolved.
+    pub sid_present: bool,
+    /// Cleanup choice made by the lifecycle controller.
+    pub cleanup: WindowsAppContainerCleanupDecision,
+    /// Structured skip reason when no OS call was attempted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+impl WindowsAppContainerLifecycleReport {
+    fn inactive(profile: WindowsAppContainerProfile) -> Self {
+        Self {
+            profile,
+            action: WindowsAppContainerLifecycleAction::SkippedInactive,
+            sid_present: false,
+            cleanup: WindowsAppContainerCleanupDecision::None,
+            skip_reason: Some(
+                "windows_appcontainer_not_active_createprocessasuser_path_unwired".to_owned(),
+            ),
+        }
+    }
+
+    const fn active(
+        profile: WindowsAppContainerProfile,
+        action: WindowsAppContainerLifecycleAction,
+    ) -> Self {
+        Self {
+            profile,
+            action,
+            sid_present: true,
+            cleanup: WindowsAppContainerCleanupDecision::RetainProfile,
+            skip_reason: None,
+        }
+    }
+}
+
+/// Run Windows `AppContainer` profile create/reuse logic through a fakeable API.
+#[cfg(any(test, target_os = "windows"))]
+#[allow(clippy::redundant_pub_crate)]
+pub(super) fn prepare_windows_appcontainer_lifecycle<A>(
+    profile: WindowsAppContainerProfile,
+    appcontainer_active: bool,
+    api: &mut A,
+) -> Result<WindowsAppContainerLifecycleReport, SandboxError>
+where
+    A: WindowsAppContainerProfileApi,
+{
+    if !appcontainer_active {
+        return Ok(WindowsAppContainerLifecycleReport::inactive(profile));
+    }
+
+    match api.create_profile(&profile)? {
+        WindowsAppContainerCreateOutcome::Created => {
+            Ok(WindowsAppContainerLifecycleReport::active(
+                profile,
+                WindowsAppContainerLifecycleAction::Created,
+            ))
+        }
+        WindowsAppContainerCreateOutcome::AlreadyExists => {
+            api.derive_profile_sid(&profile.name)?;
+            Ok(WindowsAppContainerLifecycleReport::active(
+                profile,
+                WindowsAppContainerLifecycleAction::ReusedExisting,
+            ))
+        }
+    }
+}
+
+/// Redaction-safe JSONL evidence for Windows `AppContainer` smoke/skips.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WindowsAppContainerEvidence {
+    /// Schema marker for downstream evidence validators.
+    pub schema: &'static str,
+    /// Operating-system family for this evidence record.
+    pub os: &'static str,
+    /// Hashed connector id or connector seed.
+    pub connector_id_hash: String,
+    /// Hashed `AppContainer` profile name.
+    pub profile_name_hash: String,
+    /// Capability names after normalization and deny-policy checks.
+    pub capabilities: Vec<String>,
+    /// Capability mapping decision.
+    pub capability_decision: &'static str,
+    /// Lifecycle action result.
+    pub lifecycle_action: WindowsAppContainerLifecycleAction,
+    /// Whether an `AppContainer` SID was present.
+    pub sid_present: bool,
+    /// Whether the job object was attached after lifecycle preparation.
+    pub job_object_attached: bool,
+    /// Stable step ordering for appcontainer -> job-object enforcement.
+    pub step_order: Vec<&'static str>,
+    /// Final result string for the scripted/e2e action.
+    pub action_result: &'static str,
+    /// Cleanup decision.
+    pub cleanup: WindowsAppContainerCleanupDecision,
+    /// Structured skip reason when applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+impl WindowsAppContainerEvidence {
+    /// Build redaction-safe evidence from a lifecycle report.
+    #[must_use]
+    pub fn from_lifecycle(
+        connector_id: &str,
+        report: &WindowsAppContainerLifecycleReport,
+        job_object_attached: bool,
+        action_result: &'static str,
+    ) -> Self {
+        let mut step_order = vec!["appcontainer_lifecycle"];
+        if job_object_attached {
+            step_order.push("job_object_attach");
+        }
+
+        Self {
+            schema: "fcp.windows_appcontainer_smoke.v1",
+            os: "windows",
+            connector_id_hash: stable_fnv1a64_hex(connector_id),
+            profile_name_hash: stable_fnv1a64_hex(&report.profile.name),
+            capabilities: report.profile.capabilities.clone(),
+            capability_decision: if report.profile.capabilities.is_empty() {
+                "none_required"
+            } else {
+                "mapped"
+            },
+            lifecycle_action: report.action,
+            sid_present: report.sid_present,
+            job_object_attached,
+            step_order,
+            action_result,
+            cleanup: report.cleanup,
+            skip_reason: report.skip_reason.clone(),
+        }
+    }
+
+    /// Render this record as a single JSONL line.
+    pub fn to_jsonl_line(&self) -> Result<String, serde_json::Error> {
+        serde_json::to_string(self)
+    }
+}
+
 impl WindowsAppContainerProfile {
     /// Derive a stable `AppContainer` profile from a connector id and compiled policy.
     pub fn from_policy(connector_id: &str, policy: &CompiledPolicy) -> Result<Self, SandboxError> {
@@ -1179,6 +1374,214 @@ mod tests {
             .unwrap_err();
 
         assert!(err.to_string().contains("unsupported characters"));
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum FakeCreateProfileResult {
+        Created,
+        AlreadyExists,
+        Fail,
+    }
+
+    struct FakeWindowsAppContainerApi {
+        create_result: FakeCreateProfileResult,
+        derive_fails: bool,
+        calls: Vec<String>,
+    }
+
+    impl FakeWindowsAppContainerApi {
+        fn new(create_result: FakeCreateProfileResult) -> Self {
+            Self {
+                create_result,
+                derive_fails: false,
+                calls: Vec::new(),
+            }
+        }
+
+        fn with_derive_failure(mut self) -> Self {
+            self.derive_fails = true;
+            self
+        }
+    }
+
+    impl WindowsAppContainerProfileApi for FakeWindowsAppContainerApi {
+        fn create_profile(
+            &mut self,
+            profile: &WindowsAppContainerProfile,
+        ) -> Result<WindowsAppContainerCreateOutcome, SandboxError> {
+            self.calls.push(format!("create:{}", profile.name));
+            match self.create_result {
+                FakeCreateProfileResult::Created => Ok(WindowsAppContainerCreateOutcome::Created),
+                FakeCreateProfileResult::AlreadyExists => {
+                    Ok(WindowsAppContainerCreateOutcome::AlreadyExists)
+                }
+                FakeCreateProfileResult::Fail => Err(SandboxError::SyscallFailed(
+                    "CreateAppContainerProfile failed: access denied".into(),
+                )),
+            }
+        }
+
+        fn derive_profile_sid(&mut self, profile_name: &str) -> Result<(), SandboxError> {
+            self.calls.push(format!("derive:{profile_name}"));
+            if self.derive_fails {
+                Err(SandboxError::SyscallFailed(
+                    "DeriveAppContainerSidFromAppContainerName failed: invalid argument".into(),
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    fn fake_windows_appcontainer_profile() -> WindowsAppContainerProfile {
+        WindowsAppContainerProfile {
+            name: "fcp-test-connector-0123456789abcdef".into(),
+            capabilities: vec![WINDOWS_APPCONTAINER_INTERNET_CLIENT.into()],
+        }
+    }
+
+    #[test]
+    fn test_windows_appcontainer_lifecycle_skips_without_active_backend() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::Fail);
+
+        let report =
+            prepare_windows_appcontainer_lifecycle(profile.clone(), false, &mut api).unwrap();
+
+        assert_eq!(report.profile, profile);
+        assert_eq!(
+            report.action,
+            WindowsAppContainerLifecycleAction::SkippedInactive
+        );
+        assert!(!report.sid_present);
+        assert_eq!(report.cleanup, WindowsAppContainerCleanupDecision::None);
+        assert!(report.skip_reason.is_some());
+        assert!(api.calls.is_empty());
+    }
+
+    #[test]
+    fn test_windows_appcontainer_lifecycle_records_profile_create() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::Created);
+
+        let report =
+            prepare_windows_appcontainer_lifecycle(profile.clone(), true, &mut api).unwrap();
+
+        assert_eq!(report.profile, profile);
+        assert_eq!(report.action, WindowsAppContainerLifecycleAction::Created);
+        assert!(report.sid_present);
+        assert_eq!(
+            report.cleanup,
+            WindowsAppContainerCleanupDecision::RetainProfile
+        );
+        assert_eq!(
+            api.calls,
+            vec!["create:fcp-test-connector-0123456789abcdef"]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_lifecycle_reuses_existing_profile_sid() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::AlreadyExists);
+
+        let report =
+            prepare_windows_appcontainer_lifecycle(profile.clone(), true, &mut api).unwrap();
+
+        assert_eq!(report.profile, profile);
+        assert_eq!(
+            report.action,
+            WindowsAppContainerLifecycleAction::ReusedExisting
+        );
+        assert!(report.sid_present);
+        assert_eq!(
+            api.calls,
+            vec![
+                "create:fcp-test-connector-0123456789abcdef",
+                "derive:fcp-test-connector-0123456789abcdef"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_lifecycle_maps_create_failure() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::Fail);
+
+        let err = prepare_windows_appcontainer_lifecycle(profile, true, &mut api).unwrap_err();
+
+        assert!(err.to_string().contains("CreateAppContainerProfile"));
+        assert_eq!(
+            api.calls,
+            vec!["create:fcp-test-connector-0123456789abcdef"]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_lifecycle_maps_sid_derivation_failure() {
+        let profile = fake_windows_appcontainer_profile();
+        let mut api = FakeWindowsAppContainerApi::new(FakeCreateProfileResult::AlreadyExists)
+            .with_derive_failure();
+
+        let err = prepare_windows_appcontainer_lifecycle(profile, true, &mut api).unwrap_err();
+
+        assert!(
+            err.to_string()
+                .contains("DeriveAppContainerSidFromAppContainerName")
+        );
+        assert_eq!(
+            api.calls,
+            vec![
+                "create:fcp-test-connector-0123456789abcdef",
+                "derive:fcp-test-connector-0123456789abcdef"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_windows_appcontainer_evidence_redacts_connector_and_profile_names() {
+        let profile = WindowsAppContainerProfile {
+            name: "fcp-secret-customer-0123456789abcdef".into(),
+            capabilities: vec!["custom.capability".into()],
+        };
+        let report = WindowsAppContainerLifecycleReport::inactive(profile);
+        let evidence = WindowsAppContainerEvidence::from_lifecycle(
+            "secret-customer@example.com",
+            &report,
+            false,
+            "skip",
+        );
+        let line = evidence.to_jsonl_line().unwrap();
+
+        assert!(line.contains("fcp.windows_appcontainer_smoke.v1"));
+        assert!(line.contains("windows_appcontainer_not_active"));
+        assert!(!line.contains("secret-customer@example.com"));
+        assert!(!line.contains("fcp-secret-customer"));
+        assert!(evidence.step_order.contains(&"appcontainer_lifecycle"));
+        assert!(!evidence.step_order.contains(&"job_object_attach"));
+    }
+
+    #[test]
+    fn test_windows_appcontainer_evidence_records_job_object_attachment_order() {
+        let profile = fake_windows_appcontainer_profile();
+        let report = WindowsAppContainerLifecycleReport::active(
+            profile,
+            WindowsAppContainerLifecycleAction::Created,
+        );
+        let evidence =
+            WindowsAppContainerEvidence::from_lifecycle("connector", &report, true, "apply");
+
+        assert!(evidence.job_object_attached);
+        assert_eq!(
+            evidence.step_order,
+            vec!["appcontainer_lifecycle", "job_object_attach"]
+        );
+        assert_eq!(evidence.action_result, "apply");
+        assert!(evidence.sid_present);
+        assert_eq!(
+            evidence.cleanup,
+            WindowsAppContainerCleanupDecision::RetainProfile
+        );
     }
 
     #[test]

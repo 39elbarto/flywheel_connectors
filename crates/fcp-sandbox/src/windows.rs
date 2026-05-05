@@ -53,7 +53,11 @@ use std::ptr;
 
 use tracing::{debug, info, warn};
 
-use crate::sandbox::{CompiledPolicy, Sandbox, SandboxError, WindowsAppContainerProfile};
+use crate::sandbox::{
+    CompiledPolicy, Sandbox, SandboxError, WindowsAppContainerCreateOutcome,
+    WindowsAppContainerEvidence, WindowsAppContainerLifecycleReport, WindowsAppContainerProfile,
+    WindowsAppContainerProfileApi, prepare_windows_appcontainer_lifecycle,
+};
 
 // ============================================================================
 // Windows API Types
@@ -156,24 +160,32 @@ impl WindowsSandbox {
     }
 
     /// Create or resolve the AppContainer profile when the operator has enabled the path.
-    fn prepare_appcontainer_profile(&self, policy: &CompiledPolicy) -> Result<(), SandboxError> {
+    fn prepare_appcontainer_profile(
+        &self,
+        policy: &CompiledPolicy,
+    ) -> Result<WindowsAppContainerLifecycleReport, SandboxError> {
         let profile = Self::appcontainer_profile(policy)?;
+        let mut api = NativeWindowsAppContainerApi;
+        let report =
+            prepare_windows_appcontainer_lifecycle(profile, self.appcontainer_available, &mut api)?;
+
         if !self.appcontainer_available {
             debug!(
-                appcontainer_profile = %profile.name,
-                capabilities = ?profile.capabilities,
+                appcontainer_profile = %report.profile.name,
+                capabilities = ?report.profile.capabilities,
+                skip_reason = ?report.skip_reason,
                 "AppContainer profile resolved but not created because AppContainer is not active"
             );
-            return Ok(());
+            return Ok(report);
         }
 
-        let _sid = create_or_open_appcontainer_profile(&profile)?;
         info!(
-            appcontainer_profile = %profile.name,
-            capabilities = ?profile.capabilities,
+            appcontainer_profile = %report.profile.name,
+            capabilities = ?report.profile.capabilities,
+            lifecycle_action = ?report.action,
             "Prepared Windows AppContainer profile"
         );
-        Ok(())
+        Ok(report)
     }
 
     /// Create and configure a job object.
@@ -384,11 +396,20 @@ impl Sandbox for WindowsSandbox {
         );
 
         // Step 1: Resolve/create AppContainer profile metadata when enabled.
-        self.prepare_appcontainer_profile(policy)?;
+        let appcontainer_report = self.prepare_appcontainer_profile(policy)?;
 
         // Step 2: Create and assign job object
         let job = self.create_job_object(policy)?;
         self.assign_to_job(job)?;
+        let appcontainer_evidence = WindowsAppContainerEvidence::from_lifecycle(
+            &windows_appcontainer_connector_seed(policy),
+            &appcontainer_report,
+            true,
+            "apply",
+        );
+        if let Ok(jsonl) = appcontainer_evidence.to_jsonl_line() {
+            debug!(evidence_jsonl = %jsonl, "Windows AppContainer smoke evidence");
+        }
 
         // Step 3: Set integrity level
         if let Err(e) = self.set_integrity_level(policy) {
@@ -711,9 +732,25 @@ fn windows_appcontainer_connector_seed(policy: &CompiledPolicy) -> String {
         .to_owned()
 }
 
-fn create_or_open_appcontainer_profile(
+struct NativeWindowsAppContainerApi;
+
+impl WindowsAppContainerProfileApi for NativeWindowsAppContainerApi {
+    fn create_profile(
+        &mut self,
+        profile: &WindowsAppContainerProfile,
+    ) -> Result<WindowsAppContainerCreateOutcome, SandboxError> {
+        create_appcontainer_profile(profile)
+    }
+
+    fn derive_profile_sid(&mut self, profile_name: &str) -> Result<(), SandboxError> {
+        let _sid = derive_appcontainer_sid(profile_name)?;
+        Ok(())
+    }
+}
+
+fn create_appcontainer_profile(
     profile: &WindowsAppContainerProfile,
-) -> Result<OwnedSid, SandboxError> {
+) -> Result<WindowsAppContainerCreateOutcome, SandboxError> {
     let mut capabilities = DerivedCapabilitySids::new(&profile.capabilities)?;
     let appcontainer_name = to_wide_string(&profile.name);
     let display_name = to_wide_string(&format!("FCP {}", profile.name));
@@ -734,8 +771,11 @@ fn create_or_open_appcontainer_profile(
     };
 
     match hr {
-        S_OK => Ok(OwnedSid(sid)),
-        HRESULT_ERROR_ALREADY_EXISTS => derive_appcontainer_sid(&profile.name),
+        S_OK => {
+            let _sid = OwnedSid(sid);
+            Ok(WindowsAppContainerCreateOutcome::Created)
+        }
+        HRESULT_ERROR_ALREADY_EXISTS => Ok(WindowsAppContainerCreateOutcome::AlreadyExists),
         _ => Err(SandboxError::SyscallFailed(format_hresult(
             "CreateAppContainerProfile",
             hr,

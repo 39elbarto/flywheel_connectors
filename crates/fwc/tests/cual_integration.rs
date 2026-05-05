@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
@@ -39,6 +39,9 @@ fn fixture_path(relative: &str) -> PathBuf {
         .join("testdata")
         .join(relative)
 }
+
+const SWARM_EVIDENCE_FIXTURE: &str =
+    "crates/fwc/testdata/swarm_evidence/operator_decision_cards.jsonl";
 
 #[derive(Debug, Deserialize)]
 struct HostIntegrationFixtureMatrix {
@@ -221,6 +224,198 @@ fn run_text_ok(args: &[&str]) -> String {
         "expected success for {args:?}\nstdout:\n{stdout}\nstderr:\n{stderr}"
     );
     stdout
+}
+
+fn report_by_type<'a>(payload: &'a Value, record_type: &str) -> &'a Value {
+    payload["reports"]
+        .as_array()
+        .expect("reports should be an array")
+        .iter()
+        .find(|report| report["record_type"] == record_type)
+        .unwrap_or_else(|| panic!("missing report record `{record_type}`"))
+}
+
+#[test]
+fn swarm_evidence_explore_fixture_json_exposes_operator_trace() {
+    let payload = run_json_ok(&[
+        "--json",
+        "swarm-evidence",
+        "explore",
+        SWARM_EVIDENCE_FIXTURE,
+        "--scenario",
+        "ten_thousand_agent_burst",
+    ]);
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "swarm-evidence explore");
+    assert_eq!(payload["summary"]["decision_card_count"], 5);
+    assert_eq!(payload["summary"]["filtered_decision_card_count"], 5);
+    let domains = payload["entries"]
+        .as_array()
+        .expect("entries should be an array")
+        .iter()
+        .map(|entry| {
+            entry["domain"]
+                .as_str()
+                .expect("entry should expose domain")
+                .to_owned()
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        domains,
+        BTreeSet::from([
+            "audit".to_owned(),
+            "backpressure".to_owned(),
+            "evidence-bundle".to_owned(),
+            "placement".to_owned(),
+            "scheduler".to_owned(),
+        ])
+    );
+
+    let scheduler = payload["entries"]
+        .as_array()
+        .expect("entries should be an array")
+        .iter()
+        .find(|entry| entry["card_id"] == "card:scheduler:p99-regression")
+        .expect("scheduler p99 decision card should be present");
+    assert_eq!(scheduler["action"], "delay");
+    assert_eq!(scheduler["dominant_loss_term"]["name"], "p99_queueing");
+    assert_eq!(
+        scheduler["counterfactual"]["reason"],
+        "would push p99 above the 1ms budget"
+    );
+    assert_eq!(
+        scheduler["evidence_handles"][0]["handle"],
+        "raw-samples.jsonl#line=42"
+    );
+
+    let gauntlet = report_by_type(&payload, "swarm_gauntlet_log");
+    assert_eq!(
+        gauntlet["run_context"]["git_revision"],
+        "fixture-revision-k3zfl5"
+    );
+    assert_eq!(gauntlet["run_context"]["worker_id"], "Codex");
+    assert_eq!(
+        gauntlet["run_context"]["cargo_target_dir"],
+        "/tmp/fcp-k3zfl5"
+    );
+    assert_eq!(gauntlet["run_context"]["topology"]["logical_cpus"], 64);
+    assert_eq!(gauntlet["run_context"]["command_line"][10], "[redacted]");
+    assert_eq!(gauntlet["run_context"]["command_line"][11], "[redacted]");
+    assert_eq!(gauntlet["metrics"]["p99_ns"], 1_250_000);
+    assert_eq!(gauntlet["metrics"]["p999_ns"], 2_100_000);
+    assert_eq!(gauntlet["metrics"]["throughput_ops_per_second"], 940_000);
+    assert_eq!(gauntlet["metrics"]["queue_depth"], 4096);
+    assert_eq!(
+        gauntlet["metrics"]["retry_amplification_microunits"],
+        125_000
+    );
+    assert_eq!(
+        gauntlet["machine_readable_status"]["failure_reason"],
+        "p99_regression"
+    );
+    assert_eq!(
+        gauntlet["evidence"]["decision_card_ids"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(
+        gauntlet["evidence"]["raw_sample_digest"],
+        "blake3:raw-samples-p99-regression"
+    );
+
+    let skip = report_by_type(&payload, "swarm_promotion_skip");
+    assert_eq!(
+        skip["machine_readable_status"]["skip_reason"],
+        "soak_hardware_unavailable"
+    );
+    assert_eq!(
+        skip["machine_readable_status"]["machine_reason"],
+        "missing_high_core_soak_worker"
+    );
+}
+
+#[test]
+fn swarm_evidence_replay_fixture_json_answers_debugging_questions() {
+    let payload = run_json_ok(&[
+        "--json",
+        "swarm-evidence",
+        "replay",
+        SWARM_EVIDENCE_FIXTURE,
+        "--card-id",
+        "card:scheduler:p99-regression",
+    ]);
+
+    assert_eq!(payload["status"], "ok");
+    assert_eq!(payload["command"], "swarm-evidence replay");
+    assert_eq!(payload["pagination"]["returned"], 1);
+    assert_eq!(payload["pagination"]["total_filtered"], 1);
+    assert_eq!(payload["pagination"]["has_more"], false);
+    assert_eq!(
+        payload["replay_boundary"],
+        "Offline replay renders stored decision-card inputs, action, fallback, counterfactual, and evidence pointers; it does not call live services or recompute host state."
+    );
+
+    let answers = &payload["entries"][0]["answers"];
+    assert_eq!(
+        answers["what_happened"]["scenario_id"],
+        "ten_thousand_agent_burst"
+    );
+    assert_eq!(answers["what_happened"]["domain"], "scheduler");
+    assert_eq!(answers["what_happened"]["selected_action"], "delay");
+    assert_eq!(
+        answers["why_selected"]["dominant_loss_term"]["name"],
+        "p99_queueing"
+    );
+    assert_eq!(answers["next_best_counterfactual"]["action"], "admit");
+    assert_eq!(
+        answers["next_best_counterfactual"]["reason"],
+        "would push p99 above the 1ms budget"
+    );
+    assert_eq!(answers["fallback"]["active"], false);
+    assert_eq!(
+        answers["proof_locations"]["evidence_handles"][0]["handle"],
+        "raw-samples.jsonl#line=42"
+    );
+    assert_eq!(
+        answers["proof_locations"]["replay_inputs"]["p99_ns"],
+        1_250_000
+    );
+    assert_eq!(
+        answers["proof_locations"]["replay_inputs"]["auth_token"],
+        "[redacted]"
+    );
+    assert_eq!(
+        payload["entries"][0]["redacted_record"]["card"]["replay_inputs"]["auth_token"],
+        "[redacted]"
+    );
+}
+
+#[test]
+fn swarm_evidence_replay_fixture_toon_is_concise_and_redacted() {
+    let text = run_text_ok(&[
+        "swarm-evidence",
+        "replay",
+        SWARM_EVIDENCE_FIXTURE,
+        "--card-id",
+        "card:scheduler:p99-regression",
+    ]);
+
+    for expected in [
+        "swarm-evidence replay",
+        "card:scheduler:p99-regression",
+        "selected=delay",
+        "fallback_active=false",
+    ] {
+        assert!(
+            text.contains(expected),
+            "TOON output should contain `{expected}`:\n{text}"
+        );
+    }
+    assert!(!text.contains("must-redact"));
+    assert!(!text.contains("sk-live-never-leak"));
 }
 
 fn load_host_integration_fixture(id: &str) -> HostIntegrationFixture {

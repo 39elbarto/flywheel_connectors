@@ -182,6 +182,7 @@ fn explore(args: &SwarmEvidenceExploreArgs) -> Result<Value> {
 fn replay(args: &SwarmEvidenceReplayArgs) -> Result<Value> {
     let records = load_jsonl_records(&args.file)?;
     let mut entries = filtered_entries(&records, &args.filters, &args.card_ids)?;
+    let total_filtered = entries.len();
     entries.truncate(args.limit);
     let replays = entries.iter().map(replay_summary).collect::<Vec<_>>();
 
@@ -189,9 +190,16 @@ fn replay(args: &SwarmEvidenceReplayArgs) -> Result<Value> {
         "status": "ok",
         "command": "swarm-evidence replay",
         "source": &args.file,
-        "summary": bundle_summary(&records, entries.len()),
+        "summary": bundle_summary(&records, total_filtered),
         "filters": serde_json::to_value(&args.filters)?,
         "card_ids": &args.card_ids,
+        "pagination": {
+            "offset": 0,
+            "limit": args.limit,
+            "returned": replays.len(),
+            "total_filtered": total_filtered,
+            "has_more": replays.len() < total_filtered,
+        },
         "entries": replays,
         "message": format!(
             "Rendered {} stored swarm decision card(s) from `{}`.",
@@ -558,47 +566,129 @@ fn report_links(records: &[JsonlRecord]) -> Vec<Value> {
             Some(json!({
                 "line": record.line,
                 "record_type": record_type,
-                "scenario": record
-                    .value
-                    .get("scenario")
-                    .or_else(|| record.value.get("scenario_id"))
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "outcome": record.value.get("outcome").cloned().unwrap_or(Value::Null),
-                "decision_card_ids": record
-                    .value
-                    .get("decision_card_ids")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "evidence_bundle_id": record
-                    .value
-                    .get("evidence_bundle_id")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "raw_samples_record_type": record
-                    .value
-                    .get("raw_samples_record_type")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "raw_sample_digest": record
-                    .value
-                    .get("raw_sample_digest")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "summary_digest": record.value.get("summary_digest").cloned().unwrap_or(Value::Null),
-                "gate_report_digest": record
-                    .value
-                    .get("gate_report_digest")
-                    .cloned()
-                    .unwrap_or(Value::Null),
-                "proof_notes_digest": record
-                    .value
-                    .get("proof_notes_digest")
-                    .cloned()
-                    .unwrap_or(Value::Null),
+                "scenario": scenario_field(record),
+                "latency_scenario_id": record_field(record, "latency_scenario_id"),
+                "outcome": record_field(record, "outcome"),
+                "decision_card_ids": record_field(record, "decision_card_ids"),
+                "evidence_bundle_id": record_field(record, "evidence_bundle_id"),
+                "raw_samples_record_type": record_field(record, "raw_samples_record_type"),
+                "raw_sample_digest": record_field(record, "raw_sample_digest"),
+                "summary_digest": record_field(record, "summary_digest"),
+                "gate_report_digest": record_field(record, "gate_report_digest"),
+                "proof_notes_digest": record_field(record, "proof_notes_digest"),
+                "execution_mode": record_field(record, "execution_mode"),
+                "source_kind": record_field(record, "source_kind"),
+                "run_context": {
+                    "command_line": record
+                        .value
+                        .get("command_line")
+                        .map(redacted_command_line)
+                        .unwrap_or(Value::Null),
+                    "git_revision": record_field(record, "git_revision"),
+                    "worker_id": record_field(record, "worker_id"),
+                    "cargo_target_dir": record_field(record, "cargo_target_dir"),
+                    "topology": record_field(record, "topology"),
+                },
+                "metrics": {
+                    "sample_count": record_field(record, "sample_count"),
+                    "p50_ns": record_field(record, "p50_ns"),
+                    "p95_ns": record_field(record, "p95_ns"),
+                    "p99_ns": record_field(record, "p99_ns"),
+                    "p999_ns": record_field(record, "p999_ns"),
+                    "throughput_ops_per_second": record_field(record, "throughput_ops_per_second"),
+                    "queue_depth": record_field(record, "queue_depth"),
+                    "retry_amplification_microunits": record_field(record, "retry_amplification_microunits"),
+                    "rss_bytes": record_field(record, "rss_bytes"),
+                    "cpu_microunits": record_field(record, "cpu_microunits"),
+                },
+                "evidence": {
+                    "decision_card_ids": record_field(record, "decision_card_ids"),
+                    "evidence_bundle_id": record_field(record, "evidence_bundle_id"),
+                    "raw_samples_record_type": record_field(record, "raw_samples_record_type"),
+                    "raw_sample_digest": record_field(record, "raw_sample_digest"),
+                    "summary_digest": record_field(record, "summary_digest"),
+                    "gate_report_digest": record_field(record, "gate_report_digest"),
+                    "proof_notes_digest": record_field(record, "proof_notes_digest"),
+                },
+                "machine_readable_status": {
+                    "skip_reason": record_field(record, "skip_reason"),
+                    "failure_reason": record_field(record, "failure_reason"),
+                    "machine_reason": record_field(record, "machine_reason"),
+                },
+                "audit": {
+                    "audit_event_count": record_field(record, "audit_event_count"),
+                    "same_zone_audit_appends": record_field(record, "same_zone_audit_appends"),
+                    "sparse_high_k_metadata_events": record_field(record, "sparse_high_k_metadata_events"),
+                },
             }))
         })
         .collect()
+}
+
+fn record_field(record: &JsonlRecord, field: &str) -> Value {
+    record
+        .value
+        .get(field)
+        .map(redacted_value)
+        .unwrap_or(Value::Null)
+}
+
+fn scenario_field(record: &JsonlRecord) -> Value {
+    let scenario = record_field(record, "scenario");
+    if scenario.is_null() {
+        record_field(record, "scenario_id")
+    } else {
+        scenario
+    }
+}
+
+fn redacted_command_line(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => Value::Array(redacted_command_args(items)),
+        Value::String(text) if looks_sensitive_arg(text) => json!("[redacted]"),
+        _ => redacted_value(value),
+    }
+}
+
+fn redacted_command_args(items: &[Value]) -> Vec<Value> {
+    let mut redact_next = false;
+    items
+        .iter()
+        .map(|item| {
+            let Some(text) = item.as_str() else {
+                redact_next = false;
+                return redacted_value(item);
+            };
+            let should_redact = redact_next || looks_sensitive_arg(text);
+            redact_next = is_sensitive_flag(text);
+            if should_redact {
+                json!("[redacted]")
+            } else {
+                json!(text)
+            }
+        })
+        .collect()
+}
+
+fn looks_sensitive_arg(text: &str) -> bool {
+    let normalized = text
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("authorization")
+        || normalized.contains("credential")
+        || normalized.contains("apikey")
+        || normalized.contains("accesskey")
+        || normalized.contains("privatekey")
+        || normalized.contains("bearer")
+}
+
+fn is_sensitive_flag(text: &str) -> bool {
+    text.starts_with('-') && looks_sensitive_arg(text) && !text.contains('=')
 }
 
 fn format_explore_toon(payload: &Value) -> String {
@@ -798,6 +888,8 @@ mod tests {
             payload["entries"][0]["answers"]["proof_locations"]["replay_inputs"]["auth_token"],
             "[redacted]"
         );
+        assert_eq!(payload["pagination"]["returned"], 1);
+        assert_eq!(payload["pagination"]["total_filtered"], 1);
         assert_eq!(
             payload["entries"][0]["redacted_record"]["card"]["replay_inputs"]["auth_token"],
             "[redacted]"
@@ -840,5 +932,70 @@ mod tests {
             second_page["reports"][0]["record_type"],
             "swarm_controller_safety_report"
         );
+    }
+
+    #[test]
+    fn report_links_surface_detailed_log_context_without_secrets() {
+        let mut file = write_fixture();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "record_type": "swarm_gauntlet_log",
+                "schema_version": "swarm-gauntlet-log/v1",
+                "scenario_id": "mixed_priority",
+                "latency_scenario_id": "p99_regression",
+                "execution_mode": "smoke",
+                "source_kind": "host_backed",
+                "command_line": ["rch", "exec", "--capability-token", "secret-token", "--", "cargo", "test"],
+                "git_revision": "abc123",
+                "worker_id": "Codex",
+                "cargo_target_dir": "/tmp/fcp-k3zfl5",
+                "topology": {"logical_cpus": 64, "memory_bytes": 274877906944u64},
+                "sample_count": 1000,
+                "raw_samples_record_type": "swarm_latency_sample",
+                "raw_sample_digest": "blake3:raw",
+                "p50_ns": 500,
+                "p95_ns": 950,
+                "p99_ns": 990,
+                "p999_ns": 999,
+                "throughput_ops_per_second": 1_000_000,
+                "queue_depth": 4096,
+                "retry_amplification_microunits": 125_000,
+                "rss_bytes": 8589934592u64,
+                "cpu_microunits": 64_000_000,
+                "decision_card_ids": ["card:1"],
+                "evidence_bundle_id": "bundle:fixture",
+                "skip_reason": null,
+                "failure_reason": "p99_regression",
+                "audit_event_count": 4
+            })
+        )
+        .expect("write gauntlet log");
+
+        let payload = explore(&SwarmEvidenceExploreArgs {
+            file: file.path().to_path_buf(),
+            filters: SwarmEvidenceFilters::default(),
+            limit: 10,
+            offset: 0,
+        })
+        .expect("explore");
+
+        let log = payload["reports"]
+            .as_array()
+            .expect("reports")
+            .iter()
+            .find(|report| report["record_type"] == "swarm_gauntlet_log")
+            .expect("gauntlet log report");
+        assert_eq!(log["run_context"]["git_revision"], "abc123");
+        assert_eq!(log["run_context"]["command_line"][3], "[redacted]");
+        assert_eq!(log["metrics"]["p99_ns"], 990);
+        assert_eq!(log["metrics"]["queue_depth"], 4096);
+        assert_eq!(log["evidence"]["decision_card_ids"][0], "card:1");
+        assert_eq!(
+            log["machine_readable_status"]["failure_reason"],
+            "p99_regression"
+        );
+        assert_eq!(log["audit"]["audit_event_count"], 4);
     }
 }

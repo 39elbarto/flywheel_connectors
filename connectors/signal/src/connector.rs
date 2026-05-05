@@ -1,27 +1,40 @@
 //! Signal connector implementation.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_async_core::channel::{broadcast, mpsc, watch};
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse,
-    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, InstanceId,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
+    Principal, ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResponse, SubscribeResult,
+    TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::runtime::{
+    InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
+    StreamingSupervisor, SupervisorConfig,
+};
+use fcp_streaming::{SseClient, SseConfig, SseEvent, SseStream};
+use futures_util::StreamExt;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::bridge::BridgeManager;
 use crate::client::SignalClient;
 use crate::types::{
     GroupLookupRequest, IdentityRequest, ReceiveMessagesRequest, SendMessageRequest, SignalConfig,
-    SignalEnvelope, TrustIdentityRequest, is_loopback_host,
+    SignalEnvelope, SignalInboundDrop, SignalInboundEvent, SignalInboundPolicy,
+    SignalInboundPolicyOutcome, TrustIdentityRequest, is_loopback_host, parse_signal_sse_data,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -34,10 +47,70 @@ const OP_GET_GROUP: &str = "signal.get_group";
 const OP_GET_IDENTITY: &str = "signal.get_identity";
 const OP_TRUST_IDENTITY: &str = "signal.trust_identity";
 
+// Event topics
+const EVENT_MESSAGE_RECEIVED: &str = "signal.message.received";
+const EVENT_REACTION_RECEIVED: &str = "signal.reaction.received";
+const EVENT_RECEIPT_READ: &str = "signal.receipt.read";
+const EVENT_TYPING_RECEIVED: &str = "signal.typing.received";
+const EVENT_POLICY_DENIED: &str = "signal.policy.denied";
+const SIGNAL_SSE_EVENT_BUFFER_CAPACITY: usize = 256;
+const SIGNAL_SSE_MAX_BUFFER_BYTES: usize = 1024 * 1024;
+
 // Capability IDs
 const CAP_SEND: &str = "signal.send";
 const CAP_READ: &str = "signal.read";
 const CAP_ADMIN: &str = "signal.admin";
+
+fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+#[derive(Debug)]
+struct SignalStreamRuntime {
+    task: Mutex<Option<fcp_async_core::task::JoinHandle<()>>>,
+    shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
+}
+
+impl SignalStreamRuntime {
+    const fn new() -> Self {
+        Self {
+            task: Mutex::new(None),
+            shutdown_tx: Mutex::new(None),
+        }
+    }
+
+    fn is_running(&self) -> bool {
+        lock_unpoisoned(&self.task)
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+    }
+
+    fn stop(&self) {
+        let shutdown_tx = lock_unpoisoned(&self.shutdown_tx).take();
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(true);
+        }
+        let task = lock_unpoisoned(&self.task).take();
+        if let Some(task) = task {
+            task.abort();
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum SignalStreamOutcome {
+    Emit(Box<SignalInboundEvent>),
+    Drop(SignalInboundDrop),
+}
+
+#[derive(Debug, Clone)]
+struct SignalStreamFrame {
+    event_id: Option<String>,
+    cursor: Option<String>,
+    outcome: SignalStreamOutcome,
+}
 
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
@@ -64,22 +137,27 @@ impl DoctorResult {
 /// Signal connector state.
 #[derive(Debug)]
 pub struct SignalConnector {
-    base: BaseConnector,
+    base: Arc<BaseConnector>,
     config: Option<SignalConfig>,
     client: Option<SignalClient>,
     runtime: Option<ConnectorRuntime>,
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
-    bridge: Option<BridgeManager>,
+    bridge: Option<Arc<BridgeManager>>,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: Arc<AtomicU64>,
+    subscribed_topics: Arc<Mutex<Vec<String>>>,
+    stream: Arc<SignalStreamRuntime>,
 }
 
 impl SignalConnector {
     /// Create a new connector instance.
     #[must_use]
     pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(SIGNAL_SSE_EVENT_BUFFER_CAPACITY);
         Self {
-            base: BaseConnector::new(ConnectorId::from_static("fcp.signal")),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static("fcp.signal"))),
             config: None,
             client: None,
             runtime: None,
@@ -87,18 +165,28 @@ impl SignalConnector {
             started_at: Instant::now(),
             verifier: None,
             bridge: None,
+            event_tx,
+            next_event_seq: Arc::new(AtomicU64::new(1)),
+            subscribed_topics: Arc::new(Mutex::new(Vec::new())),
+            stream: Arc::new(SignalStreamRuntime::new()),
         }
     }
 
     /// Return a reference to the bridge manager, if initialized.
     #[must_use]
-    pub const fn bridge(&self) -> Option<&BridgeManager> {
-        self.bridge.as_ref()
+    pub fn bridge(&self) -> Option<&BridgeManager> {
+        self.bridge.as_deref()
     }
 
     /// Return a mutable reference to the bridge manager, if initialized.
-    pub const fn bridge_mut(&mut self) -> Option<&mut BridgeManager> {
-        self.bridge.as_mut()
+    pub fn bridge_mut(&mut self) -> Option<&mut BridgeManager> {
+        self.bridge.as_mut().and_then(Arc::get_mut)
+    }
+
+    /// Subscribe to normalized Signal streaming events emitted by the connector.
+    #[must_use]
+    pub fn subscribe_events_for_test(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
     }
 
     fn manifest_hash() -> String {
@@ -108,7 +196,7 @@ impl SignalConnector {
     }
 
     fn bridge_ref(&self) -> FcpResult<&BridgeManager> {
-        self.bridge.as_ref().ok_or(FcpError::NotConfigured)
+        self.bridge.as_deref().ok_or(FcpError::NotConfigured)
     }
 
     fn validate_attachment_payloads(&self, attachments: &[String]) -> FcpResult<()> {
@@ -195,6 +283,123 @@ impl SignalConnector {
                 warn!(error = %error, "Signal group sync failed after receive poll");
             }
         }
+    }
+
+    fn stop_stream(&self) {
+        self.stream.stop();
+    }
+
+    fn ensure_stream_running(
+        &self,
+        config: &SignalConfig,
+        client: &SignalClient,
+        bridge: Arc<BridgeManager>,
+    ) -> FcpResult<bool> {
+        {
+            let task_guard = lock_unpoisoned(&self.stream.task);
+            if task_guard.as_ref().is_some_and(|task| !task.is_finished()) {
+                return Ok(false);
+            }
+        }
+
+        self.stream.stop();
+
+        let stream_url = client
+            .event_stream_url()
+            .map_err(|error| error.to_fcp_error())?
+            .to_string();
+        let policy = config.inbound_policy.clone();
+        let account = config.normalized_phone_number();
+        let event_tx = self.event_tx.clone();
+        let topics = Arc::clone(&self.subscribed_topics);
+        let next_event_seq = Arc::clone(&self.next_event_seq);
+        let connector_id = self.base.id.clone();
+        let instance_id = self.base.instance_id.clone();
+        let base = Arc::clone(&self.base);
+        let supervisor_config = SupervisorConfig {
+            base_backoff_ms: config.streaming.reconnect_initial_ms,
+            max_backoff_ms: config.streaming.reconnect_max_ms,
+            heartbeat_interval_ms: config.streaming.stale_after_ms.saturating_div(2).max(1),
+            heartbeat_timeout_multiplier: 2.0,
+            ..SupervisorConfig::default()
+        };
+        let sse_config = SseConfig::new()
+            .with_timeout(Duration::from_millis(config.streaming.stale_after_ms))
+            .with_max_buffer_size(SIGNAL_SSE_MAX_BUFFER_BYTES)
+            .with_auto_reconnect(false)
+            .with_reconnect_delay(Duration::from_millis(config.streaming.reconnect_initial_ms));
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        *lock_unpoisoned(&self.stream.shutdown_tx) = Some(shutdown_tx.clone());
+
+        let task = fcp_async_core::task::spawn(async move {
+            let mut supervisor =
+                StreamingSupervisor::new(supervisor_config, InMemoryStreamingSession::new());
+            let outcome = supervisor
+                .run(
+                    shutdown_rx,
+                    |session| {
+                        let stream_url = stream_url.clone();
+                        let sse_config = sse_config.clone();
+                        let policy = policy.clone();
+                        let account = account.clone();
+                        let last_event_id = session.resume_token();
+                        async move {
+                            connect_signal_sse_once(
+                                stream_url,
+                                sse_config,
+                                policy,
+                                account,
+                                last_event_id,
+                            )
+                            .await
+                        }
+                    },
+                    |frame, session| {
+                        session.record_heartbeat_ack(Instant::now());
+                        if let Some(event_id) = frame.event_id.as_ref() {
+                            session.set_resume_token(event_id.clone());
+                        }
+                        let bridge = Arc::clone(&bridge);
+                        let event_tx = event_tx.clone();
+                        let topics = Arc::clone(&topics);
+                        let connector_id = connector_id.clone();
+                        let instance_id = instance_id.clone();
+                        let next_event_seq = Arc::clone(&next_event_seq);
+                        let base = Arc::clone(&base);
+                        async move {
+                            if let Some(cursor) = frame.cursor.as_ref() {
+                                bridge.advance_cursor(cursor.clone());
+                            }
+
+                            let mut envelope =
+                                signal_stream_frame_to_envelope(frame, &connector_id, &instance_id)
+                                    .map_err(|error| -> StreamingError { Box::new(error) })?;
+                            let seq = next_event_seq.fetch_add(1, Ordering::Relaxed);
+                            envelope = envelope.with_seq(seq);
+                            if envelope.cursor.is_empty() {
+                                envelope = envelope.with_cursor_seq(seq);
+                            }
+                            let topic_allowed = {
+                                let subscribed = lock_unpoisoned(&topics);
+                                subscribed.iter().any(|topic| topic == &envelope.topic)
+                            };
+                            if topic_allowed {
+                                base.record_event();
+                                let _ = event_tx.send(Ok(envelope));
+                            }
+                            Ok(())
+                        }
+                    },
+                )
+                .await;
+
+            info!(?outcome, "Signal SSE supervisor stopped");
+            let _ = shutdown_tx.send(true);
+        });
+
+        *lock_unpoisoned(&self.stream.task) = Some(task);
+        Ok(true)
     }
 
     /// Run connector diagnostics.
@@ -593,6 +798,343 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ]
 }
 
+#[must_use]
+const fn signal_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: true,
+        replay: false,
+        min_buffer_events: 100,
+        requires_ack: false,
+    }
+}
+
+/// Build the Signal event catalog.
+#[must_use]
+pub fn events_info() -> Vec<EventInfo> {
+    vec![
+        EventInfo {
+            topic: EVENT_MESSAGE_RECEIVED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["kind", "sender"],
+                "properties": {
+                    "kind": { "const": "message" },
+                    "sender": { "type": "string" },
+                    "sender_name": { "type": "string" },
+                    "timestamp": { "type": "integer" },
+                    "group_id": { "type": "string" },
+                    "group_name": { "type": "string" },
+                    "body": { "type": "string" },
+                    "quote_text": { "type": "string" },
+                    "quote_author": { "type": "string" }
+                }
+            }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: EVENT_REACTION_RECEIVED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["kind", "sender", "reaction"],
+                "properties": {
+                    "kind": { "const": "reaction" },
+                    "sender": { "type": "string" },
+                    "group_id": { "type": "string" },
+                    "reaction": {
+                        "type": "object",
+                        "properties": {
+                            "emoji": { "type": "string" },
+                            "targetAuthor": { "type": "string" },
+                            "targetAuthorUuid": { "type": "string" },
+                            "targetSentTimestamp": { "type": "integer" },
+                            "isRemove": { "type": "boolean" }
+                        }
+                    }
+                }
+            }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: EVENT_RECEIPT_READ.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["kind", "sender", "receipt"],
+                "properties": {
+                    "kind": { "const": "read_receipt" },
+                    "sender": { "type": "string" },
+                    "timestamp": { "type": "integer" },
+                    "receipt": { "type": "object" }
+                }
+            }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: EVENT_TYPING_RECEIVED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["kind", "sender", "typing"],
+                "properties": {
+                    "kind": { "const": "typing" },
+                    "sender": { "type": "string" },
+                    "group_id": { "type": "string" },
+                    "typing": { "type": "object" }
+                }
+            }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: EVENT_POLICY_DENIED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["reason"],
+                "properties": {
+                    "reason": { "type": "string" },
+                    "sender": { "type": "string" },
+                    "group_id": { "type": "string" },
+                    "kind": { "type": "string" }
+                }
+            }),
+            requires_ack: false,
+        },
+    ]
+}
+
+const fn known_event_topics() -> [&'static str; 5] {
+    [
+        EVENT_MESSAGE_RECEIVED,
+        EVENT_REACTION_RECEIVED,
+        EVENT_RECEIPT_READ,
+        EVENT_TYPING_RECEIVED,
+        EVENT_POLICY_DENIED,
+    ]
+}
+
+fn confirm_subscribed_topics(topics: &[String]) -> FcpResult<Vec<String>> {
+    let known = known_event_topics();
+    if topics.is_empty() || topics.iter().any(|topic| topic == "*") {
+        return Ok(known.into_iter().map(str::to_string).collect());
+    }
+
+    let confirmed = topics
+        .iter()
+        .filter(|topic| known.contains(&topic.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if confirmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("No supported Signal event topics requested: {topics:?}"),
+        });
+    }
+
+    Ok(confirmed)
+}
+
+async fn connect_signal_sse_once(
+    stream_url: String,
+    sse_config: SseConfig,
+    policy: SignalInboundPolicy,
+    account: String,
+    last_event_id: Option<String>,
+) -> Result<StreamingConnection<SignalStreamFrame>, StreamingError> {
+    let client = SseClient::with_config(stream_url, sse_config);
+    let stream = client
+        .connect_with_last_id(last_event_id.as_deref())
+        .await
+        .map_err(|error| -> StreamingError { Box::new(error) })?;
+
+    let (event_tx, event_rx) = mpsc::channel(SIGNAL_SSE_EVENT_BUFFER_CAPACITY);
+    let join_handle = fcp_async_core::task::spawn(async move {
+        run_signal_sse_once(stream, policy, account, event_tx).await
+    });
+
+    Ok(StreamingConnection {
+        events: event_rx,
+        join_handle,
+    })
+}
+
+async fn run_signal_sse_once(
+    mut stream: SseStream,
+    policy: SignalInboundPolicy,
+    account: String,
+    event_tx: mpsc::Sender<SignalStreamFrame>,
+) -> Result<(), StreamingError> {
+    while let Some(next) = stream.next().await {
+        let raw = next.map_err(|error| -> StreamingError { Box::new(error) })?;
+        let Some(frame) = signal_stream_frame_from_sse_event(&raw, &policy, &account)
+            .map_err(|error| -> StreamingError { Box::new(error) })?
+        else {
+            continue;
+        };
+
+        if event_tx.send(frame).await.is_err() {
+            return Ok(());
+        }
+    }
+
+    drop(event_tx);
+    std::future::pending::<Result<(), StreamingError>>().await
+}
+
+fn signal_stream_frame_from_sse_event(
+    raw: &SseEvent,
+    policy: &SignalInboundPolicy,
+    account: &str,
+) -> serde_json::Result<Option<SignalStreamFrame>> {
+    let Some(event) = parse_signal_sse_data(raw.event.clone(), raw.id.clone(), &raw.data)? else {
+        return Ok(None);
+    };
+
+    if let Some(exception) = event.payload.exception {
+        warn!(
+            error = exception.message.as_deref().unwrap_or("unknown"),
+            event_id = event.id.as_deref().unwrap_or(""),
+            "Signal SSE receive exception"
+        );
+        return Ok(None);
+    }
+
+    let Some(envelope) = event.payload.envelope else {
+        return Ok(None);
+    };
+    let event_id = event.id;
+    let outcome = policy.evaluate_envelope(&envelope, account);
+    let cursor = signal_stream_cursor(event_id.as_deref(), &outcome);
+    let outcome = match outcome {
+        SignalInboundPolicyOutcome::Emit(event) => SignalStreamOutcome::Emit(event),
+        SignalInboundPolicyOutcome::Drop(dropped) => {
+            warn!(
+                reason = ?dropped.reason,
+                sender = dropped.sender.as_deref().unwrap_or(""),
+                group_id = dropped.group_id.as_deref().unwrap_or(""),
+                kind = ?dropped.kind,
+                "Dropping Signal SSE event before EventEnvelope emission"
+            );
+            SignalStreamOutcome::Drop(dropped)
+        }
+    };
+
+    Ok(Some(SignalStreamFrame {
+        event_id,
+        cursor,
+        outcome,
+    }))
+}
+
+fn signal_stream_cursor(
+    event_id: Option<&str>,
+    outcome: &SignalInboundPolicyOutcome,
+) -> Option<String> {
+    event_id
+        .filter(|id| !id.trim().is_empty())
+        .map(str::to_string)
+        .or_else(|| match outcome {
+            SignalInboundPolicyOutcome::Emit(event) => event.timestamp.map(|ts| ts.to_string()),
+            SignalInboundPolicyOutcome::Drop(_) => None,
+        })
+}
+
+fn signal_stream_frame_to_envelope(
+    frame: SignalStreamFrame,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+) -> serde_json::Result<EventEnvelope> {
+    match frame.outcome {
+        SignalStreamOutcome::Emit(event) => {
+            signal_inbound_event_to_envelope(*event, connector_id, instance_id, frame.cursor)
+        }
+        SignalStreamOutcome::Drop(dropped) => {
+            signal_policy_drop_to_envelope(dropped, connector_id, instance_id, frame.cursor)
+        }
+    }
+}
+
+fn signal_inbound_event_to_envelope(
+    event: SignalInboundEvent,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    cursor: Option<String>,
+) -> serde_json::Result<EventEnvelope> {
+    let topic = event.topic.clone();
+    let sender = event.sender.clone();
+    let display = event.sender_name.clone();
+    let stream_key = event.group_id.as_ref().map_or_else(
+        || format!("signal:dm:{sender}"),
+        |group_id| format!("signal:group:{group_id}"),
+    );
+    let payload = serde_json::to_value(event)?;
+    Ok(signal_event_envelope(
+        topic,
+        sender,
+        display,
+        payload,
+        connector_id,
+        instance_id,
+        Some(stream_key),
+        cursor,
+    ))
+}
+
+fn signal_policy_drop_to_envelope(
+    dropped: SignalInboundDrop,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    cursor: Option<String>,
+) -> serde_json::Result<EventEnvelope> {
+    let sender = dropped.sender.clone().unwrap_or_else(|| "unknown".into());
+    let stream_key = dropped.group_id.as_ref().map_or_else(
+        || format!("signal:dm:{sender}"),
+        |group_id| format!("signal:group:{group_id}"),
+    );
+    let payload = serde_json::to_value(dropped)?;
+    Ok(signal_event_envelope(
+        EVENT_POLICY_DENIED,
+        sender,
+        None,
+        payload,
+        connector_id,
+        instance_id,
+        Some(stream_key),
+        cursor,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn signal_event_envelope(
+    topic: impl Into<String>,
+    principal_id: String,
+    principal_display: Option<String>,
+    payload: serde_json::Value,
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    stream_key: Option<String>,
+    cursor: Option<String>,
+) -> EventEnvelope {
+    let principal = Principal {
+        kind: "signal_user".into(),
+        id: principal_id,
+        trust: TrustLevel::Untrusted,
+        display: principal_display.filter(|value| !value.trim().is_empty()),
+    };
+    let data = EventData::new(
+        connector_id.clone(),
+        instance_id.clone(),
+        ZoneId::private(),
+        principal,
+        payload,
+    );
+    let mut envelope = EventEnvelope::new(topic, data).with_ordering(OrderingPolicy::PerKey);
+    if let Some(stream_key) = stream_key {
+        envelope = envelope.with_stream_key(stream_key);
+    }
+    if let Some(cursor) = cursor {
+        envelope = envelope.with_cursor(cursor);
+    }
+    envelope
+}
+
 fn parse_input<T>(input: &serde_json::Value, operation: &str) -> FcpResult<T>
 where
     T: DeserializeOwned,
@@ -612,6 +1154,7 @@ impl FcpConnector for SignalConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        self.stop_stream();
         let config = SignalConfig::from_value(config)?;
 
         self.retry_config = config.retry.clone();
@@ -628,7 +1171,7 @@ impl FcpConnector for SignalConnector {
         let bridge = BridgeManager::new((&config).into()).map_err(|e| FcpError::Internal {
             message: format!("Failed to initialize Signal bridge state: {e}"),
         })?;
-        self.bridge = Some(bridge);
+        self.bridge = Some(Arc::new(bridge));
 
         self.client = Some(client);
         self.config = Some(config);
@@ -659,12 +1202,7 @@ impl FcpConnector for SignalConnector {
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(signal_event_caps()),
             auth_caps: None,
             op_catalog_hash: None,
         })
@@ -686,7 +1224,13 @@ impl FcpConnector for SignalConnector {
                     ),
                 };
             }
-            snapshot.details = Some(json!({ "bridge": diag }));
+            snapshot.details = Some(json!({
+                "bridge": diag,
+                "streaming": {
+                    "running": self.stream.is_running(),
+                    "subscribed_topics": lock_unpoisoned(&self.subscribed_topics).len()
+                }
+            }));
         }
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
@@ -732,6 +1276,8 @@ impl FcpConnector for SignalConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.stop_stream();
+        lock_unpoisoned(&self.subscribed_topics).clear();
         if let Some(bridge) = &mut self.bridge {
             bridge.reset();
         }
@@ -744,15 +1290,10 @@ impl FcpConnector for SignalConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: operations_info(),
-            events: Vec::new(),
+            events: events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(signal_event_caps()),
         }
     }
 
@@ -762,12 +1303,60 @@ impl FcpConnector for SignalConnector {
         result
     }
 
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        if !config.streaming.enabled {
+            return Err(FcpError::StreamingNotSupported);
+        }
+
+        let Some(verifier) = &self.verifier else {
+            return Err(FcpError::NotHandshaken);
+        };
+        let Some(capability_token) = req.capability_token else {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "Signal event subscription requires signal.read capability token".into(),
+            });
+        };
+        let required_cap = CapabilityId::from_static(CAP_READ);
+        let receive_operation = OperationId::from_static(OP_RECEIVE_MESSAGES);
+        verifier.verify_bound(capability_token, &required_cap, &receive_operation, &[])?;
+
+        let confirmed_topics = confirm_subscribed_topics(&req.topics)?;
+        lock_unpoisoned(&self.subscribed_topics).clone_from(&confirmed_topics);
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let bridge = self.bridge.as_ref().ok_or(FcpError::NotConfigured)?;
+        let _started = self.ensure_stream_running(config, client, Arc::clone(bridge))?;
+        let cursor = self
+            .bridge
+            .as_ref()
+            .and_then(|bridge| bridge.receive_cursor());
+        let cursors = cursor.map_or_else(HashMap::new, |cursor| {
+            confirmed_topics
+                .iter()
+                .map(|topic| (topic.clone(), cursor.clone()))
+                .collect()
+        });
+
+        Ok(SubscribeResponse {
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics,
+                cursors,
+                replay_supported: false,
+                buffer: Some(ReplayBufferInfo {
+                    min_events: config.streaming.min_buffer_events,
+                    overflow: "drop_oldest".into(),
+                }),
+            },
+        })
     }
 
     async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
+        lock_unpoisoned(&self.subscribed_topics).clear();
+        self.stop_stream();
+        Ok(())
     }
 }
 
@@ -921,6 +1510,9 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
 
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
@@ -998,6 +1590,45 @@ mod tests {
         }
     }
 
+    fn spawn_signal_sse_server(body: &'static str) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind Signal SSE listener");
+        let address = listener.local_addr().expect("listener address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept Signal SSE client");
+            let mut request = Vec::new();
+            let mut buf = [0_u8; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream.read(&mut buf).expect("read Signal SSE request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buf[..read]);
+            }
+            let request = String::from_utf8_lossy(&request);
+            assert!(
+                request.contains("GET /api/v1/events?account=%2B15551234567 HTTP/1.1"),
+                "unexpected Signal SSE request: {request:?}",
+            );
+
+            let response = format!(
+                "HTTP/1.1 200 OK\r\n\
+                 Content-Type: text/event-stream\r\n\
+                 Cache-Control: no-cache\r\n\
+                 Content-Length: {}\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 {body}",
+                body.len(),
+            );
+            stream
+                .write_all(response.as_bytes())
+                .expect("write Signal SSE response");
+            stream.flush().expect("flush Signal SSE response");
+        });
+
+        (format!("http://{address}"), handle)
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = SignalConnector::new();
@@ -1005,6 +1636,10 @@ mod tests {
         assert!(result.is_ok());
         let response = result.unwrap();
         assert_eq!(response.status, "accepted");
+        let caps = response.event_caps.expect("event caps");
+        assert!(caps.streaming);
+        assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, 100);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1148,6 +1783,7 @@ mod tests {
         let connector = SignalConnector::new();
         let intro = connector.introspect();
         assert_eq!(intro.operations.len(), 6);
+        assert_eq!(intro.events.len(), 5);
         assert!(
             intro
                 .operations
@@ -1288,7 +1924,16 @@ mod tests {
     fn test_streaming_not_supported() {
         let connector = SignalConnector::new();
         let intro = connector.introspect();
-        assert!(!intro.event_caps.as_ref().unwrap().streaming);
+        let caps = intro.event_caps.as_ref().unwrap();
+        assert!(caps.streaming);
+        assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, 100);
+        assert!(
+            intro
+                .events
+                .iter()
+                .any(|event| event.topic == EVENT_REACTION_RECEIVED)
+        );
     }
 
     #[test]
@@ -1603,5 +2248,122 @@ mod tests {
 
         let error = connector.invoke(req).await.unwrap_err();
         assert!(matches!(error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_subscribe_confirms_signal_topics_with_read_token() {
+        let mut connector = SignalConnector::new();
+        connector
+            .configure(json!({
+                "phone_number": "+15551234567"
+            }))
+            .await
+            .unwrap();
+        connector
+            .bridge()
+            .unwrap()
+            .advance_cursor("1700000001000".into());
+        let (handshake, capability) =
+            signed_token_for(CAP_READ, OP_RECEIVE_MESSAGES, &connector.base.instance_id);
+        connector.handshake(handshake).await.unwrap();
+
+        let response = connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_1"),
+                topics: vec![
+                    EVENT_MESSAGE_RECEIVED.into(),
+                    EVENT_REACTION_RECEIVED.into(),
+                ],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: Some(capability),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.result.confirmed_topics,
+            vec![EVENT_MESSAGE_RECEIVED, EVENT_REACTION_RECEIVED]
+        );
+        assert!(!response.result.replay_supported);
+        assert_eq!(
+            response.result.cursors[EVENT_MESSAGE_RECEIVED],
+            "1700000001000"
+        );
+        assert_eq!(response.result.buffer.unwrap().min_events, 100);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_subscribe_starts_live_sse_loopback_and_emits_event() {
+        let body = concat!(
+            "id: evt-1\n",
+            "event: receive\n",
+            r#"data: {"envelope":{"sourceNumber":"+15559876543","sourceName":"Alice","timestamp":1700000001000,"dataMessage":{"message":"hello from sse"}}}"#,
+            "\n\n",
+        );
+        let (daemon_url, server) = spawn_signal_sse_server(body);
+
+        let mut connector = SignalConnector::new();
+        let mut event_rx = connector.subscribe_events_for_test();
+        connector
+            .configure(json!({
+                "daemon_url": daemon_url,
+                "phone_number": "+15551234567",
+                "streaming": {
+                    "stale_after_ms": 1_000,
+                    "reconnect_initial_ms": 100,
+                    "reconnect_max_ms": 1_000,
+                    "min_buffer_events": 100
+                }
+            }))
+            .await
+            .unwrap();
+        let (handshake, capability) =
+            signed_token_for(CAP_READ, OP_RECEIVE_MESSAGES, &connector.base.instance_id);
+        connector.handshake(handshake).await.unwrap();
+
+        connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_sse"),
+                topics: vec![EVENT_MESSAGE_RECEIVED.into()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: Some(capability),
+            })
+            .await
+            .unwrap();
+
+        let event = fcp_async_core::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("SSE event timeout")
+            .expect("broadcast event")
+            .expect("Signal event");
+        assert_eq!(event.topic, EVENT_MESSAGE_RECEIVED);
+        assert_eq!(event.cursor, "evt-1");
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.data.principal.id, "+15559876543");
+        assert_eq!(event.data.principal.display.as_deref(), Some("Alice"));
+        assert_eq!(event.data.payload["body"], "hello from sse");
+        assert_eq!(
+            connector.bridge().unwrap().receive_cursor().as_deref(),
+            Some("evt-1")
+        );
+
+        connector
+            .unsubscribe(UnsubscribeRequest {
+                r#type: "unsubscribe".into(),
+                id: RequestId::new("unsub_sse"),
+                topics: vec![EVENT_MESSAGE_RECEIVED.into()],
+                capability_token: None,
+            })
+            .await
+            .unwrap();
+        server.join().expect("Signal SSE server thread");
     }
 }

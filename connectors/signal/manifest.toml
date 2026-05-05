@@ -3,17 +3,18 @@ format = "fcp-connector-manifest"
 schema_version = "2.1"
 min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
-protocol_features = []
+protocol_features = ["signal.sse"]
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:155556c058a195543a06ddc25858e73c7eb38c3d159e50eb42a5df65dbf59bdc"
+interface_hash = "blake3-256:fcp.interface.v2:ceaba3bd0866ba41ebab7be25020b14b0a9aa3221dbb1c1d92e079827e461545"
 
 [connector]
 id = "fcp.signal"
 name = "Signal Messenger"
 version = "0.1.0"
-description = "FCP connector for a local signal-cli REST daemon for sending and receiving messages, inspecting groups, and managing identity trust"
+description = "FCP connector for a local signal-cli REST daemon for sending, polling, SSE streaming, inbound policy filtering, group inspection, and identity trust"
 archetypes = [
     "operational",
+    "streaming",
     "bidirectional",
 ]
 format = "native"
@@ -21,7 +22,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "No durable connector state; receive cursors, group cache, and bridge health live only in process memory."
+migration_hint = "No durable connector state; receive cursors, group cache, bridge health, and SSE resume hints live only in process memory."
 
 [zones]
 home = "z:private"
@@ -40,12 +41,30 @@ required = [
     "network.dns",
     "network.egress",
 ]
-optional = []
+optional = [
+    "signal.send",
+    "signal.read",
+    "signal.admin",
+]
 forbidden = [
     "system.exec",
     "network.listen",
     "system.privileged",
 ]
+
+# Operator setup:
+# - Run signal-cli REST API locally with its SSE endpoint enabled, for example
+#   `signal-cli-rest-api` exposing `/api/v1/events?account=<number>`.
+# - Keep daemon_url on loopback unless an explicit external trust boundary is
+#   configured outside this connector.
+# - Direct messages default to open for parity with polling receive.
+# - Groups default to deny; set inbound_policy.group_allow_from to raw group IDs,
+#   `group:<id>`, or `signal:group:<id>` before subscribing to group events.
+
+[event_caps]
+streaming = true
+replay = false
+min_buffer_events = 100
 
 [provides.operations."signal.get_group"]
 description = "Get detailed information about a specific Signal group"
@@ -425,6 +444,46 @@ when_to_use = "When you need to mark a Signal contact as trusted after independe
 common_mistakes = ["Using trust_all_known_keys in production instead of a verified safety number."]
 examples = []
 related = ["signal.get_identity"]
+
+[provides.events."signal.message.received"]
+description = "Authorized Signal message or attachment event accepted after direct/group policy, mention gating, self-echo suppression, and quote-context filtering."
+streaming = true
+replay = false
+topic = "signal.message.received"
+requires_ack = false
+schema = { type = "object", required = ["kind", "sender"], properties = { kind = { const = "message" }, sender = { type = "string" }, sender_name = { type = "string" }, timestamp = { type = "integer" }, group_id = { type = "string" }, group_name = { type = "string" }, body = { type = "string" }, quote_text = { type = "string" }, quote_author = { type = "string" } } }
+
+[provides.events."signal.reaction.received"]
+description = "Authorized reaction-only Signal event accepted after the same sender/group policy checks as message events."
+streaming = true
+replay = false
+topic = "signal.reaction.received"
+requires_ack = false
+schema = { type = "object", required = ["kind", "sender", "reaction"], properties = { kind = { const = "reaction" }, sender = { type = "string" }, group_id = { type = "string" }, reaction = { type = "object" } } }
+
+[provides.events."signal.receipt.read"]
+description = "Authorized Signal read/delivery receipt surfaced by signal-cli."
+streaming = true
+replay = false
+topic = "signal.receipt.read"
+requires_ack = false
+schema = { type = "object", required = ["kind", "sender", "receipt"], properties = { kind = { const = "read_receipt" }, sender = { type = "string" }, timestamp = { type = "integer" }, receipt = { type = "object" } } }
+
+[provides.events."signal.typing.received"]
+description = "Authorized Signal typing indicator surfaced by signal-cli."
+streaming = true
+replay = false
+topic = "signal.typing.received"
+requires_ack = false
+schema = { type = "object", required = ["kind", "sender", "typing"], properties = { kind = { const = "typing" }, sender = { type = "string" }, group_id = { type = "string" }, typing = { type = "object" } } }
+
+[provides.events."signal.policy.denied"]
+description = "Structured Signal policy-denial event for audit logs without message body content."
+streaming = true
+replay = false
+topic = "signal.policy.denied"
+requires_ack = false
+schema = { type = "object", required = ["reason"], properties = { reason = { type = "string" }, sender = { type = "string" }, group_id = { type = "string" }, kind = { type = "string" } } }
 
 [sandbox]
 profile = "strict"

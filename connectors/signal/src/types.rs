@@ -64,6 +64,14 @@ pub struct SignalConfig {
     /// Request timeout in milliseconds.
     #[serde(default = "default_request_timeout_ms")]
     pub request_timeout_ms: u64,
+
+    /// signal-cli SSE streaming behavior.
+    #[serde(default)]
+    pub streaming: SignalStreamingConfig,
+
+    /// Connector-owned inbound authorization policy applied before events are emitted.
+    #[serde(default)]
+    pub inbound_policy: SignalInboundPolicy,
 }
 
 impl std::fmt::Debug for SignalConfig {
@@ -86,6 +94,8 @@ impl std::fmt::Debug for SignalConfig {
             .field("max_attachment_bytes", &self.max_attachment_bytes)
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("streaming", &self.streaming)
+            .field("inbound_policy", &self.inbound_policy)
             .finish()
     }
 }
@@ -100,6 +110,692 @@ pub enum TrustMode {
     Always,
     /// Never trust unverified identities.
     Never,
+}
+
+/// signal-cli SSE streaming behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignalStreamingConfig {
+    /// Whether `subscribe` may enable the signal-cli `/api/v1/events` SSE path.
+    pub enabled: bool,
+
+    /// Milliseconds without SSE activity before health monitoring treats the stream as stale.
+    pub stale_after_ms: u64,
+
+    /// Minimum supervised reconnect delay.
+    pub reconnect_initial_ms: u64,
+
+    /// Maximum supervised reconnect delay.
+    pub reconnect_max_ms: u64,
+
+    /// Minimum event buffer advertised in handshake and introspection.
+    pub min_buffer_events: u32,
+}
+
+impl Default for SignalStreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            stale_after_ms: 120_000,
+            reconnect_initial_ms: 1_000,
+            reconnect_max_ms: 60_000,
+            min_buffer_events: 100,
+        }
+    }
+}
+
+impl SignalStreamingConfig {
+    /// Validate streaming configuration invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError::InvalidRequest` when any enabled streaming interval or
+    /// buffer size is zero.
+    pub fn validate(&self) -> FcpResult<()> {
+        if !self.enabled {
+            return Ok(());
+        }
+        if self.stale_after_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "streaming.stale_after_ms must be greater than zero".into(),
+            });
+        }
+        if self.reconnect_initial_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "streaming.reconnect_initial_ms must be greater than zero".into(),
+            });
+        }
+        if self.reconnect_max_ms < self.reconnect_initial_ms {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "streaming.reconnect_max_ms must be >= reconnect_initial_ms".into(),
+            });
+        }
+        if self.min_buffer_events == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "streaming.min_buffer_events must be greater than zero".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Direct-message authorization mode for inbound Signal events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalDmPolicy {
+    /// Allow any direct sender.
+    Open,
+    /// Allow only senders listed in `allow_from`.
+    Allowlist,
+    /// Do not emit the event; caller should initiate a pairing challenge.
+    Pairing,
+    /// Drop all direct-message events.
+    Disabled,
+}
+
+/// Group authorization mode for inbound Signal events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalGroupPolicy {
+    /// Allow any group.
+    Open,
+    /// Allow only groups or senders listed in `group_allow_from`.
+    Allowlist,
+    /// Drop all group events.
+    Disabled,
+}
+
+/// Quote-context visibility for group events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalQuoteContextVisibility {
+    /// Include quote context after the inbound event itself is authorized.
+    All,
+    /// Include group quote context only when the quoted author is allowlisted.
+    AllowedOnly,
+    /// Never include quote text or quote author context.
+    None,
+}
+
+/// Connector-owned inbound authorization policy for Signal events.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SignalInboundPolicy {
+    /// Direct-message access mode.
+    pub dm_policy: SignalDmPolicy,
+
+    /// Direct-message sender allowlist. Entries use strict canonical equality;
+    /// `*` opens the list explicitly.
+    pub allow_from: Vec<String>,
+
+    /// Group access mode. Defaults to allowlist, which denies groups unless a
+    /// group ID is explicitly configured.
+    pub group_policy: SignalGroupPolicy,
+
+    /// Group or group-sender allowlist. Accepts raw group IDs, `group:<id>`,
+    /// `signal:group:<id>`, raw sender IDs, and `signal:<sender>`.
+    pub group_allow_from: Vec<String>,
+
+    /// Require a configured mention pattern or account mention in group text.
+    pub require_group_mention: bool,
+
+    /// Plain substring mention patterns used when Signal mention metadata does
+    /// not reference the configured account directly.
+    pub mention_patterns: Vec<String>,
+
+    /// Whether quote context is exposed after the event is authorized.
+    pub quote_context_visibility: SignalQuoteContextVisibility,
+
+    /// Drop events from the configured account to prevent echo loops.
+    pub suppress_self_echo: bool,
+
+    /// Emit authorized reaction-only events.
+    pub emit_reactions: bool,
+
+    /// Emit receipt events when signal-cli surfaces them.
+    pub emit_read_receipts: bool,
+
+    /// Emit typing events when signal-cli surfaces them.
+    pub emit_typing: bool,
+}
+
+impl Default for SignalInboundPolicy {
+    fn default() -> Self {
+        Self {
+            dm_policy: SignalDmPolicy::Open,
+            allow_from: Vec::new(),
+            group_policy: SignalGroupPolicy::Allowlist,
+            group_allow_from: Vec::new(),
+            require_group_mention: false,
+            mention_patterns: Vec::new(),
+            quote_context_visibility: SignalQuoteContextVisibility::AllowedOnly,
+            suppress_self_echo: true,
+            emit_reactions: true,
+            emit_read_receipts: true,
+            emit_typing: true,
+        }
+    }
+}
+
+impl SignalInboundPolicy {
+    /// Validate inbound policy configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns `FcpError::InvalidRequest` when a configured allowlist or mention
+    /// pattern contains a blank entry.
+    pub fn validate(&self) -> FcpResult<()> {
+        if self.allow_from.iter().any(|value| value.trim().is_empty()) {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "inbound_policy.allow_from must not contain empty entries".into(),
+            });
+        }
+        if self
+            .group_allow_from
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "inbound_policy.group_allow_from must not contain empty entries".into(),
+            });
+        }
+        if self
+            .mention_patterns
+            .iter()
+            .any(|value| value.trim().is_empty())
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: "inbound_policy.mention_patterns must not contain empty entries".into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Apply inbound policy to a Signal envelope and return the event to emit
+    /// or the structured reason for dropping it.
+    #[must_use]
+    #[allow(clippy::too_many_lines)]
+    pub fn evaluate_envelope(
+        &self,
+        envelope: &SignalEnvelope,
+        account: &str,
+    ) -> SignalInboundPolicyOutcome {
+        let Some(sender) = envelope.sender_identifier() else {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::NoSender,
+                None,
+                None,
+                None,
+            ));
+        };
+
+        if self.suppress_self_echo && identifiers_match(sender, account) {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::SelfEcho,
+                Some(sender),
+                None,
+                None,
+            ));
+        }
+
+        if envelope.sync_message.is_some() {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::SyncMessage,
+                Some(sender),
+                None,
+                None,
+            ));
+        }
+
+        let data_message = envelope.primary_data_message();
+        let reaction = envelope
+            .reaction_message
+            .as_ref()
+            .or_else(|| data_message.and_then(|message| message.reaction.as_ref()));
+        let group = data_message
+            .and_then(|message| message.group_info.as_ref())
+            .or_else(|| reaction.and_then(|message| message.group_info.as_ref()));
+        let group_id = group.map(|info| info.id.as_str());
+        let is_group = group_id.is_some();
+
+        if let Some(reason) = self.access_denial_reason(sender, group_id, is_group) {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                reason,
+                Some(sender),
+                group_id,
+                classify_envelope_kind(envelope),
+            ));
+        }
+
+        if let Some(receipt) = envelope.receipt_message.as_ref() {
+            if !self.emit_read_receipts {
+                return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                    SignalInboundDropReason::EventKindDisabled,
+                    Some(sender),
+                    group_id,
+                    Some(SignalInboundEventKind::ReadReceipt),
+                ));
+            }
+            return SignalInboundPolicyOutcome::Emit(Box::new(SignalInboundEvent::from_receipt(
+                envelope,
+                sender,
+                group,
+                receipt.clone(),
+            )));
+        }
+
+        if let Some(typing) = envelope.typing_message.as_ref() {
+            if !self.emit_typing {
+                return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                    SignalInboundDropReason::EventKindDisabled,
+                    Some(sender),
+                    group_id,
+                    Some(SignalInboundEventKind::Typing),
+                ));
+            }
+            return SignalInboundPolicyOutcome::Emit(Box::new(SignalInboundEvent::from_typing(
+                envelope,
+                sender,
+                group,
+                typing.clone(),
+            )));
+        }
+
+        let visible_quote = data_message.and_then(|message| self.visible_quote(message, is_group));
+        let has_body_content = data_message.is_some_and(|message| {
+            message
+                .message
+                .as_deref()
+                .is_some_and(|text| !text.trim().is_empty())
+                || !message.attachments.is_empty()
+                || visible_quote
+                    .as_ref()
+                    .is_some_and(|quote| !quote.text.trim().is_empty())
+        });
+
+        if let Some(reaction) = reaction {
+            if !has_body_content {
+                if !self.emit_reactions {
+                    return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                        SignalInboundDropReason::EventKindDisabled,
+                        Some(sender),
+                        group_id,
+                        Some(SignalInboundEventKind::Reaction),
+                    ));
+                }
+                return SignalInboundPolicyOutcome::Emit(Box::new(
+                    SignalInboundEvent::from_reaction(envelope, sender, group, reaction.clone()),
+                ));
+            }
+        }
+
+        let Some(data_message) = data_message else {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::NoContent,
+                Some(sender),
+                group_id,
+                classify_envelope_kind(envelope),
+            ));
+        };
+
+        if is_group
+            && self.require_group_mention
+            && !self.group_message_mentions_account(data_message, account)
+        {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::GroupMentionRequired,
+                Some(sender),
+                group_id,
+                Some(SignalInboundEventKind::Message),
+            ));
+        }
+
+        let rendered_body = data_message
+            .message
+            .as_deref()
+            .map(|message| render_signal_mentions(message, &data_message.mentions));
+        let body_has_text = rendered_body
+            .as_deref()
+            .is_some_and(|message| !message.trim().is_empty());
+        if !body_has_text && data_message.attachments.is_empty() && visible_quote.is_none() {
+            return SignalInboundPolicyOutcome::Drop(SignalInboundDrop::new(
+                SignalInboundDropReason::NoContent,
+                Some(sender),
+                group_id,
+                Some(SignalInboundEventKind::Message),
+            ));
+        }
+
+        SignalInboundPolicyOutcome::Emit(Box::new(SignalInboundEvent::from_message(
+            envelope,
+            sender,
+            group,
+            rendered_body,
+            visible_quote,
+        )))
+    }
+
+    fn access_denial_reason(
+        &self,
+        sender: &str,
+        group_id: Option<&str>,
+        is_group: bool,
+    ) -> Option<SignalInboundDropReason> {
+        if is_group {
+            return match self.group_policy {
+                SignalGroupPolicy::Open => None,
+                SignalGroupPolicy::Disabled => Some(SignalInboundDropReason::GroupDisabled),
+                SignalGroupPolicy::Allowlist => {
+                    if group_id.is_some_and(|id| {
+                        entry_matches_group(id, &self.group_allow_from)
+                            || entry_matches_sender(sender, &self.group_allow_from)
+                    }) {
+                        None
+                    } else {
+                        Some(SignalInboundDropReason::GroupNotAllowed)
+                    }
+                }
+            };
+        }
+
+        match self.dm_policy {
+            SignalDmPolicy::Open => None,
+            SignalDmPolicy::Disabled => Some(SignalInboundDropReason::DmDisabled),
+            SignalDmPolicy::Pairing => Some(SignalInboundDropReason::DmPairingRequired),
+            SignalDmPolicy::Allowlist => {
+                if entry_matches_sender(sender, &self.allow_from) {
+                    None
+                } else {
+                    Some(SignalInboundDropReason::DmNotAllowed)
+                }
+            }
+        }
+    }
+
+    fn group_message_mentions_account(&self, message: &DataMessage, account: &str) -> bool {
+        let account = account.trim();
+        if !account.is_empty()
+            && message.mentions.iter().any(|mention| {
+                mention
+                    .number
+                    .as_deref()
+                    .is_some_and(|value| identifiers_match(value, account))
+                    || mention
+                        .uuid
+                        .as_deref()
+                        .is_some_and(|value| identifiers_match(value, account))
+            })
+        {
+            return true;
+        }
+
+        let Some(text) = message.message.as_deref() else {
+            return false;
+        };
+        let rendered = render_signal_mentions(text, &message.mentions);
+        self.mention_patterns
+            .iter()
+            .any(|pattern| rendered.contains(pattern.trim()))
+    }
+
+    fn visible_quote(&self, message: &DataMessage, is_group: bool) -> Option<VisibleSignalQuote> {
+        let quote = message.quote.as_ref()?;
+        let text = quote.text.as_deref()?.trim();
+        if text.is_empty() {
+            return None;
+        }
+
+        match self.quote_context_visibility {
+            SignalQuoteContextVisibility::All => {}
+            SignalQuoteContextVisibility::None => return None,
+            SignalQuoteContextVisibility::AllowedOnly => {
+                if is_group
+                    && !self.group_allow_from.is_empty()
+                    && !quote_author_allowed(quote, &self.group_allow_from)
+                {
+                    return None;
+                }
+            }
+        }
+
+        Some(VisibleSignalQuote {
+            text: text.to_string(),
+            author: quote
+                .author_uuid
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| Some(quote.author.clone()).filter(|value| !value.trim().is_empty())),
+        })
+    }
+}
+
+/// Inbound event kind emitted by the Signal connector.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalInboundEventKind {
+    /// Message or attachment event.
+    Message,
+    /// Reaction-only event.
+    Reaction,
+    /// Read/delivery receipt event.
+    ReadReceipt,
+    /// Typing indicator event.
+    Typing,
+}
+
+impl SignalInboundEventKind {
+    /// Return the FCP event topic for this kind.
+    #[must_use]
+    pub const fn topic(self) -> &'static str {
+        match self {
+            Self::Message => "signal.message.received",
+            Self::Reaction => "signal.reaction.received",
+            Self::ReadReceipt => "signal.receipt.read",
+            Self::Typing => "signal.typing.received",
+        }
+    }
+}
+
+/// Outcome of applying inbound policy to a Signal envelope.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalInboundPolicyOutcome {
+    /// Emit this authorized event.
+    Emit(Box<SignalInboundEvent>),
+    /// Drop the event and log/audit the structured reason.
+    Drop(SignalInboundDrop),
+}
+
+/// Structured drop reason for unauthorized or unsupported inbound events.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalInboundDropReason {
+    /// Envelope had no sender identity.
+    NoSender,
+    /// Event came from the configured account and self-echo suppression is enabled.
+    SelfEcho,
+    /// Sync events are not emitted into the inbound message stream.
+    SyncMessage,
+    /// Direct-message policy is disabled.
+    DmDisabled,
+    /// Direct sender is not allowlisted.
+    DmNotAllowed,
+    /// Direct sender must complete pairing first.
+    DmPairingRequired,
+    /// Group policy is disabled.
+    GroupDisabled,
+    /// Group or group sender is not allowlisted.
+    GroupNotAllowed,
+    /// Group event did not mention the configured account or a mention pattern.
+    GroupMentionRequired,
+    /// The event kind is disabled in configuration.
+    EventKindDisabled,
+    /// Envelope carried no user-visible content.
+    NoContent,
+}
+
+/// Structured description of an inbound event dropped by policy.
+#[derive(Debug, Clone, Serialize)]
+pub struct SignalInboundDrop {
+    /// Why the event was dropped.
+    pub reason: SignalInboundDropReason,
+    /// Sender identifier, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender: Option<String>,
+    /// Group identifier, if present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Event kind, if it could be classified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SignalInboundEventKind>,
+}
+
+impl SignalInboundDrop {
+    fn new(
+        reason: SignalInboundDropReason,
+        sender: Option<&str>,
+        group_id: Option<&str>,
+        kind: Option<SignalInboundEventKind>,
+    ) -> Self {
+        Self {
+            reason,
+            sender: sender.map(str::to_string),
+            group_id: group_id.map(str::to_string),
+            kind,
+        }
+    }
+}
+
+/// Authorized normalized Signal inbound event.
+#[derive(Debug, Clone, Serialize)]
+pub struct SignalInboundEvent {
+    /// Event kind.
+    pub kind: SignalInboundEventKind,
+    /// FCP topic.
+    pub topic: String,
+    /// Sender identifier.
+    pub sender: String,
+    /// Sender display name, if signal-cli supplied one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sender_name: Option<String>,
+    /// Event timestamp in Signal epoch milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<u64>,
+    /// Signal group identifier for group events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<String>,
+    /// Signal group name for group events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
+    /// Rendered text body with Signal mention placeholders replaced.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// Visible quote text after quote-context policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_text: Option<String>,
+    /// Visible quote author after quote-context policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote_author: Option<String>,
+    /// Reaction payload for reaction events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reaction: Option<SignalReactionMessage>,
+    /// Raw receipt payload for receipt events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receipt: Option<serde_json::Value>,
+    /// Raw typing payload for typing events.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub typing: Option<serde_json::Value>,
+}
+
+impl SignalInboundEvent {
+    fn base(
+        kind: SignalInboundEventKind,
+        envelope: &SignalEnvelope,
+        sender: &str,
+        group: Option<&GroupInfo>,
+    ) -> Self {
+        Self {
+            kind,
+            topic: kind.topic().to_string(),
+            sender: sender.to_string(),
+            sender_name: envelope
+                .source_name
+                .clone()
+                .filter(|name| !name.trim().is_empty()),
+            timestamp: envelope.timestamp,
+            group_id: group.map(|info| info.id.clone()),
+            group_name: group.and_then(|info| info.name.clone()),
+            body: None,
+            quote_text: None,
+            quote_author: None,
+            reaction: None,
+            receipt: None,
+            typing: None,
+        }
+    }
+
+    fn from_message(
+        envelope: &SignalEnvelope,
+        sender: &str,
+        group: Option<&GroupInfo>,
+        body: Option<String>,
+        quote: Option<VisibleSignalQuote>,
+    ) -> Self {
+        let mut event = Self::base(SignalInboundEventKind::Message, envelope, sender, group);
+        event.body = body.filter(|text| !text.trim().is_empty());
+        if let Some(quote) = quote {
+            event.quote_text = Some(quote.text);
+            event.quote_author = quote.author;
+        }
+        event
+    }
+
+    fn from_reaction(
+        envelope: &SignalEnvelope,
+        sender: &str,
+        group: Option<&GroupInfo>,
+        reaction: SignalReactionMessage,
+    ) -> Self {
+        let mut event = Self::base(SignalInboundEventKind::Reaction, envelope, sender, group);
+        event.reaction = Some(reaction);
+        event
+    }
+
+    fn from_receipt(
+        envelope: &SignalEnvelope,
+        sender: &str,
+        group: Option<&GroupInfo>,
+        receipt: serde_json::Value,
+    ) -> Self {
+        let mut event = Self::base(SignalInboundEventKind::ReadReceipt, envelope, sender, group);
+        event.receipt = Some(receipt);
+        event
+    }
+
+    fn from_typing(
+        envelope: &SignalEnvelope,
+        sender: &str,
+        group: Option<&GroupInfo>,
+        typing: serde_json::Value,
+    ) -> Self {
+        let mut event = Self::base(SignalInboundEventKind::Typing, envelope, sender, group);
+        event.typing = Some(typing);
+        event
+    }
+}
+
+#[derive(Debug, Clone)]
+struct VisibleSignalQuote {
+    text: String,
+    author: Option<String>,
 }
 
 fn default_daemon_url() -> String {
@@ -224,6 +920,8 @@ impl SignalConfig {
 
         validate_optional_non_empty("data_dir", self.data_dir.as_deref())?;
         validate_optional_non_empty("attachment_dir", self.attachment_dir.as_deref())?;
+        self.streaming.validate()?;
+        self.inbound_policy.validate()?;
 
         Ok(())
     }
@@ -719,6 +1417,10 @@ pub struct SignalEnvelope {
     #[serde(default, rename = "receiptMessage")]
     pub receipt_message: Option<serde_json::Value>,
 
+    /// Typing indicator message.
+    #[serde(default, rename = "typingMessage")]
+    pub typing_message: Option<serde_json::Value>,
+
     /// Sync message.
     #[serde(default, rename = "syncMessage")]
     pub sync_message: Option<serde_json::Value>,
@@ -923,6 +1625,27 @@ pub fn parse_signal_sse_event(block: &str) -> serde_json::Result<Option<SignalSs
     Ok(Some(SignalSseEvent { event, id, payload }))
 }
 
+/// Parse an already-framed SSE data payload into a Signal receive event.
+///
+/// This is used by streaming clients that parse the SSE framing separately but
+/// still need signal-cli's wrapped/raw envelope compatibility.
+///
+/// # Errors
+///
+/// Returns the underlying JSON parse error when `data` is malformed.
+pub fn parse_signal_sse_data(
+    event: Option<String>,
+    id: Option<String>,
+    data: &str,
+) -> serde_json::Result<Option<SignalSseEvent>> {
+    if data.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let payload = parse_signal_receive_payload(data)?;
+    Ok(Some(SignalSseEvent { event, id, payload }))
+}
+
 fn parse_signal_receive_payload(data: &str) -> serde_json::Result<SignalReceivePayload> {
     let value = serde_json::from_str::<serde_json::Value>(data)?;
     let wrapped = serde_json::from_value::<SignalReceivePayload>(value.clone())?;
@@ -935,6 +1658,122 @@ fn parse_signal_receive_payload(data: &str) -> serde_json::Result<SignalReceiveP
         envelope: Some(envelope),
         exception: None,
     })
+}
+
+/// Render Signal mention placeholders (`\u{fffc}`) as readable `@identifier`
+/// tokens using the out-of-band mention metadata.
+#[must_use]
+pub fn render_signal_mentions(message: &str, mentions: &[SignalMention]) -> String {
+    const OBJECT_REPLACEMENT: char = '\u{fffc}';
+
+    if message.is_empty() || mentions.is_empty() || !message.contains(OBJECT_REPLACEMENT) {
+        return message.to_string();
+    }
+
+    let mut chars = message.chars().collect::<Vec<_>>();
+    let mut candidates = mentions
+        .iter()
+        .filter_map(|mention| {
+            let start = usize::try_from(mention.start?).ok()?;
+            let length = usize::try_from(mention.length?).ok()?;
+            if length == 0 {
+                return None;
+            }
+            let identifier = mention
+                .name
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .or_else(|| {
+                    mention
+                        .number
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .or_else(|| {
+                    mention
+                        .uuid
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                })?;
+            Some((start, length, identifier))
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.0));
+
+    for (start, length, identifier) in candidates {
+        let end = start.saturating_add(length).min(chars.len());
+        if start >= end || !chars[start..end].contains(&OBJECT_REPLACEMENT) {
+            continue;
+        }
+        chars.splice(start..end, format!("@{identifier}").chars());
+    }
+
+    chars.iter().collect()
+}
+
+fn classify_envelope_kind(envelope: &SignalEnvelope) -> Option<SignalInboundEventKind> {
+    if envelope.receipt_message.is_some() {
+        return Some(SignalInboundEventKind::ReadReceipt);
+    }
+    if envelope.typing_message.is_some() {
+        return Some(SignalInboundEventKind::Typing);
+    }
+    if envelope.reaction_message.is_some()
+        || envelope
+            .primary_data_message()
+            .and_then(|message| message.reaction.as_ref())
+            .is_some()
+    {
+        return Some(SignalInboundEventKind::Reaction);
+    }
+    if envelope.primary_data_message().is_some() {
+        return Some(SignalInboundEventKind::Message);
+    }
+    None
+}
+
+fn identifiers_match(left: &str, right: &str) -> bool {
+    let left = left.trim();
+    let right = right.trim();
+    !left.is_empty() && !right.is_empty() && left.eq_ignore_ascii_case(right)
+}
+
+fn entry_matches_sender(sender: &str, entries: &[String]) -> bool {
+    let candidates = [
+        sender.to_string(),
+        format!("signal:{sender}"),
+        format!("phone:{sender}"),
+    ];
+    entries.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == "*"
+            || candidates
+                .iter()
+                .any(|candidate| identifiers_match(entry, candidate))
+    })
+}
+
+fn entry_matches_group(group_id: &str, entries: &[String]) -> bool {
+    let candidates = [
+        group_id.to_string(),
+        format!("group:{group_id}"),
+        format!("signal:group:{group_id}"),
+    ];
+    entries.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == "*"
+            || candidates
+                .iter()
+                .any(|candidate| identifiers_match(entry, candidate))
+    })
+}
+
+fn quote_author_allowed(quote: &SignalQuote, entries: &[String]) -> bool {
+    quote
+        .author
+        .split(',')
+        .chain(quote.author_uuid.as_deref())
+        .any(|author| entry_matches_sender(author.trim(), entries))
 }
 
 fn deserialize_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -957,6 +1796,22 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn expect_emit(outcome: SignalInboundPolicyOutcome) -> Box<SignalInboundEvent> {
+        match outcome {
+            SignalInboundPolicyOutcome::Emit(event) => Some(event),
+            SignalInboundPolicyOutcome::Drop(_) => None,
+        }
+        .expect("expected inbound policy to emit an event")
+    }
+
+    fn expect_drop(outcome: SignalInboundPolicyOutcome) -> SignalInboundDrop {
+        match outcome {
+            SignalInboundPolicyOutcome::Emit(_) => None,
+            SignalInboundPolicyOutcome::Drop(dropped) => Some(dropped),
+        }
+        .expect("expected inbound policy to drop the event")
+    }
 
     #[test]
     fn deserialize_signal_config_defaults() {
@@ -1338,6 +2193,205 @@ data: {"sourceNumber":"+15551234567","dataMessage":{"message":"legacy"}}
     fn parse_signal_sse_rejects_malformed_data() {
         let error = parse_signal_sse_event("event: receive\ndata: {bad json}\n").unwrap_err();
         assert!(error.is_syntax());
+    }
+
+    #[test]
+    fn render_signal_mentions_replaces_object_placeholder() {
+        let rendered = render_signal_mentions(
+            "hi \u{fffc}",
+            &[SignalMention {
+                name: None,
+                number: Some("+15559876543".into()),
+                uuid: None,
+                start: Some(3),
+                length: Some(1),
+            }],
+        );
+
+        assert_eq!(rendered, "hi @+15559876543");
+    }
+
+    #[test]
+    fn inbound_policy_defaults_allow_dm_and_deny_unlisted_group() {
+        let policy = SignalInboundPolicy::default();
+        let dm: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "timestamp": 1_700_000_000_000_u64,
+            "dataMessage": { "message": "hello" }
+        }))
+        .unwrap();
+        let group: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "dataMessage": {
+                "message": "hello",
+                "groupInfo": { "groupId": "group-1", "groupName": "Ops" }
+            }
+        }))
+        .unwrap();
+
+        let event = expect_emit(policy.evaluate_envelope(&dm, "+15551234567"));
+        assert_eq!(event.kind, SignalInboundEventKind::Message);
+        assert_eq!(event.body.as_deref(), Some("hello"));
+
+        let dropped = expect_drop(policy.evaluate_envelope(&group, "+15551234567"));
+        assert_eq!(dropped.reason, SignalInboundDropReason::GroupNotAllowed);
+        assert_eq!(dropped.group_id.as_deref(), Some("group-1"));
+    }
+
+    #[test]
+    fn inbound_policy_supports_dm_allowlist_and_pairing_modes() {
+        let envelope: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "dataMessage": { "message": "hello" }
+        }))
+        .unwrap();
+        let allowed = SignalInboundPolicy {
+            dm_policy: SignalDmPolicy::Allowlist,
+            allow_from: vec!["signal:+15559876543".into()],
+            ..SignalInboundPolicy::default()
+        };
+        let pairing = SignalInboundPolicy {
+            dm_policy: SignalDmPolicy::Pairing,
+            ..SignalInboundPolicy::default()
+        };
+
+        assert!(matches!(
+            allowed.evaluate_envelope(&envelope, "+15551234567"),
+            SignalInboundPolicyOutcome::Emit(_)
+        ));
+        let dropped = expect_drop(pairing.evaluate_envelope(&envelope, "+15551234567"));
+        assert_eq!(dropped.reason, SignalInboundDropReason::DmPairingRequired);
+    }
+
+    #[test]
+    fn inbound_policy_requires_group_mention_when_configured() {
+        let policy = SignalInboundPolicy {
+            group_allow_from: vec!["group:group-1".into()],
+            require_group_mention: true,
+            mention_patterns: vec!["@bot".into()],
+            ..SignalInboundPolicy::default()
+        };
+        let missing_mention: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "dataMessage": {
+                "message": "hello",
+                "groupInfo": { "groupId": "group-1" }
+            }
+        }))
+        .unwrap();
+        let with_mention: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "dataMessage": {
+                "message": "@bot hello",
+                "groupInfo": { "groupId": "group-1" }
+            }
+        }))
+        .unwrap();
+
+        let dropped = expect_drop(policy.evaluate_envelope(&missing_mention, "+15551234567"));
+        assert_eq!(
+            dropped.reason,
+            SignalInboundDropReason::GroupMentionRequired
+        );
+        assert!(matches!(
+            policy.evaluate_envelope(&with_mention, "+15551234567"),
+            SignalInboundPolicyOutcome::Emit(_)
+        ));
+    }
+
+    #[test]
+    fn inbound_policy_hides_group_quote_context_from_unallowed_author() {
+        let envelope: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "dataMessage": {
+                "message": "replying",
+                "groupInfo": { "groupId": "group-1" },
+                "quote": {
+                    "id": 1_700_000_000_000_u64,
+                    "author": "+15550000000",
+                    "text": "private context"
+                }
+            }
+        }))
+        .unwrap();
+        let policy = SignalInboundPolicy {
+            group_allow_from: vec!["group:group-1".into()],
+            ..SignalInboundPolicy::default()
+        };
+
+        let event = expect_emit(policy.evaluate_envelope(&envelope, "+15551234567"));
+        assert_eq!(event.body.as_deref(), Some("replying"));
+        assert!(event.quote_text.is_none());
+    }
+
+    #[test]
+    fn inbound_policy_drops_self_echo() {
+        let envelope: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15551234567",
+            "dataMessage": { "message": "echo" }
+        }))
+        .unwrap();
+
+        let dropped = expect_drop(
+            SignalInboundPolicy::default().evaluate_envelope(&envelope, "+15551234567"),
+        );
+        assert_eq!(dropped.reason, SignalInboundDropReason::SelfEcho);
+    }
+
+    #[test]
+    fn inbound_policy_authorizes_reaction_only_events_after_sender_policy() {
+        let envelope: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "reactionMessage": {
+                "emoji": "+1",
+                "targetAuthor": "+15551234567",
+                "targetSentTimestamp": 1_700_000_000_000_u64,
+                "groupInfo": { "groupId": "group-1" }
+            }
+        }))
+        .unwrap();
+        let denied = SignalInboundPolicy::default();
+        let allowed = SignalInboundPolicy {
+            group_allow_from: vec!["group:group-1".into()],
+            ..SignalInboundPolicy::default()
+        };
+
+        let dropped = expect_drop(denied.evaluate_envelope(&envelope, "+15551234567"));
+        assert_eq!(dropped.reason, SignalInboundDropReason::GroupNotAllowed);
+        assert_eq!(dropped.kind, Some(SignalInboundEventKind::Reaction));
+
+        let event = expect_emit(allowed.evaluate_envelope(&envelope, "+15551234567"));
+        assert_eq!(event.kind, SignalInboundEventKind::Reaction);
+        assert_eq!(
+            event
+                .reaction
+                .as_ref()
+                .and_then(|reaction| reaction.emoji.as_deref()),
+            Some("+1")
+        );
+    }
+
+    #[test]
+    fn inbound_policy_emits_receipts_and_typing_events() {
+        let receipt: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "receiptMessage": { "type": "READ", "timestamps": [1_700_000_000_000_u64] }
+        }))
+        .unwrap();
+        let typing: SignalEnvelope = serde_json::from_value(serde_json::json!({
+            "sourceNumber": "+15559876543",
+            "typingMessage": { "action": "STARTED" }
+        }))
+        .unwrap();
+        let policy = SignalInboundPolicy::default();
+
+        let event = expect_emit(policy.evaluate_envelope(&receipt, "+15551234567"));
+        assert_eq!(event.kind, SignalInboundEventKind::ReadReceipt);
+        assert!(event.receipt.is_some());
+
+        let event = expect_emit(policy.evaluate_envelope(&typing, "+15551234567"));
+        assert_eq!(event.kind, SignalInboundEventKind::Typing);
+        assert!(event.typing.is_some());
     }
 
     #[test]

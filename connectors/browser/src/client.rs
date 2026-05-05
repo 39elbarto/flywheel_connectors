@@ -32,6 +32,7 @@ struct BrowserControlOperation {
     id: &'static str,
     method: &'static str,
     path: &'static str,
+    implementation: BrowserControlImplementation,
 }
 
 impl BrowserControlOperation {
@@ -40,7 +41,31 @@ impl BrowserControlOperation {
             "id": self.id,
             "method": self.method,
             "path": self.path,
+            "implementation": self.implementation.descriptor(),
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BrowserControlImplementation {
+    Cdp { methods: &'static [&'static str] },
+    WorkerPolicy { description: &'static str },
+}
+
+impl BrowserControlImplementation {
+    fn descriptor(self) -> serde_json::Value {
+        match self {
+            Self::Cdp { methods } => serde_json::json!({
+                "kind": "cdp",
+                "protocol": "Chrome DevTools Protocol",
+                "methods": methods,
+            }),
+            Self::WorkerPolicy { description } => serde_json::json!({
+                "kind": "worker_policy",
+                "description": description,
+                "methods": [],
+            }),
+        }
     }
 }
 
@@ -65,66 +90,127 @@ const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
     id: "browser.navigate",
     method: "POST",
     path: "/navigate",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &[
+            "Page.enable",
+            "Network.enable",
+            "Network.setUserAgentOverride",
+            "Page.navigate",
+        ],
+    },
 };
 const WORKER_SCREENSHOT: BrowserControlOperation = BrowserControlOperation {
     id: "browser.screenshot",
     method: "POST",
     path: "/screenshot",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &[
+            "DOM.getDocument",
+            "DOM.querySelector",
+            "DOM.getBoxModel",
+            "Page.getLayoutMetrics",
+            "Page.captureScreenshot",
+        ],
+    },
 };
 const WORKER_RENDER_PDF: BrowserControlOperation = BrowserControlOperation {
     id: "browser.render_pdf",
     method: "POST",
     path: "/pdf",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Page.printToPDF"],
+    },
 };
 const WORKER_EXTRACT_TEXT: BrowserControlOperation = BrowserControlOperation {
     id: "browser.extract_text",
     method: "POST",
     path: "/extract_text",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Runtime.evaluate"],
+    },
 };
 const WORKER_EXTRACT_LINKS: BrowserControlOperation = BrowserControlOperation {
     id: "browser.extract_links",
     method: "POST",
     path: "/extract_links",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Runtime.evaluate"],
+    },
 };
 const WORKER_WAIT_FOR_SELECTOR: BrowserControlOperation = BrowserControlOperation {
     id: "browser.wait_for_selector",
     method: "POST",
     path: "/wait_for_selector",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Runtime.evaluate"],
+    },
 };
 const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
     id: "browser.click",
     method: "POST",
     path: "/click",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &[
+            "DOM.getDocument",
+            "DOM.querySelector",
+            "DOM.getBoxModel",
+            "Input.dispatchMouseEvent",
+        ],
+    },
 };
 const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
     id: "browser.fill_form",
     method: "POST",
     path: "/fill_form",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &[
+            "DOM.getDocument",
+            "DOM.querySelector",
+            "DOM.focus",
+            "Input.insertText",
+            "Runtime.evaluate",
+        ],
+    },
 };
 const WORKER_EVALUATE_JS: BrowserControlOperation = BrowserControlOperation {
     id: "browser.evaluate_js",
     method: "POST",
     path: "/evaluate",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Runtime.evaluate"],
+    },
 };
 const WORKER_GET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     id: "browser.get_cookies",
     method: "POST",
     path: "/cookies",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Network.getCookies"],
+    },
 };
 const WORKER_SET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     id: "browser.set_cookies",
     method: "POST",
     path: "/set_cookies",
+    implementation: BrowserControlImplementation::Cdp {
+        methods: &["Network.setCookies"],
+    },
 };
 const WORKER_SET_PROXY: BrowserControlOperation = BrowserControlOperation {
     id: "browser.set_proxy",
     method: "POST",
     path: "/proxy/set",
+    implementation: BrowserControlImplementation::WorkerPolicy {
+        description: "Apply connector-scoped proxy policy before browser target launch.",
+    },
 };
 const WORKER_CLEAR_PROXY: BrowserControlOperation = BrowserControlOperation {
     id: "browser.clear_proxy",
     method: "POST",
     path: "/proxy/clear",
+    implementation: BrowserControlImplementation::WorkerPolicy {
+        description: "Clear connector-scoped proxy policy for future browser targets.",
+    },
 };
 
 const REQUIRED_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] = &[
@@ -829,6 +915,106 @@ mod tests {
             );
         }
         assert_eq!(operations.len(), REQUIRED_BROWSER_CONTROL_OPERATIONS.len());
+    }
+
+    #[test]
+    fn test_worker_contract_pins_cdp_command_plan() {
+        fn operation<'a>(operations: &'a [serde_json::Value], id: &str) -> &'a serde_json::Value {
+            operations
+                .iter()
+                .find(|operation| operation["id"] == id)
+                .unwrap()
+        }
+
+        let descriptor = browser_control_contract_descriptor();
+        let operations = descriptor["operations"].as_array().unwrap();
+
+        let navigate = operation(operations, "browser.navigate");
+        assert_eq!(navigate["implementation"]["kind"], "cdp");
+        assert_eq!(
+            navigate["implementation"]["methods"],
+            serde_json::json!([
+                "Page.enable",
+                "Network.enable",
+                "Network.setUserAgentOverride",
+                "Page.navigate"
+            ])
+        );
+
+        let screenshot = operation(operations, "browser.screenshot");
+        assert_eq!(screenshot["implementation"]["kind"], "cdp");
+        assert_eq!(
+            screenshot["implementation"]["methods"],
+            serde_json::json!([
+                "DOM.getDocument",
+                "DOM.querySelector",
+                "DOM.getBoxModel",
+                "Page.getLayoutMetrics",
+                "Page.captureScreenshot"
+            ])
+        );
+
+        let click = operation(operations, "browser.click");
+        assert_eq!(click["implementation"]["kind"], "cdp");
+        assert_eq!(
+            click["implementation"]["methods"],
+            serde_json::json!([
+                "DOM.getDocument",
+                "DOM.querySelector",
+                "DOM.getBoxModel",
+                "Input.dispatchMouseEvent"
+            ])
+        );
+
+        let get_cookies = operation(operations, "browser.get_cookies");
+        assert_eq!(
+            get_cookies["implementation"]["methods"],
+            serde_json::json!(["Network.getCookies"])
+        );
+
+        let set_proxy = operation(operations, "browser.set_proxy");
+        assert_eq!(set_proxy["implementation"]["kind"], "worker_policy");
+        assert_eq!(
+            set_proxy["implementation"]["methods"],
+            serde_json::json!([])
+        );
+    }
+
+    #[test]
+    fn test_worker_contract_gives_every_worker_operation_an_execution_plan() {
+        let descriptor = browser_control_contract_descriptor();
+        let operations = descriptor["operations"].as_array().unwrap();
+
+        for operation in operations {
+            let id = operation["id"].as_str().unwrap();
+            let implementation = &operation["implementation"];
+            let kind = implementation["kind"].as_str().unwrap();
+            let methods = implementation["methods"].as_array().unwrap();
+
+            assert!(
+                matches!(kind, "cdp" | "worker_policy"),
+                "{id} has unknown implementation kind `{kind}`"
+            );
+            if kind == "cdp" {
+                assert!(!methods.is_empty(), "{id} must list CDP methods");
+                for method in methods {
+                    let method = method.as_str().unwrap();
+                    assert!(
+                        method.split_once('.').is_some(),
+                        "{id} has invalid CDP method `{method}`"
+                    );
+                }
+            } else {
+                assert!(
+                    methods.is_empty(),
+                    "{id} policy operations do not issue CDP"
+                );
+                assert!(
+                    implementation["description"].as_str().is_some(),
+                    "{id} policy operation must explain worker behavior"
+                );
+            }
+        }
     }
 
     #[test]

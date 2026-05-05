@@ -377,6 +377,23 @@ max_redirects = 0
 [provides.operations.ingest_webhook_event.ai_hints]
 when_to_use = "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, duplicate replay suppression, opt-in privacy-gated Contacts enrichment for group participants, opt-in scoped reply-context fallback, optional same-sender DM split-send coalescing, or an explicit coalescing flush"
 
+[provides.operations.ingest_webhook_request]
+summary = "Process a host-forwarded BlueBubbles webhook request"
+capability = "imessage.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "best_effort"
+
+[provides.operations.ingest_webhook_request.network_constraints]
+host_allow = ["localhost", "127.0.0.1"]
+port_allow = [1234]
+require_tls = false
+deny_private_ranges = false
+max_redirects = 0
+
+[provides.operations.ingest_webhook_request.ai_hints]
+when_to_use = "When a supervised FCP host/webhook receiver request region has accepted a raw BlueBubbles POST and needs callback auth, method/path/body guardrails, sender/conversation policy, replay dedupe, coalescing, and EventEnvelope fan-out in one route contract"
+
 [provides.operations.get_server_info]
 summary = "Get BlueBubbles server info"
 capability = "imessage.admin"

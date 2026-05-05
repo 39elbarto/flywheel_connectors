@@ -65,6 +65,7 @@ mod tests {
             "imessage.list_webhooks",
             "imessage.unregister_webhook",
             "imessage.ingest_webhook_event",
+            "imessage.ingest_webhook_request",
             "imessage.get_server_info",
         ];
         for op in &expected_ops {

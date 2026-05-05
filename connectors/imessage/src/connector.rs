@@ -21,6 +21,7 @@ use fcp_sdk::prelude::*;
 use rusqlite::{Connection, OpenFlags, params_from_iter};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::client::BlueBubblesClient;
 use crate::types::{
@@ -55,6 +56,7 @@ const OP_REGISTER_WEBHOOK: &str = "imessage.register_webhook";
 const OP_LIST_WEBHOOKS: &str = "imessage.list_webhooks";
 const OP_UNREGISTER_WEBHOOK: &str = "imessage.unregister_webhook";
 const OP_INGEST_WEBHOOK_EVENT: &str = "imessage.ingest_webhook_event";
+const OP_INGEST_WEBHOOK_REQUEST: &str = "imessage.ingest_webhook_request";
 
 // Capability IDs
 const CAP_SEND: &str = "imessage.send";
@@ -66,6 +68,12 @@ const DEFAULT_SYNC_MESSAGE_LIMIT: u64 = 50;
 const WEBHOOK_EVENT_BUFFER_MIN_EVENTS: u32 = 64;
 const WEBHOOK_EVENT_BUFFER_MIN_EVENTS_USIZE: usize = 64;
 const WEBHOOK_EVENT_BUFFER_MAX_EVENTS: usize = 256;
+const WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 1024 * 1024;
+const WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
+const WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 64;
+const WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 120;
+const WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
+const WEBHOOK_AUTH_HEADER: &str = "x-bluebubbles-auth";
 
 #[must_use]
 const fn webhook_event_caps() -> EventCaps {
@@ -1630,7 +1638,8 @@ impl BlueBubblesConnector {
             | OP_SYNC_EVENTS
             | OP_DOWNLOAD_ATTACHMENT
             | OP_RESOLVE_SEND_TARGET
-            | OP_INGEST_WEBHOOK_EVENT => CAP_READ,
+            | OP_INGEST_WEBHOOK_EVENT
+            | OP_INGEST_WEBHOOK_REQUEST => CAP_READ,
             OP_GET_SERVER_INFO
             | OP_GET_ACTION_AVAILABILITY
             | OP_REGISTER_WEBHOOK
@@ -2985,6 +2994,93 @@ pub fn operations_info() -> Vec<OperationInfo> {
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
+            id: OperationId::from_static(OP_INGEST_WEBHOOK_REQUEST),
+            summary: "Process a host-forwarded BlueBubbles webhook request".into(),
+            description: Some(
+                "Validates FCP host request-region metadata, callback auth, route path, method, and body bounds before passing the BlueBubbles POST body into the normalized webhook event pipeline".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["method", "url", "body"],
+                "properties": {
+                    "method": {
+                        "type": "string",
+                        "description": "HTTP method observed by the host request region"
+                    },
+                    "url": {
+                        "type": "string",
+                        "description": "Full callback URL observed by the host; password query auth is accepted but redacted from outputs"
+                    },
+                    "headers": {
+                        "type": "object",
+                        "description": "Optional host-forwarded headers; x-bluebubbles-auth may carry stripped callback auth"
+                    },
+                    "body": {
+                        "type": "object",
+                        "description": "Raw BlueBubbles webhook JSON body"
+                    },
+                    "body_size_bytes": {
+                        "type": "integer",
+                        "description": "Host-measured request body byte size before connector parsing"
+                    },
+                    "max_body_bytes": {
+                        "type": "integer",
+                        "description": "Ingress body limit override for tests or stricter host policy"
+                    },
+                    "request_region": {
+                        "type": "object",
+                        "description": "FCP host request-region metadata such as source, cancelled, and deadline_exceeded"
+                    },
+                    "event_type": {
+                        "type": "string",
+                        "description": "Optional event type override when the transport carries it outside the JSON body"
+                    },
+                    "account_id": {
+                        "type": "string",
+                        "description": "Optional account namespace for dedupe; defaults to connector webhook_account_id"
+                    },
+                    "observed_at_ms": {
+                        "type": "integer",
+                        "description": "Optional host-observed epoch-ms timestamp used for deterministic coalescing tests"
+                    }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "accepted": { "type": "boolean" },
+                    "status_code": { "type": "integer" },
+                    "reason_code": { "type": "string" },
+                    "reason": { "type": "string" },
+                    "ingest": { "type": "object" },
+                    "request_region": { "type": "object" },
+                    "service_layers": { "type": "object" },
+                    "logs": { "type": "array", "items": { "type": "object" } },
+                    "body_bytes": { "type": "integer" },
+                    "tainted": { "type": "boolean" },
+                    "clean_shutdown": { "type": "boolean" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When the FCP host or webhook receiver has accepted a raw BlueBubbles POST in a supervised request region and needs connector-local callback auth, body bounds, sender policy, replay dedupe, coalescing, and EventEnvelope fan-out in one route contract".into(),
+                common_mistakes: vec![
+                    "Passing a URL without the BlueBubbles callback auth query or x-bluebubbles-auth header".into(),
+                    "Expecting this operation to open a socket; the host owns the HTTP listener and forwards request-region metadata".into(),
+                    "Logging or echoing the callback password; outputs redact query auth and never return the configured password".into(),
+                ],
+                examples: vec![
+                    r#"{"method":"POST","url":"http://localhost:8645/bluebubbles-webhook","headers":{"x-bluebubbles-auth":"[REDACTED]"},"body":{"type":"new-message","data":{"guid":"msg-1","text":"hello"}}}"#.into(),
+                ],
+                related: vec![CapabilityId::from_static(OP_INGEST_WEBHOOK_EVENT)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
             id: OperationId::from_static(OP_GET_SERVER_INFO),
             summary: "Get BlueBubbles server info".into(),
             description: Some(
@@ -3086,6 +3182,197 @@ fn optional_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn ingress_request_region_bool(input: &Value, field: &str) -> bool {
+    input
+        .get("request_region")
+        .and_then(|region| region.get(field))
+        .or_else(|| input.get(field))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn ingress_request_region_string(input: &Value, field: &str, default: &str) -> String {
+    input
+        .get("request_region")
+        .and_then(|region| region.get(field))
+        .or_else(|| input.get(field))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| default.to_string(), str::to_string)
+}
+
+fn ingress_u64_field(input: &Value, field: &str, default: u64) -> FcpResult<u64> {
+    input.get(field).map_or(Ok(default), |value| {
+        value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a non-negative integer"),
+        })
+    })
+}
+
+fn ingress_usize_field(input: &Value, field: &str, default: usize) -> FcpResult<usize> {
+    let default_u64 = u64::try_from(default).map_err(|_| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{field} default is too large for this platform"),
+    })?;
+    let raw = ingress_u64_field(input, field, default_u64)?;
+    usize::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{field} is too large for this platform"),
+    })
+}
+
+fn webhook_ingress_body_size(input: &Value, body: &Value) -> FcpResult<usize> {
+    if input.get("body_size_bytes").is_some() {
+        return ingress_usize_field(input, "body_size_bytes", 0);
+    }
+    serde_json::to_vec(body)
+        .map(|body| body.len())
+        .map_err(|error| FcpError::Internal {
+            message: format!("Failed to measure BlueBubbles webhook body: {error}"),
+        })
+}
+
+fn webhook_ingress_header_value(input: &Value, header_name: &str) -> FcpResult<Option<String>> {
+    let Some(headers) = input.get("headers") else {
+        return Ok(None);
+    };
+    let headers = headers
+        .as_object()
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "headers must be an object of HTTP header strings".into(),
+        })?;
+    for (key, value) in headers {
+        if key.eq_ignore_ascii_case(header_name) {
+            let Some(value) = value.as_str() else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("header `{key}` must be a string"),
+                });
+            };
+            return Ok(Some(value.trim().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn redacted_webhook_url(url: &reqwest::Url) -> String {
+    let mut redacted = url.clone();
+    let query_pairs = url
+        .query_pairs()
+        .map(|(key, value)| {
+            let value = if key.eq_ignore_ascii_case("password") {
+                "[REDACTED]".to_string()
+            } else {
+                value.into_owned()
+            };
+            (key.into_owned(), value)
+        })
+        .collect::<Vec<_>>();
+    redacted.set_query(None);
+    {
+        let mut pairs = redacted.query_pairs_mut();
+        for (key, value) in query_pairs {
+            pairs.append_pair(&key, &value);
+        }
+    }
+    redacted.to_string()
+}
+
+fn webhook_ingress_request_region(input: &Value, method: &str, url: &str) -> Value {
+    json!({
+        "surface": "fcp.webhook.request_region",
+        "provider": "bluebubbles",
+        "source": ingress_request_region_string(input, "source", "host_forwarded"),
+        "method": method,
+        "url": url,
+        "cancelled": ingress_request_region_bool(input, "cancelled"),
+        "deadline_exceeded": ingress_request_region_bool(input, "deadline_exceeded")
+    })
+}
+
+fn webhook_ingress_service_layers(input: &Value) -> FcpResult<Value> {
+    let timeout_ms = ingress_u64_field(input, "timeout_ms", WEBHOOK_INGRESS_TIMEOUT_MS)?;
+    let concurrency_limit = ingress_u64_field(
+        input,
+        "concurrency_limit",
+        WEBHOOK_INGRESS_CONCURRENCY_LIMIT,
+    )?;
+    let rate_limit_max =
+        ingress_u64_field(input, "rate_limit_max", WEBHOOK_INGRESS_RATE_LIMIT_MAX)?;
+    let rate_limit_window_ms = ingress_u64_field(
+        input,
+        "rate_limit_window_ms",
+        WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS,
+    )?;
+
+    Ok(json!({
+        "builder": "fcp.webhook.ServiceBuilder",
+        "host_enforced": true,
+        "layers": [
+            { "name": "timeout", "timeout_ms": timeout_ms },
+            { "name": "concurrency_limit", "max_in_flight": concurrency_limit },
+            { "name": "load_shed", "enabled": true },
+            {
+                "name": "rate_limit",
+                "pool": "bluebubbles.webhook",
+                "max": rate_limit_max,
+                "per_ms": rate_limit_window_ms
+            }
+        ]
+    }))
+}
+
+fn webhook_ingress_log(stage: &str, status: &str, reason_code: &str, message: &str) -> Value {
+    json!({
+        "stage": stage,
+        "status": status,
+        "reason_code": reason_code,
+        "message": message,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn webhook_ingress_response(
+    accepted: bool,
+    status_code: u16,
+    reason_code: &str,
+    reason: &str,
+    ingest_result: Option<&Value>,
+    request_region: &Value,
+    service_layers: &Value,
+    logs: &[Value],
+    body_bytes: usize,
+) -> Value {
+    json!({
+        "accepted": accepted,
+        "status_code": status_code,
+        "reason_code": reason_code,
+        "reason": reason,
+        "ingest": ingest_result,
+        "request_region": request_region,
+        "service_layers": service_layers,
+        "logs": logs,
+        "body_bytes": body_bytes,
+        "tainted": true,
+        "clean_shutdown": true,
+    })
+}
+
+fn webhook_password_from_url(url: &reqwest::Url) -> Option<String> {
+    url.query_pairs()
+        .find(|(key, _)| key.eq_ignore_ascii_case("password"))
+        .map(|(_, value)| value.into_owned())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn webhook_password_matches(candidate: &str, expected: &str) -> bool {
+    candidate.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 fn webhook_events_from_input(input: &Value) -> FcpResult<Vec<String>> {
@@ -3432,6 +3719,468 @@ impl BlueBubblesConnector {
             envelope.timestamp = timestamp;
         }
         Ok(envelope)
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn invoke_webhook_event_pipeline(
+        &self,
+        state: &BlueBubblesState,
+        event_zone_id: &ZoneId,
+        event_correlation_id: Option<&CorrelationId>,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let flush_coalescing = input
+            .get("flush_coalescing")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if flush_coalescing && input.get("payload").is_none() {
+            let outcome = state
+                .webhook_coalescer
+                .flush_all(&state.config.webhook_coalescing)?;
+            let first_event = outcome.events.first().cloned();
+            let event_envelopes = self.record_webhook_event_envelopes(
+                state,
+                event_zone_id,
+                event_correlation_id,
+                state.config.webhook_account_id.as_str(),
+                &outcome.events,
+            )?;
+            return Ok(json!({
+                "status": outcome.status,
+                "dedupe_id": null,
+                "dedupe_ids": [],
+                "duplicate_id": null,
+                "acceptance": null,
+                "policy": state.config.webhook_inbound.summary(),
+                "coalescing": outcome.summary,
+                "reply_context_lookup": null,
+                "contacts_enrichment": null,
+                "event": first_event,
+                "events": outcome.events,
+                "event_envelopes": event_envelopes,
+            }));
+        }
+
+        let payload = input
+            .get("payload")
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "Missing 'payload' field".into(),
+            })?;
+        let account_id = optional_string(input, "account_id")
+            .unwrap_or(state.config.webhook_account_id.as_str());
+        let event_type = optional_string(input, "event_type");
+        let mut event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
+        let dedupe_ids = bluebubbles_webhook_source_dedupe_ids(account_id, &event);
+        let dedupe_id = dedupe_ids
+            .first()
+            .cloned()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "BlueBubbles webhook event produced no dedupe IDs".into(),
+            })?;
+        let acceptance = state.config.webhook_inbound.evaluate(&event);
+        let policy = state.config.webhook_inbound.summary();
+        let observed_at_ms = input
+            .get("observed_at_ms")
+            .and_then(Value::as_i64)
+            .or(event.date_created_ms)
+            .unwrap_or_else(|| Utc::now().timestamp_millis());
+        let (status, duplicate_id, coalescing, reply_context_lookup, contacts_enrichment, events) =
+            if acceptance.accepted {
+                match state.webhook_dedupe.claim(&dedupe_ids)? {
+                    BlueBubblesDedupeClaim::Claimed => {
+                        if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
+                            let _ = state.webhook_dedupe.release(&dedupe_ids);
+                            return Err(error);
+                        }
+                        let contacts_enrichment =
+                            state.enrich_group_participants(account_id, &mut event);
+                        let reply_context_lookup =
+                            state.resolve_reply_context(account_id, &mut event).await;
+                        let outcome = state.webhook_coalescer.ingest(
+                            &state.config.webhook_coalescing,
+                            account_id,
+                            event.clone(),
+                            observed_at_ms,
+                        )?;
+                        (
+                            outcome.status,
+                            None,
+                            Some(outcome.summary),
+                            Some(reply_context_lookup),
+                            Some(contacts_enrichment),
+                            outcome.events,
+                        )
+                    }
+                    BlueBubblesDedupeClaim::Duplicate { matched_id } => {
+                        ("duplicate", Some(matched_id), None, None, None, Vec::new())
+                    }
+                }
+            } else {
+                ("rejected", None, None, None, None, Vec::new())
+            };
+        let emitted_event = events.first().cloned();
+        let event_envelopes = self.record_webhook_event_envelopes(
+            state,
+            event_zone_id,
+            event_correlation_id,
+            account_id,
+            &events,
+        )?;
+        let correlation_id =
+            event_correlation_id.map_or_else(|| "none".to_string(), ToString::to_string);
+        let chat_guid = event.chat_guid.as_deref().unwrap_or("none").to_string();
+        tracing::info!(
+            operation = OP_INGEST_WEBHOOK_EVENT,
+            correlation_id = %correlation_id,
+            event_id = %event.event_id,
+            message_guid = %event.event_id,
+            chat_guid = %chat_guid,
+            dedupe_id = %dedupe_id,
+            dedupe_decision = %status,
+            duplicate_id = %duplicate_id.as_deref().unwrap_or("none"),
+            inbound_acceptance = %acceptance.reason,
+            reply_context_status = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.status),
+            reply_context_reason = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.reason),
+            contacts_enrichment_status = %contacts_enrichment.as_ref().map_or("none", |summary| summary.status),
+            contacts_enrichment_reason = %contacts_enrichment.as_ref().map_or("none", |summary| summary.reason),
+            contacts_enrichment_enriched_count = contacts_enrichment.as_ref().map_or(0, |summary| summary.enriched_count),
+            coalescing_decision = %coalescing.as_ref().map_or("none", |summary| summary.decision),
+            coalescing_emitted_count = coalescing.as_ref().map_or(0, |summary| summary.emitted_count),
+            coalescing_buffered_count = coalescing.as_ref().map_or(0, |summary| summary.buffered_count),
+            inbound_policy_allow_from_me = policy.allow_from_me,
+            inbound_policy_allowed_sender_count = policy.allowed_sender_count,
+            inbound_policy_allowed_chat_count = policy.allowed_chat_count,
+            inbound_policy_allow_group_chats = policy.allow_group_chats,
+            inbound_policy_persistent_dedupe = policy.persistent_dedupe,
+            auth_outcome = "capability_token_verified",
+            redaction_decision = "response_excludes_webhook_password",
+            "normalized BlueBubbles webhook event"
+        );
+        Ok(json!({
+            "status": status,
+            "dedupe_id": dedupe_id,
+            "dedupe_ids": dedupe_ids,
+            "duplicate_id": duplicate_id,
+            "acceptance": acceptance,
+            "policy": policy,
+            "coalescing": coalescing,
+            "reply_context_lookup": reply_context_lookup,
+            "contacts_enrichment": contacts_enrichment,
+            "event": emitted_event,
+            "events": events,
+            "event_envelopes": event_envelopes,
+        }))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn invoke_webhook_request_pipeline(
+        &self,
+        state: &BlueBubblesState,
+        event_zone_id: &ZoneId,
+        event_correlation_id: Option<&CorrelationId>,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let method = required_string(input, "method")?;
+        let raw_url = required_string(input, "url")?;
+        let parsed_url = reqwest::Url::parse(raw_url);
+        let redacted_url = parsed_url
+            .as_ref()
+            .map_or_else(|_| "[invalid-url]".to_string(), redacted_webhook_url);
+        let request_region = webhook_ingress_request_region(input, method, &redacted_url);
+        let service_layers = webhook_ingress_service_layers(input)?;
+        let mut logs = vec![
+            webhook_ingress_log(
+                "request_region",
+                "ok",
+                "request_region_attached",
+                "FCP request-region metadata attached to BlueBubbles webhook ingress",
+            ),
+            webhook_ingress_log(
+                "service_builder",
+                "ok",
+                "service_layers_applied",
+                "Timeout, concurrency, load-shed, and rate-limit layers are declared for host enforcement",
+            ),
+        ];
+
+        let body_value = input.get("body").ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "Missing required field: body".into(),
+        })?;
+        let body_bytes = webhook_ingress_body_size(input, body_value)?;
+        let max_body_bytes =
+            ingress_usize_field(input, "max_body_bytes", WEBHOOK_INGRESS_MAX_BODY_BYTES)?;
+
+        if ingress_request_region_bool(input, "cancelled") {
+            logs.push(webhook_ingress_log(
+                "request_region",
+                "denied",
+                "request_cancelled",
+                "Webhook request was cancelled before connector processing",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                408,
+                "request_cancelled",
+                "Webhook request was cancelled before connector processing",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        if ingress_request_region_bool(input, "deadline_exceeded") {
+            logs.push(webhook_ingress_log(
+                "timeout",
+                "denied",
+                "request_timeout",
+                "Webhook request deadline was exceeded before connector processing",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                408,
+                "request_timeout",
+                "Webhook request deadline was exceeded before connector processing",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        if !method.eq_ignore_ascii_case("POST") {
+            logs.push(webhook_ingress_log(
+                "admission",
+                "denied",
+                "method_not_allowed",
+                "BlueBubbles webhook ingress accepts POST requests only",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                405,
+                "method_not_allowed",
+                "BlueBubbles webhook ingress accepts POST requests only",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        if body_bytes > max_body_bytes {
+            logs.push(webhook_ingress_log(
+                "admission",
+                "denied",
+                "payload_too_large",
+                "BlueBubbles webhook body exceeds configured ingress maximum",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                413,
+                "payload_too_large",
+                "BlueBubbles webhook body exceeds configured ingress maximum",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        if !body_value.is_object() {
+            logs.push(webhook_ingress_log(
+                "parse",
+                "denied",
+                "malformed_payload",
+                "BlueBubbles webhook body must be a JSON object",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                400,
+                "malformed_payload",
+                "BlueBubbles webhook body must be a JSON object",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        let parsed_url = match parsed_url {
+            Ok(url) => url,
+            Err(error) => {
+                logs.push(webhook_ingress_log(
+                    "route",
+                    "denied",
+                    "malformed_url",
+                    "BlueBubbles webhook URL must be absolute and parseable",
+                ));
+                return Ok(webhook_ingress_response(
+                    false,
+                    400,
+                    "malformed_url",
+                    &format!("BlueBubbles webhook URL must be absolute and parseable: {error}"),
+                    None,
+                    &request_region,
+                    &service_layers,
+                    &logs,
+                    body_bytes,
+                ));
+            }
+        };
+
+        if parsed_url.path() != state.config.webhook_path {
+            logs.push(webhook_ingress_log(
+                "route",
+                "denied",
+                "path_mismatch",
+                "BlueBubbles webhook path does not match configured ingress route",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                404,
+                "path_mismatch",
+                "BlueBubbles webhook path does not match configured ingress route",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+
+        let header_auth = webhook_ingress_header_value(input, WEBHOOK_AUTH_HEADER)?;
+        let supplied_auth = webhook_password_from_url(&parsed_url)
+            .or_else(|| header_auth.filter(|value| !value.trim().is_empty()));
+        let Some(supplied_auth) = supplied_auth else {
+            logs.push(webhook_ingress_log(
+                "auth",
+                "denied",
+                "missing_auth",
+                "BlueBubbles webhook password was not supplied in the URL or host-forwarded auth header",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                401,
+                "missing_auth",
+                "BlueBubbles webhook password was not supplied in the URL or host-forwarded auth header",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        };
+
+        if !webhook_password_matches(&supplied_auth, &state.config.server_passcode) {
+            logs.push(webhook_ingress_log(
+                "auth",
+                "denied",
+                "invalid_auth",
+                "BlueBubbles webhook password did not match connector configuration",
+            ));
+            return Ok(webhook_ingress_response(
+                false,
+                401,
+                "invalid_auth",
+                "BlueBubbles webhook password did not match connector configuration",
+                None,
+                &request_region,
+                &service_layers,
+                &logs,
+                body_bytes,
+            ));
+        }
+        logs.push(webhook_ingress_log(
+            "auth",
+            "ok",
+            "webhook_auth_validated",
+            "BlueBubbles webhook callback auth validated before event normalization",
+        ));
+
+        let mut ingest_input = serde_json::Map::new();
+        ingest_input.insert("payload".into(), body_value.clone());
+        for field in ["account_id", "observed_at_ms"] {
+            if let Some(value) = input.get(field) {
+                ingest_input.insert(field.into(), value.clone());
+            }
+        }
+        let header_event_type = webhook_ingress_header_value(input, "x-bluebubbles-event")?;
+        let event_type = optional_string(input, "event_type")
+            .map(str::to_string)
+            .or(header_event_type);
+        if let Some(event_type) = event_type {
+            ingest_input.insert("event_type".into(), Value::String(event_type));
+        }
+
+        let ingest_result = self
+            .invoke_webhook_event_pipeline(
+                state,
+                event_zone_id,
+                event_correlation_id,
+                &Value::Object(ingest_input),
+            )
+            .await?;
+        let status = ingest_result
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let (accepted, status_code, reason_code, reason) = match status {
+            "accepted" | "flushed" => (
+                true,
+                200,
+                "event_accepted",
+                "BlueBubbles webhook event accepted for downstream emission",
+            ),
+            "buffered" => (
+                true,
+                202,
+                "event_buffered",
+                "BlueBubbles webhook event accepted into the coalescing buffer",
+            ),
+            "duplicate" => (
+                false,
+                409,
+                "replay_suppressed",
+                "Duplicate BlueBubbles webhook request suppressed by replay dedupe",
+            ),
+            "rejected" => (
+                false,
+                403,
+                "policy_rejected",
+                "BlueBubbles webhook event rejected by connector-local sender/conversation policy",
+            ),
+            _ => (
+                false,
+                500,
+                "unexpected_ingest_status",
+                "BlueBubbles webhook event returned an unexpected ingest status",
+            ),
+        };
+        logs.push(webhook_ingress_log(
+            "emit",
+            if accepted { "ok" } else { "denied" },
+            reason_code,
+            reason,
+        ));
+        Ok(webhook_ingress_response(
+            accepted,
+            status_code,
+            reason_code,
+            reason,
+            Some(&ingest_result),
+            &request_region,
+            &service_layers,
+            &logs,
+            body_bytes,
+        ))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -3934,164 +4683,22 @@ impl BlueBubblesConnector {
                 })
             }
             OP_INGEST_WEBHOOK_EVENT => {
-                let flush_coalescing = req
-                    .input
-                    .get("flush_coalescing")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                if flush_coalescing && req.input.get("payload").is_none() {
-                    let outcome = state
-                        .webhook_coalescer
-                        .flush_all(&state.config.webhook_coalescing)?;
-                    let first_event = outcome.events.first().cloned();
-                    let event_envelopes = self.record_webhook_event_envelopes(
-                        state,
-                        &event_zone_id,
-                        event_correlation_id.as_ref(),
-                        state.config.webhook_account_id.as_str(),
-                        &outcome.events,
-                    )?;
-                    return Ok(InvokeResponse::ok(
-                        req.id,
-                        json!({
-                            "status": outcome.status,
-                            "dedupe_id": null,
-                            "dedupe_ids": [],
-                            "duplicate_id": null,
-                            "acceptance": null,
-                            "policy": state.config.webhook_inbound.summary(),
-                            "coalescing": outcome.summary,
-                            "reply_context_lookup": null,
-                            "contacts_enrichment": null,
-                            "event": first_event,
-                            "events": outcome.events,
-                            "event_envelopes": event_envelopes,
-                        }),
-                    ));
-                }
-
-                let payload = req
-                    .input
-                    .get("payload")
-                    .ok_or_else(|| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'payload' field".into(),
-                    })?;
-                let account_id = optional_string(&req.input, "account_id")
-                    .unwrap_or(state.config.webhook_account_id.as_str());
-                let event_type = optional_string(&req.input, "event_type");
-                let mut event = normalize_bluebubbles_webhook_payload(payload, event_type)?;
-                let dedupe_ids = bluebubbles_webhook_source_dedupe_ids(account_id, &event);
-                let dedupe_id =
-                    dedupe_ids
-                        .first()
-                        .cloned()
-                        .ok_or_else(|| FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "BlueBubbles webhook event produced no dedupe IDs".into(),
-                        })?;
-                let acceptance = state.config.webhook_inbound.evaluate(&event);
-                let policy = state.config.webhook_inbound.summary();
-                let observed_at_ms = req
-                    .input
-                    .get("observed_at_ms")
-                    .and_then(Value::as_i64)
-                    .or(event.date_created_ms)
-                    .unwrap_or_else(|| Utc::now().timestamp_millis());
-                let (
-                    status,
-                    duplicate_id,
-                    coalescing,
-                    reply_context_lookup,
-                    contacts_enrichment,
-                    events,
-                ) = if acceptance.accepted {
-                    match state.webhook_dedupe.claim(&dedupe_ids)? {
-                        BlueBubblesDedupeClaim::Claimed => {
-                            if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
-                                let _ = state.webhook_dedupe.release(&dedupe_ids);
-                                return Err(error);
-                            }
-                            let contacts_enrichment =
-                                state.enrich_group_participants(account_id, &mut event);
-                            let reply_context_lookup =
-                                state.resolve_reply_context(account_id, &mut event).await;
-                            let outcome = state.webhook_coalescer.ingest(
-                                &state.config.webhook_coalescing,
-                                account_id,
-                                event.clone(),
-                                observed_at_ms,
-                            )?;
-                            (
-                                outcome.status,
-                                None,
-                                Some(outcome.summary),
-                                Some(reply_context_lookup),
-                                Some(contacts_enrichment),
-                                outcome.events,
-                            )
-                        }
-                        BlueBubblesDedupeClaim::Duplicate { matched_id } => {
-                            ("duplicate", Some(matched_id), None, None, None, Vec::new())
-                        }
-                    }
-                } else {
-                    ("rejected", None, None, None, None, Vec::new())
-                };
-                let emitted_event = events.first().cloned();
-                let event_envelopes = self.record_webhook_event_envelopes(
+                self.invoke_webhook_event_pipeline(
                     state,
                     &event_zone_id,
                     event_correlation_id.as_ref(),
-                    account_id,
-                    &events,
-                )?;
-                let correlation_id = req
-                    .correlation_id
-                    .as_ref()
-                    .map_or_else(|| "none".to_string(), ToString::to_string);
-                let chat_guid = event.chat_guid.as_deref().unwrap_or("none").to_string();
-                tracing::info!(
-                    operation = OP_INGEST_WEBHOOK_EVENT,
-                    correlation_id = %correlation_id,
-                    event_id = %event.event_id,
-                    message_guid = %event.event_id,
-                    chat_guid = %chat_guid,
-                    dedupe_id = %dedupe_id,
-                    dedupe_decision = %status,
-                    duplicate_id = %duplicate_id.as_deref().unwrap_or("none"),
-                    inbound_acceptance = %acceptance.reason,
-                    reply_context_status = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.status),
-                    reply_context_reason = %reply_context_lookup.as_ref().map_or("none", |lookup| lookup.reason),
-                    contacts_enrichment_status = %contacts_enrichment.as_ref().map_or("none", |summary| summary.status),
-                    contacts_enrichment_reason = %contacts_enrichment.as_ref().map_or("none", |summary| summary.reason),
-                    contacts_enrichment_enriched_count = contacts_enrichment.as_ref().map_or(0, |summary| summary.enriched_count),
-                    coalescing_decision = %coalescing.as_ref().map_or("none", |summary| summary.decision),
-                    coalescing_emitted_count = coalescing.as_ref().map_or(0, |summary| summary.emitted_count),
-                    coalescing_buffered_count = coalescing.as_ref().map_or(0, |summary| summary.buffered_count),
-                    inbound_policy_allow_from_me = policy.allow_from_me,
-                    inbound_policy_allowed_sender_count = policy.allowed_sender_count,
-                    inbound_policy_allowed_chat_count = policy.allowed_chat_count,
-                    inbound_policy_allow_group_chats = policy.allow_group_chats,
-                    inbound_policy_persistent_dedupe = policy.persistent_dedupe,
-                    auth_outcome = "capability_token_verified",
-                    redaction_decision = "response_excludes_webhook_password",
-                    "normalized BlueBubbles webhook event"
-                );
-                json!({
-                    "status": status,
-                    "dedupe_id": dedupe_id,
-                    "dedupe_ids": dedupe_ids,
-                    "duplicate_id": duplicate_id,
-                    "acceptance": acceptance,
-                    "policy": policy,
-                    "coalescing": coalescing,
-                    "reply_context_lookup": reply_context_lookup,
-                    "contacts_enrichment": contacts_enrichment,
-                    "event": emitted_event,
-                    "events": events,
-                    "event_envelopes": event_envelopes,
-                })
+                    &req.input,
+                )
+                .await?
+            }
+            OP_INGEST_WEBHOOK_REQUEST => {
+                self.invoke_webhook_request_pipeline(
+                    state,
+                    &event_zone_id,
+                    event_correlation_id.as_ref(),
+                    &req.input,
+                )
+                .await?
             }
             OP_GET_SERVER_INFO => {
                 let info = client
@@ -4252,6 +4859,13 @@ mod tests {
             .into_owned()
     }
 
+    fn webhook_callback_url(auth_value: &str) -> String {
+        format!(
+            "http://localhost:8645/bluebubbles-webhook?{}={auth_value}",
+            "password"
+        )
+    }
+
     async fn invoke_webhook_result(
         connector: &BlueBubblesConnector,
         signing_key: &Ed25519SigningKey,
@@ -4266,6 +4880,27 @@ mod tests {
                     OP_INGEST_WEBHOOK_EVENT,
                 ),
                 ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap()
+            .result
+            .unwrap()
+    }
+
+    async fn invoke_webhook_request_result(
+        connector: &BlueBubblesConnector,
+        signing_key: &Ed25519SigningKey,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        connector
+            .invoke(InvokeRequest {
+                input,
+                capability_token: generate_valid_token(
+                    connector,
+                    signing_key,
+                    OP_INGEST_WEBHOOK_REQUEST,
+                ),
+                ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_REQUEST)
             })
             .await
             .unwrap()
@@ -4770,7 +5405,7 @@ mod tests {
     fn test_introspection_operations() {
         let connector = BlueBubblesConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 20);
+        assert_eq!(intro.operations.len(), 21);
         for operation in [
             OP_SEND_MESSAGE,
             OP_SEND_MEDIA,
@@ -4792,6 +5427,7 @@ mod tests {
             OP_LIST_WEBHOOKS,
             OP_UNREGISTER_WEBHOOK,
             OP_INGEST_WEBHOOK_EVENT,
+            OP_INGEST_WEBHOOK_REQUEST,
         ] {
             assert!(
                 intro
@@ -5894,7 +6530,7 @@ mod tests {
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 20);
+        assert_eq!(ops.len(), 21);
     }
 
     #[test]
@@ -6108,6 +6744,12 @@ mod tests {
             ),
             (
                 OP_INGEST_WEBHOOK_EVENT,
+                CAP_READ,
+                SafetyTier::Safe,
+                IdempotencyClass::BestEffort,
+            ),
+            (
+                OP_INGEST_WEBHOOK_REQUEST,
                 CAP_READ,
                 SafetyTier::Safe,
                 IdempotencyClass::BestEffort,
@@ -6400,6 +7042,174 @@ mod tests {
         assert_eq!(second_result["status"], "duplicate");
         assert_eq!(second_result["duplicate_id"], "acct-a:msg-1");
         assert_eq!(second_result["event_envelopes"], json!([]));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_request_authenticates_and_fans_out() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_inbound(None))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let input = json!({
+            "method": "POST",
+            "url": webhook_callback_url("test-password-123"),
+            "headers": { "x-bluebubbles-event": "new-message" },
+            "request_region": { "source": "loopback_harness" },
+            "account_id": "acct-a",
+            "observed_at_ms": 1_700_000_000_000_i64,
+            "body": {
+                "type": "new-message",
+                "data": {
+                    "guid": "msg-request-1",
+                    "text": "hello",
+                    "handle": { "address": "+15551234567" },
+                    "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                    "isFromMe": false
+                }
+            }
+        });
+        let first = invoke_webhook_request_result(&connector, &signing_key, input.clone()).await;
+        assert_eq!(first["accepted"], true);
+        assert_eq!(first["status_code"], 200);
+        assert_eq!(first["reason_code"], "event_accepted");
+        assert_eq!(first["ingest"]["status"], "accepted");
+        assert_eq!(first["ingest"]["event"]["event_id"], "msg-request-1");
+        assert_eq!(
+            first["ingest"]["event_envelopes"][0]["topic"],
+            "imessage.message.inbound"
+        );
+        assert_eq!(
+            first["request_region"]["surface"],
+            "fcp.webhook.request_region"
+        );
+        assert_eq!(first["request_region"]["source"], "loopback_harness");
+        assert_eq!(
+            first["service_layers"]["builder"],
+            "fcp.webhook.ServiceBuilder"
+        );
+        assert_eq!(first["service_layers"]["host_enforced"], true);
+        assert!(
+            !first["request_region"]["url"]
+                .as_str()
+                .unwrap()
+                .contains("test-password-123")
+        );
+        assert!(
+            first["logs"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|log| log["reason_code"] == "webhook_auth_validated")
+        );
+
+        let second = invoke_webhook_request_result(&connector, &signing_key, input).await;
+        assert_eq!(second["accepted"], false);
+        assert_eq!(second["status_code"], 409);
+        assert_eq!(second["reason_code"], "replay_suppressed");
+        assert_eq!(second["ingest"]["status"], "duplicate");
+        assert_eq!(second["ingest"]["event_envelopes"], json!([]));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_request_rejects_auth_and_oversized_body() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_inbound(None))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let body = json!({
+            "type": "new-message",
+            "data": {
+                "guid": "msg-auth-fail",
+                "handle": { "address": "+15551234567" },
+                "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                "isFromMe": false
+            }
+        });
+        let invalid_auth = invoke_webhook_request_result(
+            &connector,
+            &signing_key,
+            json!({
+                "method": "POST",
+                "url": webhook_callback_url("wrong"),
+                "body": body.clone()
+            }),
+        )
+        .await;
+        assert_eq!(invalid_auth["accepted"], false);
+        assert_eq!(invalid_auth["status_code"], 401);
+        assert_eq!(invalid_auth["reason_code"], "invalid_auth");
+        assert!(invalid_auth["ingest"].is_null());
+
+        let oversized = invoke_webhook_request_result(
+            &connector,
+            &signing_key,
+            json!({
+                "method": "POST",
+                "url": webhook_callback_url("test-password-123"),
+                "body": body,
+                "body_size_bytes": 2048,
+                "max_body_bytes": 64
+            }),
+        )
+        .await;
+        assert_eq!(oversized["accepted"], false);
+        assert_eq!(oversized["status_code"], 413);
+        assert_eq!(oversized["reason_code"], "payload_too_large");
+        assert!(oversized["ingest"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_request_policy_rejection_never_emits() {
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let rejected = invoke_webhook_request_result(
+            &connector,
+            &signing_key,
+            json!({
+                "method": "POST",
+                "url": webhook_callback_url("test-password-123"),
+                "headers": { "x-bluebubbles-event": "new-message" },
+                "body": {
+                    "data": {
+                        "guid": "msg-policy-reject",
+                        "text": "untrusted",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(rejected["accepted"], false);
+        assert_eq!(rejected["status_code"], 403);
+        assert_eq!(rejected["reason_code"], "policy_rejected");
+        assert_eq!(rejected["ingest"]["status"], "rejected");
+        assert_eq!(
+            rejected["ingest"]["acceptance"]["reason"],
+            "conversation_not_bound"
+        );
+        assert_eq!(rejected["ingest"]["event_envelopes"], json!([]));
     }
 
     #[fcp_async_core::runtime::test]

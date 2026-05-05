@@ -28,16 +28,16 @@ pub const DEFAULT_BROWSER_URL: &str = "http://localhost:9222";
 /// Required FCP browser-control contract version.
 pub const BROWSER_CONTROL_PROTOCOL_VERSION: u64 = 1;
 
-#[cfg(not(test))]
-const MAX_BROWSER_CONTROL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
-#[cfg(test)]
-const MAX_BROWSER_CONTROL_RESPONSE_BYTES: usize = 8 * 1024;
+const CONTROL_RESPONSE_BYTES_SMALL: usize = 1_048_576;
+const CONTROL_RESPONSE_BYTES_STANDARD: usize = 10_485_760;
+const CONTROL_RESPONSE_BYTES_CAPTURE: usize = 52_428_800;
 
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
     id: &'static str,
     method: &'static str,
     path: &'static str,
+    max_response_bytes: usize,
     implementation: BrowserControlImplementation,
 }
 
@@ -47,6 +47,7 @@ impl BrowserControlOperation {
             "id": self.id,
             "method": self.method,
             "path": self.path,
+            "max_response_bytes": self.max_response_bytes,
             "implementation": self.implementation.descriptor(),
         })
     }
@@ -103,6 +104,7 @@ const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
     id: "browser.navigate",
     method: "POST",
     path: "/navigate",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "Page.enable",
@@ -116,6 +118,7 @@ const WORKER_SCREENSHOT: BrowserControlOperation = BrowserControlOperation {
     id: "browser.screenshot",
     method: "POST",
     path: "/screenshot",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -130,6 +133,7 @@ const WORKER_RENDER_PDF: BrowserControlOperation = BrowserControlOperation {
     id: "browser.render_pdf",
     method: "POST",
     path: "/pdf",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Page.printToPDF"],
     },
@@ -138,6 +142,7 @@ const WORKER_EXTRACT_TEXT: BrowserControlOperation = BrowserControlOperation {
     id: "browser.extract_text",
     method: "POST",
     path: "/extract_text",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -146,6 +151,7 @@ const WORKER_EXTRACT_LINKS: BrowserControlOperation = BrowserControlOperation {
     id: "browser.extract_links",
     method: "POST",
     path: "/extract_links",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -154,6 +160,7 @@ const WORKER_WAIT_FOR_SELECTOR: BrowserControlOperation = BrowserControlOperatio
     id: "browser.wait_for_selector",
     method: "POST",
     path: "/wait_for_selector",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -162,6 +169,7 @@ const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
     id: "browser.click",
     method: "POST",
     path: "/click",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -175,6 +183,7 @@ const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
     id: "browser.fill_form",
     method: "POST",
     path: "/fill_form",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -189,6 +198,7 @@ const WORKER_EVALUATE_JS: BrowserControlOperation = BrowserControlOperation {
     id: "browser.evaluate_js",
     method: "POST",
     path: "/evaluate",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -197,6 +207,7 @@ const WORKER_GET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     id: "browser.get_cookies",
     method: "POST",
     path: "/cookies",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.getCookies"],
     },
@@ -205,6 +216,7 @@ const WORKER_SET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     id: "browser.set_cookies",
     method: "POST",
     path: "/set_cookies",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.setCookies"],
     },
@@ -213,6 +225,7 @@ const WORKER_SET_PROXY: BrowserControlOperation = BrowserControlOperation {
     id: "browser.set_proxy",
     method: "POST",
     path: "/proxy/set",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Apply connector-scoped proxy policy before browser target launch.",
     },
@@ -221,6 +234,7 @@ const WORKER_CLEAR_PROXY: BrowserControlOperation = BrowserControlOperation {
     id: "browser.clear_proxy",
     method: "POST",
     path: "/proxy/clear",
+    max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Clear connector-scoped proxy policy for future browser targets.",
     },
@@ -459,7 +473,10 @@ impl BrowserClient {
     /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
         let url = format!("{}/health", self.browser_url);
-        match self.execute(|| self.http.get(&url)).await {
+        match self
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || self.http.get(&url))
+            .await
+        {
             Ok(body) => validate_fcp_browser_control_health(&body).map_err(|reason| {
                 BrowserError::InvalidConfig(format!(
                     "browser control-plane /health response is not compatible with fcp-browser-control contract v{BROWSER_CONTROL_PROTOCOL_VERSION}: {reason}"
@@ -505,7 +522,6 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
         user_agent: Option<&str>,
     ) -> BrowserResult<NavigateResult> {
-        let endpoint = self.worker_endpoint(WORKER_NAVIGATE);
         let mut body = serde_json::json!({ "url": url });
         if let Some(w) = wait_until {
             body["wait_until"] = serde_json::Value::String(w.to_string());
@@ -516,7 +532,7 @@ impl BrowserClient {
         if let Some(ua) = user_agent {
             body["user_agent"] = serde_json::Value::String(ua.to_string());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_NAVIGATE, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -530,7 +546,6 @@ impl BrowserClient {
         format: Option<&str>,
         quality: Option<u32>,
     ) -> BrowserResult<ScreenshotResult> {
-        let endpoint = self.worker_endpoint(WORKER_SCREENSHOT);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -544,7 +559,7 @@ impl BrowserClient {
         if let Some(q) = quality {
             body["quality"] = serde_json::Value::Number(q.into());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_SCREENSHOT, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -557,7 +572,6 @@ impl BrowserClient {
         landscape: Option<bool>,
         print_background: Option<bool>,
     ) -> BrowserResult<PdfResult> {
-        let endpoint = self.worker_endpoint(WORKER_RENDER_PDF);
         let mut body = serde_json::json!({});
         if let Some(f) = format {
             body["format"] = serde_json::Value::String(f.to_string());
@@ -568,7 +582,7 @@ impl BrowserClient {
         if let Some(pb) = print_background {
             body["print_background"] = serde_json::Value::Bool(pb);
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_RENDER_PDF, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -580,7 +594,6 @@ impl BrowserClient {
         selector: Option<&str>,
         include_hidden: Option<bool>,
     ) -> BrowserResult<TextResult> {
-        let endpoint = self.worker_endpoint(WORKER_EXTRACT_TEXT);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -588,18 +601,17 @@ impl BrowserClient {
         if let Some(ih) = include_hidden {
             body["include_hidden"] = serde_json::Value::Bool(ih);
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_EXTRACT_TEXT, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Extract links from the page.
     pub async fn extract_links(&self, selector: Option<&str>) -> BrowserResult<LinksResult> {
-        let endpoint = self.worker_endpoint(WORKER_EXTRACT_LINKS);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_EXTRACT_LINKS, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -612,7 +624,6 @@ impl BrowserClient {
         state: Option<&str>,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<WaitResult> {
-        let endpoint = self.worker_endpoint(WORKER_WAIT_FOR_SELECTOR);
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(s) = state {
             body["state"] = serde_json::Value::String(s.to_string());
@@ -620,7 +631,7 @@ impl BrowserClient {
         if let Some(t) = timeout_ms {
             body["timeout_ms"] = serde_json::Value::Number(t.into());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_WAIT_FOR_SELECTOR, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -632,12 +643,11 @@ impl BrowserClient {
         selector: &str,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<ClickResult> {
-        let endpoint = self.worker_endpoint(WORKER_CLICK);
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(t) = timeout_ms {
             body["timeout_ms"] = serde_json::Value::Number(t.into());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_CLICK, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -647,12 +657,11 @@ impl BrowserClient {
         fields: &serde_json::Value,
         submit_selector: Option<&str>,
     ) -> BrowserResult<FormResult> {
-        let endpoint = self.worker_endpoint(WORKER_FILL_FORM);
         let mut body = serde_json::json!({ "fields": fields });
         if let Some(ss) = submit_selector {
             body["submit_selector"] = serde_json::Value::String(ss.to_string());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_FILL_FORM, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -660,9 +669,8 @@ impl BrowserClient {
 
     /// Evaluate JavaScript in the page context.
     pub async fn evaluate_js(&self, expression: &str) -> BrowserResult<JsResult> {
-        let endpoint = self.worker_endpoint(WORKER_EVALUATE_JS);
         let body = serde_json::json!({ "expression": expression });
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_EVALUATE_JS, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -670,12 +678,11 @@ impl BrowserClient {
 
     /// Get cookies.
     pub async fn get_cookies(&self, domain: Option<&str>) -> BrowserResult<Vec<Cookie>> {
-        let endpoint = self.worker_endpoint(WORKER_GET_COOKIES);
         let mut body = serde_json::json!({});
         if let Some(d) = domain {
             body["domain"] = serde_json::Value::String(d.to_string());
         }
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_GET_COOKIES, &body).await?;
         let cookies: Vec<Cookie> = serde_json::from_value(
             data.get("cookies")
                 .cloned()
@@ -686,9 +693,8 @@ impl BrowserClient {
 
     /// Set cookies.
     pub async fn set_cookies(&self, cookies: &[Cookie]) -> BrowserResult<u32> {
-        let endpoint = self.worker_endpoint(WORKER_SET_COOKIES);
         let body = serde_json::json!({ "cookies": cookies });
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_SET_COOKIES, &body).await?;
         let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
         Ok(count as u32)
     }
@@ -697,16 +703,16 @@ impl BrowserClient {
 
     /// Configure outbound proxy for browser traffic.
     pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
-        let endpoint = self.worker_endpoint(WORKER_SET_PROXY);
         let body = serde_json::to_value(proxy)?;
-        let data = self.post_json(&endpoint, &body).await?;
+        let data = self.post_json(WORKER_SET_PROXY, &body).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     /// Clear outbound proxy configuration.
     pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
-        let endpoint = self.worker_endpoint(WORKER_CLEAR_PROXY);
-        let data = self.post_json(&endpoint, &serde_json::json!({})).await?;
+        let data = self
+            .post_json(WORKER_CLEAR_PROXY, &serde_json::json!({}))
+            .await?;
         Ok(serde_json::from_value(data)?)
     }
 
@@ -719,14 +725,19 @@ impl BrowserClient {
 
     async fn post_json(
         &self,
-        url: &str,
+        operation: BrowserControlOperation,
         body: &serde_json::Value,
     ) -> BrowserResult<serde_json::Value> {
-        self.execute(|| self.http.post(url).json(body)).await
+        let url = self.worker_endpoint(operation);
+        self.execute(operation.max_response_bytes, || {
+            self.http.post(&url).json(body)
+        })
+        .await
     }
 
     async fn execute(
         &self,
+        max_response_bytes: usize,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> BrowserResult<serde_json::Value> {
         let ctx = self.runtime.request_context();
@@ -751,7 +762,12 @@ impl BrowserClient {
                         }
 
                         if status.is_server_error() {
-                            let body = match read_limited_response_text(response).await {
+                            let body = match read_limited_response_text(
+                                response,
+                                max_response_bytes,
+                            )
+                            .await
+                            {
                                 Ok(body) => body,
                                 Err(err) => return AttemptOutcome::Terminal(err),
                             };
@@ -766,7 +782,12 @@ impl BrowserClient {
                         }
 
                         if !status.is_success() {
-                            let body = match read_limited_response_text(response).await {
+                            let body = match read_limited_response_text(
+                                response,
+                                max_response_bytes,
+                            )
+                            .await
+                            {
                                 Ok(body) => body,
                                 Err(err) => return AttemptOutcome::Terminal(err),
                             };
@@ -783,7 +804,7 @@ impl BrowserClient {
                             });
                         }
 
-                        match read_limited_response_text(response).await {
+                        match read_limited_response_text(response, max_response_bytes).await {
                             Ok(body) => match serde_json::from_str(&body) {
                                 Ok(data) => AttemptOutcome::Success(data),
                                 Err(e) => AttemptOutcome::Terminal(BrowserError::Serialization(e)),
@@ -810,20 +831,28 @@ impl BrowserClient {
 
     async fn raw_chrome_cdp_endpoint_detected(&self) -> bool {
         let url = format!("{}/json/version", self.browser_url);
-        match self.execute(|| self.http.get(&url)).await {
+        match self
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || self.http.get(&url))
+            .await
+        {
             Ok(body) => looks_like_chrome_cdp_version(&body),
             Err(_) => false,
         }
     }
 }
 
-async fn read_limited_response_text(response: reqwest::Response) -> BrowserResult<String> {
+async fn read_limited_response_text(
+    response: reqwest::Response,
+    max_response_bytes: usize,
+) -> BrowserResult<String> {
     let status = response.status();
     if let Some(content_length) = response.content_length() {
-        if usize::try_from(content_length)
-            .map_or(true, |length| length > MAX_BROWSER_CONTROL_RESPONSE_BYTES)
-        {
-            return Err(response_size_limit_error(status, Some(content_length)));
+        if usize::try_from(content_length).map_or(true, |length| length > max_response_bytes) {
+            return Err(response_size_limit_error(
+                status,
+                max_response_bytes,
+                Some(content_length),
+            ));
         }
     }
 
@@ -831,8 +860,8 @@ async fn read_limited_response_text(response: reqwest::Response) -> BrowserResul
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(BrowserError::Http)?;
-        if body.len().saturating_add(chunk.len()) > MAX_BROWSER_CONTROL_RESPONSE_BYTES {
-            return Err(response_size_limit_error(status, None));
+        if body.len().saturating_add(chunk.len()) > max_response_bytes {
+            return Err(response_size_limit_error(status, max_response_bytes, None));
         }
         body.extend_from_slice(&chunk);
     }
@@ -843,15 +872,17 @@ async fn read_limited_response_text(response: reqwest::Response) -> BrowserResul
     })
 }
 
-fn response_size_limit_error(status: StatusCode, content_length: Option<u64>) -> BrowserError {
+fn response_size_limit_error(
+    status: StatusCode,
+    max_response_bytes: usize,
+    content_length: Option<u64>,
+) -> BrowserError {
     let message = match content_length {
         Some(content_length) => format!(
-            "browser control response exceeds {MAX_BROWSER_CONTROL_RESPONSE_BYTES} byte limit: content-length {content_length}"
+            "browser control response exceeds {max_response_bytes} byte limit: content-length {content_length}"
         ),
         None => {
-            format!(
-                "browser control response exceeds {MAX_BROWSER_CONTROL_RESPONSE_BYTES} byte limit"
-            )
+            format!("browser control response exceeds {max_response_bytes} byte limit")
         }
     };
 
@@ -916,15 +947,21 @@ fn validate_browser_control_operation(
             .get("path")
             .and_then(serde_json::Value::as_str)
             .is_some_and(|path| path == required.path)
+        && operation
+            .get("max_response_bytes")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|limit| usize::try_from(limit).ok())
+            .is_some_and(|limit| limit == required.max_response_bytes)
         && browser_control_implementation_matches(operation, required)
     {
         Ok(())
     } else {
         Err(format!(
-            "operation `{}` is incompatible; expected {} `{}` with implementation {}",
+            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {} and implementation {}",
             required.id,
             required.method,
             required.path,
+            required.max_response_bytes,
             required.implementation.summary()
         ))
     }
@@ -1012,6 +1049,8 @@ mod tests {
                     operation["id"] == required.id
                         && operation["method"] == required.method
                         && operation["path"] == required.path
+                        && operation["max_response_bytes"]
+                            == serde_json::json!(required.max_response_bytes)
                 }),
                 "missing {} {} {}",
                 required.method,
@@ -1095,6 +1134,8 @@ mod tests {
             let implementation = &operation["implementation"];
             let kind = implementation["kind"].as_str().unwrap();
             let methods = implementation["methods"].as_array().unwrap();
+            let max_response_bytes = operation["max_response_bytes"].as_u64().unwrap();
+            assert!(max_response_bytes > 0, "{id} must expose a response cap");
 
             assert!(
                 matches!(kind, "cdp" | "worker_policy"),
@@ -1194,6 +1235,18 @@ mod tests {
         let err = validate_fcp_browser_control_health(&body).unwrap_err();
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("POST"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_operation_response_budget() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["max_response_bytes"] = serde_json::json!(CONTROL_RESPONSE_BYTES_SMALL);
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("max_response_bytes"));
+        assert!(err.contains(&CONTROL_RESPONSE_BYTES_CAPTURE.to_string()));
     }
 
     #[test]
@@ -1573,10 +1626,10 @@ mod tests {
         let mock_server = MockServer::start().await;
 
         Mock::given(method("POST"))
-            .and(path("/navigate"))
+            .and(path("/wait_for_selector"))
             .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![
                 b'x';
-                MAX_BROWSER_CONTROL_RESPONSE_BYTES
+                CONTROL_RESPONSE_BYTES_SMALL
                     + 1
             ]))
             .mount(&mock_server)
@@ -1588,10 +1641,11 @@ mod tests {
             .with_retry_config(0);
 
         let result = client
-            .navigate("https://example.com", None, None, None)
+            .wait_for_selector(".ready", Some("visible"), Some(1_000))
             .await;
         let err = result.unwrap_err();
         assert!(format!("{err}").contains("browser control response exceeds"));
+        assert!(format!("{err}").contains(&CONTROL_RESPONSE_BYTES_SMALL.to_string()));
     }
 
     #[fcp_async_core::runtime::test]

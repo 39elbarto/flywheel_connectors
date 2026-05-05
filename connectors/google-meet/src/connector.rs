@@ -652,7 +652,10 @@ impl GoogleMeetConnector {
         {
             let mut response =
                 SimulateResponse::denied(req.id, error.to_string(), error.error_code());
-            if error.error_code() == "FCP-3001" {
+            if matches!(
+                &error,
+                FcpError::CapabilityDenied { .. } | FcpError::OperationNotGranted { .. }
+            ) {
                 response = response.with_missing_capabilities(vec![cap_id.as_str().to_string()]);
             }
             return response;
@@ -1618,6 +1621,7 @@ mod tests {
     }
 
     fn capability_for_cap(
+        connector: &GoogleMeetConnector,
         signing_key: &Ed25519SigningKey,
         op: &str,
         capability_id: &str,
@@ -1638,16 +1642,22 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("valid constraints cbor")
+            .target_instance(connector.base.instance_id.as_str())
             .sign(signing_key)
             .expect("sign token");
         CapabilityToken::from_raw(cose)
     }
 
-    fn capability_for(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
-        capability_for_cap(signing_key, op, MEET_SPACE_READ_CAP)
+    fn capability_for(
+        connector: &GoogleMeetConnector,
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+    ) -> CapabilityToken {
+        capability_for_cap(connector, signing_key, op, MEET_SPACE_READ_CAP)
     }
 
     fn simulate_request_json(
+        connector: &GoogleMeetConnector,
         signing_key: &Ed25519SigningKey,
         operation: &str,
         capability_id: &str,
@@ -1656,10 +1666,10 @@ mod tests {
             r#type: "simulate".into(),
             id: RequestId::new(format!("sim-{operation}")),
             connector_id: ConnectorId::from_static(CONNECTOR_ID),
-            operation: OperationId::from_static(operation),
+            operation: OperationId::new(operation).expect("valid operation id"),
             zone_id: ZoneId::work(),
             input: json!({}),
-            capability_token: capability_for_cap(signing_key, operation, capability_id),
+            capability_token: capability_for_cap(connector, signing_key, operation, capability_id),
             estimate_cost: false,
             check_availability: false,
             context: None,
@@ -1877,7 +1887,7 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let mut connector = GoogleMeetConnector::new();
         configure_and_handshake(&mut connector, &signing_key).await;
-        let capability_grant = capability_for(&signing_key, NORMALIZE_SPACE_OP);
+        let capability_grant = capability_for(&connector, &signing_key, NORMALIZE_SPACE_OP);
 
         let result = connector
             .handle_invoke(json!({
@@ -1900,6 +1910,7 @@ mod tests {
 
         let result = connector
             .handle_simulate(simulate_request_json(
+                &connector,
                 &signing_key,
                 "gmeet.live.join",
                 "meeting.live_join",
@@ -1930,6 +1941,7 @@ mod tests {
 
         let result = connector
             .handle_simulate(simulate_request_json(
+                &connector,
                 &signing_key,
                 CONFERENCE_RECORD_GET_OP,
                 MEET_CONFERENCE_READ_CAP,
@@ -1949,6 +1961,7 @@ mod tests {
 
         let result = connector
             .handle_simulate(simulate_request_json(
+                &connector,
                 &signing_key,
                 CONFERENCE_RECORD_GET_OP,
                 MEET_SPACE_READ_CAP,
@@ -2228,6 +2241,7 @@ mod tests {
                     "max_items": 2
                 },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     CONFERENCE_RECORDS_LIST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2242,6 +2256,7 @@ mod tests {
                 "operation": CONFERENCE_RECORD_LATEST_OP,
                 "input": { "meeting": "https://meet.google.com/abc-defg-hij" },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     CONFERENCE_RECORD_LATEST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2259,6 +2274,7 @@ mod tests {
                 "operation": CONFERENCE_RECORD_GET_OP,
                 "input": { "conference_record": "conferenceRecords/rec-1" },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     CONFERENCE_RECORD_GET_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2280,6 +2296,7 @@ mod tests {
                     "max_items": 10
                 },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     PARTICIPANTS_LIST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2301,6 +2318,7 @@ mod tests {
                     "max_items": 10
                 },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     PARTICIPANT_SESSIONS_LIST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2324,6 +2342,7 @@ mod tests {
                     "max_items": 1
                 },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     CONFERENCE_RECORDS_LIST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2433,8 +2452,12 @@ mod tests {
             }))
             .await
             .expect("handshake");
-        let capability =
-            capability_for_cap(&signing_key, ATTENDANCE_LIST_OP, MEET_CONFERENCE_READ_CAP);
+        let capability = capability_for_cap(
+            &connector,
+            &signing_key,
+            ATTENDANCE_LIST_OP,
+            MEET_CONFERENCE_READ_CAP,
+        );
 
         let result = connector
             .handle_invoke(json!({
@@ -2521,6 +2544,7 @@ mod tests {
             .await
             .expect("handshake");
         let capability = capability_for_cap(
+            &connector,
             &signing_key,
             CONFERENCE_RECORDS_LIST_OP,
             MEET_CONFERENCE_READ_CAP,
@@ -2587,6 +2611,7 @@ mod tests {
                 "operation": PARTICIPANTS_LIST_OP,
                 "input": { "conference_record": "conferenceRecords/rec-1" },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     PARTICIPANTS_LIST_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2603,6 +2628,7 @@ mod tests {
                 "operation": CONFERENCE_RECORD_GET_OP,
                 "input": { "conference_record": "conferenceRecords/rec-1" },
                 "capability_token": capability_for_cap(
+                    &connector,
                     &signing_key,
                     CONFERENCE_RECORD_GET_OP,
                     MEET_CONFERENCE_READ_CAP
@@ -2639,6 +2665,7 @@ mod tests {
             .await
             .expect("handshake");
         let capability = capability_for_cap(
+            &connector,
             &signing_key,
             CONFERENCE_RECORDS_LIST_OP,
             MEET_CONFERENCE_READ_CAP,

@@ -58,5 +58,17 @@ id = "matrix.upload_media"
 [[operations]]
 id = "matrix.download_media"
 
+[events]
+topics = [
+  "matrix.message.authorized",
+  "matrix.event.dropped",
+  "matrix.reaction",
+  "matrix.encrypted",
+]
+delivery_model = "manual_sync_persisted_events"
+replay = false
+requires_ack = false
+buffer_capacity = 200
+
 [provisioning]
-note = "Requires a non-production Matrix homeserver account plus either a bearer access token or a credential_id that the host/egress proxy will inject at runtime. Use disposable rooms for verification, prefer HTTPS for live homeservers, configure inbound_policy before using sync projections as agent input, and invoke matrix.sync explicitly because the connector does not run a background receive loop. Encrypted events fail closed by default until verified E2EE/device verification is implemented."
+note = "Requires a non-production Matrix homeserver account plus either a bearer access token or a credential_id that the host/egress proxy will inject at runtime. Use disposable rooms for verification, prefer HTTPS for live homeservers, configure inbound_policy before using sync projections as agent input, subscribe to Matrix event topics when stream delivery is needed, and invoke matrix.sync explicitly because the connector does not run a background receive loop. Persisted sync calls fan out policy-projected events; persist=false is preview-only. Encrypted events fail closed by default until verified E2EE/device verification is implemented."

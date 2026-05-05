@@ -17,8 +17,9 @@ It supports room creation and membership mutations, message send, timeline and r
   - direct `access_token`
   - `credential_id`, where the host or egress proxy injects the bearer token at runtime
 - The connector maintains an in-memory sync cursor and tracked room summaries only.
-- There is no background receive loop. Operators must call `matrix.sync` explicitly to advance the cursor and inspect deltas.
-- `matrix.sync` preserves raw room deltas and also returns a separate inbound-policy projection for future supervised delivery: authorized messages, dropped-event metadata, reaction events, and encrypted-event metadata.
+- There is no background receive loop. Operators must call `matrix.sync` explicitly to advance the cursor, inspect deltas, and drive event delivery.
+- FCP `subscribe` is supported for manual-sync fanout. When `matrix.sync` runs with `persist=true`, matching policy-projected deltas are emitted as `EventEnvelope` items on `matrix.message.authorized`, `matrix.event.dropped`, `matrix.reaction`, and `matrix.encrypted`.
+- `matrix.sync` preserves raw room deltas and also returns the same inbound-policy projection: authorized messages, dropped-event metadata, reaction events, and encrypted-event metadata.
 - Encrypted Matrix timeline events fail closed by default for agent delivery until verified E2EE/device verification is implemented. Operators may choose metadata-only projection, but ciphertext is not emitted.
 - Secret material stays in memory. Diagnostics should use room IDs, event IDs, status codes, and retry metadata rather than raw tokens or media bytes.
 
@@ -47,7 +48,8 @@ The current connector exposes:
 - auth mode and whether credential injection is still required
 - sync delivery model guidance
 - sync telemetry including success/failure counts, last duration, last error, and the last tracked token
-- inbound-policy telemetry for the most recent sync projection, including authorized, dropped, reaction, and encrypted event counts
+- inbound-policy telemetry for the most recent sync projection, including authorized, dropped, reaction, encrypted, and emitted event counts
+- event stream state, including buffer capacity and currently subscribed topics
 
 `health()` is intentionally truthful:
 
@@ -62,6 +64,7 @@ The current connector exposes:
 - `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are acceptable for deterministic verification harnesses.
 - Use a non-production account and disposable rooms when verifying room creation, joins, leaves, sends, and media mutations.
 - Configure `inbound_policy.allowed_users`, `bot_user_id`, `require_mention`, `free_response_rooms`, and `process_reactions` before treating `matrix.sync` policy projections as agent-delivery input.
+- Subscribe to the Matrix event topics before calling `matrix.sync` if the host needs streaming delivery. `persist=false` returns a preview only and does not emit events.
 - Verify with offloaded Cargo commands only:
 
 ```bash
@@ -73,7 +76,7 @@ rch exec -- cargo test -p fcp-matrix
 
 This slice does not provide:
 
-- a background sync worker or webhook-style event delivery
+- a background sync worker or webhook-style push delivery
 - homeserver administration or provisioning
 - end-to-end encryption device management
 - durable connector-local storage beyond in-memory sync tracking

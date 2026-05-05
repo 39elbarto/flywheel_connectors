@@ -1,17 +1,20 @@
 //! Matrix connector implementation.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine as _;
+use fcp_async_core::channel::broadcast;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse,
+    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
+    InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal,
+    ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    SimulateRequest, SimulateResponse, SubscribeResult, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
@@ -43,6 +46,12 @@ const OP_DOWNLOAD_MEDIA: &str = "matrix.download_media";
 const CAP_READ: &str = "matrix.read";
 const CAP_WRITE: &str = "matrix.write";
 const CAP_MANAGE: &str = "matrix.manage";
+
+const EVENT_MESSAGE_AUTHORIZED: &str = "matrix.message.authorized";
+const EVENT_DROPPED: &str = "matrix.event.dropped";
+const EVENT_REACTION: &str = "matrix.reaction";
+const EVENT_ENCRYPTED: &str = "matrix.encrypted";
+const MATRIX_EVENT_BUFFER_CAPACITY: usize = 200;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct MatrixRoomSummary {
@@ -140,6 +149,7 @@ struct MatrixSyncTelemetry {
     last_dropped_event_count: usize,
     last_reaction_event_count: usize,
     last_encrypted_event_count: usize,
+    last_emitted_event_count: usize,
 }
 
 #[derive(Debug, Default)]
@@ -222,12 +232,16 @@ pub struct MatrixConnector {
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
     sync_state: RwLock<MatrixSyncState>,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: AtomicU64,
+    subscribed_topics: RwLock<Vec<String>>,
 }
 
 impl MatrixConnector {
     /// Create a new connector.
     #[must_use]
     pub fn new() -> Self {
+        let (event_tx, _) = broadcast::channel(MATRIX_EVENT_BUFFER_CAPACITY);
         Self {
             base: BaseConnector::new(ConnectorId::from_static("fcp.matrix")),
             config: None,
@@ -237,7 +251,16 @@ impl MatrixConnector {
             started_at: Instant::now(),
             verifier: None,
             sync_state: RwLock::new(MatrixSyncState::default()),
+            event_tx,
+            next_event_seq: AtomicU64::new(1),
+            subscribed_topics: RwLock::new(Vec::new()),
         }
+    }
+
+    /// Subscribe to Matrix event envelopes emitted by persisted manual sync calls.
+    #[must_use]
+    pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
+        self.event_tx.subscribe()
     }
 
     fn manifest_hash() -> String {
@@ -256,11 +279,18 @@ impl MatrixConnector {
                 "transport_policy_ok": transport_ok,
                 "transport_policy_message": transport_message,
                 "credential_injection_required": matches!(&config.auth, MatrixAuth::CredentialId { .. }),
-                "sync_delivery_model": "manual_sync_only",
+                "sync_delivery_model": "manual_sync_event_fanout",
                 "inbound_policy": inbound_policy_snapshot(&config.inbound_policy),
                 "retry_config": self.retry_config.clone(),
             })
         })
+    }
+
+    fn subscribed_topics_snapshot(&self) -> Vec<String> {
+        self.subscribed_topics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
     }
 
     #[allow(clippy::significant_drop_tightening)]
@@ -290,6 +320,7 @@ impl MatrixConnector {
             "last_dropped_event_count": telemetry.last_dropped_event_count,
             "last_reaction_event_count": telemetry.last_reaction_event_count,
             "last_encrypted_event_count": telemetry.last_encrypted_event_count,
+            "last_emitted_event_count": telemetry.last_emitted_event_count,
         })
     }
 
@@ -302,9 +333,14 @@ impl MatrixConnector {
             "manifest_hash": Self::manifest_hash(),
             "provisioning": self.provisioning_snapshot(),
             "sync_tracking": self.sync_observability_snapshot(),
+            "event_stream": {
+                "delivery_model": "manual_sync_persisted_events",
+                "buffer_capacity": MATRIX_EVENT_BUFFER_CAPACITY,
+                "subscribed_topics": self.subscribed_topics_snapshot(),
+            },
             "operator_guidance": {
                 "dedicated_environment": "Use a non-production homeserver account and disposable rooms when verifying create, join, leave, send_message, and media mutations.",
-                "sync_model": "This connector does not run a background receive loop. Invoke matrix.sync explicitly to advance the in-memory cursor and inspect room deltas.",
+                "sync_model": "This connector does not run a background receive loop. Invoke matrix.sync explicitly to advance the in-memory cursor, inspect room deltas, and fan out subscribed EventEnvelope items when persist=true.",
                 "credential_injection": "credential_id mode requires the host or egress proxy to inject a bearer token before self_check can prove live readiness.",
                 "redaction": "Do not log raw access tokens or decoded media bytes. Prefer room IDs, event IDs, and retry metadata in diagnostics.",
                 "verification_commands": [
@@ -351,6 +387,7 @@ impl MatrixConnector {
         next_batch: &str,
         persist: bool,
         projection: &SyncProjection,
+        emitted_event_count: usize,
         duration: Duration,
     ) {
         let mut state = self
@@ -373,6 +410,7 @@ impl MatrixConnector {
         state.telemetry.last_dropped_event_count = projection.dropped_events.len();
         state.telemetry.last_reaction_event_count = projection.reaction_events.len();
         state.telemetry.last_encrypted_event_count = projection.encrypted_events.len();
+        state.telemetry.last_emitted_event_count = emitted_event_count;
     }
 
     fn record_sync_failure(
@@ -402,6 +440,76 @@ impl MatrixConnector {
         state.telemetry.last_dropped_event_count = 0;
         state.telemetry.last_reaction_event_count = 0;
         state.telemetry.last_encrypted_event_count = 0;
+        state.telemetry.last_emitted_event_count = 0;
+    }
+
+    fn build_event_envelope(
+        &self,
+        topic: &'static str,
+        batch: &str,
+        payload: &serde_json::Value,
+    ) -> EventEnvelope {
+        let seq = self.next_event_seq.fetch_add(1, AtomicOrdering::Relaxed);
+        let event_id = payload
+            .get("event_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("event");
+        let mut envelope = EventEnvelope::new(
+            topic,
+            EventData::new(
+                self.base.id.clone(),
+                self.base.instance_id.clone(),
+                ZoneId::community(),
+                matrix_event_principal(payload),
+                payload.clone(),
+            )
+            .with_resource_uris(matrix_event_resource_uris(payload)),
+        )
+        .with_seq(seq)
+        .with_cursor(format!("{batch}:{event_id}:{seq}"))
+        .with_ordering(OrderingPolicy::PerKey);
+
+        if let Some(room_id) = payload.get("room_id").and_then(serde_json::Value::as_str) {
+            envelope = envelope.with_stream_key(room_id);
+        }
+
+        envelope
+    }
+
+    fn emit_projected_events(&self, batch: &str, projection: &SyncProjection) -> usize {
+        let subscribed_topics = self.subscribed_topics_snapshot();
+        if subscribed_topics.is_empty() {
+            return 0;
+        }
+
+        let topic_groups = [
+            (
+                EVENT_MESSAGE_AUTHORIZED,
+                projection.authorized_message_events.as_slice(),
+            ),
+            (EVENT_DROPPED, projection.dropped_events.as_slice()),
+            (EVENT_REACTION, projection.reaction_events.as_slice()),
+            (EVENT_ENCRYPTED, projection.encrypted_events.as_slice()),
+        ];
+
+        let mut emitted = 0_usize;
+        for (topic, payloads) in topic_groups {
+            if !subscribed_topics
+                .iter()
+                .any(|subscribed| subscribed == topic)
+            {
+                continue;
+            }
+            for payload in payloads {
+                let envelope = self.build_event_envelope(topic, batch, payload);
+                if self.event_tx.send(Ok(envelope)).is_ok() {
+                    self.base.record_event();
+                    emitted = emitted.saturating_add(1);
+                }
+            }
+        }
+
+        emitted
     }
 
     /// Run diagnostics.
@@ -475,7 +583,7 @@ impl MatrixConnector {
             checks.push(doctor_check(
                 "sync_delivery_model",
                 true,
-                "No background receive loop is running; use matrix.sync to advance the in-memory cursor explicitly",
+                "No background receive loop is running; use matrix.sync with persist=true to advance the in-memory cursor and fan out subscribed events",
                 false,
             ));
             checks.push(doctor_check(
@@ -753,6 +861,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "dropped_events": { "type": "array" },
                     "reaction_events": { "type": "array" },
                     "encrypted_events": { "type": "array" },
+                    "emitted_event_count": { "type": "integer" },
                     "membership_changes": { "type": "array" },
                     "state_changes": { "type": "array" },
                     "inbound_policy": { "type": "object" },
@@ -1090,6 +1199,115 @@ fn inbound_policy_snapshot(policy: &MatrixInboundPolicy) -> serde_json::Value {
         "process_reactions": policy.process_reactions,
         "encrypted_events": encrypted_event_policy_label(policy.encrypted_events),
     })
+}
+
+const fn matrix_event_topics() -> [&'static str; 4] {
+    [
+        EVENT_MESSAGE_AUTHORIZED,
+        EVENT_DROPPED,
+        EVENT_REACTION,
+        EVENT_ENCRYPTED,
+    ]
+}
+
+fn confirm_matrix_event_topics(topics: &[String]) -> FcpResult<Vec<String>> {
+    let known = matrix_event_topics();
+    if topics.is_empty()
+        || topics
+            .iter()
+            .any(|topic| matches!(topic.as_str(), "*" | "matrix.*"))
+    {
+        return Ok(known.into_iter().map(str::to_string).collect());
+    }
+
+    let mut confirmed = Vec::new();
+    for topic in topics {
+        if known.contains(&topic.as_str()) && !confirmed.iter().any(|seen| seen == topic) {
+            confirmed.push(topic.clone());
+        }
+    }
+
+    if confirmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("No supported Matrix event topics requested: {topics:?}"),
+        });
+    }
+
+    Ok(confirmed)
+}
+
+fn matrix_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: true,
+        replay: false,
+        min_buffer_events: u32::try_from(MATRIX_EVENT_BUFFER_CAPACITY).unwrap_or(u32::MAX),
+        requires_ack: false,
+    }
+}
+
+fn matrix_event_schema(topic: &str) -> serde_json::Value {
+    let description = match topic {
+        EVENT_MESSAGE_AUTHORIZED => "Policy-authorized Matrix room message",
+        EVENT_DROPPED => "Matrix timeline event dropped before agent delivery",
+        EVENT_REACTION => "Matrix reaction event",
+        EVENT_ENCRYPTED => "Matrix encrypted event metadata",
+        _ => "Matrix event",
+    };
+
+    json!({
+        "type": "object",
+        "description": description,
+        "required": ["room_id"],
+        "properties": {
+            "room_id": { "type": "string" },
+            "event_id": { "type": ["string", "null"] },
+            "sender": { "type": ["string", "null"] },
+            "origin_server_ts": { "type": ["integer", "null"] }
+        },
+        "additionalProperties": true
+    })
+}
+
+fn matrix_events_info() -> Vec<EventInfo> {
+    matrix_event_topics()
+        .into_iter()
+        .map(|topic| EventInfo {
+            topic: topic.to_string(),
+            schema: matrix_event_schema(topic),
+            requires_ack: false,
+        })
+        .collect()
+}
+
+fn matrix_event_principal(payload: &serde_json::Value) -> Principal {
+    let sender = payload
+        .get("sender")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown");
+    Principal {
+        kind: "matrix_user".into(),
+        id: sender.to_string(),
+        trust: TrustLevel::Untrusted,
+        display: None,
+    }
+}
+
+fn matrix_event_resource_uris(payload: &serde_json::Value) -> Vec<String> {
+    let mut uris = Vec::new();
+    if let Some(room_id) = payload.get("room_id").and_then(serde_json::Value::as_str) {
+        uris.push(format!("matrix:room:{room_id}"));
+    }
+    if let Some(event_id) = payload.get("event_id").and_then(serde_json::Value::as_str) {
+        uris.push(format!("matrix:event:{event_id}"));
+    }
+    if let Some(target_event_id) = payload
+        .get("target_event_id")
+        .and_then(serde_json::Value::as_str)
+    {
+        uris.push(format!("matrix:event:{target_event_id}"));
+    }
+    uris
 }
 
 fn sender_allowed(policy: &MatrixInboundPolicy, sender: Option<&str>) -> bool {
@@ -1520,6 +1738,11 @@ impl FcpConnector for MatrixConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.subscribed_topics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        self.next_event_seq.store(1, AtomicOrdering::Relaxed);
         self.base.set_configured(true);
         Ok(())
     }
@@ -1547,12 +1770,7 @@ impl FcpConnector for MatrixConnector {
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(matrix_event_caps()),
             auth_caps: None,
             op_catalog_hash: None,
         })
@@ -1644,21 +1862,20 @@ impl FcpConnector for MatrixConnector {
         if let Some(runtime) = &self.runtime {
             runtime.shutdown();
         }
+        self.subscribed_topics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
         Ok(())
     }
 
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: operations_info(),
-            events: Vec::new(),
+            events: matrix_events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(matrix_event_caps()),
         }
     }
 
@@ -1668,12 +1885,74 @@ impl FcpConnector for MatrixConnector {
         result
     }
 
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        self.base.check_ready()?;
+        let verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let Some(capability_token) = req.capability_token else {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "Matrix event subscription requires a matrix.read capability token".into(),
+            });
+        };
+        verifier.verify_bound(
+            capability_token,
+            &CapabilityId::from_static(CAP_READ),
+            &OperationId::from_static(OP_SYNC),
+            &[],
+        )?;
+
+        let confirmed_topics = confirm_matrix_event_topics(&req.topics)?;
+        self.subscribed_topics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone_from(&confirmed_topics);
+        let cursor = self
+            .sync_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .last_sync_token
+            .clone();
+        let cursors = cursor.map_or_else(HashMap::new, |cursor| {
+            confirmed_topics
+                .iter()
+                .map(|topic| (topic.clone(), cursor.clone()))
+                .collect()
+        });
+
+        Ok(SubscribeResponse {
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics,
+                cursors,
+                replay_supported: false,
+                buffer: Some(ReplayBufferInfo {
+                    min_events: u32::try_from(MATRIX_EVENT_BUFFER_CAPACITY).unwrap_or(u32::MAX),
+                    overflow: "drop_oldest".into(),
+                }),
+            },
+        })
     }
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
+    async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()> {
+        self.base.check_ready()?;
+        let mut subscribed_topics = self
+            .subscribed_topics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if req.topics.is_empty()
+            || req
+                .topics
+                .iter()
+                .any(|topic| matches!(topic.as_str(), "*" | "matrix.*"))
+        {
+            subscribed_topics.clear();
+        } else {
+            subscribed_topics
+                .retain(|topic| !req.topics.iter().any(|requested| requested == topic));
+        }
+        drop(subscribed_topics);
+        Ok(())
     }
 }
 
@@ -1826,11 +2105,17 @@ impl MatrixConnector {
                     )
                 };
                 let duration = sync_started.elapsed();
+                let emitted_event_count = if persist {
+                    self.emit_projected_events(&response.next_batch, &projection)
+                } else {
+                    0
+                };
                 self.record_sync_success(
                     used_since.as_deref(),
                     &response.next_batch,
                     persist,
                     &projection,
+                    emitted_event_count,
                     duration,
                 );
                 info!(
@@ -1843,6 +2128,7 @@ impl MatrixConnector {
                     dropped_events = projection.dropped_events.len(),
                     reaction_events = projection.reaction_events.len(),
                     encrypted_events = projection.encrypted_events.len(),
+                    emitted_event_count,
                     membership_changes = projection.membership_changes.len(),
                     state_changes = projection.state_changes.len(),
                     "Matrix sync cycle completed"
@@ -1858,6 +2144,7 @@ impl MatrixConnector {
                     "dropped_events": projection.dropped_events,
                     "reaction_events": projection.reaction_events,
                     "encrypted_events": projection.encrypted_events,
+                    "emitted_event_count": emitted_event_count,
                     "membership_changes": projection.membership_changes,
                     "state_changes": projection.state_changes,
                     "inbound_policy": inbound_policy_snapshot(&inbound_policy),
@@ -2119,7 +2406,40 @@ mod tests {
         let c = MatrixConnector::new();
         let intro = c.introspect();
         assert_eq!(intro.operations.len(), 11);
-        assert!(!intro.event_caps.as_ref().unwrap().streaming);
+        assert!(intro.event_caps.as_ref().unwrap().streaming);
+        assert_eq!(intro.events.len(), 4);
+        let topics = intro
+            .events
+            .iter()
+            .map(|event| event.topic.as_str())
+            .collect::<Vec<_>>();
+        assert!(topics.contains(&EVENT_MESSAGE_AUTHORIZED));
+        assert!(topics.contains(&EVENT_DROPPED));
+        assert!(topics.contains(&EVENT_REACTION));
+        assert!(topics.contains(&EVENT_ENCRYPTED));
+    }
+
+    #[test]
+    fn matrix_event_topic_confirmation_defaults_and_filters() {
+        assert_eq!(
+            confirm_matrix_event_topics(&[]).unwrap(),
+            vec![
+                EVENT_MESSAGE_AUTHORIZED.to_string(),
+                EVENT_DROPPED.to_string(),
+                EVENT_REACTION.to_string(),
+                EVENT_ENCRYPTED.to_string(),
+            ]
+        );
+        assert_eq!(
+            confirm_matrix_event_topics(&[
+                EVENT_REACTION.to_string(),
+                "matrix.unknown".to_string(),
+                EVENT_REACTION.to_string(),
+            ])
+            .unwrap(),
+            vec![EVENT_REACTION.to_string()]
+        );
+        assert!(confirm_matrix_event_topics(&["matrix.unknown".to_string()]).is_err());
     }
 
     #[test]
@@ -2323,7 +2643,7 @@ mod tests {
         );
         assert_eq!(
             d["details"]["provisioning"]["sync_delivery_model"].as_str(),
-            Some("manual_sync_only")
+            Some("manual_sync_event_fanout")
         );
         assert!(d["checks"].as_array().unwrap().iter().any(|check| {
             check["name"].as_str() == Some("credential_injection")
@@ -2961,8 +3281,135 @@ mod tests {
             Some(0)
         );
         assert_eq!(
+            doctor["sync_tracking"]["last_emitted_event_count"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
             doctor["sync_tracking"]["last_persisted"].as_bool(),
             Some(true)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn sync_emits_authorized_event_for_active_subscription() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .and(wiremock::matchers::query_param("timeout", "1000"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "next_batch": "batch_stream",
+                    "rooms": {
+                        "join": {
+                            "!room:matrix.org": {
+                                "state": { "events": [] },
+                                "timeline": {
+                                    "events": [
+                                        {
+                                            "event_id": "$msg_stream",
+                                            "type": "m.room.message",
+                                            "sender": "@alice:matrix.org",
+                                            "origin_server_ts": 120,
+                                            "content": {
+                                                "msgtype": "m.text",
+                                                "body": "Hello from Matrix"
+                                            },
+                                            "room_id": "!room:matrix.org"
+                                        }
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let key = test_signing_key();
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": mock.uri(),
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "inbound_policy": { "require_mention": false }
+        }))
+        .await
+        .unwrap();
+        c.handshake(HandshakeRequest {
+            protocol_version: "2.0.0".into(),
+            zone: ZoneId::work(),
+            zone_dir: None,
+            host_public_key: key.verifying_key().to_bytes(),
+            nonce: [0u8; 32],
+            capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+            host: None,
+            transport_caps: None,
+            requested_instance_id: None,
+        })
+        .await
+        .unwrap();
+
+        let mut event_rx = c.subscribe_events();
+        let subscribe_response = c
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_matrix"),
+                topics: vec![EVENT_MESSAGE_AUTHORIZED.into()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: Some(test_token_for_key(&key, &c.base.instance_id)),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            subscribe_response.result.confirmed_topics,
+            vec![EVENT_MESSAGE_AUTHORIZED.to_string()]
+        );
+
+        let response = c
+            .invoke(sync_invoke_request_with_key(
+                &c,
+                json!({ "timeout_ms": 1000 }),
+                &key,
+            ))
+            .await
+            .unwrap();
+        let result = response.result.unwrap();
+        assert_eq!(result["emitted_event_count"].as_u64(), Some(1));
+
+        let event = fcp_async_core::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("timeout waiting for Matrix sync event")
+            .expect("broadcast receive")
+            .expect("event payload");
+        assert_eq!(event.topic, EVENT_MESSAGE_AUTHORIZED);
+        assert_eq!(event.seq, 1);
+        assert_eq!(event.cursor, "batch_stream:$msg_stream:1");
+        assert_eq!(event.stream_key.as_deref(), Some("!room:matrix.org"));
+        assert_eq!(event.ordering, Some(OrderingPolicy::PerKey));
+        assert_eq!(event.data.principal.kind, "matrix_user");
+        assert_eq!(event.data.principal.id, "@alice:matrix.org");
+        assert_eq!(event.data.principal.trust, TrustLevel::Untrusted);
+        assert_eq!(event.data.zone_id, ZoneId::community());
+        assert_eq!(
+            event.data.payload["body"].as_str(),
+            Some("Hello from Matrix")
+        );
+        assert!(
+            event
+                .data
+                .resource_uris
+                .iter()
+                .any(|uri| uri == "matrix:room:!room:matrix.org")
+        );
+        assert!(
+            event
+                .data
+                .resource_uris
+                .iter()
+                .any(|uri| uri == "matrix:event:$msg_stream")
         );
     }
 

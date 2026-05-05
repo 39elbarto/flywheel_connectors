@@ -363,6 +363,20 @@ deny_localhost = true
 deny_private_ranges = false
 require_sni = true
 
+[provides.operations."mattermost.authorize_slash_command"]
+description = "Authorize an inbound Mattermost slash command payload with the configured stable-ID monitor policy"
+capability = "mattermost.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."mattermost.authorize_slash_command".input_schema]
+type = "object"
+
+[provides.operations."mattermost.authorize_slash_command".output_schema]
+type = "object"
+
 # ── Events ──
 
 [provides.events."mattermost.posted"]

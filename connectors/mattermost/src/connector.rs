@@ -20,7 +20,7 @@ use fcp_prelude::{
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
-use serde::de::DeserializeOwned;
+use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
@@ -340,6 +340,11 @@ impl MattermostConnector {
                 invoke_get_posts_for_channel(client, &req.input).await?
             }
             "mattermost.search_posts" => invoke_search_posts(client, &req.input).await?,
+            "mattermost.authorize_slash_command" => invoke_authorize_slash_command(
+                &self.monitor_policy,
+                self.monitor_policy_audit.as_ref(),
+                &req.input,
+            )?,
             "mattermost.create_reaction" => invoke_create_reaction(client, &req.input).await?,
             "mattermost.delete_reaction" => invoke_delete_reaction(client, &req.input).await?,
             "mattermost.get_file_info" => invoke_get_file_info(client, &req.input).await?,
@@ -1112,6 +1117,40 @@ async fn invoke_search_posts(
     to_json(results)
 }
 
+fn invoke_authorize_slash_command(
+    policy: &MattermostMonitorPolicy,
+    audit: &MattermostMonitorPolicyAudit,
+    input: &serde_json::Value,
+) -> FcpResult<serde_json::Value> {
+    let payload = MattermostSlashCommandPayload::from_input(input)?;
+    let decision = policy.evaluate_slash_command(&payload);
+    let (decision_text, reason) = monitor_policy_decision_parts(decision);
+    if let MattermostMonitorPolicyDecision::Denied(reason) = decision {
+        audit.record_denial(reason);
+    }
+    let receipt = mattermost_slash_policy_decision_receipt(decision_text, reason, &payload);
+    if decision == MattermostMonitorPolicyDecision::Allowed {
+        debug!(
+            command = %payload.command,
+            receipt = %receipt,
+            "Mattermost slash command allowed by monitor policy"
+        );
+    } else {
+        info!(
+            command = %payload.command,
+            reason,
+            receipt = %receipt,
+            "Mattermost slash command suppressed by monitor policy"
+        );
+    }
+
+    Ok(json!({
+        "decision": decision_text,
+        "reason": reason,
+        "receipt": receipt,
+    }))
+}
+
 async fn invoke_create_reaction(
     client: &MattermostClient,
     input: &serde_json::Value,
@@ -1361,6 +1400,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
     ops.extend(file_read_operations());
     ops.extend(read_reaction_operations());
     ops.extend(search_operations());
+    ops.extend(slash_route_operations());
     ops.extend(write_operations());
     ops
 }
@@ -1468,6 +1508,7 @@ fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId>
         | "mattermost.get_thread"
         | "mattermost.get_posts_for_channel"
         | "mattermost.search_posts"
+        | "mattermost.authorize_slash_command"
         | "mattermost.get_file_info"
         | "mattermost.get_file_link"
         | "mattermost.download_file"
@@ -1859,6 +1900,58 @@ fn search_operations() -> Vec<OperationInfo> {
                 CapabilityId::from_static("mattermost.get_posts_for_channel"),
                 CapabilityId::from_static("mattermost.get_my_teams"),
             ],
+        },
+        rate_limit: None,
+        requires_approval: Some(ApprovalMode::None),
+    }]
+}
+
+fn slash_route_operations() -> Vec<OperationInfo> {
+    vec![OperationInfo {
+        id: OperationId::from_static("mattermost.authorize_slash_command"),
+        summary: "Authorize an inbound Mattermost slash command payload.".into(),
+        description: Some(
+            "Applies the configured monitor policy to a Mattermost slash command payload and returns a redacted allow/deny receipt. This operation does not open an HTTP listener or call Mattermost."
+                .into(),
+        ),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "team_id": {"type": "string"},
+                "channel_id": {"type": "string"},
+                "channel_name": {"type": "string"},
+                "user_id": {"type": "string"},
+                "user_name": {"type": "string"},
+                "command": {"type": "string"},
+                "text": {"type": "string"},
+                "token": {"type": "string"},
+                "response_url": {"type": "string"},
+                "trigger_id": {"type": "string"}
+            },
+            "required": ["channel_id", "user_id", "command"]
+        }),
+        output_schema: json!({
+            "type": "object",
+            "properties": {
+                "decision": {"type": "string", "enum": ["allow", "deny"]},
+                "reason": {"type": "string"},
+                "receipt": {"type": "object"}
+            }
+        }),
+        capability: CapabilityId::from_static("mattermost.read"),
+        risk_level: RiskLevel::Low,
+        safety_tier: SafetyTier::Safe,
+        idempotency: IdempotencyClass::Strict,
+        ai_hints: AgentHint {
+            when_to_use: "Use from a host-owned slash-command HTTP route before converting an inbound command into an agent event or turn input.".into(),
+            common_mistakes: vec![
+                "Treating Mattermost user_name or channel_name as authorization inputs; this operation authorizes by stable user_id and channel_id only.".into(),
+                "Expecting this operation to register or serve Mattermost slash-command routes; listener setup remains host/request-region responsibility.".into(),
+            ],
+            examples: vec![
+                r#"{"channel_id":"c_general","user_id":"u_alice","command":"/agent","text":"status"}"#.into(),
+            ],
+            related: vec![CapabilityId::from_static("mattermost.get_channel")],
         },
         rate_limit: None,
         requires_approval: Some(ApprovalMode::None),
@@ -2364,6 +2457,162 @@ fn event_info() -> Vec<EventInfo> {
 
 // ── Monitor policy ─────────────────────────────────────────────────────
 
+#[derive(Debug, Deserialize)]
+struct RawMattermostSlashCommandPayload {
+    #[serde(default)]
+    team_id: Option<String>,
+    channel_id: String,
+    user_id: String,
+    command: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    token: Option<String>,
+    #[serde(default)]
+    response_url: Option<String>,
+    #[serde(default)]
+    trigger_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct MattermostSlashCommandRedactions(u8);
+
+impl MattermostSlashCommandRedactions {
+    const TEXT: Self = Self(0b0001);
+    const TOKEN: Self = Self(0b0010);
+    const RESPONSE_URL: Self = Self(0b0100);
+    const TRIGGER_ID: Self = Self(0b1000);
+
+    fn from_raw(raw: &RawMattermostSlashCommandPayload) -> Self {
+        let mut redactions = Self(0);
+        if raw
+            .text
+            .as_deref()
+            .is_some_and(|text| !text.trim().is_empty())
+        {
+            redactions.0 |= Self::TEXT.0;
+        }
+        if raw
+            .token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty())
+        {
+            redactions.0 |= Self::TOKEN.0;
+        }
+        if raw
+            .response_url
+            .as_deref()
+            .is_some_and(|url| !url.trim().is_empty())
+        {
+            redactions.0 |= Self::RESPONSE_URL.0;
+        }
+        if raw
+            .trigger_id
+            .as_deref()
+            .is_some_and(|trigger_id| !trigger_id.trim().is_empty())
+        {
+            redactions.0 |= Self::TRIGGER_ID.0;
+        }
+        redactions
+    }
+
+    const fn contains(self, field: Self) -> bool {
+        self.0 & field.0 != 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MattermostSlashCommandPayload {
+    team_id: Option<String>,
+    channel_id: String,
+    user_id: String,
+    command: String,
+    redactions: MattermostSlashCommandRedactions,
+}
+
+impl MattermostSlashCommandPayload {
+    fn from_input(input: &Value) -> FcpResult<Self> {
+        let raw: RawMattermostSlashCommandPayload =
+            serde_json::from_value(input.clone()).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("invalid authorize_slash_command input: {error}"),
+            })?;
+
+        let channel_id = normalize_slash_channel_id(&raw.channel_id)?;
+        let user_id = normalize_slash_user_id(&raw.user_id)?;
+        let command = normalize_slash_command_name(&raw.command)?;
+        let team_id = raw
+            .team_id
+            .as_deref()
+            .map(normalize_slash_team_id)
+            .transpose()?
+            .flatten();
+
+        Ok(Self {
+            team_id,
+            channel_id,
+            user_id,
+            command,
+            redactions: MattermostSlashCommandRedactions::from_raw(&raw),
+        })
+    }
+}
+
+fn normalize_slash_channel_id(value: &str) -> FcpResult<String> {
+    validate_slash_stable_id(
+        "channel_id",
+        &normalize_mattermost_channel_policy_id(value.trim()),
+    )
+}
+
+fn normalize_slash_user_id(value: &str) -> FcpResult<String> {
+    validate_slash_stable_id(
+        "user_id",
+        &normalize_mattermost_user_policy_id(value.trim()),
+    )
+}
+
+fn normalize_slash_team_id(value: &str) -> FcpResult<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    validate_slash_stable_id("team_id", value).map(Some)
+}
+
+fn normalize_slash_command_name(value: &str) -> FcpResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(invalid_monitor_policy(
+            "slash command payload field 'command' is required",
+        ));
+    }
+    validate_slash_stable_id("command", value)
+}
+
+fn validate_slash_stable_id(field: &str, value: &str) -> FcpResult<String> {
+    if value.is_empty() {
+        return Err(invalid_monitor_policy(format!(
+            "slash command payload field '{field}' is required"
+        )));
+    }
+    if value.len() > MONITOR_POLICY_ID_MAX_CHARS {
+        return Err(invalid_monitor_policy(format!(
+            "slash command payload field '{field}' must be at most {MONITOR_POLICY_ID_MAX_CHARS} characters"
+        )));
+    }
+    if !value.is_ascii()
+        || value
+            .chars()
+            .any(|character| character.is_ascii_whitespace())
+    {
+        return Err(invalid_monitor_policy(format!(
+            "slash command payload field '{field}' must be an ASCII identifier without whitespace"
+        )));
+    }
+    Ok(value.to_string())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct MattermostMonitorPolicy {
     require_mention: bool,
@@ -2480,6 +2729,22 @@ impl MattermostMonitorPolicy {
         self.evaluate_context(&context)
     }
 
+    fn evaluate_slash_command(
+        &self,
+        payload: &MattermostSlashCommandPayload,
+    ) -> MattermostMonitorPolicyDecision {
+        let context = MattermostSocketPolicyContext {
+            event_name: Some("slash_command".to_string()),
+            channel_id: Some(payload.channel_id.clone()),
+            user_id: Some(payload.user_id.clone()),
+            channel_type: None,
+            text: None,
+            root_id: None,
+            mention_user_ids: BTreeSet::new(),
+        };
+        self.evaluate_context(&context)
+    }
+
     fn evaluate_context(
         &self,
         context: &MattermostSocketPolicyContext,
@@ -2539,6 +2804,15 @@ impl MattermostMonitorPolicy {
 enum MattermostMonitorPolicyDecision {
     Allowed,
     Denied(&'static str),
+}
+
+const fn monitor_policy_decision_parts(
+    decision: MattermostMonitorPolicyDecision,
+) -> (&'static str, &'static str) {
+    match decision {
+        MattermostMonitorPolicyDecision::Allowed => ("allow", "allowed"),
+        MattermostMonitorPolicyDecision::Denied(reason) => ("deny", reason),
+    }
 }
 
 #[derive(Debug, Default)]
@@ -2603,6 +2877,36 @@ fn mattermost_monitor_policy_denial_receipt(
         "has_channel_id": mattermost_socket_channel_id(message).is_some(),
         "has_user_id": mattermost_socket_user_id(message).is_some(),
         "message_text_redacted": true,
+        "stable_ids_redacted": true,
+    })
+}
+
+fn mattermost_slash_policy_decision_receipt(
+    decision: &'static str,
+    reason: &'static str,
+    payload: &MattermostSlashCommandPayload,
+) -> Value {
+    json!({
+        "schema": "mattermost.slash_policy.decision.v1",
+        "route": "slash_command",
+        "decision": decision,
+        "reason": reason,
+        "command": payload.command,
+        "has_team_id": payload.team_id.is_some(),
+        "has_channel_id": true,
+        "has_user_id": true,
+        "text_redacted": payload
+            .redactions
+            .contains(MattermostSlashCommandRedactions::TEXT),
+        "token_redacted": payload
+            .redactions
+            .contains(MattermostSlashCommandRedactions::TOKEN),
+        "response_url_redacted": payload
+            .redactions
+            .contains(MattermostSlashCommandRedactions::RESPONSE_URL),
+        "trigger_id_redacted": payload
+            .redactions
+            .contains(MattermostSlashCommandRedactions::TRIGGER_ID),
         "stable_ids_redacted": true,
     })
 }
@@ -3757,6 +4061,20 @@ mod tests {
     }
 
     #[test]
+    fn slash_command_operation_is_safe_read_only() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|operation| operation.id.as_str() == "mattermost.authorize_slash_command")
+            .expect("slash command authorization operation should exist");
+
+        assert_eq!(op.capability.as_str(), "mattermost.read");
+        assert!(matches!(op.safety_tier, SafetyTier::Safe));
+        assert!(matches!(op.idempotency, IdempotencyClass::Strict));
+        assert!(matches!(op.requires_approval, Some(ApprovalMode::None)));
+    }
+
+    #[test]
     fn configure_rejects_ambiguous_auth_modes() {
         let err = MattermostConnector::new()
             .configure(json!({
@@ -4263,6 +4581,95 @@ mod tests {
     }
 
     #[test]
+    fn monitor_policy_slash_route_authorizes_stable_ids_only() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "allowed_channels": ["c_allowed"],
+            "allowed_users": ["u_allowed"]
+        })))
+        .unwrap();
+        let allowed = MattermostSlashCommandPayload::from_input(&json!({
+            "team_id": "t_allowed",
+            "channel_id": "mattermost:channel:c_allowed",
+            "channel_name": "general",
+            "user_id": "mattermost:user:u_allowed",
+            "user_name": "alice",
+            "command": "/agent",
+            "text": "status"
+        }))
+        .unwrap();
+        let denied_wrong_stable_ids = MattermostSlashCommandPayload::from_input(&json!({
+            "team_id": "t_allowed",
+            "channel_id": "c_denied",
+            "channel_name": "c_allowed",
+            "user_id": "u_denied",
+            "user_name": "u_allowed",
+            "command": "/agent",
+            "text": "status"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate_slash_command(&allowed),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+        assert_eq!(
+            policy.evaluate_slash_command(&denied_wrong_stable_ids),
+            MattermostMonitorPolicyDecision::Denied("channel_not_allowed")
+        );
+    }
+
+    #[test]
+    fn authorize_slash_command_returns_redacted_denial_receipt() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "allowed_channels": ["c_allowed"],
+            "allowed_users": ["u_allowed"]
+        })))
+        .unwrap();
+        let audit = MattermostMonitorPolicyAudit::default();
+
+        let output = invoke_authorize_slash_command(
+            &policy,
+            &audit,
+            &json!({
+                "team_id": "t_secret",
+                "channel_id": "c_allowed",
+                "channel_name": "general",
+                "user_id": "u_denied",
+                "user_name": "alice",
+                "command": "/agent",
+                "text": "secret incident text",
+                "token": "slash_token_secret",
+                "response_url": "https://mattermost.example.com/hooks/secret",
+                "trigger_id": "trigger_secret"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(output.get("decision").and_then(Value::as_str), Some("deny"));
+        assert_eq!(
+            output.get("reason").and_then(Value::as_str),
+            Some("user_not_allowed")
+        );
+        assert_eq!(
+            audit
+                .to_redacted_json()
+                .get("denied_by_reason")
+                .and_then(|reasons| reasons.get("user_not_allowed"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        let rendered = output.to_string();
+        assert!(rendered.contains("/agent"));
+        assert!(!rendered.contains("secret incident text"));
+        assert!(!rendered.contains("slash_token_secret"));
+        assert!(!rendered.contains("hooks/secret"));
+        assert!(!rendered.contains("trigger_secret"));
+        assert!(!rendered.contains("t_secret"));
+        assert!(!rendered.contains("c_allowed"));
+        assert!(!rendered.contains("u_denied"));
+    }
+
+    #[test]
     fn monitor_policy_denial_receipt_redacts_message_text_and_ids()
     -> Result<(), Box<dyn std::error::Error>> {
         let message: MattermostWebSocketMessage = serde_json::from_value(json!({
@@ -4734,7 +5141,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_lists_extended_post_and_group_operations() {
+    fn manifest_lists_extended_post_group_and_slash_operations() {
         let manifest_path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
         let manifest = std::fs::read_to_string(&manifest_path)
@@ -4746,6 +5153,7 @@ mod tests {
             "mattermost.update_post",
             "mattermost.pin_post",
             "mattermost.unpin_post",
+            "mattermost.authorize_slash_command",
         ] {
             assert!(
                 manifest.contains(operation),

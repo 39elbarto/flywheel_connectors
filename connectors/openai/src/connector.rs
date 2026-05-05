@@ -43,6 +43,23 @@ struct DeploymentProfile {
 }
 
 const ALLOWED_BASE_URL_HOSTS: &[&str] = &["api.openai.com", "api.deepseek.com"];
+const OPENAI_CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const CODEX_CONNECTOR_LOCAL_SECRET_FIELDS: &[&str] = &[
+    "access_token",
+    "refresh_token",
+    "id_token",
+    "device_code",
+    "device_auth_id",
+    "user_code",
+    "authorization_code",
+    "code_verifier",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenAITransportDecision {
+    OpenAiApi,
+    CodexDeferred,
+}
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -66,6 +83,8 @@ impl From<DeploymentProfileObject> for DeploymentProfile {
 
 impl OpenAIConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        reject_connector_local_codex_secret_fields(params)?;
+
         let api_key_value = params
             .get("api_key")
             .and_then(|v| v.as_str())
@@ -115,6 +134,9 @@ impl OpenAIConfig {
             .or_else(|| deployment_profile.as_ref().and_then(|p| p.base_url.clone()))
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
 
+        let transport_decision = resolve_transport_decision(params, &base_url)?;
+        reject_deferred_codex_transport(transport_decision, &base_url)?;
+
         let base_url = normalize_base_url(&base_url)?;
 
         let organization = params
@@ -154,6 +176,129 @@ impl OpenAIConfig {
             .as_ref()
             .and_then(|profile| profile.name.as_deref())
     }
+}
+
+fn reject_connector_local_codex_secret_fields(params: &serde_json::Value) -> FcpResult<()> {
+    let Some(object) = params.as_object() else {
+        return Ok(());
+    };
+
+    if let Some(field) = CODEX_CONNECTOR_LOCAL_SECRET_FIELDS
+        .iter()
+        .find(|field| object.contains_key(**field))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "{field} must not be configured on the OpenAI connector; Codex OAuth/device-code credentials must be stored through host credential flows and referenced by credential_id"
+            ),
+        });
+    }
+
+    Ok(())
+}
+
+fn base_url_matches(base_url: &str, host: &str, paths: &[&str]) -> bool {
+    let trimmed = base_url.trim();
+    let Ok(parsed) = url::Url::parse(trimmed) else {
+        return false;
+    };
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return false;
+    }
+
+    let Some(parsed_host) = parsed.host_str() else {
+        return false;
+    };
+
+    if parsed_host.trim_end_matches('.').to_ascii_lowercase() != host {
+        return false;
+    }
+
+    let path = parsed.path().trim_end_matches('/');
+    paths.contains(&path)
+}
+
+fn is_openai_api_base_url(base_url: &str) -> bool {
+    base_url_matches(base_url, "api.openai.com", &["", "/v1"])
+}
+
+fn is_openai_codex_base_url(base_url: &str) -> bool {
+    base_url_matches(
+        base_url,
+        "chatgpt.com",
+        &[
+            "/backend-api",
+            "/backend-api/codex",
+            "/backend-api/v1",
+            "/backend-api/codex/v1",
+        ],
+    )
+}
+
+fn is_legacy_codex_compat_base_url(base_url: &str) -> bool {
+    base_url_matches(base_url, "api.githubcopilot.com", &["", "/v1"])
+}
+
+fn canonicalize_codex_responses_base_url(base_url: &str) -> Option<&'static str> {
+    if is_openai_codex_base_url(base_url) || is_legacy_codex_compat_base_url(base_url) {
+        Some(OPENAI_CODEX_RESPONSES_BASE_URL)
+    } else {
+        None
+    }
+}
+
+fn resolve_transport_decision(
+    params: &serde_json::Value,
+    base_url: &str,
+) -> FcpResult<OpenAITransportDecision> {
+    let explicit = params.get("transport").or_else(|| params.get("api"));
+    let Some(explicit) = explicit else {
+        return if is_openai_codex_base_url(base_url) || is_legacy_codex_compat_base_url(base_url) {
+            Ok(OpenAITransportDecision::CodexDeferred)
+        } else {
+            Ok(OpenAITransportDecision::OpenAiApi)
+        };
+    };
+
+    let raw = explicit.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "transport/api must be a string".into(),
+    })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai-api" | "openai-responses" | "openai-completions" => {
+            Ok(OpenAITransportDecision::OpenAiApi)
+        }
+        "codex" | "openai-codex" | "openai-codex-responses" => {
+            Ok(OpenAITransportDecision::CodexDeferred)
+        }
+        other => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported OpenAI transport/api: {other}"),
+        }),
+    }
+}
+
+fn reject_deferred_codex_transport(
+    decision: OpenAITransportDecision,
+    base_url: &str,
+) -> FcpResult<()> {
+    if decision == OpenAITransportDecision::OpenAiApi
+        && !is_openai_codex_base_url(base_url)
+        && !is_legacy_codex_compat_base_url(base_url)
+    {
+        return Ok(());
+    }
+
+    let canonical =
+        canonicalize_codex_responses_base_url(base_url).unwrap_or(OPENAI_CODEX_RESPONSES_BASE_URL);
+    Err(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!(
+            "OpenAI Codex OAuth/device-code transport is intentionally host-mediated in FCP; connector-local Codex transport is deferred. Provision Codex OAuth through host credential flows and reference it by credential_id when the host exposes that profile. canonical_base_url={canonical}"
+        ),
+    })
 }
 
 fn parse_deployment_profile(
@@ -3735,6 +3880,13 @@ mod tests {
             .expect("handshake should succeed");
     }
 
+    fn invalid_request_message<T: std::fmt::Debug>(result: FcpResult<T>) -> String {
+        match result {
+            Err(FcpError::InvalidRequest { message, .. }) => message,
+            other => format!("unexpected result: {other:?}"),
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake() {
         let mut connector = OpenAIConnector::new();
@@ -4081,6 +4233,98 @@ mod tests {
     fn normalize_base_url_trims_whitespace() {
         let result = normalize_base_url("  https://api.openai.com  ").unwrap();
         assert_eq!(result, "https://api.openai.com");
+    }
+
+    #[test]
+    fn codex_base_url_canonicalization_accepts_chatgpt_forms() {
+        for value in [
+            "https://chatgpt.com/backend-api",
+            "https://chatgpt.com/backend-api/",
+            "https://chatgpt.com/backend-api/codex",
+            "https://chatgpt.com/backend-api/codex/v1/",
+        ] {
+            assert_eq!(
+                canonicalize_codex_responses_base_url(value),
+                Some(OPENAI_CODEX_RESPONSES_BASE_URL),
+                "{value} should canonicalize to the Codex responses base"
+            );
+        }
+    }
+
+    #[test]
+    fn codex_base_url_canonicalization_accepts_legacy_copilot_forms() {
+        for value in [
+            "https://api.githubcopilot.com",
+            "https://api.githubcopilot.com/",
+            "https://api.githubcopilot.com/v1",
+        ] {
+            assert_eq!(
+                canonicalize_codex_responses_base_url(value),
+                Some(OPENAI_CODEX_RESPONSES_BASE_URL),
+                "{value} should be treated as legacy Codex-compatible transport"
+            );
+        }
+    }
+
+    #[test]
+    fn transport_decision_normalizes_explicit_codex_from_openai_api_base() {
+        let params = json!({ "transport": "openai-codex" });
+        let decision = resolve_transport_decision(&params, "https://api.openai.com").unwrap();
+        assert_eq!(decision, OpenAITransportDecision::CodexDeferred);
+        assert!(is_openai_api_base_url("https://api.openai.com/v1/"));
+    }
+
+    #[test]
+    fn transport_decision_detects_codex_base_without_explicit_transport() {
+        let params = json!({});
+        let decision =
+            resolve_transport_decision(&params, "https://chatgpt.com/backend-api/v1").unwrap();
+        assert_eq!(decision, OpenAITransportDecision::CodexDeferred);
+    }
+
+    #[test]
+    fn config_rejects_codex_transport_with_host_credential_flow_guidance() {
+        let result = OpenAIConfig::from_params(&json!({
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+            "transport": "openai-codex",
+            "base_url": "https://chatgpt.com/backend-api/v1"
+        }));
+
+        let message = invalid_request_message(result);
+        assert!(message.contains("host-mediated"));
+        assert!(message.contains("credential_id"));
+        assert!(message.contains(OPENAI_CODEX_RESPONSES_BASE_URL));
+        assert!(!message.contains("11223344-5566-7788-99aa-bbccddeeff00"));
+    }
+
+    #[test]
+    fn config_rejects_codex_oauth_secret_fields_before_storage() {
+        for field in CODEX_CONNECTOR_LOCAL_SECRET_FIELDS {
+            let mut params = serde_json::Map::new();
+            params.insert("api_key".into(), json!("sk-test"));
+            params.insert((*field).into(), json!("secret-value"));
+
+            let result = OpenAIConfig::from_params(&serde_json::Value::Object(params));
+            let message = invalid_request_message(result);
+            assert!(message.contains(field));
+            assert!(message.contains("must not be configured"));
+            assert!(message.contains("credential_id"));
+            assert!(!message.contains("secret-value"));
+        }
+    }
+
+    #[test]
+    fn config_rejects_device_code_denial_inputs_without_secret_leakage() {
+        let result = OpenAIConfig::from_params(&json!({
+            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+            "device_code": "pending-device-code",
+            "authorization_code": "declined-authorization-code"
+        }));
+
+        let message = invalid_request_message(result);
+        assert!(message.contains("device_code"));
+        assert!(!message.contains("pending-device-code"));
+        assert!(!message.contains("declined-authorization-code"));
     }
 
     #[test]

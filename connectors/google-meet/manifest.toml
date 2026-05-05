@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:46142b762672a8991cd91cb04cc3eda213219188a63b0ae7235fa3ac846512d8"
+interface_hash = "blake3-256:fcp.interface.v2:1947131d879e0699521ed5f20e633faed0d9aa3123cfb613ec8ddb4e3c2e2787"
 
 [connector]
 id = "fcp.google-meet"
@@ -38,8 +38,9 @@ optional = [
     "meeting.live_join",
     "meeting.live_read",
     "meeting.live_leave",
+    "meeting.live_speak",
 ]
-forbidden = ["system.exec", "network.listen", "browser.control", "meeting.live_speak"]
+forbidden = ["system.exec", "network.listen", "browser.control"]
 
 [provides.operations."gmeet.normalize_space_name"]
 description = "Normalize a Google Meet URL, meeting code, or spaces/* name into a Meet API spaces/* resource name"
@@ -910,6 +911,13 @@ default = "transcribe"
 type = "integer"
 minimum = 1
 maximum = 480
+[provides.operations."gmeet.live.join".input_schema.properties.realtime]
+type = "object"
+description = "Audit-safe realtime provider policy; accepts strategy, provider, transcriptionProvider, voiceProvider, model, audioFormat, readiness, voiceCall, and provider model defaults"
+[provides.operations."gmeet.live.join".input_schema.properties.readiness]
+type = "object"
+[provides.operations."gmeet.live.join".input_schema.properties.voice_call]
+type = "object"
 
 [provides.operations."gmeet.live.join".output_schema]
 required = ["accepted", "status", "session", "browser_handoff"]
@@ -1016,6 +1024,56 @@ max_response_bytes = 1048576
 when_to_use = "Read the live-session transcript buffer after a consented join handoff."
 common_mistakes = ["Using completed-conference transcript operations for an active call", "Expecting this read to speak or control the call"]
 examples = ['{"session_id":"<session-id>"}']
+related = ["gmeet.live.join", "gmeet.live.status"]
+
+[provides.operations."gmeet.live.say"]
+description = "Queue policy-gated speech for an active realtime Google Meet live session"
+capability = "meeting.live_speak"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.live.say".input_schema]
+required = ["text"]
+type = "object"
+[provides.operations."gmeet.live.say".input_schema.properties.session_id]
+type = "string"
+[provides.operations."gmeet.live.say".input_schema.properties.text]
+type = "string"
+maxLength = 8192
+
+[provides.operations."gmeet.live.say".output_schema]
+required = ["accepted", "queued", "session_id", "queue_event"]
+type = "object"
+[provides.operations."gmeet.live.say".output_schema.properties.accepted]
+type = "boolean"
+[provides.operations."gmeet.live.say".output_schema.properties.queued]
+type = "boolean"
+[provides.operations."gmeet.live.say".output_schema.properties.session_id]
+type = "string"
+[provides.operations."gmeet.live.say".output_schema.properties.queue_event]
+type = "object"
+
+[provides.operations."gmeet.live.say".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.say".ai_hints]
+when_to_use = "Queue a spoken utterance only after an explicitly consented realtime live join."
+common_mistakes = ["Trying to speak in mode=transcribe; transcribe-only sessions cannot emit audio", "Expecting TwiML fallback; Google Meet realtime joins require the selected voice provider path to be ready", "Logging spoken text; this operation records only audit-safe queue metadata"]
+examples = ['{"session_id":"<session-id>","text":"One moment while I check that."}']
 related = ["gmeet.live.join", "gmeet.live.status"]
 
 [provides.operations."gmeet.live.leave"]
@@ -1142,6 +1200,13 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "meeting.live_speak"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "gmeet.normalize_space_name" = ["meet.space.read"]
 "gmeet.space.get" = ["meet.space.read"]
@@ -1163,4 +1228,5 @@ scope = "instance"
 "gmeet.live.join" = ["meeting.live_join"]
 "gmeet.live.status" = ["meeting.live_read"]
 "gmeet.live.transcript" = ["meeting.live_read"]
+"gmeet.live.say" = ["meeting.live_speak"]
 "gmeet.live.leave" = ["meeting.live_leave"]

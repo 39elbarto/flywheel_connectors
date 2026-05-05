@@ -45,6 +45,7 @@ const MEET_DRIVE_ARTIFACT_READ_CAP: &str = "meet.drive_artifact.read";
 const MEET_LIVE_JOIN_CAP: &str = "meeting.live_join";
 const MEET_LIVE_READ_CAP: &str = "meeting.live_read";
 const MEET_LIVE_LEAVE_CAP: &str = "meeting.live_leave";
+const MEET_LIVE_SPEAK_CAP: &str = "meeting.live_speak";
 const SPACE_GET_OP: &str = "gmeet.space.get";
 const SPACE_CREATE_OP: &str = "gmeet.space.create";
 const SPACE_END_ACTIVE_CONFERENCE_OP: &str = "gmeet.space.end_active_conference";
@@ -65,6 +66,7 @@ const LIVE_JOIN_OP: &str = "gmeet.live.join";
 const LIVE_STATUS_OP: &str = "gmeet.live.status";
 const LIVE_TRANSCRIPT_OP: &str = "gmeet.live.transcript";
 const LIVE_LEAVE_OP: &str = "gmeet.live.leave";
+const LIVE_SAY_OP: &str = "gmeet.live.say";
 const DEFAULT_PAGE_SIZE: u32 = 100;
 const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
 const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
@@ -76,6 +78,19 @@ const MAX_DRIVE_EXPORT_BYTES: usize = 10 * 1_048_576;
 const ARTIFACT_OPERATION_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const DEFAULT_LIVE_SESSION_DURATION_MINUTES: u64 = 60;
 const MAX_LIVE_SESSION_DURATION_MINUTES: u64 = 8 * 60;
+const DEFAULT_REALTIME_PROVIDER: &str = "openai";
+const DEFAULT_REALTIME_AUDIO_FORMAT: &str = "pcm16_16000";
+const DEFAULT_READINESS_TIMEOUT_MS: u64 = 30_000;
+const MAX_READINESS_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_READINESS_INITIAL_BACKOFF_MS: u64 = 250;
+const DEFAULT_READINESS_MAX_BACKOFF_MS: u64 = 2_000;
+const MAX_READINESS_BACKOFF_MS: u64 = 10_000;
+const DEFAULT_VOICE_CALL_REQUEST_TIMEOUT_MS: u64 = 30_000;
+const MAX_VOICE_CALL_REQUEST_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_VOICE_CALL_DTMF_DELAY_MS: u64 = 2_500;
+const DEFAULT_VOICE_CALL_POST_DTMF_SPEECH_DELAY_MS: u64 = 5_000;
+const MAX_VOICE_CALL_DELAY_MS: u64 = 30_000;
+const MAX_LIVE_SPEECH_TEXT_BYTES: usize = 8_192;
 const MEETINGS_SPACE_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.readonly";
 const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
@@ -120,6 +135,73 @@ impl GoogleMeetLiveMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GoogleMeetRealtimeStrategy {
+    Agent,
+    Bidi,
+}
+
+impl GoogleMeetRealtimeStrategy {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Bidi => "bidi",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetProviderModelSelection {
+    provider: String,
+    model: String,
+    model_source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    configured_override: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    provider_default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetReadinessPolicy {
+    microphone_muted_waitable: bool,
+    timeout_ms: u64,
+    initial_backoff_ms: u64,
+    max_backoff_ms: u64,
+    max_attempts: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetVoiceCallPolicy {
+    enabled: bool,
+    request_timeout_ms: u64,
+    dtmf_delay_ms: u64,
+    post_dtmf_speech_delay_ms: u64,
+    allow_twiml_fallback: bool,
+    intro_failure_policy: String,
+    intro_sent: bool,
+    keepalive: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetRealtimeProviderPolicy {
+    schema_version: String,
+    strategy: GoogleMeetRealtimeStrategy,
+    audio_format: String,
+    transcription: GoogleMeetProviderModelSelection,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    voice: Option<GoogleMeetProviderModelSelection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    legacy_provider: Option<String>,
+    legacy_fallback_applied: bool,
+    diagnostics: Vec<String>,
+    tool_policy: String,
+    realtime_bridge_requested: bool,
+    transcribe_only_speech_policy: String,
+    readiness: GoogleMeetReadinessPolicy,
+    voice_call: GoogleMeetVoiceCallPolicy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct GoogleMeetStopReason {
     code: String,
@@ -136,7 +218,10 @@ struct GoogleMeetLiveSession {
     max_duration_minutes: u64,
     started_at: String,
     browser_handoff: serde_json::Value,
+    provider_policy: GoogleMeetRealtimeProviderPolicy,
+    status_transitions: Vec<serde_json::Value>,
     transcript: Vec<serde_json::Value>,
+    speech_queue: Vec<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -799,7 +884,9 @@ impl GoogleMeetConnector {
                 "api_read_operations": true,
                 "artifact_operations": true,
                 "live_session_operations": true,
-                "live_session_contract": "browser_handoff_only",
+                "live_session_contract": "browser_handoff_with_realtime_policy",
+                "live_speech_operations": true,
+                "live_speech_policy": "meeting.live_speak plus mode=realtime required; speech text is not logged",
             }
         }))
     }
@@ -861,7 +948,9 @@ impl GoogleMeetConnector {
             "foundation_only": false,
             "api_read_operations": true,
             "live_session_operations": true,
-            "live_session_contract": "browser_handoff_only",
+            "live_session_contract": "browser_handoff_with_realtime_policy",
+            "live_speech_operations": true,
+            "live_speech_policy": "meeting.live_speak plus mode=realtime required; speech text is not logged",
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
@@ -966,7 +1055,7 @@ impl GoogleMeetConnector {
         checks.push(DoctorCheck {
             name: "live_session_boundary".into(),
             status: DoctorStatus::Healthy,
-            message: "Live join/status/transcript/leave are available as a browser-handoff contract; browser automation remains delegated to fcp.browser and live speak remains deferred".into(),
+            message: "Live join/status/transcript/say/leave are available as a browser-handoff contract with explicit realtime provider policy; browser automation and voice bridge execution remain delegated, meeting.live_speak plus mode=realtime are required for speech, legacy realtime.provider=google is diagnosed as transcriptionProvider=openai plus voiceProvider=google".into(),
         });
 
         let status = if checks
@@ -1011,7 +1100,7 @@ impl GoogleMeetConnector {
         let report = match client.foundation_probe() {
             Ok(()) => SelfCheckReport::degraded(
                 "api_probe_deferred",
-                "Google Meet read and artifact API operations are configured; invoke a read operation or loopback e2e for API proof",
+                "Google Meet read, artifact, and live realtime provider-policy operations are configured; invoke a read operation, live policy unit path, or loopback e2e for proof",
             ),
             Err(error) => SelfCheckReport::failed("foundation_probe_failed", error.to_string()),
         };
@@ -1149,6 +1238,7 @@ impl GoogleMeetConnector {
             LIVE_STATUS_OP => self.invoke_live_status(),
             LIVE_TRANSCRIPT_OP => self.invoke_live_transcript(&input),
             LIVE_LEAVE_OP => self.invoke_live_leave(&input),
+            LIVE_SAY_OP => self.invoke_live_say(&input),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1165,6 +1255,7 @@ impl GoogleMeetConnector {
             MAX_LIVE_SESSION_DURATION_MINUTES,
         )?
         .unwrap_or(DEFAULT_LIVE_SESSION_DURATION_MINUTES);
+        let provider_policy = parse_realtime_provider_policy(input, mode)?;
         let session_id = SessionId::new().to_string();
         let meeting_url = normalized
             .meeting_uri
@@ -1173,8 +1264,14 @@ impl GoogleMeetConnector {
             .meeting_code
             .ok_or_else(|| invalid_request("meeting_url did not normalize to a meeting code"))?;
         let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let browser_handoff =
-            browser_handoff_contract(&session_id, &meeting_url, mode, max_duration_minutes);
+        let browser_handoff = browser_handoff_contract(
+            &session_id,
+            &meeting_url,
+            mode,
+            max_duration_minutes,
+            &provider_policy,
+        );
+        let status_transitions = live_join_status_transitions(&provider_policy);
         let session = GoogleMeetLiveSession {
             session_id,
             meeting_url,
@@ -1183,7 +1280,10 @@ impl GoogleMeetConnector {
             max_duration_minutes,
             started_at,
             browser_handoff,
+            provider_policy,
+            status_transitions,
             transcript: Vec::new(),
+            speech_queue: Vec::new(),
         };
 
         let replaced_session = {
@@ -1334,6 +1434,82 @@ impl GoogleMeetConnector {
                 "stopped_session": stopped_session,
             })),
         }
+    }
+
+    fn invoke_live_say(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let session_filter = optional_str(input, "session_id")?;
+        let text = require_str(input, "text")?;
+        if text.len() > MAX_LIVE_SPEECH_TEXT_BYTES {
+            return Err(invalid_request(format!(
+                "`text` must be at most {MAX_LIVE_SPEECH_TEXT_BYTES} bytes"
+            )));
+        }
+
+        let response = {
+            let mut state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            let Some(session) = state.active.as_mut() else {
+                return Err(invalid_request(
+                    "No active Google Meet realtime live session is available for gmeet.live.say",
+                ));
+            };
+            if let Some(expected) =
+                session_filter.filter(|expected| *expected != session.session_id)
+            {
+                return Err(invalid_request(format!(
+                    "session_id {expected} does not match active Google Meet live session"
+                )));
+            }
+            if session.mode != GoogleMeetLiveMode::Realtime {
+                return Err(invalid_request(
+                    "gmeet.live.say requires mode=realtime; transcribe-only sessions cannot speak",
+                ));
+            }
+            let voice = session.provider_policy.voice.as_ref().ok_or_else(|| {
+                invalid_request("Realtime session has no configured voice provider")
+            })?;
+            let voice_provider = voice.provider.clone();
+            let voice_model = voice.model.clone();
+            let queued_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+            let queue_event = json!({
+                "schema_version": "google_meet_live_speech_queue.v1",
+                "session_id": &session.session_id,
+                "queued_at": queued_at,
+                "status": "queued",
+                "text_bytes": text.len(),
+                "redaction": "text_not_logged",
+                "voice_provider": &voice_provider,
+                "voice_model": &voice_model,
+                "audio_format": &session.provider_policy.audio_format,
+                "strategy": session.provider_policy.strategy.as_str(),
+                "allow_twiml_fallback": session.provider_policy.voice_call.allow_twiml_fallback,
+                "intro_failure_policy": &session.provider_policy.voice_call.intro_failure_policy,
+                "keepalive": &session.provider_policy.voice_call.keepalive,
+            });
+            session.speech_queue.push(queue_event.clone());
+            session.status_transitions.push(live_status_transition(
+                "speech_queued",
+                "active",
+                &json!({
+                    "queue_depth": session.speech_queue.len(),
+                    "voice_provider": &voice_provider,
+                    "text_logged": false,
+                }),
+            ));
+
+            let response = json!({
+                "accepted": true,
+                "queued": true,
+                "session_id": &session.session_id,
+                "queue_depth": session.speech_queue.len(),
+                "queue_event": queue_event,
+            });
+            drop(state);
+            response
+        };
+
+        Ok(response)
     }
 
     fn ensure_configured_scopes(
@@ -1890,6 +2066,338 @@ fn parse_live_mode(input: &serde_json::Value) -> FcpResult<GoogleMeetLiveMode> {
     }
 }
 
+fn parse_realtime_strategy(input: &serde_json::Value) -> FcpResult<GoogleMeetRealtimeStrategy> {
+    let Some(raw) = optional_str_any(input, &["strategy"])? else {
+        return Ok(GoogleMeetRealtimeStrategy::Agent);
+    };
+    match raw {
+        "agent" => Ok(GoogleMeetRealtimeStrategy::Agent),
+        "bidi" => Ok(GoogleMeetRealtimeStrategy::Bidi),
+        _ => Err(invalid_request(
+            "`realtime.strategy` must be either `agent` or `bidi`",
+        )),
+    }
+}
+
+fn optional_str_any<'a>(
+    input: &'a serde_json::Value,
+    fields: &[&str],
+) -> FcpResult<Option<&'a str>> {
+    for field in fields {
+        if input.get(*field).is_some() {
+            return optional_str(input, field);
+        }
+    }
+    Ok(None)
+}
+
+fn optional_owned_str_any(input: &serde_json::Value, fields: &[&str]) -> FcpResult<Option<String>> {
+    optional_str_any(input, fields).map(|value| value.map(ToString::to_string))
+}
+
+fn optional_u64_any(
+    input: &serde_json::Value,
+    fields: &[&str],
+    min: u64,
+    max: u64,
+) -> FcpResult<Option<u64>> {
+    for field in fields {
+        if input.get(*field).is_some() {
+            return parse_optional_u64(input, field, min, max);
+        }
+    }
+    Ok(None)
+}
+
+fn optional_bool_any(input: &serde_json::Value, fields: &[&str]) -> FcpResult<Option<bool>> {
+    for field in fields {
+        if input.get(*field).is_some() {
+            return parse_optional_bool(input, field);
+        }
+    }
+    Ok(None)
+}
+
+fn optional_object_any<'a>(
+    input: &'a serde_json::Value,
+    fields: &[&str],
+) -> FcpResult<Option<&'a serde_json::Value>> {
+    for field in fields {
+        if let Some(value) = input.get(*field) {
+            if value.is_object() {
+                return Ok(Some(value));
+            }
+            return Err(invalid_request(format!("`{field}` must be an object")));
+        }
+    }
+    Ok(None)
+}
+
+fn normalize_realtime_provider_id(raw: &str, field: &str) -> FcpResult<String> {
+    let provider = raw.trim();
+    if provider.is_empty() {
+        return Err(invalid_request(format!("`{field}` must not be empty")));
+    }
+    if provider.len() > 64
+        || provider
+            .chars()
+            .any(|char| char.is_ascii_whitespace() || matches!(char, '/' | '\\' | '"' | '\''))
+    {
+        return Err(invalid_request(format!(
+            "`{field}` must be a compact provider identifier, not a secret or URL"
+        )));
+    }
+    Ok(provider.to_ascii_lowercase())
+}
+
+fn optional_provider_id(input: &serde_json::Value, fields: &[&str]) -> FcpResult<Option<String>> {
+    let Some(raw) = optional_str_any(input, fields)? else {
+        return Ok(None);
+    };
+    normalize_realtime_provider_id(raw, fields[0]).map(Some)
+}
+
+fn provider_config<'a>(
+    realtime: &'a serde_json::Value,
+    provider: &str,
+) -> FcpResult<Option<&'a serde_json::Value>> {
+    let Some(providers) = optional_object_any(realtime, &["providers"])? else {
+        return Ok(None);
+    };
+    match providers.get(provider) {
+        Some(value) if value.is_object() => Ok(Some(value)),
+        Some(_) => Err(invalid_request(format!(
+            "`realtime.providers.{provider}` must be an object"
+        ))),
+        None => Ok(None),
+    }
+}
+
+fn resolve_provider_model_selection(
+    realtime: &serde_json::Value,
+    provider: &str,
+    configured_override: Option<String>,
+) -> FcpResult<GoogleMeetProviderModelSelection> {
+    let config = provider_config(realtime, provider)?;
+    let provider_config_model = config
+        .map(|value| optional_owned_str_any(value, &["model", "model_id", "modelId"]))
+        .transpose()?
+        .flatten();
+    let provider_default_model = config
+        .map(|value| optional_owned_str_any(value, &["default_model", "defaultModel"]))
+        .transpose()?
+        .flatten();
+
+    let (model, model_source) = match (
+        provider_config_model,
+        configured_override.clone(),
+        provider_default_model.clone(),
+    ) {
+        (Some(model), _, _) => (model, "provider_config"),
+        (None, Some(model), _) => (model, "configured_override"),
+        (None, None, Some(model)) => (model, "provider_default"),
+        (None, None, None) => ("provider-default".to_string(), "provider_default_implicit"),
+    };
+
+    Ok(GoogleMeetProviderModelSelection {
+        provider: provider.to_string(),
+        model,
+        model_source: model_source.to_string(),
+        configured_override,
+        provider_default_model,
+    })
+}
+
+fn realtime_config(input: &serde_json::Value) -> FcpResult<&serde_json::Value> {
+    match input.get("realtime") {
+        Some(value) if value.is_object() => Ok(value),
+        Some(_) => Err(invalid_request("`realtime` must be an object")),
+        None => Ok(input),
+    }
+}
+
+fn parse_readiness_policy(
+    input: &serde_json::Value,
+    realtime: &serde_json::Value,
+) -> FcpResult<GoogleMeetReadinessPolicy> {
+    let readiness = optional_object_any(input, &["readiness"])?
+        .or(optional_object_any(realtime, &["readiness"])?)
+        .unwrap_or(realtime);
+    let timeout_ms = optional_u64_any(
+        readiness,
+        &["timeout_ms", "timeoutMs"],
+        1,
+        MAX_READINESS_TIMEOUT_MS,
+    )?
+    .unwrap_or(DEFAULT_READINESS_TIMEOUT_MS);
+    let initial_backoff_ms = optional_u64_any(
+        readiness,
+        &["initial_backoff_ms", "initialBackoffMs"],
+        1,
+        MAX_READINESS_BACKOFF_MS,
+    )?
+    .unwrap_or(DEFAULT_READINESS_INITIAL_BACKOFF_MS);
+    let max_backoff_ms = optional_u64_any(
+        readiness,
+        &["max_backoff_ms", "maxBackoffMs"],
+        1,
+        MAX_READINESS_BACKOFF_MS,
+    )?
+    .unwrap_or(DEFAULT_READINESS_MAX_BACKOFF_MS);
+    if initial_backoff_ms > max_backoff_ms {
+        return Err(invalid_request(
+            "`readiness.initial_backoff_ms` must be <= `readiness.max_backoff_ms`",
+        ));
+    }
+    let max_attempts = timeout_ms.div_ceil(initial_backoff_ms).clamp(1, 512);
+
+    Ok(GoogleMeetReadinessPolicy {
+        microphone_muted_waitable: true,
+        timeout_ms,
+        initial_backoff_ms,
+        max_backoff_ms,
+        max_attempts,
+    })
+}
+
+fn parse_voice_call_policy(
+    input: &serde_json::Value,
+    realtime: &serde_json::Value,
+    mode: GoogleMeetLiveMode,
+) -> FcpResult<GoogleMeetVoiceCallPolicy> {
+    let voice_call = optional_object_any(input, &["voice_call", "voiceCall"])?
+        .or(optional_object_any(realtime, &["voice_call", "voiceCall"])?)
+        .unwrap_or(realtime);
+    if optional_bool_any(voice_call, &["allow_twiml_fallback", "allowTwimlFallback"])?
+        .unwrap_or(false)
+    {
+        return Err(invalid_request(
+            "`voice_call.allow_twiml_fallback` is not supported for Google Meet realtime joins",
+        ));
+    }
+    Ok(GoogleMeetVoiceCallPolicy {
+        enabled: optional_bool_any(voice_call, &["enabled"])?
+            .unwrap_or(mode == GoogleMeetLiveMode::Realtime),
+        request_timeout_ms: optional_u64_any(
+            voice_call,
+            &["request_timeout_ms", "requestTimeoutMs"],
+            1,
+            MAX_VOICE_CALL_REQUEST_TIMEOUT_MS,
+        )?
+        .unwrap_or(DEFAULT_VOICE_CALL_REQUEST_TIMEOUT_MS),
+        dtmf_delay_ms: optional_u64_any(
+            voice_call,
+            &["dtmf_delay_ms", "dtmfDelayMs"],
+            0,
+            MAX_VOICE_CALL_DELAY_MS,
+        )?
+        .unwrap_or(DEFAULT_VOICE_CALL_DTMF_DELAY_MS),
+        post_dtmf_speech_delay_ms: optional_u64_any(
+            voice_call,
+            &["post_dtmf_speech_delay_ms", "postDtmfSpeechDelayMs"],
+            0,
+            MAX_VOICE_CALL_DELAY_MS,
+        )?
+        .unwrap_or(DEFAULT_VOICE_CALL_POST_DTMF_SPEECH_DELAY_MS),
+        allow_twiml_fallback: false,
+        intro_failure_policy: "warn_and_continue".to_string(),
+        intro_sent: false,
+        keepalive: "stay_alive_until_leave_or_shutdown".to_string(),
+    })
+}
+
+fn parse_realtime_provider_policy(
+    input: &serde_json::Value,
+    mode: GoogleMeetLiveMode,
+) -> FcpResult<GoogleMeetRealtimeProviderPolicy> {
+    let realtime = realtime_config(input)?;
+    let strategy = parse_realtime_strategy(realtime)?;
+    let global_model =
+        optional_owned_str_any(realtime, &["model", "configured_model", "configuredModel"])?;
+    let legacy_provider = optional_provider_id(realtime, &["provider"])?;
+    let explicit_transcription_provider = optional_provider_id(
+        realtime,
+        &["transcription_provider", "transcriptionProvider"],
+    )?;
+    let explicit_voice_provider =
+        optional_provider_id(realtime, &["voice_provider", "voiceProvider"])?;
+    let legacy_fallback_applied = legacy_provider.as_deref() == Some("google")
+        && explicit_transcription_provider.is_none()
+        && explicit_voice_provider.is_none();
+    let mut diagnostics = Vec::new();
+    if legacy_fallback_applied {
+        diagnostics.push(
+            "legacy realtime.provider=google is ambiguous; using transcriptionProvider=openai and voiceProvider=google"
+                .to_string(),
+        );
+    }
+
+    let transcription_provider = if legacy_fallback_applied {
+        DEFAULT_REALTIME_PROVIDER.to_string()
+    } else {
+        explicit_transcription_provider
+            .or_else(|| legacy_provider.clone())
+            .unwrap_or_else(|| DEFAULT_REALTIME_PROVIDER.to_string())
+    };
+    let voice_provider = match mode {
+        GoogleMeetLiveMode::Transcribe => {
+            if explicit_voice_provider.is_some() || legacy_provider.is_some() {
+                diagnostics.push(
+                    "voice provider settings are recorded but disabled because mode=transcribe cannot speak"
+                        .to_string(),
+                );
+            }
+            None
+        }
+        GoogleMeetLiveMode::Realtime => Some(if legacy_fallback_applied {
+            "google".to_string()
+        } else {
+            explicit_voice_provider
+                .or_else(|| legacy_provider.clone())
+                .unwrap_or_else(|| DEFAULT_REALTIME_PROVIDER.to_string())
+        }),
+    };
+
+    let transcription_model_override =
+        optional_owned_str_any(realtime, &["transcription_model", "transcriptionModel"])?
+            .or_else(|| global_model.clone());
+    let voice_model_override = optional_owned_str_any(realtime, &["voice_model", "voiceModel"])?
+        .or_else(|| global_model.clone());
+    let transcription = resolve_provider_model_selection(
+        realtime,
+        &transcription_provider,
+        transcription_model_override,
+    )?;
+    let voice = voice_provider
+        .as_deref()
+        .map(|provider| resolve_provider_model_selection(realtime, provider, voice_model_override))
+        .transpose()?;
+    let audio_format = optional_owned_str_any(realtime, &["audio_format", "audioFormat"])?
+        .unwrap_or_else(|| DEFAULT_REALTIME_AUDIO_FORMAT.to_string());
+    let readiness = parse_readiness_policy(input, realtime)?;
+    let voice_call = parse_voice_call_policy(input, realtime, mode)?;
+
+    Ok(GoogleMeetRealtimeProviderPolicy {
+        schema_version: "google_meet_realtime_provider_policy.v1".to_string(),
+        strategy,
+        audio_format,
+        transcription,
+        voice,
+        legacy_provider,
+        legacy_fallback_applied,
+        diagnostics,
+        tool_policy: match strategy {
+            GoogleMeetRealtimeStrategy::Agent => "agent_tools_disabled",
+            GoogleMeetRealtimeStrategy::Bidi => "bidi_tools_enabled",
+        }
+        .to_string(),
+        realtime_bridge_requested: mode == GoogleMeetLiveMode::Realtime,
+        transcribe_only_speech_policy: "deny_meet_say".to_string(),
+        readiness,
+        voice_call,
+    })
+}
+
 fn stop_reason(code: &str, message: &str) -> GoogleMeetStopReason {
     GoogleMeetStopReason {
         code: code.to_string(),
@@ -1920,7 +2428,10 @@ fn live_session_summary_json(session: &GoogleMeetLiveSession) -> serde_json::Val
 fn live_session_json(session: &GoogleMeetLiveSession) -> serde_json::Value {
     let mut value = live_session_summary_json(session);
     value["browser_handoff"] = session.browser_handoff.clone();
+    value["provider_policy"] = json!(&session.provider_policy);
+    value["status_transitions"] = json!(&session.status_transitions);
     value["transcript_entry_count"] = json!(session.transcript.len());
+    value["speech_queue_count"] = json!(session.speech_queue.len());
     value
 }
 
@@ -1939,11 +2450,78 @@ fn live_state_json(state: &GoogleMeetLiveState) -> serde_json::Value {
     })
 }
 
+fn live_status_transition(
+    event: &str,
+    status: &str,
+    details: &serde_json::Value,
+) -> serde_json::Value {
+    json!({
+        "schema_version": "google_meet_live_status_transition.v1",
+        "event": event,
+        "status": status,
+        "observed_at": Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+        "details": details,
+    })
+}
+
+fn live_join_status_transitions(
+    policy: &GoogleMeetRealtimeProviderPolicy,
+) -> Vec<serde_json::Value> {
+    let mut transitions = vec![
+        live_status_transition(
+            "session_requested",
+            "active",
+            &json!({
+                "mode": if policy.realtime_bridge_requested { "realtime" } else { "transcribe" },
+                "strategy": policy.strategy.as_str(),
+            }),
+        ),
+        live_status_transition(
+            "provider_policy_selected",
+            "active",
+            &json!({
+                "transcription_provider": &policy.transcription.provider,
+                "transcription_model": &policy.transcription.model,
+                "voice_provider": policy.voice.as_ref().map(|voice| voice.provider.as_str()),
+                "voice_model": policy.voice.as_ref().map(|voice| voice.model.as_str()),
+                "audio_format": &policy.audio_format,
+                "legacy_fallback_applied": policy.legacy_fallback_applied,
+            }),
+        ),
+        live_status_transition(
+            "microphone_muted_waitable",
+            "waiting",
+            &json!({
+                "blocker": "microphone_muted",
+                "waitable": policy.readiness.microphone_muted_waitable,
+                "timeout_ms": policy.readiness.timeout_ms,
+                "initial_backoff_ms": policy.readiness.initial_backoff_ms,
+                "max_backoff_ms": policy.readiness.max_backoff_ms,
+                "max_attempts": policy.readiness.max_attempts,
+            }),
+        ),
+    ];
+    if policy.realtime_bridge_requested {
+        transitions.push(live_status_transition(
+            "realtime_bridge_requested",
+            "active",
+            &json!({
+                "allow_twiml_fallback": policy.voice_call.allow_twiml_fallback,
+                "intro_failure_policy": &policy.voice_call.intro_failure_policy,
+                "intro_sent": policy.voice_call.intro_sent,
+                "keepalive": &policy.voice_call.keepalive,
+            }),
+        ));
+    }
+    transitions
+}
+
 fn browser_handoff_contract(
     session_id: &str,
     meeting_url: &str,
     mode: GoogleMeetLiveMode,
     max_duration_minutes: u64,
+    provider_policy: &GoogleMeetRealtimeProviderPolicy,
 ) -> serde_json::Value {
     json!({
         "contract_version": "gmeet_live_browser_handoff.v1",
@@ -1964,7 +2542,8 @@ fn browser_handoff_contract(
             "session_id": session_id,
             "meeting_url": meeting_url,
             "mode": mode.as_str(),
-            "max_duration_minutes": max_duration_minutes
+            "max_duration_minutes": max_duration_minutes,
+            "provider_policy": provider_policy
         },
         "worker_plan": [
             {
@@ -1993,7 +2572,9 @@ fn browser_handoff_contract(
         "audit": {
             "source_connector": CONNECTOR_ID,
             "reason": "google_meet_live_session_handoff",
-            "no_embedded_browser_runtime": true
+            "no_embedded_browser_runtime": true,
+            "provider_policy": provider_policy,
+            "voice_text_not_logged": true
         }
     })
 }
@@ -2290,6 +2871,7 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                 }
             }),
         ),
+        live_say_op_info(),
         live_leave_op_info(),
     ]
 }
@@ -2426,6 +3008,16 @@ fn live_join_op_info() -> OperationInfo {
                     "type": "integer",
                     "minimum": 1,
                     "maximum": MAX_LIVE_SESSION_DURATION_MINUTES
+                },
+                "realtime": {
+                    "type": "object",
+                    "description": "Audit-safe realtime provider policy; accepts strategy, provider, transcriptionProvider, voiceProvider, model, audioFormat, readiness, voiceCall, and provider model defaults"
+                },
+                "readiness": {
+                    "type": "object"
+                },
+                "voice_call": {
+                    "type": "object"
                 }
             }
         }),
@@ -2449,9 +3041,11 @@ fn live_join_op_info() -> OperationInfo {
             common_mistakes: vec![
                 "Passing Calendar or redirect URLs; only canonical https://meet.google.com/<meeting-code> URLs are accepted.".into(),
                 "Assuming this connector embeds a browser runtime; the response is a strict fcp.browser handoff contract.".into(),
+                "Using legacy realtime.provider for both audio directions; prefer transcriptionProvider and voiceProvider.".into(),
             ],
             examples: vec![
                 r#"{"meeting_url":"https://meet.google.com/abc-defg-hij","mode":"transcribe"}"#.into(),
+                r#"{"meeting_url":"https://meet.google.com/abc-defg-hij","mode":"realtime","realtime":{"transcriptionProvider":"openai","voiceProvider":"google","strategy":"agent"}}"#.into(),
             ],
             related: vec![CapabilityId::from_static(LIVE_STATUS_OP)],
         },
@@ -2488,6 +3082,53 @@ fn live_read_op_info(
         },
     );
     info.requires_approval = Some(ApprovalMode::Policy);
+    info
+}
+
+fn live_say_op_info() -> OperationInfo {
+    let mut info = op_info(
+        LIVE_SAY_OP,
+        "Queue policy-gated speech for an active realtime Google Meet live session",
+        json!({
+            "type": "object",
+            "required": ["text"],
+            "properties": {
+                "session_id": { "type": "string" },
+                "text": {
+                    "type": "string",
+                    "maxLength": MAX_LIVE_SPEECH_TEXT_BYTES
+                }
+            }
+        }),
+        json!({
+            "type": "object",
+            "required": ["accepted", "queued", "session_id", "queue_event"],
+            "properties": {
+                "accepted": { "type": "boolean" },
+                "queued": { "type": "boolean" },
+                "session_id": { "type": "string" },
+                "queue_event": { "type": "object" }
+            }
+        }),
+        MEET_LIVE_SPEAK_CAP,
+        RiskLevel::High,
+        SafetyTier::Dangerous,
+        IdempotencyClass::BestEffort,
+        AgentHint {
+            when_to_use: "Queue a spoken utterance only after an explicitly consented realtime live join.".into(),
+            common_mistakes: vec![
+                "Trying to speak in mode=transcribe; transcribe-only sessions cannot emit audio.".into(),
+                "Expecting TwiML fallback; Google Meet realtime joins require the selected voice provider path to be ready.".into(),
+                "Logging spoken text; this operation records only audit-safe queue metadata.".into(),
+            ],
+            examples: vec![r#"{"session_id":"<session-id>","text":"One moment while I check that."}"#.into()],
+            related: vec![
+                CapabilityId::from_static(LIVE_JOIN_OP),
+                CapabilityId::from_static(LIVE_STATUS_OP),
+            ],
+        },
+    );
+    info.requires_approval = Some(ApprovalMode::Interactive);
     info
 }
 
@@ -2966,6 +3607,7 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         LIVE_JOIN_OP => Ok(CapabilityId::from_static(MEET_LIVE_JOIN_CAP)),
         LIVE_STATUS_OP | LIVE_TRANSCRIPT_OP => Ok(CapabilityId::from_static(MEET_LIVE_READ_CAP)),
         LIVE_LEAVE_OP => Ok(CapabilityId::from_static(MEET_LIVE_LEAVE_CAP)),
+        LIVE_SAY_OP => Ok(CapabilityId::from_static(MEET_LIVE_SPEAK_CAP)),
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -3760,6 +4402,158 @@ mod tests {
     }
 
     #[test]
+    fn realtime_provider_policy_separates_defaults_and_legacy_fallback() {
+        let default_policy = parse_realtime_provider_policy(
+            &json!({
+                "mode": "realtime",
+                "realtime": {
+                    "providers": {
+                        "openai": {
+                            "defaultModel": "gpt-4o-realtime-preview",
+                            "api_key": "sk-secret-should-not-leak"
+                        }
+                    }
+                }
+            }),
+            GoogleMeetLiveMode::Realtime,
+        )
+        .expect("default policy");
+        assert_eq!(default_policy.transcription.provider, "openai");
+        assert_eq!(
+            default_policy.voice.as_ref().expect("voice").provider,
+            "openai"
+        );
+        assert_eq!(
+            default_policy
+                .transcription
+                .provider_default_model
+                .as_deref(),
+            Some("gpt-4o-realtime-preview")
+        );
+        assert_eq!(
+            default_policy.transcription.model_source,
+            "provider_default"
+        );
+
+        let legacy_policy = parse_realtime_provider_policy(
+            &json!({
+                "mode": "realtime",
+                "realtime": {
+                    "provider": "google",
+                    "model": "global-override-model",
+                    "providers": {
+                        "google": {
+                            "default_model": "gemini-live-default",
+                            "token": "google-token-should-not-leak"
+                        },
+                        "openai": {
+                            "defaultModel": "openai-transcribe-default",
+                            "refresh_token": "refresh-token-should-not-leak"
+                        }
+                    }
+                }
+            }),
+            GoogleMeetLiveMode::Realtime,
+        )
+        .expect("legacy policy");
+        assert!(legacy_policy.legacy_fallback_applied);
+        assert_eq!(legacy_policy.legacy_provider.as_deref(), Some("google"));
+        assert_eq!(legacy_policy.transcription.provider, "openai");
+        assert_eq!(legacy_policy.transcription.model, "global-override-model");
+        assert_eq!(
+            legacy_policy.transcription.model_source,
+            "configured_override"
+        );
+        let voice = legacy_policy.voice.as_ref().expect("voice policy");
+        assert_eq!(voice.provider, "google");
+        assert_eq!(voice.model, "global-override-model");
+        assert!(legacy_policy.diagnostics.iter().any(|message| {
+            message.contains("transcriptionProvider=openai")
+                && message.contains("voiceProvider=google")
+        }));
+
+        let wire_policy = serde_json::to_string(&legacy_policy).expect("policy JSON");
+        for forbidden in [
+            "google-token-should-not-leak",
+            "refresh-token-should-not-leak",
+            "api_key",
+            "token",
+            "refresh_token",
+        ] {
+            assert!(
+                !wire_policy.contains(forbidden),
+                "provider policy leaked secret material/key name {forbidden}: {wire_policy}"
+            );
+        }
+    }
+
+    #[test]
+    fn realtime_readiness_and_voice_call_policy_match_openclaw_semantics() {
+        let policy = parse_realtime_provider_policy(
+            &json!({
+                "mode": "realtime",
+                "realtime": {
+                    "strategy": "bidi",
+                    "readiness": {
+                        "timeoutMs": 60000,
+                        "initialBackoffMs": 500,
+                        "maxBackoffMs": 5000
+                    },
+                    "voiceCall": {
+                        "dtmfDelayMs": 3000,
+                        "postDtmfSpeechDelayMs": 7000
+                    }
+                }
+            }),
+            GoogleMeetLiveMode::Realtime,
+        )
+        .expect("policy");
+        assert_eq!(policy.strategy, GoogleMeetRealtimeStrategy::Bidi);
+        assert_eq!(policy.tool_policy, "bidi_tools_enabled");
+        assert!(policy.readiness.microphone_muted_waitable);
+        assert_eq!(policy.readiness.timeout_ms, 60_000);
+        assert_eq!(policy.readiness.max_backoff_ms, 5_000);
+        assert_eq!(policy.voice_call.dtmf_delay_ms, 3_000);
+        assert_eq!(policy.voice_call.post_dtmf_speech_delay_ms, 7_000);
+        assert!(!policy.voice_call.allow_twiml_fallback);
+        assert_eq!(policy.voice_call.intro_failure_policy, "warn_and_continue");
+        assert!(!policy.voice_call.intro_sent);
+        assert_eq!(
+            policy.voice_call.keepalive,
+            "stay_alive_until_leave_or_shutdown"
+        );
+
+        assert!(
+            parse_realtime_provider_policy(
+                &json!({
+                    "mode": "realtime",
+                    "realtime": {
+                        "readiness": {
+                            "timeoutMs": MAX_READINESS_TIMEOUT_MS + 1
+                        }
+                    }
+                }),
+                GoogleMeetLiveMode::Realtime,
+            )
+            .is_err()
+        );
+        assert!(
+            parse_realtime_provider_policy(
+                &json!({
+                    "mode": "realtime",
+                    "realtime": {
+                        "voiceCall": {
+                            "allowTwimlFallback": true
+                        }
+                    }
+                }),
+                GoogleMeetLiveMode::Realtime,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn normalize_space_config_accepts_only_supported_access_and_entry_point_enums() {
         let config = normalize_space_config(&json!({
             "config": {
@@ -3824,8 +4618,9 @@ mod tests {
         assert_eq!(result["details"]["live_session_operations"], true);
         assert_eq!(
             result["details"]["live_session_contract"],
-            "browser_handoff_only"
+            "browser_handoff_with_realtime_policy"
         );
+        assert_eq!(result["details"]["live_speech_operations"], true);
     }
 
     #[fcp_async_core::runtime::test]
@@ -3839,7 +4634,11 @@ mod tests {
         let health = connector.handle_health().await.expect("health");
         assert_eq!(health["api_read_operations"], true);
         assert_eq!(health["live_session_operations"], true);
-        assert_eq!(health["live_session_contract"], "browser_handoff_only");
+        assert_eq!(
+            health["live_session_contract"],
+            "browser_handoff_with_realtime_policy"
+        );
+        assert_eq!(health["live_speech_operations"], true);
 
         let doctor = connector.handle_doctor().await.expect("doctor");
         let checks = doctor["checks"].as_array().expect("doctor checks");
@@ -3852,7 +4651,7 @@ mod tests {
             live_boundary["message"]
                 .as_str()
                 .expect("live boundary message")
-                .contains("browser-handoff contract")
+                .contains("realtime provider policy")
         );
     }
 
@@ -4008,12 +4807,9 @@ mod tests {
                 LIVE_JOIN_OP,
                 LIVE_STATUS_OP,
                 LIVE_TRANSCRIPT_OP,
+                LIVE_SAY_OP,
                 LIVE_LEAVE_OP,
             ]
-        );
-        assert!(
-            !ids.iter().any(|id| id.contains("say")),
-            "voice/speak operations are intentionally deferred to a separate child"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
         assert_eq!(ops[0]["safety_tier"], "safe");
@@ -4056,6 +4852,7 @@ mod tests {
                 LIVE_JOIN_OP,
                 LIVE_STATUS_OP,
                 LIVE_TRANSCRIPT_OP,
+                LIVE_SAY_OP,
                 LIVE_LEAVE_OP,
             ]
             .contains(&op["id"].as_str().expect("op id"))
@@ -4079,6 +4876,13 @@ mod tests {
             .expect("live status op");
         assert_eq!(live_status["capability"], MEET_LIVE_READ_CAP);
         assert_eq!(live_status["requires_approval"], "policy");
+        let live_say = ops
+            .iter()
+            .find(|op| op["id"] == LIVE_SAY_OP)
+            .expect("live say op");
+        assert_eq!(live_say["capability"], MEET_LIVE_SPEAK_CAP);
+        assert_eq!(live_say["safety_tier"], "dangerous");
+        assert_eq!(live_say["requires_approval"], "interactive");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4144,6 +4948,14 @@ mod tests {
         assert_eq!(first["accepted"], true);
         assert_eq!(first["session"]["meeting_code"], "abc-defg-hij");
         assert_eq!(first["session"]["mode"], "transcribe");
+        assert_eq!(
+            first["session"]["provider_policy"]["transcription"]["provider"],
+            DEFAULT_REALTIME_PROVIDER
+        );
+        assert_eq!(
+            first["session"]["provider_policy"]["voice"],
+            serde_json::Value::Null
+        );
         assert_eq!(first["browser_handoff"]["target_connector"], "fcp.browser");
         assert_eq!(
             first["browser_handoff"]["local_control_policy"]["bind"],
@@ -4156,6 +4968,10 @@ mod tests {
         assert_eq!(
             first["browser_handoff"]["audit"]["no_embedded_browser_runtime"],
             true
+        );
+        assert_eq!(
+            first["browser_handoff"]["session"]["provider_policy"]["transcribe_only_speech_policy"],
+            "deny_meet_say"
         );
         let first_session_id = first["session"]["session_id"]
             .as_str()
@@ -4200,7 +5016,14 @@ mod tests {
                 "operation": LIVE_JOIN_OP,
                 "input": {
                     "meeting_url": "https://meet.google.com/xyz-abcd-efg",
-                    "mode": "realtime"
+                    "mode": "realtime",
+                    "realtime": {
+                        "provider": "google",
+                        "providers": {
+                            "google": { "defaultModel": "gemini-live-default" },
+                            "openai": { "defaultModel": "openai-transcribe-default" }
+                        }
+                    }
                 },
                 "capability_token": capability_for_cap(
                     &connector,
@@ -4214,6 +5037,36 @@ mod tests {
         assert_eq!(
             second["replaced_session"]["stop_reason"]["code"],
             "replaced_by_new_join"
+        );
+        assert_eq!(
+            second["session"]["provider_policy"]["transcription"]["provider"],
+            "openai"
+        );
+        assert_eq!(
+            second["session"]["provider_policy"]["voice"]["provider"],
+            "google"
+        );
+        assert_eq!(
+            second["session"]["provider_policy"]["legacy_fallback_applied"],
+            true
+        );
+        let transitions = second["session"]["status_transitions"]
+            .as_array()
+            .expect("status transitions");
+        assert!(
+            transitions
+                .iter()
+                .any(|transition| transition["event"] == "provider_policy_selected")
+        );
+        assert!(
+            transitions
+                .iter()
+                .any(|transition| transition["event"] == "microphone_muted_waitable")
+        );
+        assert!(
+            transitions
+                .iter()
+                .any(|transition| transition["event"] == "realtime_bridge_requested")
         );
         let second_session_id = second["session"]["session_id"]
             .as_str()
@@ -4255,6 +5108,177 @@ mod tests {
         assert_eq!(
             left["stopped_session"]["stop_reason"]["code"],
             "leave_requested"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn live_say_requires_realtime_and_denies_after_stop_without_logging_text() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config())
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_LIVE_JOIN_CAP,
+                    MEET_LIVE_READ_CAP,
+                    MEET_LIVE_LEAVE_CAP,
+                    MEET_LIVE_SPEAK_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let transcribe_join = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/abc-defg-hij",
+                    "mode": "transcribe"
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("transcribe join");
+        let transcribe_session_id = transcribe_join["session"]["session_id"]
+            .as_str()
+            .expect("transcribe session id");
+        let transcribe_denial = connector
+            .handle_invoke(json!({
+                "operation": LIVE_SAY_OP,
+                "input": {
+                    "session_id": transcribe_session_id,
+                    "text": "this text must never be logged"
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_SAY_OP,
+                    MEET_LIVE_SPEAK_CAP
+                ),
+            }))
+            .await
+            .expect_err("transcribe-only sessions cannot speak");
+        assert!(
+            matches!(transcribe_denial, FcpError::InvalidRequest { message, .. } if message.contains("transcribe-only sessions cannot speak"))
+        );
+
+        let realtime_join = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/xyz-abcd-efg",
+                    "mode": "realtime",
+                    "realtime": {
+                        "voiceProvider": "google",
+                        "transcriptionProvider": "openai",
+                        "voiceModel": "gemini-live-voice",
+                        "transcriptionModel": "gpt-4o-transcribe"
+                    }
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("realtime join");
+        let realtime_session_id = realtime_join["session"]["session_id"]
+            .as_str()
+            .expect("realtime session id")
+            .to_string();
+        let said = connector
+            .handle_invoke(json!({
+                "operation": LIVE_SAY_OP,
+                "input": {
+                    "session_id": realtime_session_id,
+                    "text": "private spoken text"
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_SAY_OP,
+                    MEET_LIVE_SPEAK_CAP
+                ),
+            }))
+            .await
+            .expect("say");
+        assert_eq!(said["accepted"], true);
+        assert_eq!(said["queued"], true);
+        assert_eq!(said["queue_event"]["voice_provider"], "google");
+        assert_eq!(said["queue_event"]["voice_model"], "gemini-live-voice");
+        assert_eq!(said["queue_event"]["allow_twiml_fallback"], false);
+        assert_eq!(
+            said["queue_event"]["keepalive"],
+            "stay_alive_until_leave_or_shutdown"
+        );
+        assert_eq!(said["queue_event"]["redaction"], "text_not_logged");
+        let said_wire = serde_json::to_string(&said).expect("say JSON");
+        assert!(!said_wire.contains("private spoken text"));
+
+        let status = connector
+            .handle_invoke(json!({
+                "operation": LIVE_STATUS_OP,
+                "input": {},
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_STATUS_OP,
+                    MEET_LIVE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("status");
+        assert_eq!(status["session"]["speech_queue_count"], 1);
+        assert!(
+            status["session"]["status_transitions"]
+                .as_array()
+                .expect("status transitions")
+                .iter()
+                .any(|transition| transition["event"] == "speech_queued")
+        );
+
+        connector
+            .handle_invoke(json!({
+                "operation": LIVE_LEAVE_OP,
+                "input": { "session_id": realtime_session_id },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_LEAVE_OP,
+                    MEET_LIVE_LEAVE_CAP
+                ),
+            }))
+            .await
+            .expect("leave");
+        let after_stop = connector
+            .handle_invoke(json!({
+                "operation": LIVE_SAY_OP,
+                "input": { "text": "after stop" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_SAY_OP,
+                    MEET_LIVE_SPEAK_CAP
+                ),
+            }))
+            .await
+            .expect_err("speech queue denied after stop");
+        assert!(
+            matches!(after_stop, FcpError::InvalidRequest { message, .. } if message.contains("No active Google Meet realtime live session"))
         );
     }
 
@@ -4514,34 +5538,40 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn simulate_denies_deferred_live_speak_operation() {
+    async fn simulate_live_say_requires_live_speak_capability() {
         let signing_key = Ed25519SigningKey::generate();
         let mut connector = GoogleMeetConnector::new();
         configure_and_handshake(&mut connector, &signing_key).await;
 
-        let result = connector
+        let denied = connector
             .handle_simulate(simulate_request_json(
                 &connector,
                 &signing_key,
-                "gmeet.live.say",
-                "meeting.live_speak",
+                LIVE_SAY_OP,
+                MEET_LIVE_READ_CAP,
             ))
             .await
-            .expect("simulate response");
+            .expect("simulate denied");
 
-        assert_eq!(result["would_succeed"], false);
+        assert_eq!(denied["would_succeed"], false);
         assert!(
-            result["failure_reason"]
-                .as_str()
-                .expect("failure reason")
-                .contains("gmeet.live.say")
-        );
-        assert!(
-            result["missing_capabilities"]
+            denied["missing_capabilities"]
                 .as_array()
                 .expect("missing capabilities")
-                .is_empty()
+                .iter()
+                .any(|capability| capability == MEET_LIVE_SPEAK_CAP)
         );
+
+        let allowed = connector
+            .handle_simulate(simulate_request_json(
+                &connector,
+                &signing_key,
+                LIVE_SAY_OP,
+                MEET_LIVE_SPEAK_CAP,
+            ))
+            .await
+            .expect("simulate allowed");
+        assert_eq!(allowed["would_succeed"], true);
     }
 
     #[fcp_async_core::runtime::test]
@@ -6415,7 +7445,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_read_api_capabilities_without_live_controls() {
+    fn manifest_declares_read_api_and_live_policy_capabilities() {
         let manifest =
             ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).expect("parse manifest");
         let optional = &manifest.capabilities.optional;
@@ -6429,6 +7459,7 @@ mod tests {
             "meeting.live_join",
             "meeting.live_read",
             "meeting.live_leave",
+            "meeting.live_speak",
         ] {
             assert!(
                 optional
@@ -6438,12 +7469,7 @@ mod tests {
             );
         }
         let forbidden = &manifest.capabilities.forbidden;
-        for forbidden_capability in [
-            "system.exec",
-            "network.listen",
-            "browser.control",
-            "meeting.live_speak",
-        ] {
+        for forbidden_capability in ["system.exec", "network.listen", "browser.control"] {
             assert!(
                 forbidden
                     .iter()
@@ -6475,12 +7501,13 @@ mod tests {
                         | LIVE_JOIN_OP
                         | LIVE_STATUS_OP
                         | LIVE_TRANSCRIPT_OP
+                        | LIVE_SAY_OP
                         | LIVE_LEAVE_OP
                 )
             }),
-            "manifest should advertise only the space, conference-read, artifact, Drive artifact, and live handoff operations"
+            "manifest should advertise only the space, conference-read, artifact, Drive artifact, and live policy operations"
         );
-        assert_eq!(manifest.provides.operations.len(), 21);
+        assert_eq!(manifest.provides.operations.len(), 22);
         assert_eq!(
             manifest
                 .provides
@@ -6552,6 +7579,18 @@ mod tests {
                 .capability
                 .as_str(),
             MEET_LIVE_READ_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == LIVE_SAY_OP)
+                .map(|(_id, operation)| operation)
+                .expect("live say op")
+                .capability
+                .as_str(),
+            MEET_LIVE_SPEAK_CAP
         );
     }
 }

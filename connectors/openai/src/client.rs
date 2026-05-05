@@ -622,6 +622,37 @@ impl OpenAIClient {
         }
     }
 
+    /// Create an ephemeral Realtime client secret for browser/WebRTC clients.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or malformed provider responses.
+    #[instrument(skip(self, request_body))]
+    pub async fn create_realtime_client_secret(
+        &self,
+        request_body: &serde_json::Value,
+    ) -> OpenAIResult<serde_json::Value> {
+        let url = format!("{}/v1/realtime/client_secrets", self.base_url);
+
+        let request = self
+            .client
+            .post(&url)
+            .header("Content-Type", "application/json");
+        let request = self.apply_auth(request);
+
+        let response = request.json(request_body).send().await?;
+        let status = response.status();
+        let headers = response.headers().clone();
+        let bytes = response.bytes().await?;
+
+        if status.is_success() {
+            serde_json::from_slice(&bytes).map_err(OpenAIError::from)
+        } else {
+            Err(parse_error_response(status, &headers, &bytes))
+        }
+    }
+
     /// Create a fine-tuning job.
     ///
     /// # Errors

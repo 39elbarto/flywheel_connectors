@@ -32,7 +32,7 @@ use std::pin::Pin;
 use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{header, method, path},
+    matchers::{body_partial_json, header, method, path},
 };
 
 // ──────────────── re-export the connector under test ────────────────
@@ -1204,6 +1204,14 @@ async fn lifecycle_introspect_operations() {
     assert!(
         op_ids.contains(&"openai.realtime.transcribe"),
         "should include openai.realtime.transcribe"
+    );
+    assert!(
+        op_ids.contains(&"openai.realtime.voice"),
+        "should include openai.realtime.voice"
+    );
+    assert!(
+        op_ids.contains(&"openai.realtime.browser_session"),
+        "should include openai.realtime.browser_session"
     );
     assert!(
         op_ids.contains(&"openai.audio.tts"),
@@ -2554,6 +2562,356 @@ async fn realtime_transcribe_provider_error_before_ready() {
         "error should include provider detail: {message}"
     );
     ws_task.await.expect("websocket task");
+}
+
+/// Realtime voice waits for session readiness, drains queued audio, and returns output events.
+#[fcp_async_core::runtime::test]
+async fn realtime_voice_loopback_websocket_session() {
+    let _ctx = AsyncTestContext::for_scenario("openai.realtime.voice.loopback");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+    let input_audio = base64::engine::general_purpose::STANDARD.encode(b"voice-in");
+    let output_audio = base64::engine::general_purpose::STANDARD.encode(b"assistant-audio");
+
+    let ws_task = fcp_async_core::task::spawn({
+        let input_audio = input_audio.clone();
+        let output_audio = output_audio.clone();
+        async move {
+            let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+            let (mut ws, headers) = accept_openai_test_websocket(tcp_stream).await;
+            assert!(
+                headers.starts_with("GET /v1/realtime?model=gpt-realtime HTTP/1.1"),
+                "unexpected realtime voice websocket request: {headers}"
+            );
+            assert!(
+                headers.contains("Authorization: Bearer test-api-key-xyz"),
+                "missing authorization header: {headers}"
+            );
+            assert!(
+                headers.contains("OpenAI-Beta: realtime=v1"),
+                "missing realtime beta header: {headers}"
+            );
+
+            let update = recv_text_frame(&mut ws, "receive realtime voice session update")
+                .await
+                .expect("session update frame");
+            let update: serde_json::Value =
+                serde_json::from_str(&update).expect("session update json");
+            assert_eq!(update["type"], "session.update");
+            assert_eq!(update["session"]["type"], "realtime");
+            assert_eq!(update["session"]["model"], "gpt-realtime");
+            assert_eq!(update["session"]["instructions"], "Be concise.");
+            assert_eq!(update["session"]["audio"]["output"]["voice"], "marin");
+            assert_eq!(
+                update["session"]["audio"]["input"]["format"],
+                json!({ "type": "audio/pcm", "rate": 24_000 })
+            );
+            assert_eq!(
+                update["session"]["audio"]["output"]["format"],
+                json!({ "type": "audio/pcm", "rate": 24_000 })
+            );
+            assert!(update["session"]["audio"]["input"]["turn_detection"].is_null());
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "session.updated",
+                    "session": {
+                        "id": "sess_voice",
+                        "type": "realtime"
+                    }
+                }),
+                "send session.updated",
+            )
+            .await;
+
+            let append = recv_text_frame(&mut ws, "receive voice audio append")
+                .await
+                .expect("audio append frame");
+            let append: serde_json::Value = serde_json::from_str(&append).expect("append json");
+            assert_eq!(append["type"], "input_audio_buffer.append");
+            assert_eq!(append["audio"], input_audio);
+
+            let commit = recv_text_frame(&mut ws, "receive voice audio commit")
+                .await
+                .expect("audio commit frame");
+            let commit: serde_json::Value = serde_json::from_str(&commit).expect("commit json");
+            assert_eq!(commit["type"], "input_audio_buffer.commit");
+
+            let create = recv_text_frame(&mut ws, "receive response create")
+                .await
+                .expect("response create frame");
+            let create: serde_json::Value = serde_json::from_str(&create).expect("create json");
+            assert_eq!(create["type"], "response.create");
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "input_audio_buffer.committed",
+                    "event_id": "event_commit",
+                    "item_id": "item_1"
+                }),
+                "send audio committed",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "response.output_audio.delta",
+                    "event_id": "event_audio",
+                    "item_id": "assistant_1",
+                    "delta": output_audio
+                }),
+                "send assistant audio",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "response.output_audio_transcript.delta",
+                    "event_id": "event_transcript_delta",
+                    "item_id": "assistant_1",
+                    "delta": "Hello"
+                }),
+                "send assistant transcript delta",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "response.output_audio_transcript.done",
+                    "event_id": "event_transcript_done",
+                    "item_id": "assistant_1",
+                    "transcript": "Hello from realtime voice"
+                }),
+                "send assistant transcript done",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "response.done",
+                    "response": {
+                        "id": "resp_voice",
+                        "status": "completed"
+                    }
+                }),
+                "send response done",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
+        }
+    });
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &base_url).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.voice"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.voice",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.voice",
+            "input": {
+                "audio_b64": input_audio,
+                "voice": "marin",
+                "instructions": "Be concise.",
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(
+        result["session_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("fcp-rtv-")
+    );
+    assert_eq!(result["provider_session_id"], "sess_voice");
+    assert_eq!(result["model"], "gpt-realtime");
+    assert_eq!(result["voice"], "marin");
+    assert_eq!(result["assistant_transcript"], "Hello from realtime voice");
+    assert_eq!(result["audio_chunks_b64"].as_array().unwrap().len(), 1);
+    assert_eq!(result["audio_b64"], output_audio);
+    assert_eq!(result["stats"]["response_status"], "completed");
+    assert_eq!(result["stats"]["reconnect_attempts"], 0);
+    assert_eq!(result["provenance"]["source"], "openai.realtime.voice");
+
+    ws_task.await.expect("websocket task");
+}
+
+/// Realtime voice rejects malformed provider frames before returning partial output.
+#[fcp_async_core::runtime::test]
+async fn realtime_voice_malformed_event_fails_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let (mut ws, _) = accept_openai_test_websocket(tcp_stream).await;
+        let _ = recv_text_frame(&mut ws, "receive session update").await;
+        send_json_frame(
+            &mut ws,
+            json!({
+                "event_id": "missing-type"
+            }),
+            "send malformed realtime event",
+        )
+        .await;
+        close_test_websocket(&mut ws).await;
+    });
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &base_url).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.voice"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.voice",
+        connector.instance_id(),
+    );
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"audio");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.voice",
+            "input": {
+                "audio_b64": audio_b64,
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("Malformed realtime voice event"),
+        "error should mention malformed frame: {message}"
+    );
+    ws_task.await.expect("websocket task");
+}
+
+/// Browser Realtime sessions mint an ephemeral client secret with redacted auth handling.
+#[fcp_async_core::runtime::test]
+async fn realtime_browser_session_client_secret_happy_path() {
+    let _ctx = AsyncTestContext::for_scenario("openai.realtime.browser_session.client_secret");
+
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v1/realtime/client_secrets"))
+        .and(header("Authorization", "Bearer test-api-key-xyz"))
+        .and(body_partial_json(json!({
+            "expires_after": {
+                "anchor": "created_at",
+                "seconds": 120
+            },
+            "session": {
+                "type": "realtime",
+                "model": "gpt-realtime",
+                "instructions": "Keep replies short.",
+                "audio": {
+                    "output": {
+                        "voice": "cedar"
+                    }
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "client_secret": {
+                "value": "ek_test_client_secret",
+                "expires_at": 1_765_000_000_u64
+            },
+            "session": {
+                "id": "sess_browser",
+                "type": "realtime",
+                "model": "gpt-realtime"
+            }
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.browser_session"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.browser_session",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.browser_session",
+            "input": {
+                "voice": "cedar",
+                "instructions": "Keep replies short.",
+                "expires_after_seconds": 120,
+                "audit_context": "unit-test-browser-session"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["provider"], "openai");
+    assert_eq!(result["transport"], "webrtc-sdp");
+    assert_eq!(result["client_secret"], "ek_test_client_secret");
+    assert_eq!(
+        result["offer_url"],
+        format!("{}/v1/realtime/calls", mock_server.uri())
+    );
+    assert_eq!(result["model"], "gpt-realtime");
+    assert_eq!(result["voice"], "cedar");
+    assert_eq!(result["expires_at"], 1_765_000_000_u64);
+    assert_eq!(result["audit_context"], "unit-test-browser-session");
+    assert_eq!(result["taint"], json!(["secret_material"]));
+}
+
+/// Browser session creation validates voice names before making network calls.
+#[fcp_async_core::runtime::test]
+async fn realtime_browser_session_rejects_invalid_voice() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.browser_session"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.browser_session",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.browser_session",
+            "input": { "voice": "nova" },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("realtime voice"),
+        "error should mention realtime voice validation: {message}"
+    );
 }
 
 // ============================================================================

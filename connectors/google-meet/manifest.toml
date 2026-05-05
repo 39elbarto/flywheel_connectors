@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:87c887543a2f0532c3206f080853b42515587eb262a3558b6e1ce3ff4660091a"
+interface_hash = "blake3-256:fcp.interface.v2:e715a1b037536a2b2372914de8e4d8a83b0a6060f793a8bca0fa7e9df54bc45d"
 
 [connector]
 id = "fcp.google-meet"
 name = "Google Meet Connector"
 version = "0.1.0"
-description = "FCP connector foundation for Google Meet spaces and conference artifacts"
+description = "FCP connector for Google Meet spaces, conference records, participants, sessions, and attendance"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
 
@@ -88,6 +88,301 @@ common_mistakes = ["Passing a Calendar event link instead of a meet.google.com l
 examples = ['{"input":"https://meet.google.com/abc-defg-hij"}', '{"input":"spaces/abc-defg-hij"}']
 related = []
 
+[provides.operations."gmeet.conference_record.get"]
+description = "Fetch one Google Meet conference record by resource name or id"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.conference_record.get".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.conference_record.get".input_schema.properties.conference_record]
+type = "string"
+description = "conferenceRecords/* resource name or bare conference record id"
+
+[provides.operations."gmeet.conference_record.get".output_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.conference_record.get".output_schema.properties.conference_record]
+type = "object"
+
+[provides.operations."gmeet.conference_record.get".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.conference_record.get".ai_hints]
+when_to_use = "Fetch raw Google Meet conference metadata before participant or attendance reads."
+common_mistakes = ["Passing a spaces/* resource instead of conferenceRecords/*", "Assuming this returns transcripts, recordings, or live media controls"]
+examples = ['{"conference_record":"conferenceRecords/abc"}']
+related = []
+
+[provides.operations."gmeet.conference_records.list"]
+description = "List Google Meet conference records, optionally filtered by meeting space"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.conference_records.list".input_schema]
+type = "object"
+[provides.operations."gmeet.conference_records.list".input_schema.properties.meeting]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource used to filter conference records"
+[provides.operations."gmeet.conference_records.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.conference_records.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.conference_records.list".output_schema]
+required = ["conference_records", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.conference_records.list".output_schema.properties.conference_records]
+type = "array"
+[provides.operations."gmeet.conference_records.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.conference_records.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.conference_records.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.conference_records.list".ai_hints]
+when_to_use = "Find conferenceRecords/* ids for a Meet space before participant, session, or attendance reads."
+common_mistakes = ["Forgetting max_items on broad workspace scans", "Treating read-only conference records as live meeting control"]
+examples = ['{"meeting":"https://meet.google.com/abc-defg-hij","max_items":10}']
+related = []
+
+[provides.operations."gmeet.conference_record.latest"]
+description = "Fetch the latest Google Meet conference record for a meeting space"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.conference_record.latest".input_schema]
+required = ["meeting"]
+type = "object"
+[provides.operations."gmeet.conference_record.latest".input_schema.properties.meeting]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource"
+
+[provides.operations."gmeet.conference_record.latest".output_schema]
+required = ["input", "space_name", "conference_record"]
+type = "object"
+[provides.operations."gmeet.conference_record.latest".output_schema.properties.input]
+type = "string"
+[provides.operations."gmeet.conference_record.latest".output_schema.properties.space_name]
+type = "string"
+[provides.operations."gmeet.conference_record.latest".output_schema.properties.conference_record]
+type = "object"
+
+[provides.operations."gmeet.conference_record.latest".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.conference_record.latest".ai_hints]
+when_to_use = "Select the most recent conference record for a recurring Meet URL before attendance reads."
+common_mistakes = ["Using this when all historical conference records are required", "Assuming absence of a conference record means the meeting space does not exist"]
+examples = ['{"meeting":"spaces/abc-defg-hij"}']
+related = []
+
+[provides.operations."gmeet.participants.list"]
+description = "List participants for a Google Meet conference record"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.participants.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.participants.list".input_schema.properties.conference_record]
+type = "string"
+[provides.operations."gmeet.participants.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.participants.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.participants.list".output_schema]
+required = ["participants", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.participants.list".output_schema.properties.participants]
+type = "array"
+[provides.operations."gmeet.participants.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.participants.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.participants.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.participants.list".ai_hints]
+when_to_use = "Read participant identities and participant resources from a completed Meet conference record."
+common_mistakes = ["Passing a spaces/* resource instead of conferenceRecords/*", "Assuming participant rows are already merged across duplicate joins"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_items":100}']
+related = []
+
+[provides.operations."gmeet.participant_sessions.list"]
+description = "List participant sessions for one Google Meet participant resource"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.participant_sessions.list".input_schema]
+required = ["participant"]
+type = "object"
+[provides.operations."gmeet.participant_sessions.list".input_schema.properties.participant]
+type = "string"
+[provides.operations."gmeet.participant_sessions.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.participant_sessions.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.participant_sessions.list".output_schema]
+required = ["participant_sessions", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.participant_sessions.list".output_schema.properties.participant_sessions]
+type = "array"
+[provides.operations."gmeet.participant_sessions.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.participant_sessions.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.participant_sessions.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.participant_sessions.list".ai_hints]
+when_to_use = "Read join and leave sessions for a Meet participant before building attendance rows."
+common_mistakes = ["Passing conferenceRecords/* instead of a participant resource", "Assuming one participant has exactly one session"]
+examples = ['{"participant":"conferenceRecords/abc/participants/p1"}']
+related = []
+
+[provides.operations."gmeet.attendance.list"]
+description = "Build attendance rows from Google Meet conference records, participants, and participant sessions"
+capability = "meet.conference.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.attendance.list".input_schema]
+type = "object"
+[provides.operations."gmeet.attendance.list".input_schema.properties.meeting]
+type = "string"
+description = "Google Meet URL, meeting code, or spaces/* resource; required unless conference_record is provided"
+[provides.operations."gmeet.attendance.list".input_schema.properties.conference_record]
+type = "string"
+description = "conferenceRecords/* resource name or bare conference record id; skips meeting lookup when provided"
+[provides.operations."gmeet.attendance.list".input_schema.properties.all_conference_records]
+type = "boolean"
+[provides.operations."gmeet.attendance.list".input_schema.properties.merge_duplicate_participants]
+type = "boolean"
+[provides.operations."gmeet.attendance.list".input_schema.properties.late_after_minutes]
+type = "integer"
+[provides.operations."gmeet.attendance.list".input_schema.properties.early_before_minutes]
+type = "integer"
+[provides.operations."gmeet.attendance.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.attendance.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.attendance.list".output_schema]
+required = ["conference_records", "attendance", "participant_evidence"]
+type = "object"
+[provides.operations."gmeet.attendance.list".output_schema.properties.conference_records]
+type = "array"
+[provides.operations."gmeet.attendance.list".output_schema.properties.attendance]
+type = "array"
+[provides.operations."gmeet.attendance.list".output_schema.properties.participant_evidence]
+type = "array"
+
+[provides.operations."gmeet.attendance.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.attendance.list".ai_hints]
+when_to_use = "Produce auditable attendance rows for completed Google Meet conferences with raw participant evidence."
+common_mistakes = ["Using this for live-meeting monitoring", "Dropping participant_evidence when reconciling attendance disputes", "Treating duplicate participant joins as distinct people when merge_duplicate_participants is true"]
+examples = ['{"meeting":"https://meet.google.com/abc-defg-hij","merge_duplicate_participants":true}', '{"conference_record":"conferenceRecords/abc","late_after_minutes":5,"early_before_minutes":5}']
+related = []
+
 [event_caps]
 streaming = false
 replay = false
@@ -110,5 +405,18 @@ window_ms = 60000
 burst = 30
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "meet.conference.read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
 [rate_limits.operation_pools]
 "gmeet.normalize_space_name" = ["meet.space.read"]
+"gmeet.conference_record.get" = ["meet.conference.read"]
+"gmeet.conference_records.list" = ["meet.conference.read"]
+"gmeet.conference_record.latest" = ["meet.conference.read"]
+"gmeet.participants.list" = ["meet.conference.read"]
+"gmeet.participant_sessions.list" = ["meet.conference.read"]
+"gmeet.attendance.list" = ["meet.conference.read"]

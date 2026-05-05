@@ -199,15 +199,15 @@ impl GoogleMeetClient {
         T: DeserializeOwned + NamedGoogleMeetResource,
     {
         let mut items = Vec::new();
-        let mut page_token: Option<String> = None;
+        let mut next_page_cursor: Option<String> = None;
 
         loop {
             let mut page_query = query.to_vec();
-            if let Some(token) = &page_token {
-                page_query.push(("pageToken", token.clone()));
+            if let Some(cursor) = &next_page_cursor {
+                page_query.push(("pageToken", cursor.clone()));
             }
-            let payload = self.get_json::<Value>(path, &page_query).await?;
-            let page_items_value = payload
+            let page_body = self.get_json::<Value>(path, &page_query).await?;
+            let page_items_value = page_body
                 .get(collection_key)
                 .cloned()
                 .unwrap_or_else(|| Value::Array(Vec::new()));
@@ -227,11 +227,11 @@ impl GoogleMeetClient {
                     return Ok(items);
                 }
             }
-            page_token = payload
+            next_page_cursor = page_body
                 .get("nextPageToken")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            if page_token.is_none() {
+            if next_page_cursor.is_none() {
                 return Ok(items);
             }
         }
@@ -244,8 +244,9 @@ impl GoogleMeetClient {
     ) -> GoogleMeetResult<T> {
         let url = self.build_url(path, query)?;
         let mut request = self.http.get(url);
-        for (name, value) in auth_header_pairs(&self.auth)? {
-            request = request.header(name, value);
+        let auth_headers = auth_headers(&self.auth)?;
+        if !auth_headers.is_empty() {
+            request = request.headers(auth_headers);
         }
         let response = request.send().await.map_err(GoogleMeetError::Http)?;
         decode_response(response).await
@@ -261,7 +262,7 @@ impl GoogleMeetClient {
                 message: format!("invalid Google Meet request path `{path}`: {error}"),
             }
         })?;
-        {
+        if !query.is_empty() {
             let mut pairs = url.query_pairs_mut();
             for (key, value) in query {
                 pairs.append_pair(key, value);
@@ -272,10 +273,11 @@ impl GoogleMeetClient {
 }
 
 /// Google Meet conference record resource.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleMeetConferenceRecord {
     /// Resource name, `conferenceRecords/{conference_record}`.
+    #[serde(default)]
     pub name: String,
     /// Associated space resource when provided by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -295,10 +297,11 @@ pub struct GoogleMeetConferenceRecord {
 }
 
 /// Google Meet participant resource.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleMeetParticipant {
     /// Resource name.
+    #[serde(default)]
     pub name: String,
     /// Earliest observed start time.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -342,10 +345,11 @@ pub struct GoogleMeetDisplayIdentity {
 }
 
 /// Google Meet participant session resource.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GoogleMeetParticipantSession {
     /// Resource name.
+    #[serde(default)]
     pub name: String,
     /// Session start time.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -359,7 +363,7 @@ pub struct GoogleMeetParticipantSession {
 }
 
 /// One attendance row after optional participant merge.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoogleMeetAttendanceRow {
     /// Conference record resource.
     pub conference_record: String,
@@ -492,15 +496,16 @@ pub fn normalize_conference_record_name(input: &str) -> GoogleMeetResult<String>
     } else {
         format!("conferenceRecords/{trimmed}")
     };
-    validate_resource_name(&name, "conferenceRecords")?;
+    validate_resource_name(&name, "conferenceRecords", 2)?;
     Ok(name)
 }
 
 /// Normalize a participant input into `conferenceRecords/*/participants/*`.
 pub fn normalize_participant_name(input: &str) -> GoogleMeetResult<String> {
     let trimmed = input.trim().trim_start_matches('/');
-    validate_resource_name(trimmed, "conferenceRecords")?;
-    if !trimmed.contains("/participants/") || trimmed.contains("/participantSessions/") {
+    validate_resource_name(trimmed, "conferenceRecords", 4)?;
+    let parts = resource_segments(trimmed);
+    if parts.get(2) != Some(&"participants") {
         return Err(GoogleMeetError::InvalidConfig {
             message: "participant must be a conferenceRecords/*/participants/* resource"
                 .to_string(),
@@ -519,18 +524,28 @@ pub fn encode_resource_name_for_path(name: &str) -> String {
         .join("/")
 }
 
-fn validate_resource_name(name: &str, expected_prefix: &str) -> GoogleMeetResult<()> {
-    if !name.starts_with(expected_prefix)
+fn validate_resource_name(
+    name: &str,
+    expected_prefix: &str,
+    expected_segments: usize,
+) -> GoogleMeetResult<()> {
+    let segments = resource_segments(name);
+    if segments.first() != Some(&expected_prefix)
         || name.contains('?')
         || name.contains('#')
         || name.chars().any(char::is_whitespace)
-        || name.split('/').any(str::is_empty)
+        || segments.iter().any(|segment| segment.is_empty())
+        || segments.len() != expected_segments
     {
         return Err(GoogleMeetError::InvalidConfig {
             message: format!("invalid Google Meet resource name `{name}`"),
         });
     }
     Ok(())
+}
+
+fn resource_segments(name: &str) -> Vec<&str> {
+    name.split('/').collect()
 }
 
 fn validate_resource_suffix(value: &str, message: &'static str) -> GoogleMeetResult<()> {
@@ -556,20 +571,24 @@ fn ensure_named<T: NamedGoogleMeetResource>(resource: &T, context: &str) -> Goog
     Ok(())
 }
 
-fn auth_header_pairs(auth: &GoogleMaterializedAuth) -> GoogleMeetResult<Vec<(String, String)>> {
+fn auth_headers(auth: &GoogleMaterializedAuth) -> GoogleMeetResult<header::HeaderMap> {
     let mut pairs = Vec::new();
     auth.apply_headers(&mut pairs);
-    for (name, value) in &pairs {
-        header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+    let mut headers = header::HeaderMap::new();
+    for (name, value) in pairs {
+        let name = header::HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
             GoogleMeetError::InvalidConfig {
                 message: format!("invalid Google auth header name `{name}`: {error}"),
             }
         })?;
-        header::HeaderValue::from_str(value).map_err(|error| GoogleMeetError::InvalidConfig {
-            message: format!("invalid Google auth header value for `{name}`: {error}"),
+        let value = header::HeaderValue::from_str(&value).map_err(|error| {
+            GoogleMeetError::InvalidConfig {
+                message: format!("invalid Google auth header value for `{name}`: {error}"),
+            }
         })?;
+        headers.insert(name, value);
     }
-    Ok(pairs)
+    Ok(headers)
 }
 
 async fn decode_response<T: DeserializeOwned>(response: reqwest::Response) -> GoogleMeetResult<T> {

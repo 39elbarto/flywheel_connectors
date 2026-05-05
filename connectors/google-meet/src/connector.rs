@@ -39,7 +39,8 @@ const PARTICIPANTS_LIST_OP: &str = "gmeet.participants.list";
 const PARTICIPANT_SESSIONS_LIST_OP: &str = "gmeet.participant_sessions.list";
 const ATTENDANCE_LIST_OP: &str = "gmeet.attendance.list";
 const DEFAULT_PAGE_SIZE: u32 = 100;
-const MAX_PAGE_SIZE: u32 = 250;
+const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
+const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
 const DEFAULT_MAX_ITEMS: usize = 100;
 const MAX_ITEMS_CAP: usize = 1_000;
 
@@ -693,7 +694,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_page_size(input)?;
+        let page_size = parse_page_size(input, MAX_CONFERENCE_RECORD_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let meeting = optional_str(input, "meeting")?;
         let records = client
@@ -732,7 +733,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_page_size(input)?;
+        let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let participants = client
             .list_participants(
@@ -754,7 +755,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_page_size(input)?;
+        let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let sessions = client
             .list_participant_sessions(
@@ -776,7 +777,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let page_size = parse_page_size(input)?;
+        let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let merge = parse_optional_bool(input, "merge_duplicate_participants")?.unwrap_or(true);
         let late_after_minutes =
@@ -796,8 +797,9 @@ impl GoogleMeetConnector {
                 let meeting = require_str(input, "meeting")?;
                 let space = normalize_meet_space_name(meeting)?;
                 let limit = if all_records { max_items } else { 1 };
+                let record_page_size = clamp_page_size(page_size, MAX_CONFERENCE_RECORD_PAGE_SIZE);
                 let records = client
-                    .list_conference_records(Some(&space.space_name), page_size, Some(limit))
+                    .list_conference_records(Some(&space.space_name), record_page_size, Some(limit))
                     .await
                     .map_err(|error| error.to_fcp_error())?;
                 (Some(meeting.to_string()), Some(space.space_name), records)
@@ -928,7 +930,7 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
         read_api_op_info(
             CONFERENCE_RECORDS_LIST_OP,
             "List Google Meet conference records, optionally filtered by meeting space",
-            paged_input_schema(json!({
+            paged_input_schema(&json!({
                 "meeting": { "type": "string" }
             })),
         ),
@@ -946,21 +948,21 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
         read_api_op_info(
             PARTICIPANTS_LIST_OP,
             "List participants for a Google Meet conference record",
-            paged_input_schema(json!({
+            paged_input_schema(&json!({
                 "conference_record": { "type": "string" }
             })),
         ),
         read_api_op_info(
             PARTICIPANT_SESSIONS_LIST_OP,
             "List participant sessions for a Google Meet participant resource",
-            paged_input_schema(json!({
+            paged_input_schema(&json!({
                 "participant": { "type": "string" }
             })),
         ),
         read_api_op_info(
             ATTENDANCE_LIST_OP,
             "Build attendance rows from Google Meet participants and participant sessions",
-            paged_input_schema(json!({
+            paged_input_schema(&json!({
                 "meeting": { "type": "string" },
                 "conference_record": { "type": "string" },
                 "all_conference_records": { "type": "boolean" },
@@ -972,7 +974,7 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
     ]
 }
 
-fn paged_input_schema(extra_properties: serde_json::Value) -> serde_json::Value {
+fn paged_input_schema(extra_properties: &serde_json::Value) -> serde_json::Value {
     let mut properties = serde_json::Map::new();
     if let Some(extra) = extra_properties.as_object() {
         for (key, value) in extra {
@@ -1305,10 +1307,14 @@ fn parse_max_items(input: &serde_json::Value) -> FcpResult<usize> {
     .map_or(Ok(DEFAULT_MAX_ITEMS), Ok)
 }
 
-fn parse_page_size(input: &serde_json::Value) -> FcpResult<Option<u32>> {
+fn parse_page_size(input: &serde_json::Value, max: u32) -> FcpResult<Option<u32>> {
     Ok(Some(
-        parse_optional_u32(input, "page_size", 1, MAX_PAGE_SIZE)?.unwrap_or(DEFAULT_PAGE_SIZE),
+        parse_optional_u32(input, "page_size", 1, max)?.unwrap_or(DEFAULT_PAGE_SIZE),
     ))
+}
+
+fn clamp_page_size(page_size: Option<u32>, max: u32) -> Option<u32> {
+    page_size.map(|value| value.min(max))
 }
 
 fn parse_optional_u32(
@@ -1384,7 +1390,17 @@ fn op_info(
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::Mutex;
+    use std::thread;
+    use std::time::{Duration as StdDuration, Instant};
+
     use super::*;
+    use crate::client::{
+        GoogleMeetUserIdentity, encode_resource_name_for_path, normalize_conference_record_name,
+        normalize_participant_name,
+    };
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -1392,6 +1408,153 @@ mod tests {
     use fcp_prelude::CapabilityConstraints;
 
     const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+    #[derive(Debug, Clone)]
+    struct StubResponse {
+        status: u16,
+        headers: Vec<(&'static str, String)>,
+        body: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct RecordedRequest {
+        target: String,
+        authorization: Option<String>,
+    }
+
+    fn json_response(body: impl serde::Serialize) -> StubResponse {
+        StubResponse {
+            status: 200,
+            headers: vec![("content-type", "application/json".to_string())],
+            body: serde_json::to_string(&body).expect("serialize JSON response"),
+        }
+    }
+
+    fn error_response(
+        status: u16,
+        body: impl serde::Serialize,
+        headers: Vec<(&'static str, String)>,
+    ) -> StubResponse {
+        StubResponse {
+            status,
+            headers,
+            body: serde_json::to_string(&body).expect("serialize JSON response"),
+        }
+    }
+
+    fn spawn_loopback(
+        responses: Vec<StubResponse>,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<RecordedRequest>>>,
+        thread::JoinHandle<()>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+        listener
+            .set_nonblocking(true)
+            .expect("set loopback nonblocking");
+        let addr = listener.local_addr().expect("loopback addr");
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let recorded = Arc::clone(&requests);
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + StdDuration::from_secs(5);
+            let mut responses = responses.into_iter();
+            while Instant::now() < deadline {
+                let Some(response) = responses.next() else {
+                    return;
+                };
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _peer)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < deadline,
+                                "timed out waiting for loopback request"
+                            );
+                            thread::sleep(StdDuration::from_millis(10));
+                        }
+                        Err(error) => {
+                            assert_eq!(
+                                error.kind(),
+                                std::io::ErrorKind::WouldBlock,
+                                "accept loopback request: {error}"
+                            );
+                        }
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("set loopback stream blocking");
+                stream
+                    .set_read_timeout(Some(StdDuration::from_secs(1)))
+                    .expect("set read timeout");
+                let mut buffer = [0_u8; 8192];
+                let mut received = Vec::new();
+                loop {
+                    let count = stream.read(&mut buffer).expect("read request");
+                    if count == 0 {
+                        break;
+                    }
+                    received.extend_from_slice(&buffer[..count]);
+                    if received.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let request = String::from_utf8_lossy(&received);
+                let target = request
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split_whitespace().nth(1))
+                    .expect("request target")
+                    .to_string();
+                let authorization = request.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("authorization")
+                        .then(|| value.trim().to_string())
+                });
+                recorded
+                    .lock()
+                    .expect("record requests")
+                    .push(RecordedRequest {
+                        target,
+                        authorization,
+                    });
+                let reason = match response.status {
+                    200 => "OK",
+                    400 => "Bad Request",
+                    429 => "Too Many Requests",
+                    _ => "Stubbed",
+                };
+                let mut headers = String::new();
+                for (name, value) in response.headers {
+                    headers.push_str(name);
+                    headers.push_str(": ");
+                    headers.push_str(&value);
+                    headers.push_str("\r\n");
+                }
+                let wire = format!(
+                    "HTTP/1.1 {} {}\r\n{}content-length: {}\r\nconnection: close\r\n\r\n{}",
+                    response.status,
+                    reason,
+                    headers,
+                    response.body.len(),
+                    response.body
+                );
+                stream
+                    .write_all(wire.as_bytes())
+                    .expect("write loopback response");
+            }
+            assert!(
+                responses.next().is_none(),
+                "loopback server did not receive every expected request"
+            );
+        });
+        (format!("http://{addr}/v2"), requests, handle)
+    }
+
+    fn finish_loopback(handle: thread::JoinHandle<()>) {
+        handle.join().expect("loopback server finished");
+    }
 
     fn direct_test_auth_fields() -> serde_json::Map<String, serde_json::Value> {
         let mut object = serde_json::Map::new();
@@ -1416,7 +1579,11 @@ mod tests {
         serde_json::Value::Object(object)
     }
 
-    fn capability_for(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn capability_for_cap(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        capability_id: &str,
+    ) -> CapabilityToken {
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
             ..Default::default()
@@ -1425,7 +1592,7 @@ mod tests {
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = Utc::now();
         let cose = CapabilityTokenBuilder::new()
-            .capability_id(MEET_SPACE_READ_CAP)
+            .capability_id(capability_id)
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[op])
@@ -1436,6 +1603,10 @@ mod tests {
             .sign(signing_key)
             .expect("sign token");
         CapabilityToken::from_raw(cose)
+    }
+
+    fn capability_for(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+        capability_for_cap(signing_key, op, MEET_SPACE_READ_CAP)
     }
 
     async fn configure_and_handshake(
@@ -1452,7 +1623,7 @@ mod tests {
                 "zone": "z:work",
                 "host_public_key": signing_key.verifying_key().to_bytes(),
                 "nonce": vec![0u8; 32],
-                "capabilities_requested": [MEET_SPACE_READ_CAP],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
             }))
             .await
             .expect("handshake");
@@ -1600,7 +1771,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn introspection_advertises_only_foundation_operation() {
+    async fn introspection_advertises_space_and_conference_read_operations_only() {
         let connector = GoogleMeetConnector::new();
         let result = connector.handle_introspect().await.expect("introspect");
         let ops = result["operations"].as_array().expect("operations");
@@ -1608,7 +1779,18 @@ mod tests {
             .iter()
             .map(|op| op["id"].as_str().expect("op id"))
             .collect();
-        assert_eq!(ids, vec![NORMALIZE_SPACE_OP]);
+        assert_eq!(
+            ids,
+            vec![
+                NORMALIZE_SPACE_OP,
+                CONFERENCE_RECORD_GET_OP,
+                CONFERENCE_RECORDS_LIST_OP,
+                CONFERENCE_RECORD_LATEST_OP,
+                PARTICIPANTS_LIST_OP,
+                PARTICIPANT_SESSIONS_LIST_OP,
+                ATTENDANCE_LIST_OP,
+            ]
+        );
         assert!(
             !ids.iter().any(|id| {
                 id.contains("join")
@@ -1616,13 +1798,19 @@ mod tests {
                     || id.contains("say")
                     || id.contains("transcript")
                     || id.contains("recording")
-                    || id.contains("conference_record")
+                    || id.contains("space.create")
+                    || id.contains("space.end")
             }),
-            "foundation must not advertise live-session or artifact operations"
+            "conference read bead must not advertise live-session, artifact, or space mutation operations"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
         assert_eq!(ops[0]["safety_tier"], "safe");
         assert_eq!(ops[0]["idempotency"], "strict");
+        for op in &ops[1..] {
+            assert_eq!(op["capability"], MEET_CONFERENCE_READ_CAP);
+            assert_eq!(op["safety_tier"], "safe");
+            assert_eq!(op["idempotency"], "strict");
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1646,6 +1834,698 @@ mod tests {
     }
 
     #[test]
+    fn google_resource_helpers_preserve_parent_child_shape() {
+        assert_eq!(
+            normalize_conference_record_name("rec-1").expect("record id"),
+            "conferenceRecords/rec-1"
+        );
+        assert_eq!(
+            normalize_conference_record_name("conferenceRecords/rec-1").expect("record resource"),
+            "conferenceRecords/rec-1"
+        );
+        assert_eq!(
+            normalize_participant_name("conferenceRecords/rec-1/participants/p1")
+                .expect("participant resource"),
+            "conferenceRecords/rec-1/participants/p1"
+        );
+        assert_eq!(
+            encode_resource_name_for_path("conferenceRecords/rec 1/participants/user@example.com"),
+            "conferenceRecords/rec%201/participants/user%40example%2Ecom"
+        );
+        for raw in [
+            "",
+            "rec-1/extra",
+            "conferenceRecordsx/rec-1",
+            "conferenceRecords/",
+            "conferenceRecords/rec-1/extra",
+            "conferenceRecords/rec 1",
+            "conferenceRecords/rec-1?alt=json",
+            "conferenceRecords/rec-1/participants/p1",
+        ] {
+            assert!(
+                normalize_conference_record_name(raw).is_err(),
+                "{raw:?} should reject as a conference record"
+            );
+        }
+        for raw in [
+            "conferenceRecords/rec-1",
+            "conferenceRecordsx/rec-1/participants/p1",
+            "conferenceRecords/rec-1/participants/",
+            "conferenceRecords/rec-1/foo/p1",
+            "conferenceRecords/rec-1/participants/p1/extra",
+            "conferenceRecords/rec-1/participants/p1/participantSessions/s1",
+        ] {
+            assert!(
+                normalize_participant_name(raw).is_err(),
+                "{raw:?} should reject as a participant resource"
+            );
+        }
+    }
+
+    #[test]
+    fn page_size_caps_follow_meet_collection_limits() {
+        assert_eq!(
+            parse_page_size(
+                &json!({ "page_size": MAX_CONFERENCE_RECORD_PAGE_SIZE }),
+                MAX_CONFERENCE_RECORD_PAGE_SIZE
+            )
+            .expect("conference page size"),
+            Some(MAX_CONFERENCE_RECORD_PAGE_SIZE)
+        );
+        assert!(
+            matches!(
+                parse_page_size(
+                    &json!({ "page_size": MAX_CONFERENCE_RECORD_PAGE_SIZE + 1 }),
+                    MAX_CONFERENCE_RECORD_PAGE_SIZE
+                ),
+                Err(FcpError::InvalidRequest { .. })
+            ),
+            "conferenceRecords.list should not request above Google's documented cap"
+        );
+        assert_eq!(
+            parse_page_size(
+                &json!({ "page_size": MAX_PARTICIPANT_PAGE_SIZE }),
+                MAX_PARTICIPANT_PAGE_SIZE
+            )
+            .expect("participant page size"),
+            Some(MAX_PARTICIPANT_PAGE_SIZE)
+        );
+        assert_eq!(
+            clamp_page_size(
+                Some(MAX_PARTICIPANT_PAGE_SIZE),
+                MAX_CONFERENCE_RECORD_PAGE_SIZE
+            ),
+            Some(MAX_CONFERENCE_RECORD_PAGE_SIZE)
+        );
+    }
+
+    #[test]
+    fn attendance_merge_and_timing_matches_conference_bounds() {
+        let record = GoogleMeetConferenceRecord {
+            name: "conferenceRecords/rec-1".to_string(),
+            space: Some("spaces/abc-defg-hij".to_string()),
+            start_time: Some("2026-05-04T10:00:00Z".to_string()),
+            end_time: Some("2026-05-04T11:00:00Z".to_string()),
+            expire_time: None,
+            extra: BTreeMap::new(),
+        };
+        let participant_one = GoogleMeetParticipant {
+            name: "conferenceRecords/rec-1/participants/p1".to_string(),
+            earliest_start_time: None,
+            latest_end_time: None,
+            signedin_user: Some(GoogleMeetUserIdentity {
+                user: Some("users/alice".to_string()),
+                display_name: Some("Alice Example".to_string()),
+            }),
+            anonymous_user: None,
+            phone_user: None,
+            extra: BTreeMap::new(),
+        };
+        let participant_two = GoogleMeetParticipant {
+            name: "conferenceRecords/rec-1/participants/p2".to_string(),
+            earliest_start_time: None,
+            latest_end_time: None,
+            signedin_user: Some(GoogleMeetUserIdentity {
+                user: Some("users/alice".to_string()),
+                display_name: Some("Alice Example".to_string()),
+            }),
+            anonymous_user: None,
+            phone_user: None,
+            extra: BTreeMap::new(),
+        };
+        let rows = vec![
+            attendance_row_for_participant(
+                &record,
+                &participant_one,
+                vec![GoogleMeetParticipantSession {
+                    name: "conferenceRecords/rec-1/participants/p1/participantSessions/s1"
+                        .to_string(),
+                    start_time: Some("2026-05-04T10:10:00Z".to_string()),
+                    end_time: Some("2026-05-04T10:30:00Z".to_string()),
+                    extra: BTreeMap::new(),
+                }],
+            ),
+            attendance_row_for_participant(
+                &record,
+                &participant_two,
+                vec![GoogleMeetParticipantSession {
+                    name: "conferenceRecords/rec-1/participants/p2/participantSessions/s2"
+                        .to_string(),
+                    start_time: Some("2026-05-04T10:40:00Z".to_string()),
+                    end_time: Some("2026-05-04T10:50:00Z".to_string()),
+                    extra: BTreeMap::new(),
+                }],
+            ),
+        ];
+
+        let merged = merge_attendance_rows(
+            rows,
+            &record,
+            AttendanceOptions {
+                merge_duplicate_participants: true,
+                late_after_minutes: 5,
+                early_before_minutes: 5,
+            },
+        );
+
+        assert_eq!(merged.len(), 1);
+        let row = &merged[0];
+        assert_eq!(
+            row.participants,
+            vec![
+                "conferenceRecords/rec-1/participants/p1",
+                "conferenceRecords/rec-1/participants/p2",
+            ]
+        );
+        assert_eq!(row.participant, "conferenceRecords/rec-1/participants/p1");
+        assert_eq!(row.display_name.as_deref(), Some("Alice Example"));
+        assert_eq!(row.user.as_deref(), Some("users/alice"));
+        assert_eq!(
+            row.first_join_time.as_deref(),
+            Some("2026-05-04T10:10:00.000Z")
+        );
+        assert_eq!(
+            row.last_leave_time.as_deref(),
+            Some("2026-05-04T10:50:00.000Z")
+        );
+        assert_eq!(row.duration_ms, Some(1_800_000));
+        assert_eq!(row.late, Some(true));
+        assert_eq!(row.late_by_ms, Some(600_000));
+        assert_eq!(row.early_leave, Some(true));
+        assert_eq!(row.early_leave_by_ms, Some(600_000));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_operations_cover_loopback_pagination_and_bounded_stop() {
+        let (base_url, requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-1",
+                    "space": "spaces/abc-defg-hij"
+                }],
+                "nextPageToken": "page-2"
+            })),
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-2",
+                    "space": "spaces/abc-defg-hij"
+                }]
+            })),
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-latest",
+                    "space": "spaces/abc-defg-hij"
+                }]
+            })),
+            json_response(json!({
+                "name": "conferenceRecords/rec-1",
+                "space": "spaces/abc-defg-hij"
+            })),
+            json_response(json!({
+                "participants": [{
+                    "name": "conferenceRecords/rec-1/participants/p1",
+                    "signedinUser": {
+                        "user": "users/alice",
+                        "displayName": "Alice Example"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p1/participantSessions/s1",
+                    "startTime": "2026-05-04T10:02:00Z",
+                    "endTime": "2026-05-04T10:40:00Z"
+                }]
+            })),
+            json_response(json!({
+                "conferenceRecords": [
+                    { "name": "conferenceRecords/rec-stop-1" },
+                    { "name": "conferenceRecords/rec-stop-2" }
+                ],
+                "nextPageToken": "must-not-be-requested"
+            })),
+        ]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "base_url",
+                json!(base_url),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+
+        let list_result = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORDS_LIST_OP,
+                "input": {
+                    "meeting": "spaces/abc-defg-hij",
+                    "page_size": 2,
+                    "max_items": 2
+                },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    CONFERENCE_RECORDS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("list conference records");
+        assert_eq!(list_result["count"], 2);
+
+        let latest_result = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORD_LATEST_OP,
+                "input": { "meeting": "https://meet.google.com/abc-defg-hij" },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    CONFERENCE_RECORD_LATEST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("latest conference record");
+        assert_eq!(
+            latest_result["conference_record"]["name"],
+            "conferenceRecords/rec-latest"
+        );
+
+        let get_result = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORD_GET_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    CONFERENCE_RECORD_GET_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("get conference record");
+        assert_eq!(
+            get_result["conference_record"]["name"],
+            "conferenceRecords/rec-1"
+        );
+
+        let participants_result = connector
+            .handle_invoke(json!({
+                "operation": PARTICIPANTS_LIST_OP,
+                "input": {
+                    "conference_record": "conferenceRecords/rec-1",
+                    "page_size": 5,
+                    "max_items": 10
+                },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    PARTICIPANTS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("list participants");
+        assert_eq!(
+            participants_result["participants"][0]["signedinUser"]["user"],
+            "users/alice"
+        );
+
+        let sessions_result = connector
+            .handle_invoke(json!({
+                "operation": PARTICIPANT_SESSIONS_LIST_OP,
+                "input": {
+                    "participant": "conferenceRecords/rec-1/participants/p1",
+                    "page_size": 5,
+                    "max_items": 10
+                },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    PARTICIPANT_SESSIONS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("list participant sessions");
+        assert_eq!(
+            sessions_result["participant_sessions"]
+                .as_array()
+                .expect("sessions")
+                .len(),
+            1
+        );
+
+        let bounded_result = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORDS_LIST_OP,
+                "input": {
+                    "page_size": 2,
+                    "max_items": 1
+                },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    CONFERENCE_RECORDS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("bounded list conference records");
+        assert_eq!(bounded_result["count"], 1);
+        finish_loopback(server);
+
+        let recorded = requests.lock().expect("requests").clone();
+        assert_eq!(recorded.len(), 7, "loopback transcript: {recorded:#?}");
+        let first_url =
+            Url::parse(&format!("http://loopback.test{}", recorded[0].target)).expect("first URL");
+        let first_query: BTreeMap<_, _> = first_url.query_pairs().into_owned().collect();
+        assert_eq!(first_url.path(), "/v2/conferenceRecords");
+        assert_eq!(first_query.get("pageSize"), Some(&"2".to_string()));
+        assert_eq!(
+            first_query.get("filter"),
+            Some(&"space.name = \"spaces/abc-defg-hij\"".to_string())
+        );
+        let second_url =
+            Url::parse(&format!("http://loopback.test{}", recorded[1].target)).expect("second URL");
+        let second_query: BTreeMap<_, _> = second_url.query_pairs().into_owned().collect();
+        assert_eq!(second_query.get("pageToken"), Some(&"page-2".to_string()));
+        let latest_url =
+            Url::parse(&format!("http://loopback.test{}", recorded[2].target)).expect("latest URL");
+        let latest_query: BTreeMap<_, _> = latest_url.query_pairs().into_owned().collect();
+        assert_eq!(latest_query.get("pageSize"), Some(&"1".to_string()));
+        assert_eq!(recorded[3].target, "/v2/conferenceRecords/rec%2D1");
+        assert_eq!(
+            recorded[4].target,
+            "/v2/conferenceRecords/rec%2D1/participants?pageSize=5"
+        );
+        assert_eq!(
+            recorded[5].target,
+            "/v2/conferenceRecords/rec%2D1/participants/p1/participantSessions?pageSize=5"
+        );
+        assert!(
+            !recorded
+                .iter()
+                .any(|request| request.target.contains("must-not-be-requested")),
+            "max_items must stop before following the next page token"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_attendance_uses_google_conference_records_loopback_with_logging() {
+        let (base_url, requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "conferenceRecords": [{
+                    "name": "conferenceRecords/rec-1",
+                    "space": "spaces/abc-defg-hij",
+                    "startTime": "2026-05-04T10:00:00Z",
+                    "endTime": "2026-05-04T11:00:00Z"
+                }]
+            })),
+            json_response(json!({
+                "participants": [
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p1",
+                        "signedinUser": {
+                            "user": "users/alice",
+                            "displayName": "Alice Example"
+                        }
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/participants/p2",
+                        "signedinUser": {
+                            "user": "users/bob",
+                            "displayName": "Bob Example"
+                        }
+                    }
+                ]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p1/participantSessions/s1",
+                    "startTime": "2026-05-04T10:02:00Z",
+                    "endTime": "2026-05-04T10:40:00Z"
+                }]
+            })),
+            json_response(json!({
+                "participantSessions": [{
+                    "name": "conferenceRecords/rec-1/participants/p2/participantSessions/s1",
+                    "startTime": "2026-05-04T10:15:00Z",
+                    "endTime": "2026-05-04T10:45:00Z"
+                }]
+            })),
+        ]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "base_url",
+                json!(base_url),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+        let capability =
+            capability_for_cap(&signing_key, ATTENDANCE_LIST_OP, MEET_CONFERENCE_READ_CAP);
+
+        let result = connector
+            .handle_invoke(json!({
+                "operation": ATTENDANCE_LIST_OP,
+                "input": {
+                    "meeting": "https://meet.google.com/abc-defg-hij",
+                    "max_items": 10
+                },
+                "capability_token": capability,
+            }))
+            .await
+            .expect("attendance invoke");
+        finish_loopback(server);
+
+        let attendance = result["attendance"].as_array().expect("attendance rows");
+        assert_eq!(attendance.len(), 2);
+        assert_eq!(
+            attendance[0]["conference_record"],
+            "conferenceRecords/rec-1"
+        );
+        assert_eq!(
+            result["participant_evidence"][0]["participants"]
+                .as_array()
+                .expect("participants")
+                .len(),
+            2
+        );
+
+        let recorded = requests.lock().expect("requests").clone();
+        assert_eq!(recorded.len(), 4, "loopback requests: {recorded:#?}");
+        assert!(
+            recorded
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+            "every Meet API request must carry injected auth"
+        );
+        let first_url =
+            Url::parse(&format!("http://loopback.test{}", recorded[0].target)).expect("first URL");
+        assert_eq!(first_url.path(), "/v2/conferenceRecords");
+        let query: BTreeMap<_, _> = first_url.query_pairs().into_owned().collect();
+        assert_eq!(
+            query.get("filter"),
+            Some(&"space.name = \"spaces/abc-defg-hij\"".to_string())
+        );
+        assert_eq!(query.get("pageSize"), Some(&DEFAULT_PAGE_SIZE.to_string()));
+        assert!(
+            recorded[1].target.contains("participants"),
+            "participant request path: {}",
+            recorded[1].target
+        );
+        assert_eq!(
+            recorded
+                .iter()
+                .filter(|request| request.target.contains("participantSessions"))
+                .count(),
+            2
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_api_rate_limit_preserves_retry_after() {
+        let (base_url, _requests, server) = spawn_loopback(vec![error_response(
+            429,
+            json!({ "error": { "message": "quota exceeded" } }),
+            vec![("retry-after", "3".to_string())],
+        )]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "base_url",
+                json!(base_url),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+        let capability = capability_for_cap(
+            &signing_key,
+            CONFERENCE_RECORDS_LIST_OP,
+            MEET_CONFERENCE_READ_CAP,
+        );
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORDS_LIST_OP,
+                "input": { "meeting": "spaces/abc-defg-hij" },
+                "capability_token": capability,
+            }))
+            .await
+            .expect_err("rate limit should fail");
+        finish_loopback(server);
+
+        assert!(matches!(
+            err,
+            FcpError::RateLimited {
+                retry_after_ms: 3000,
+                ..
+            }
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_api_rejects_missing_names_and_malformed_json() {
+        let (base_url, _requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "participants": [{
+                    "signedinUser": {
+                        "user": "users/alice",
+                        "displayName": "Alice Example"
+                    }
+                }]
+            })),
+            StubResponse {
+                status: 200,
+                headers: vec![("content-type", "application/json".to_string())],
+                body: "{not-json".to_string(),
+            },
+        ]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "base_url",
+                json!(base_url),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+
+        let missing_name = connector
+            .handle_invoke(json!({
+                "operation": PARTICIPANTS_LIST_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    PARTICIPANTS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect_err("participants without names must fail");
+        assert!(
+            matches!(missing_name, FcpError::InvalidRequest { message, .. } if message.contains("without name"))
+        );
+
+        let malformed_json = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORD_GET_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &signing_key,
+                    CONFERENCE_RECORD_GET_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect_err("malformed JSON must fail");
+        finish_loopback(server);
+        assert!(matches!(malformed_json, FcpError::Internal { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_api_rejects_malformed_collection_payload() {
+        let (base_url, _requests, server) = spawn_loopback(vec![json_response(json!({
+            "conferenceRecords": { "name": "not-an-array" }
+        }))]);
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "base_url",
+                json!(base_url),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_SPACE_READ_CAP, MEET_CONFERENCE_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+        let capability = capability_for_cap(
+            &signing_key,
+            CONFERENCE_RECORDS_LIST_OP,
+            MEET_CONFERENCE_READ_CAP,
+        );
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORDS_LIST_OP,
+                "input": { "meeting": "spaces/abc-defg-hij" },
+                "capability_token": capability,
+            }))
+            .await
+            .expect_err("malformed collection should fail");
+        finish_loopback(server);
+
+        assert!(
+            matches!(err, FcpError::InvalidRequest { message, .. } if message.contains("non-array collection"))
+        );
+    }
+
+    #[test]
     fn manifest_hash_matches_computed_interface() {
         let unchecked =
             ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).expect("parse unchecked");
@@ -1657,7 +2537,7 @@ mod tests {
     }
 
     #[test]
-    fn manifest_declares_foundation_capabilities_without_live_controls() {
+    fn manifest_declares_read_api_capabilities_without_live_controls() {
         let manifest =
             ConnectorManifest::parse_str_unchecked(MANIFEST_TOML).expect("parse manifest");
         let optional = &manifest.capabilities.optional;
@@ -1688,12 +2568,32 @@ mod tests {
                 .any(|capability| capability.as_str() == "browser.control")
         );
         assert!(
+            manifest.provides.operations.keys().all(|id| {
+                matches!(
+                    id.as_str(),
+                    NORMALIZE_SPACE_OP
+                        | CONFERENCE_RECORD_GET_OP
+                        | CONFERENCE_RECORDS_LIST_OP
+                        | CONFERENCE_RECORD_LATEST_OP
+                        | PARTICIPANTS_LIST_OP
+                        | PARTICIPANT_SESSIONS_LIST_OP
+                        | ATTENDANCE_LIST_OP
+                )
+            }),
+            "manifest should advertise only the space-normalize and conference-read operations"
+        );
+        assert_eq!(manifest.provides.operations.len(), 7);
+        assert_eq!(
             manifest
                 .provides
                 .operations
-                .keys()
-                .all(|id| id.as_str() == NORMALIZE_SPACE_OP),
-            "foundation manifest should advertise only normalize operation"
+                .iter()
+                .find(|(id, _operation)| id.as_str() == CONFERENCE_RECORDS_LIST_OP)
+                .map(|(_id, operation)| operation)
+                .expect("conference list op")
+                .capability
+                .as_str(),
+            MEET_CONFERENCE_READ_CAP
         );
     }
 }

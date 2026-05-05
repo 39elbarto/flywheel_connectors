@@ -2,7 +2,7 @@
 //!
 //! Implements the Flywheel Connector Protocol for headless browser automation,
 //! providing navigation, screenshots, text extraction, form filling, and JS evaluation
-//! via a Chrome DevTools Protocol endpoint.
+//! via an FCP browser-control plane that may use Chrome DevTools Protocol internally.
 
 #![forbid(unsafe_code)]
 #![allow(dead_code)]

@@ -14,18 +14,20 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_feishu::connector::{FeishuConnector, operations_info};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, SafetyTier, ZoneId,
 };
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_CHATS_LIST: &str = "feishu.chats.list";
 const OP_MESSAGES_SEND: &str = "feishu.messages.send";
+const OP_WEBHOOK_INGEST_REQUEST: &str = "feishu.webhook.ingest_request";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/feishu_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/feishu_connector/<timestamp>";
 const APP_ID: &str = "cli_test_app";
@@ -46,6 +48,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
             CapabilityId::from_static("feishu.users.read"),
             CapabilityId::from_static("feishu.docs.read"),
             CapabilityId::from_static("feishu.calendar.read"),
+            CapabilityId::from_static("feishu.webhook.ingest"),
         ],
         host: None,
         transport_caps: None,
@@ -53,11 +56,15 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    instance_id: &InstanceId,
+) -> CapabilityToken {
     let capability = match op {
         OP_CHATS_LIST => "feishu.chats.read",
         OP_MESSAGES_SEND => "feishu.messages.write",
-        _ => panic!("unsupported Feishu integration operation: {op}"),
+        _ => "feishu.webhook.ingest",
     };
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -73,12 +80,45 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id.as_str())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
+}
+
+fn feishu_webhook_signature(
+    timestamp: &str,
+    nonce: &str,
+    encrypt_key: &str,
+    raw_body: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(encrypt_key.as_bytes());
+    hasher.update(raw_body.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn signed_webhook_input(raw_body: String, policy: serde_json::Value) -> serde_json::Value {
+    let timestamp = "1715000000";
+    let nonce = "integration-nonce";
+    let encrypt_key = "integration-encrypt-key";
+    json!({
+        "method": "POST",
+        "headers": {
+            "x-lark-request-timestamp": timestamp,
+            "x-lark-request-nonce": nonce,
+            "x-lark-signature": feishu_webhook_signature(timestamp, nonce, encrypt_key, &raw_body),
+        },
+        "raw_body": raw_body,
+        "verification_token": "integration-token",
+        "encrypt_key": encrypt_key,
+        "policy": policy,
+    })
 }
 
 fn invoke_req(
@@ -283,7 +323,7 @@ async fn invoke_chats_list_preserves_pagination_evidence() {
                 "page_token": "page-1",
                 "page_size": 50
             }),
-            generate_valid_token(&signing_key, OP_CHATS_LIST),
+            generate_valid_token(&signing_key, OP_CHATS_LIST, connector.instance_id()),
         ))
         .await
         .unwrap();
@@ -327,7 +367,7 @@ async fn invoke_messages_send_emits_mutation_evidence() {
                 "msg_type": "text",
                 "content": "{\"text\":\"hello from integration\"}"
             }),
-            generate_valid_token(&signing_key, OP_MESSAGES_SEND),
+            generate_valid_token(&signing_key, OP_MESSAGES_SEND, connector.instance_id()),
         ))
         .await
         .unwrap();
@@ -342,6 +382,68 @@ async fn invoke_messages_send_emits_mutation_evidence() {
     );
 }
 
+#[fcp_async_core::runtime::test]
+async fn invoke_webhook_ingest_validates_and_normalizes_event_evidence() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector(&server).await;
+    let raw_body = serde_json::to_string(&json!({
+        "schema": "2.0",
+        "header": {
+            "event_id": "evt-integration-1",
+            "event_type": "im.message.receive_v1",
+            "token": "integration-token",
+        },
+        "event": {
+            "sender": { "sender_id": { "open_id": "ou_allowed" } },
+            "message": {
+                "message_id": "om_integration",
+                "chat_id": "oc_allowed",
+                "chat_type": "group",
+                "message_type": "text",
+                "content": "{\"text\":\"hello\"}",
+                "mentions": [{ "id": { "open_id": "ou_bot" } }]
+            }
+        }
+    }))
+    .unwrap();
+
+    let response = connector
+        .invoke(invoke_req(
+            OP_WEBHOOK_INGEST_REQUEST,
+            signed_webhook_input(
+                raw_body,
+                json!({
+                    "allowed_sender_open_ids": ["ou_allowed"],
+                    "allowed_chat_ids": ["oc_allowed"],
+                    "require_mention": true,
+                    "bot_open_id": "ou_bot",
+                }),
+            ),
+            generate_valid_token(
+                &signing_key,
+                OP_WEBHOOK_INGEST_REQUEST,
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("webhook result");
+    assert_eq!(result["status_code"], 200);
+    assert_eq!(result["reason_code"], "event_accepted");
+    assert_eq!(result["event_emitted"], true);
+    assert_eq!(
+        result["normalized_event"]["topic"],
+        "feishu.webhook.message_received"
+    );
+    assert_eq!(result["normalized_event"]["raw_content_included"], false);
+    println!(
+        "feishu_webhook_ingest_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
 #[test]
 fn introspection_emits_v3_compliance_evidence() {
     let connector = FeishuConnector::new();
@@ -349,7 +451,7 @@ fn introspection_emits_v3_compliance_evidence() {
     let value = serde_json::to_value(&introspection).unwrap();
     let operations = value["operations"].as_array().expect("operations array");
 
-    assert_eq!(operations.len(), 10);
+    assert_eq!(operations.len(), 11);
     assert!(operations.iter().all(|operation| {
         operation["ai_hints"]["when_to_use"]
             .as_str()
@@ -369,6 +471,22 @@ fn introspection_emits_v3_compliance_evidence() {
     assert_eq!(
         chats_list["idempotency"],
         serde_json::to_value(IdempotencyClass::Strict).unwrap()
+    );
+    let webhook = operations
+        .iter()
+        .find(|operation| operation["id"] == OP_WEBHOOK_INGEST_REQUEST)
+        .expect("webhook ingest operation");
+    assert_eq!(
+        webhook["idempotency"],
+        serde_json::to_value(IdempotencyClass::BestEffort).unwrap()
+    );
+    assert!(value["event_caps"]["replay"].as_bool().unwrap());
+    assert!(
+        value["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|event| event["topic"] == "feishu.webhook.message_received")
     );
     assert_eq!(value["auth_caps"]["methods"].as_array().unwrap().len(), 2);
 

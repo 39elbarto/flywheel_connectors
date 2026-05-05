@@ -28,6 +28,7 @@ tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
 async-trait.workspace = true
 sha2.workspace = true
 hex.workspace = true
+subtle.workspace = true
 anyhow.workspace = true
 
 [dev-dependencies]

@@ -8,16 +8,17 @@ use std::{
 use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityGrant, CapabilityId,
-    CapabilityVerifier, ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    CapabilityVerifier, ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, ResourceTypeInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::client::FeishuClient;
 use crate::types::{ReplyMessageRequest, SendMessageRequest};
@@ -41,6 +42,7 @@ const VERIFY_COMMANDS: [&str; 7] = [
     "rch exec -- cargo clippy -p fcp-feishu --all-targets -- -D warnings",
 ];
 const MAX_CHATS_PAGE_SIZE: u32 = 200;
+const FEISHU_WEBHOOK_MAX_BODY_BYTES: usize = 1024 * 1024;
 const ALLOWED_RECEIVE_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id", "email", "chat_id"];
 const ALLOWED_USER_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id"];
 
@@ -54,6 +56,7 @@ const OP_USERS_GET: &str = "feishu.users.get";
 const OP_DOCS_GET: &str = "feishu.docs.get";
 const OP_SHEETS_GET: &str = "feishu.sheets.get";
 const OP_CALENDAR_EVENTS: &str = "feishu.calendar.events";
+const OP_WEBHOOK_INGEST_REQUEST: &str = "feishu.webhook.ingest_request";
 const OP_HEALTH: &str = "feishu.health";
 
 // Capability IDs
@@ -63,6 +66,7 @@ const CAP_CHATS_READ: &str = "feishu.chats.read";
 const CAP_USERS_READ: &str = "feishu.users.read";
 const CAP_DOCS_READ: &str = "feishu.docs.read";
 const CAP_CALENDAR_READ: &str = "feishu.calendar.read";
+const CAP_WEBHOOK_INGEST: &str = "feishu.webhook.ingest";
 
 /// Feishu connector configuration.
 #[derive(Clone, Deserialize)]
@@ -253,6 +257,7 @@ fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId>
         OP_USERS_GET | OP_HEALTH => CAP_USERS_READ,
         OP_DOCS_GET | OP_SHEETS_GET => CAP_DOCS_READ,
         OP_CALENDAR_EVENTS => CAP_CALENDAR_READ,
+        OP_WEBHOOK_INGEST_REQUEST => CAP_WEBHOOK_INGEST,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -272,6 +277,38 @@ fn required_string_input<'a>(input: &'a serde_json::Value, field: &str) -> FcpRe
             code: 1005,
             message: format!("Missing '{field}' field"),
         })
+}
+
+fn required_object_input<'a>(input: &'a Value, field: &str) -> FcpResult<&'a Map<String, Value>> {
+    input
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing '{field}' object"),
+        })
+}
+
+fn validate_webhook_input(input: &Value) -> FcpResult<()> {
+    required_string_input(input, "method")?;
+    required_object_input(input, "headers")?;
+    required_string_input(input, "raw_body")?;
+    required_string_input(input, "verification_token")?;
+    required_string_input(input, "encrypt_key")?;
+    required_object_input(input, "policy")?;
+
+    if let Some(max_body_bytes) = input.get("max_body_bytes").and_then(Value::as_u64)
+        && (max_body_bytes == 0 || max_body_bytes > FEISHU_WEBHOOK_MAX_BODY_BYTES as u64)
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "max_body_bytes must be between 1 and {FEISHU_WEBHOOK_MAX_BODY_BYTES}"
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpResult<()> {
@@ -319,6 +356,9 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpRe
         OP_CALENDAR_EVENTS => {
             required_string_input(input, "calendar_id")?;
         }
+        OP_WEBHOOK_INGEST_REQUEST => {
+            validate_webhook_input(input)?;
+        }
         OP_HEALTH => {}
         _ => {
             return Err(FcpError::InvalidRequest {
@@ -329,6 +369,656 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpRe
     }
 
     Ok(())
+}
+
+fn header_value<'a>(headers: &'a Map<String, Value>, name: &str) -> Option<&'a str> {
+    headers.iter().find_map(|(key, value)| {
+        if !key.eq_ignore_ascii_case(name) {
+            return None;
+        }
+        value.as_str().or_else(|| {
+            value
+                .as_array()
+                .and_then(|values| values.iter().find_map(Value::as_str))
+        })
+    })
+}
+
+fn value_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    let mut current = value;
+    for component in path {
+        current = current.get(*component)?;
+    }
+    Some(current)
+}
+
+fn string_at_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    value_at_path(value, path).and_then(Value::as_str)
+}
+
+fn array_contains_string(value: &Value, field: &str, needle: &str) -> bool {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(Value::as_str)
+                .any(|item| item == needle)
+        })
+}
+
+fn optional_bool(value: &Value, field: &str) -> bool {
+    value.get(field).and_then(Value::as_bool).unwrap_or(false)
+}
+
+fn feishu_signature_hex(timestamp: &str, nonce: &str, encrypt_key: &str, raw_body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(timestamp.as_bytes());
+    hasher.update(nonce.as_bytes());
+    hasher.update(encrypt_key.as_bytes());
+    hasher.update(raw_body.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+fn constant_time_hex_eq(expected_hex: &str, provided_hex: &str) -> bool {
+    let Ok(expected) = hex::decode(expected_hex) else {
+        return false;
+    };
+    let Ok(provided) = hex::decode(provided_hex) else {
+        return false;
+    };
+    bool::from(expected.ct_eq(&provided))
+}
+
+fn verify_webhook_signature(
+    headers: &Map<String, Value>,
+    encrypt_key: &str,
+    raw_body: &str,
+) -> Result<(), &'static str> {
+    let Some(timestamp) = header_value(headers, "x-lark-request-timestamp") else {
+        return Err("missing_signature_timestamp");
+    };
+    let Some(nonce) = header_value(headers, "x-lark-request-nonce") else {
+        return Err("missing_signature_nonce");
+    };
+    let Some(signature) = header_value(headers, "x-lark-signature") else {
+        return Err("missing_signature");
+    };
+    let expected = feishu_signature_hex(timestamp, nonce, encrypt_key, raw_body);
+    if constant_time_hex_eq(&expected, signature) {
+        Ok(())
+    } else {
+        Err("invalid_signature")
+    }
+}
+
+fn webhook_response(
+    status_code: u16,
+    reason_code: &str,
+    body_bytes: usize,
+    logs: Vec<Value>,
+    response_body: Value,
+) -> Value {
+    json!({
+        "accepted": status_code < 400,
+        "status_code": status_code,
+        "reason_code": reason_code,
+        "event_emitted": false,
+        "event_id": Value::Null,
+        "event_type": Value::Null,
+        "dedupe_key": Value::Null,
+        "normalized_event": Value::Null,
+        "policy_decision": Value::Null,
+        "response_body": response_body,
+        "body_bytes": body_bytes,
+        "request_region": {
+            "method_checked": true,
+            "signature_verified": status_code < 400 || reason_code != "invalid_signature",
+            "max_body_bytes": FEISHU_WEBHOOK_MAX_BODY_BYTES,
+            "transport": "host_forwarded_request",
+        },
+        "logs": logs,
+    })
+}
+
+fn webhook_rejection(
+    status_code: u16,
+    reason_code: &str,
+    body_bytes: usize,
+    logs: Vec<Value>,
+) -> Value {
+    webhook_response(status_code, reason_code, body_bytes, logs, json!({}))
+}
+
+fn webhook_event_id(payload: &Value, raw_body: &str) -> String {
+    string_at_path(payload, &["header", "event_id"])
+        .or_else(|| string_at_path(payload, &["event", "message", "message_id"]))
+        .or_else(|| string_at_path(payload, &["event", "message_id"]))
+        .or_else(|| string_at_path(payload, &["event", "comment_id"]))
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            let mut hasher = Sha256::new();
+            hasher.update(raw_body.as_bytes());
+            format!("sha256:{}", hex::encode(hasher.finalize()))
+        })
+}
+
+fn webhook_event_type(payload: &Value) -> &str {
+    string_at_path(payload, &["header", "event_type"])
+        .or_else(|| payload.get("type").and_then(Value::as_str))
+        .unwrap_or("unknown")
+}
+
+fn feishu_topic_for_event_type(event_type: &str) -> &'static str {
+    match event_type {
+        "im.message.receive_v1" => "feishu.webhook.message_received",
+        "im.message.message_read_v1" => "feishu.webhook.message_read",
+        "im.message.reaction.created_v1" => "feishu.webhook.reaction_created",
+        "im.message.reaction.deleted_v1" => "feishu.webhook.reaction_deleted",
+        "drive.notice.comment_add_v1" => "feishu.webhook.document_comment_added",
+        _ => "feishu.webhook.unknown_event",
+    }
+}
+
+fn event_section(payload: &Value) -> &Value {
+    payload.get("event").unwrap_or(payload)
+}
+
+fn actor_open_id(event: &Value) -> Option<&str> {
+    string_at_path(event, &["sender", "sender_id", "open_id"])
+        .or_else(|| string_at_path(event, &["operator", "operator_id", "open_id"]))
+        .or_else(|| string_at_path(event, &["operator_id", "open_id"]))
+        .or_else(|| string_at_path(event, &["user_id", "open_id"]))
+        .or_else(|| string_at_path(event, &["user", "open_id"]))
+        .or_else(|| string_at_path(event, &["comment", "user_id", "open_id"]))
+        .or_else(|| string_at_path(event, &["comment", "user", "open_id"]))
+}
+
+fn chat_id(event: &Value) -> Option<&str> {
+    string_at_path(event, &["message", "chat_id"])
+        .or_else(|| string_at_path(event, &["chat_id"]))
+        .or_else(|| string_at_path(event, &["chat", "chat_id"]))
+}
+
+fn message_id(event: &Value) -> Option<&str> {
+    string_at_path(event, &["message", "message_id"])
+        .or_else(|| string_at_path(event, &["message_id"]))
+}
+
+fn mentions_bot(event: &Value, bot_open_id: &str) -> bool {
+    let Some(mentions) = value_at_path(event, &["message", "mentions"]).and_then(Value::as_array)
+    else {
+        return false;
+    };
+
+    mentions.iter().any(|mention| {
+        string_at_path(mention, &["id", "open_id"]) == Some(bot_open_id)
+            || string_at_path(mention, &["id", "user_id"]) == Some(bot_open_id)
+            || mention.get("open_id").and_then(Value::as_str) == Some(bot_open_id)
+            || mention.get("key").and_then(Value::as_str) == Some("@_all")
+    })
+}
+
+fn normalize_message_event(event_type: &str, event_id: &str, event: &Value) -> Value {
+    let message = event.get("message").unwrap_or(event);
+    let content_present = message
+        .get("content")
+        .and_then(Value::as_str)
+        .is_some_and(|content| !content.trim().is_empty());
+    json!({
+        "topic": feishu_topic_for_event_type(event_type),
+        "event_type": event_type,
+        "event_id": event_id,
+        "message_id": message_id(event),
+        "chat_id": chat_id(event),
+        "chat_type": message.get("chat_type").and_then(Value::as_str),
+        "message_type": message.get("message_type").and_then(Value::as_str),
+        "sender_open_id": actor_open_id(event),
+        "content_present": content_present,
+        "raw_content_included": false,
+    })
+}
+
+fn normalize_read_event(event_type: &str, event_id: &str, event: &Value) -> Value {
+    json!({
+        "topic": feishu_topic_for_event_type(event_type),
+        "event_type": event_type,
+        "event_id": event_id,
+        "message_id": message_id(event),
+        "chat_id": chat_id(event),
+        "reader_open_id": actor_open_id(event),
+    })
+}
+
+fn normalize_reaction_event(event_type: &str, event_id: &str, event: &Value) -> Value {
+    json!({
+        "topic": feishu_topic_for_event_type(event_type),
+        "event_type": event_type,
+        "event_id": event_id,
+        "message_id": message_id(event),
+        "chat_id": chat_id(event),
+        "operator_open_id": actor_open_id(event),
+        "reaction_type": string_at_path(event, &["reaction", "emoji_type"])
+            .or_else(|| string_at_path(event, &["reaction", "reaction_type"])),
+    })
+}
+
+fn normalize_comment_event(event_type: &str, event_id: &str, event: &Value) -> Value {
+    json!({
+        "topic": feishu_topic_for_event_type(event_type),
+        "event_type": event_type,
+        "event_id": event_id,
+        "file_token": event.get("file_token").and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["file", "token"])),
+        "file_type": event.get("file_type").and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["file", "type"])),
+        "comment_id": event.get("comment_id").and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["comment", "comment_id"])),
+        "reply_id": event.get("reply_id").and_then(Value::as_str)
+            .or_else(|| string_at_path(event, &["comment", "reply_id"])),
+        "actor_open_id": actor_open_id(event),
+    })
+}
+
+fn normalize_webhook_event(event_type: &str, event_id: &str, event: &Value) -> Value {
+    match event_type {
+        "im.message.receive_v1" => normalize_message_event(event_type, event_id, event),
+        "im.message.message_read_v1" => normalize_read_event(event_type, event_id, event),
+        "im.message.reaction.created_v1" | "im.message.reaction.deleted_v1" => {
+            normalize_reaction_event(event_type, event_id, event)
+        }
+        "drive.notice.comment_add_v1" => normalize_comment_event(event_type, event_id, event),
+        _ => json!({
+            "topic": feishu_topic_for_event_type(event_type),
+            "event_type": event_type,
+            "event_id": event_id,
+            "actor_open_id": actor_open_id(event),
+            "chat_id": chat_id(event),
+            "raw_payload_included": false,
+        }),
+    }
+}
+
+fn policy_array_contains(policy: &Value, field: &str, value: Option<&str>) -> bool {
+    value.is_some_and(|needle| array_contains_string(policy, field, needle))
+}
+
+fn comment_policy_decision(policy: &Value, event: &Value) -> (bool, Value) {
+    let comment_policy = policy
+        .get("comment")
+        .or_else(|| policy.get("comment_rules"))
+        .unwrap_or(&Value::Null);
+
+    if comment_policy.is_null() {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_policy_required",
+            }),
+        );
+    }
+    if comment_policy.get("enabled").and_then(Value::as_bool) == Some(false) {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_policy_disabled",
+            }),
+        );
+    }
+
+    let actor = actor_open_id(event);
+    let document_ref = event
+        .get("file_token")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["file", "token"]));
+    if comment_policy
+        .get("document_allowlist")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        && !policy_array_contains(comment_policy, "document_allowlist", document_ref)
+    {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_document_not_allowed",
+                "file_token": document_ref,
+            }),
+        );
+    }
+
+    if policy_array_contains(comment_policy, "allow_from_open_ids", actor)
+        || policy_array_contains(comment_policy, "allow_from", actor)
+    {
+        return (
+            true,
+            json!({
+                "allowed": true,
+                "reason_code": "comment_allowlist_match",
+                "actor_open_id": actor,
+                "policy": comment_policy.get("policy").and_then(Value::as_str).unwrap_or("allowlist"),
+            }),
+        );
+    }
+
+    let mode = comment_policy
+        .get("policy")
+        .and_then(Value::as_str)
+        .unwrap_or("pairing");
+    if mode == "pairing" && policy_array_contains(comment_policy, "paired_open_ids", actor) {
+        return (
+            true,
+            json!({
+                "allowed": true,
+                "reason_code": "comment_pairing_match",
+                "actor_open_id": actor,
+                "policy": "pairing",
+            }),
+        );
+    }
+
+    (
+        false,
+        json!({
+            "allowed": false,
+            "reason_code": "comment_actor_not_allowed",
+            "actor_open_id": actor,
+            "policy": mode,
+        }),
+    )
+}
+
+fn webhook_policy_decision(event_type: &str, event: &Value, policy: &Value) -> (bool, Value) {
+    let actor = actor_open_id(event);
+    let chat = chat_id(event);
+    let bot_open_id = policy.get("bot_open_id").and_then(Value::as_str);
+
+    if bot_open_id.is_some() && actor == bot_open_id {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "self_or_bot_sender",
+                "actor_open_id": actor,
+            }),
+        );
+    }
+    if policy
+        .get("allowed_sender_open_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        && !policy_array_contains(policy, "allowed_sender_open_ids", actor)
+    {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "sender_not_allowed",
+                "actor_open_id": actor,
+            }),
+        );
+    }
+    if policy
+        .get("allowed_chat_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|items| !items.is_empty())
+        && !policy_array_contains(policy, "allowed_chat_ids", chat)
+    {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "chat_not_allowed",
+                "chat_id": chat,
+            }),
+        );
+    }
+    if optional_bool(policy, "require_mention")
+        && event_type == "im.message.receive_v1"
+        && bot_open_id.is_none_or(|bot| !mentions_bot(event, bot))
+    {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "mention_required",
+                "bot_open_id": bot_open_id,
+            }),
+        );
+    }
+    if event_type == "drive.notice.comment_add_v1" {
+        return comment_policy_decision(policy, event);
+    }
+
+    (
+        true,
+        json!({
+            "allowed": true,
+            "reason_code": "policy_allowed",
+            "actor_open_id": actor,
+            "chat_id": chat,
+        }),
+    )
+}
+
+fn seen_event_ids(input: &Value, event_id: &str) -> bool {
+    input
+        .get("seen_event_ids")
+        .and_then(Value::as_array)
+        .is_some_and(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .any(|id| id == event_id)
+        })
+}
+
+fn feishu_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: false,
+        replay: true,
+        min_buffer_events: 0,
+        requires_ack: false,
+    }
+}
+
+fn feishu_events_info() -> Vec<EventInfo> {
+    vec![
+        EventInfo {
+            topic: "feishu.webhook.message_received".into(),
+            schema: json!({ "type": "object", "required": ["event_id", "event_type"] }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: "feishu.webhook.message_read".into(),
+            schema: json!({ "type": "object", "required": ["event_id", "event_type"] }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: "feishu.webhook.reaction_created".into(),
+            schema: json!({ "type": "object", "required": ["event_id", "event_type"] }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: "feishu.webhook.reaction_deleted".into(),
+            schema: json!({ "type": "object", "required": ["event_id", "event_type"] }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: "feishu.webhook.document_comment_added".into(),
+            schema: json!({ "type": "object", "required": ["event_id", "event_type"] }),
+            requires_ack: false,
+        },
+    ]
+}
+
+fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
+    validate_webhook_input(input)?;
+    let method = required_string_input(input, "method")?;
+    let headers = required_object_input(input, "headers")?;
+    let raw_body = required_string_input(input, "raw_body")?;
+    let expected_verifier = required_string_input(input, "verification_token")?;
+    let encrypt_key = required_string_input(input, "encrypt_key")?;
+    let policy = required_object_input(input, "policy")?;
+    let body_bytes = raw_body.len();
+    let mut logs = vec![json!({
+        "layer": "request_region",
+        "code": "received",
+        "method": method,
+        "body_bytes": body_bytes,
+    })];
+
+    if !method.eq_ignore_ascii_case("POST") {
+        logs.push(json!({"layer": "request_region", "code": "method_not_allowed"}));
+        return Ok(webhook_rejection(
+            405,
+            "method_not_allowed",
+            body_bytes,
+            logs,
+        ));
+    }
+    let max_body_bytes = input
+        .get("max_body_bytes")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(FEISHU_WEBHOOK_MAX_BODY_BYTES);
+    if body_bytes > max_body_bytes {
+        logs.push(json!({"layer": "request_region", "code": "body_too_large"}));
+        return Ok(webhook_rejection(413, "body_too_large", body_bytes, logs));
+    }
+    if optional_bool(input, "deadline_exceeded") {
+        logs.push(json!({"layer": "request_region", "code": "body_timeout"}));
+        return Ok(webhook_rejection(408, "body_timeout", body_bytes, logs));
+    }
+    if optional_bool(input, "rate_limited") {
+        logs.push(json!({"layer": "request_region", "code": "rate_limited"}));
+        return Ok(webhook_rejection(429, "rate_limited", body_bytes, logs));
+    }
+
+    if let Err(reason) = verify_webhook_signature(headers, encrypt_key, raw_body) {
+        logs.push(json!({"layer": "security", "code": reason}));
+        return Ok(webhook_rejection(401, reason, body_bytes, logs));
+    }
+    logs.push(json!({"layer": "security", "code": "signature_verified"}));
+
+    let payload: Value = match serde_json::from_str(raw_body) {
+        Ok(payload) => payload,
+        Err(err) => {
+            logs.push(
+                json!({"layer": "parser", "code": "malformed_json", "error": err.to_string()}),
+            );
+            return Ok(webhook_rejection(400, "malformed_json", body_bytes, logs));
+        }
+    };
+
+    let presented_verifier = payload
+        .get("token")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(&payload, &["header", "token"]));
+    if presented_verifier != Some(expected_verifier) {
+        logs.push(json!({"layer": "security", "code": "invalid_verification_token"}));
+        return Ok(webhook_rejection(
+            401,
+            "invalid_verification_token",
+            body_bytes,
+            logs,
+        ));
+    }
+    logs.push(json!({"layer": "security", "code": "verification_token_matched"}));
+
+    if payload.get("encrypt").is_some() {
+        logs.push(json!({"layer": "security", "code": "encrypted_payload_unsupported"}));
+        return Ok(webhook_rejection(
+            415,
+            "encrypted_payload_unsupported",
+            body_bytes,
+            logs,
+        ));
+    }
+
+    if payload.get("type").and_then(Value::as_str) == Some("url_verification") {
+        let Some(challenge) = payload.get("challenge").and_then(Value::as_str) else {
+            logs.push(json!({"layer": "parser", "code": "missing_challenge"}));
+            return Ok(webhook_rejection(
+                400,
+                "missing_challenge",
+                body_bytes,
+                logs,
+            ));
+        };
+        logs.push(json!({"layer": "dispatcher", "code": "challenge_response"}));
+        return Ok(webhook_response(
+            200,
+            "challenge_response",
+            body_bytes,
+            logs,
+            json!({ "challenge": challenge }),
+        ));
+    }
+
+    let event_type = webhook_event_type(&payload);
+    let event_id = webhook_event_id(&payload, raw_body);
+    let event = event_section(&payload);
+    let dedupe_key = format!("feishu:{event_type}:{event_id}");
+    if seen_event_ids(input, &event_id) {
+        logs.push(json!({
+            "layer": "dedupe",
+            "code": "duplicate_event",
+            "mode": "caller_supplied_seen_event_ids",
+        }));
+        let mut duplicate = webhook_response(200, "duplicate_event", body_bytes, logs, json!({}));
+        duplicate["event_id"] = json!(event_id);
+        duplicate["event_type"] = json!(event_type);
+        duplicate["dedupe_key"] = json!(dedupe_key);
+        return Ok(duplicate);
+    }
+
+    let normalized_event = normalize_webhook_event(event_type, &event_id, event);
+    let (allowed, policy_decision) =
+        webhook_policy_decision(event_type, event, &Value::Object(policy.clone()));
+    if !allowed {
+        logs.push(json!({"layer": "policy", "code": "event_denied"}));
+        let mut denied = webhook_response(
+            200,
+            policy_decision
+                .get("reason_code")
+                .and_then(Value::as_str)
+                .unwrap_or("policy_denied"),
+            body_bytes,
+            logs,
+            json!({}),
+        );
+        denied["event_id"] = json!(event_id);
+        denied["event_type"] = json!(event_type);
+        denied["dedupe_key"] = json!(dedupe_key);
+        denied["normalized_event"] = normalized_event;
+        denied["policy_decision"] = policy_decision;
+        return Ok(denied);
+    }
+
+    logs.push(json!({"layer": "dispatcher", "code": "event_normalized"}));
+    Ok(json!({
+        "accepted": true,
+        "status_code": 200,
+        "reason_code": "event_accepted",
+        "event_emitted": true,
+        "event_id": event_id,
+        "event_type": event_type,
+        "dedupe_key": dedupe_key,
+        "normalized_event": normalized_event,
+        "policy_decision": policy_decision,
+        "response_body": {},
+        "body_bytes": body_bytes,
+        "request_region": {
+            "method_checked": true,
+            "signature_verified": true,
+            "max_body_bytes": max_body_bytes,
+            "transport": "host_forwarded_request",
+        },
+        "logs": logs,
+    }))
 }
 
 // Doctor types
@@ -429,7 +1119,7 @@ fn operator_guidance() -> OperatorGuidance {
         ],
         limitations: vec![
             "This first slice is tenant-app bound and does not impersonate arbitrary users or cross tenant boundaries.",
-            "Webhook ingestion, websocket event delivery, Drive search/export/write, and calendar mutations remain explicit non-goals.",
+            "Webhook ingestion is host-forwarded request processing only; embedded listener lifecycle, websocket event delivery, Drive search/export/write, and calendar mutations remain explicit non-goals.",
             "Known-token reads are supported for docs, sheets, and calendar events, but this connector does not discover or enumerate those resources globally.",
         ],
         common_remediation: vec![
@@ -467,6 +1157,7 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "notes": [
                 "The connector is bound to one installed tenant app and uses the tenant access token internal auth endpoint.",
                 "Read operations cover messages, chats, users, known docs, known spreadsheets, and known calendar event lists.",
+                "Webhook support is a host-forwarded request ingestion operation; this connector does not open a listening socket.",
             ],
         },
         "auth_boundary": {
@@ -476,7 +1167,8 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "base_url": config.map(|cfg| cfg.base_url.clone()),
             "cross_tenant_supported": false,
             "user_impersonation_supported": false,
-            "webhook_receiver_included": false,
+            "webhook_receiver_included": true,
+            "webhook_transport": "host_forwarded_request_operation",
             "websocket_events_included": false,
         },
         "service_inventory": {
@@ -485,10 +1177,13 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "directory": [OP_USERS_GET],
             "docs": [OP_DOCS_GET, OP_SHEETS_GET],
             "calendar": [OP_CALENDAR_EVENTS],
+            "webhook": [OP_WEBHOOK_INGEST_REQUEST],
             "health": [OP_HEALTH],
         },
         "non_goals": [
-            "Webhook ingestion and websocket event delivery",
+            "Embedded webhook listener lifecycle and websocket event delivery",
+            "Encrypted Feishu webhook payload decryption",
+            "Automated document-comment reply workflow",
             "Cross-tenant brokering or arbitrary user impersonation",
             "Drive search, export, folder traversal, and write operations",
             "Calendar mutation or subscription setup"
@@ -523,6 +1218,12 @@ impl FeishuConnector {
         }
     }
 
+    /// Return this connector instance ID for host-issued capability token binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -547,7 +1248,11 @@ impl FeishuConnector {
                 credentials_configured: !config.app_id.trim().is_empty()
                     && !config.app_secret.trim().is_empty(),
                 authenticated_identity_probe: "POST /open-apis/auth/v3/tenant_access_token/internal",
-                risky_mutations: vec![OP_MESSAGES_SEND, OP_MESSAGES_REPLY],
+                risky_mutations: vec![
+                    OP_MESSAGES_SEND,
+                    OP_MESSAGES_REPLY,
+                    OP_WEBHOOK_INGEST_REQUEST,
+                ],
                 supported_hosts: vec![FEISHU_CN_HOST, FEISHU_GLOBAL_HOST],
                 tenant_app_boundary: FEISHU_TENANT_APP_BOUNDARY,
             }
@@ -1114,6 +1819,62 @@ pub fn operations_info() -> Vec<OperationInfo> {
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
+            id: OperationId::from_static(OP_WEBHOOK_INGEST_REQUEST),
+            summary: "Ingest a host-forwarded Feishu webhook request".into(),
+            description: Some(
+                "Validates a Feishu/Lark webhook request already accepted by host ingress, verifies token and signature, rejects encrypted payloads, normalizes supported message/read/reaction/document-comment events, and applies caller-supplied sender/chat/comment policy before returning an event record.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["method", "headers", "raw_body", "verification_token", "encrypt_key", "policy"],
+                "properties": {
+                    "method": { "type": "string", "description": "Forwarded HTTP method; only POST is accepted" },
+                    "headers": { "type": "object", "description": "Forwarded request headers including x-lark-request-timestamp, x-lark-request-nonce, and x-lark-signature" },
+                    "raw_body": { "type": "string", "description": "Exact raw JSON body bytes decoded as UTF-8; required for Feishu signature verification" },
+                    "verification_token": { "type": "string", "description": "Configured Feishu verification token" },
+                    "encrypt_key": { "type": "string", "description": "Configured Feishu encrypt key used by Feishu signature construction; encrypted payloads are still rejected by this slice" },
+                    "policy": { "type": "object", "description": "Sender/chat/mention/comment policy evaluated before event emission" },
+                    "seen_event_ids": { "type": "array", "items": { "type": "string" }, "description": "Caller-supplied dedupe set for idempotent retry handling" },
+                    "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": FEISHU_WEBHOOK_MAX_BODY_BYTES },
+                    "deadline_exceeded": { "type": "boolean", "description": "Host request-region timeout signal for deterministic tests and admission handling" },
+                    "rate_limited": { "type": "boolean", "description": "Host request-region rate-limit signal for deterministic tests and admission handling" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["accepted", "status_code", "reason_code", "event_emitted", "logs"],
+                "properties": {
+                    "accepted": { "type": "boolean" },
+                    "status_code": { "type": "integer" },
+                    "reason_code": { "type": "string" },
+                    "event_emitted": { "type": "boolean" },
+                    "event_id": { "type": ["string", "null"] },
+                    "event_type": { "type": ["string", "null"] },
+                    "dedupe_key": { "type": ["string", "null"] },
+                    "normalized_event": { "type": ["object", "null"] },
+                    "policy_decision": { "type": ["object", "null"] },
+                    "response_body": { "type": "object" },
+                    "logs": { "type": "array" }
+                }
+            }),
+            capability: CapabilityId::from_static(CAP_WEBHOOK_INGEST),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When host ingress forwards a Feishu/Lark webhook request for validation, normalization, and policy gating.".into(),
+                common_mistakes: vec![
+                    "Pass the exact raw JSON body string used for signature verification.".into(),
+                    "Do not use this operation as an embedded HTTP listener; host ingress owns the socket.".into(),
+                    "Encrypted Feishu webhook payloads are deliberately rejected in this slice.".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(CAP_WEBHOOK_INGEST)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Feishu API health check".into(),
             description: Some(
@@ -1228,12 +1989,7 @@ impl FcpConnector for FeishuConnector {
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(feishu_event_caps()),
             auth_caps: Some(feishu_auth_caps()),
             op_catalog_hash: None,
         })
@@ -1416,15 +2172,10 @@ impl FcpConnector for FeishuConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: operations_info(),
-            events: Vec::new(),
+            events: feishu_events_info(),
             resource_types: feishu_resource_types(),
             auth_caps: Some(feishu_auth_caps()),
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(feishu_event_caps()),
         }
     }
 
@@ -1549,7 +2300,7 @@ impl FeishuConnector {
                 })?
             }
             OP_CHATS_LIST => {
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let pagination_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let page_size = req
                     .input
                     .get("page_size")
@@ -1557,7 +2308,7 @@ impl FeishuConnector {
                     .map(validate_chats_page_size)
                     .transpose()?;
                 let resp = client
-                    .list_chats(runtime, page_token, page_size)
+                    .list_chats(runtime, pagination_cursor, page_size)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -1618,7 +2369,7 @@ impl FeishuConnector {
                 })?
             }
             OP_SHEETS_GET => {
-                let spreadsheet_token = req
+                let spreadsheet_ref = req
                     .input
                     .get("spreadsheet_token")
                     .and_then(|v| v.as_str())
@@ -1627,7 +2378,7 @@ impl FeishuConnector {
                         message: "Missing 'spreadsheet_token' field".into(),
                     })?;
                 let resp = client
-                    .get_spreadsheet(runtime, spreadsheet_token)
+                    .get_spreadsheet(runtime, spreadsheet_ref)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
@@ -1643,15 +2394,16 @@ impl FeishuConnector {
                         code: 1005,
                         message: "Missing 'calendar_id' field".into(),
                     })?;
-                let page_token = req.input.get("page_token").and_then(|v| v.as_str());
+                let pagination_cursor = req.input.get("page_token").and_then(|v| v.as_str());
                 let resp = client
-                    .list_calendar_events(runtime, calendar_id, page_token)
+                    .list_calendar_events(runtime, calendar_id, pagination_cursor)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(resp).map_err(|e| FcpError::Internal {
                     message: format!("Failed to serialize response: {e}"),
                 })?
             }
+            OP_WEBHOOK_INGEST_REQUEST => invoke_webhook_ingest_request(&req.input)?,
             OP_HEALTH => {
                 client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "healthy" })
@@ -1679,6 +2431,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -1693,6 +2446,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id.as_str())
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .unwrap()
@@ -1750,6 +2504,7 @@ mod tests {
                 CapabilityId::from_static(CAP_USERS_READ),
                 CapabilityId::from_static(CAP_DOCS_READ),
                 CapabilityId::from_static(CAP_CALENDAR_READ),
+                CapabilityId::from_static(CAP_WEBHOOK_INGEST),
             ],
             host: None,
             transport_caps: None,
@@ -1911,7 +2666,12 @@ mod tests {
                 "msg_type": "text",
                 "content": "{\"text\":\"hello\"}"
             }),
-            signed_token(&signing_key, CAP_MSG_WRITE, OP_MESSAGES_SEND),
+            signed_token(
+                &signing_key,
+                CAP_MSG_WRITE,
+                OP_MESSAGES_SEND,
+                connector.instance_id(),
+            ),
         );
         let resp = connector.simulate(req).await.unwrap();
         assert!(resp.would_succeed);
@@ -1930,7 +2690,12 @@ mod tests {
                 "msg_type": "text",
                 "content": "{\"text\":\"hello\"}"
             }),
-            signed_token(&signing_key, CAP_CHATS_READ, OP_CHATS_LIST),
+            signed_token(
+                &signing_key,
+                CAP_CHATS_READ,
+                OP_CHATS_LIST,
+                connector.instance_id(),
+            ),
         );
         let resp = connector.simulate(req).await.unwrap();
         assert!(!resp.would_succeed);
@@ -1946,7 +2711,12 @@ mod tests {
             &connector,
             OP_MESSAGES_SEND,
             json!({}),
-            signed_token(&signing_key, CAP_MSG_WRITE, OP_MESSAGES_SEND),
+            signed_token(
+                &signing_key,
+                CAP_MSG_WRITE,
+                OP_MESSAGES_SEND,
+                connector.instance_id(),
+            ),
         );
         let resp = connector.simulate(req).await.unwrap();
         assert!(!resp.would_succeed);
@@ -2006,7 +2776,7 @@ mod tests {
     fn test_introspection_operations() {
         let connector = FeishuConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 10);
+        assert_eq!(intro.operations.len(), 11);
         let op_ids: Vec<&str> = intro.operations.iter().map(|op| op.id.as_str()).collect();
         assert!(op_ids.contains(&OP_MESSAGES_SEND));
         assert!(op_ids.contains(&OP_MESSAGES_REPLY));
@@ -2017,13 +2787,14 @@ mod tests {
         assert!(op_ids.contains(&OP_DOCS_GET));
         assert!(op_ids.contains(&OP_SHEETS_GET));
         assert!(op_ids.contains(&OP_CALENDAR_EVENTS));
+        assert!(op_ids.contains(&OP_WEBHOOK_INGEST_REQUEST));
         assert!(op_ids.contains(&OP_HEALTH));
     }
 
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 11);
     }
 
     #[test]
@@ -2104,7 +2875,13 @@ mod tests {
         let connector = FeishuConnector::new();
         let intro = connector.introspect();
         assert!(!intro.event_caps.as_ref().unwrap().streaming);
-        assert!(intro.events.is_empty());
+        assert!(intro.event_caps.as_ref().unwrap().replay);
+        assert!(
+            intro
+                .events
+                .iter()
+                .any(|event| event.topic == "feishu.webhook.message_received")
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2194,8 +2971,10 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn test_handshake_grants_capabilities() {
         let mut connector = FeishuConnector::new();
+        configure_for_tests(&mut connector).await;
         let result = connector.handshake(base_handshake()).await.unwrap();
-        assert_eq!(result.capabilities_granted.len(), 6);
+        assert_eq!(result.capabilities_granted.len(), 7);
+        assert!(result.event_caps.unwrap().replay);
         assert!(result.auth_caps.is_some());
     }
 
@@ -2318,5 +3097,214 @@ mod tests {
         assert!(validate_chats_page_size(0).is_err());
         assert!(validate_chats_page_size(201).is_err());
         assert_eq!(validate_chats_page_size(200).unwrap(), 200);
+    }
+
+    fn signed_webhook_input(raw_body: String, policy: Value) -> Value {
+        let timestamp = "1715000000";
+        let nonce = "nonce-123";
+        let encrypt_key = "encrypt-key";
+        let signature = feishu_signature_hex(timestamp, nonce, encrypt_key, &raw_body);
+        json!({
+            "method": "POST",
+            "headers": {
+                "x-lark-request-timestamp": timestamp,
+                "x-lark-request-nonce": nonce,
+                "x-lark-signature": signature,
+            },
+            "raw_body": raw_body,
+            "verification_token": "verify-token",
+            "encrypt_key": encrypt_key,
+            "policy": policy,
+        })
+    }
+
+    fn message_event_body(sender: &str, chat: &str) -> String {
+        serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-message-1",
+                "event_type": "im.message.receive_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "sender": { "sender_id": { "open_id": sender } },
+                "message": {
+                    "message_id": "om_1",
+                    "chat_id": chat,
+                    "chat_type": "group",
+                    "message_type": "text",
+                    "content": "{\"text\":\"hello\"}",
+                    "mentions": [{ "id": { "open_id": "ou_bot" } }]
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn test_webhook_challenge_response() {
+        let raw_body = serde_json::to_string(&json!({
+            "type": "url_verification",
+            "token": "verify-token",
+            "challenge": "challenge-value",
+        }))
+        .unwrap();
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(raw_body, json!({})))
+            .expect("webhook challenge should process");
+
+        assert_eq!(output["status_code"], 200);
+        assert_eq!(output["reason_code"], "challenge_response");
+        assert_eq!(output["response_body"]["challenge"], "challenge-value");
+        assert_eq!(output["event_emitted"], false);
+    }
+
+    #[test]
+    fn test_webhook_rejects_invalid_signature() {
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let mut input = signed_webhook_input(raw_body, json!({}));
+        input["headers"]["x-lark-signature"] = json!("not-hex");
+
+        let output = invoke_webhook_ingest_request(&input).expect("webhook should return response");
+        assert_eq!(output["status_code"], 401);
+        assert_eq!(output["reason_code"], "invalid_signature");
+        assert_eq!(output["event_emitted"], false);
+    }
+
+    #[test]
+    fn test_webhook_rejects_encrypted_payload() {
+        let raw_body = serde_json::to_string(&json!({
+            "encrypt": "ciphertext",
+            "token": "verify-token",
+        }))
+        .unwrap();
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(raw_body, json!({})))
+            .expect("encrypted payload should return explicit denial");
+
+        assert_eq!(output["status_code"], 415);
+        assert_eq!(output["reason_code"], "encrypted_payload_unsupported");
+    }
+
+    #[test]
+    fn test_webhook_normalizes_message_event_with_policy() {
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(
+            raw_body,
+            json!({
+                "allowed_sender_open_ids": ["ou_allowed"],
+                "allowed_chat_ids": ["oc_allowed"],
+                "require_mention": true,
+                "bot_open_id": "ou_bot",
+            }),
+        ))
+        .expect("message event should process");
+
+        assert_eq!(output["status_code"], 200);
+        assert_eq!(output["reason_code"], "event_accepted");
+        assert_eq!(output["event_emitted"], true);
+        assert_eq!(output["event_id"], "evt-message-1");
+        assert_eq!(
+            output["normalized_event"]["topic"],
+            "feishu.webhook.message_received"
+        );
+        assert_eq!(output["normalized_event"]["raw_content_included"], false);
+    }
+
+    #[test]
+    fn test_webhook_denies_sender_policy_before_emission() {
+        let raw_body = message_event_body("ou_denied", "oc_allowed");
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(
+            raw_body,
+            json!({
+                "allowed_sender_open_ids": ["ou_allowed"],
+                "allowed_chat_ids": ["oc_allowed"],
+            }),
+        ))
+        .expect("policy denial should return webhook response");
+
+        assert_eq!(output["status_code"], 200);
+        assert_eq!(output["event_emitted"], false);
+        assert_eq!(output["reason_code"], "sender_not_allowed");
+        assert_eq!(output["policy_decision"]["allowed"], false);
+    }
+
+    #[test]
+    fn test_webhook_duplicate_uses_caller_supplied_dedupe() {
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let mut input = signed_webhook_input(raw_body, json!({}));
+        input["seen_event_ids"] = json!(["evt-message-1"]);
+
+        let output = invoke_webhook_ingest_request(&input).expect("duplicate should process");
+        assert_eq!(output["status_code"], 200);
+        assert_eq!(output["reason_code"], "duplicate_event");
+        assert_eq!(output["event_emitted"], false);
+        assert_eq!(
+            output["dedupe_key"],
+            "feishu:im.message.receive_v1:evt-message-1"
+        );
+    }
+
+    #[test]
+    fn test_webhook_comment_policy_pairing() {
+        let raw_body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-comment-1",
+                "event_type": "drive.notice.comment_add_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "file_token": "doc_1",
+                "file_type": "docx",
+                "comment_id": "comment_1",
+                "user_id": { "open_id": "ou_commenter" }
+            }
+        }))
+        .unwrap();
+
+        let denied =
+            invoke_webhook_ingest_request(&signed_webhook_input(raw_body.clone(), json!({})))
+                .expect("missing comment policy should deny");
+        assert_eq!(denied["event_emitted"], false);
+        assert_eq!(denied["reason_code"], "comment_policy_required");
+
+        let allowed = invoke_webhook_ingest_request(&signed_webhook_input(
+            raw_body,
+            json!({
+                "comment": {
+                    "enabled": true,
+                    "policy": "pairing",
+                    "document_allowlist": ["doc_1"],
+                    "paired_open_ids": ["ou_commenter"]
+                }
+            }),
+        ))
+        .expect("paired comment should pass");
+        assert_eq!(allowed["event_emitted"], true);
+        assert_eq!(
+            allowed["normalized_event"]["topic"],
+            "feishu.webhook.document_comment_added"
+        );
+    }
+
+    #[test]
+    fn test_webhook_request_region_signals() {
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let mut body_limit = signed_webhook_input(raw_body.clone(), json!({}));
+        body_limit["max_body_bytes"] = json!(1);
+        let output = invoke_webhook_ingest_request(&body_limit).expect("body limit should respond");
+        assert_eq!(output["status_code"], 413);
+        assert_eq!(output["reason_code"], "body_too_large");
+
+        let mut timeout = signed_webhook_input(raw_body.clone(), json!({}));
+        timeout["deadline_exceeded"] = json!(true);
+        let output = invoke_webhook_ingest_request(&timeout).expect("timeout should respond");
+        assert_eq!(output["status_code"], 408);
+        assert_eq!(output["reason_code"], "body_timeout");
+
+        let mut rate = signed_webhook_input(raw_body, json!({}));
+        rate["rate_limited"] = json!(true);
+        let output = invoke_webhook_ingest_request(&rate).expect("rate limit should respond");
+        assert_eq!(output["status_code"], 429);
+        assert_eq!(output["reason_code"], "rate_limited");
     }
 }

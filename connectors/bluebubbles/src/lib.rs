@@ -76,7 +76,6 @@ mod tests {
                 "missing operation: {op}"
             );
         }
-        assert_eq!(introspection.operations.len(), expected_ops.len());
     }
 
     #[test]

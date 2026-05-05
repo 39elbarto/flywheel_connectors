@@ -37,4 +37,5 @@ url.workspace = true
 
 [dev-dependencies]
 fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
 wiremock.workspace = true

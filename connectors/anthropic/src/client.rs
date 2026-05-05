@@ -11,6 +11,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
 use futures_util::{Stream, StreamExt};
+use reqwest::header::{HeaderMap, HeaderValue};
 use reqwest::{Client, Response, StatusCode};
 use serde::Deserialize;
 use tracing::{debug, instrument};
@@ -101,6 +102,14 @@ impl fmt::Debug for AnthropicClient {
             .field("retry_config", &self.retry_config)
             .finish_non_exhaustive()
     }
+}
+
+fn auth_header_value(value: &str, label: &str) -> AnthropicResult<HeaderValue> {
+    HeaderValue::from_str(value).map_err(|_| AnthropicError::Api {
+        error_type: "invalid_auth_header".into(),
+        message: format!("Anthropic {label} contains characters that are not valid in headers"),
+        status_code: None,
+    })
 }
 
 impl AnthropicClient {
@@ -231,7 +240,7 @@ impl AnthropicClient {
             .post(&url)
             .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
-        let request = self.apply_auth(request);
+        let request = self.apply_auth(request)?;
         let request = request.json(&serde_json::json!({
             "model": "claude-3-5-haiku-20241022",
             "max_tokens": 1,
@@ -250,13 +259,23 @@ impl AnthropicClient {
     }
 
     /// Apply auth headers to a request builder.
-    fn apply_auth(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn apply_auth(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> AnthropicResult<reqwest::RequestBuilder> {
+        let mut headers = HeaderMap::new();
         match &self.auth {
-            AnthropicAuth::ApiKey(key) => request.header("x-api-key", key),
+            AnthropicAuth::ApiKey(key) => {
+                let value = auth_header_value(key, "API key")?;
+                headers.insert("x-api-key", value);
+            }
             AnthropicAuth::CredentialId(credential_id) => {
-                request.header("X-FCP-Credential-ID", credential_id.to_string())
+                let credential_id = credential_id.to_string();
+                let value = auth_header_value(&credential_id, "credential id")?;
+                headers.insert("x-fcp-credential-id", value);
             }
         }
+        Ok(request.headers(headers))
     }
 
     /// Send a message to Claude.
@@ -381,7 +400,10 @@ impl AnthropicClient {
                     .post(url.as_str())
                     .header("anthropic-version", &self.api_version)
                     .header("content-type", "application/json");
-                let request = self.apply_auth(request);
+                let request = match self.apply_auth(request) {
+                    Ok(request) => request,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
 
                 match request.json(body).send().await {
                     Ok(response) => match self.handle_response(response).await {
@@ -415,7 +437,7 @@ impl AnthropicClient {
             .post(&url)
             .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
-        let request = self.apply_auth(request);
+        let request = self.apply_auth(request)?;
         let response = request.json(body).send().await?;
 
         let status = response.status();
@@ -678,7 +700,7 @@ fn parse_sse_event(event_str: &str) -> Option<AnthropicResult<StreamEvent>> {
     }
 }
 
-fn stream_event_type(event: &StreamEvent) -> &'static str {
+const fn stream_event_type(event: &StreamEvent) -> &'static str {
     match event {
         StreamEvent::MessageStart { .. } => "message_start",
         StreamEvent::ContentBlockStart { .. } => "content_block_start",

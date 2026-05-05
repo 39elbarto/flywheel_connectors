@@ -67,6 +67,7 @@ pub mod __fuzz {
     }
 
     /// Parse a `Retry-After` header value into bounded milliseconds.
+    #[must_use]
     pub fn parse_retry_after_header(header_value: &str) -> Option<u64> {
         parse_retry_after_header_value(header_value)
     }
@@ -81,6 +82,7 @@ pub mod __fuzz {
     /// - envelope-vs-payload type mismatch detection
     ///
     /// Bead `flywheel_connectors-dzveq`.
+    #[must_use]
     pub fn parse_sse_event_bytes_fuzz(
         event_bytes: &[u8],
     ) -> Option<Result<StreamEvent, AnthropicError>> {

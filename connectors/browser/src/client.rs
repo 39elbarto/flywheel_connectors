@@ -30,62 +30,100 @@ pub const BROWSER_CONTROL_PROTOCOL_VERSION: u64 = 1;
 #[derive(Clone, Copy)]
 struct BrowserControlOperation {
     id: &'static str,
+    method: &'static str,
     path: &'static str,
 }
 
+impl BrowserControlOperation {
+    fn descriptor(self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "method": self.method,
+            "path": self.path,
+        })
+    }
+}
+
+const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.navigate",
+    method: "POST",
+    path: "/navigate",
+};
+const WORKER_SCREENSHOT: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.screenshot",
+    method: "POST",
+    path: "/screenshot",
+};
+const WORKER_RENDER_PDF: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.render_pdf",
+    method: "POST",
+    path: "/pdf",
+};
+const WORKER_EXTRACT_TEXT: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.extract_text",
+    method: "POST",
+    path: "/extract_text",
+};
+const WORKER_EXTRACT_LINKS: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.extract_links",
+    method: "POST",
+    path: "/extract_links",
+};
+const WORKER_WAIT_FOR_SELECTOR: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.wait_for_selector",
+    method: "POST",
+    path: "/wait_for_selector",
+};
+const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.click",
+    method: "POST",
+    path: "/click",
+};
+const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.fill_form",
+    method: "POST",
+    path: "/fill_form",
+};
+const WORKER_EVALUATE_JS: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.evaluate_js",
+    method: "POST",
+    path: "/evaluate",
+};
+const WORKER_GET_COOKIES: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.get_cookies",
+    method: "POST",
+    path: "/cookies",
+};
+const WORKER_SET_COOKIES: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.set_cookies",
+    method: "POST",
+    path: "/set_cookies",
+};
+const WORKER_SET_PROXY: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.set_proxy",
+    method: "POST",
+    path: "/proxy/set",
+};
+const WORKER_CLEAR_PROXY: BrowserControlOperation = BrowserControlOperation {
+    id: "browser.clear_proxy",
+    method: "POST",
+    path: "/proxy/clear",
+};
+
 const REQUIRED_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] = &[
-    BrowserControlOperation {
-        id: "browser.navigate",
-        path: "/navigate",
-    },
-    BrowserControlOperation {
-        id: "browser.screenshot",
-        path: "/screenshot",
-    },
-    BrowserControlOperation {
-        id: "browser.render_pdf",
-        path: "/pdf",
-    },
-    BrowserControlOperation {
-        id: "browser.extract_text",
-        path: "/extract_text",
-    },
-    BrowserControlOperation {
-        id: "browser.extract_links",
-        path: "/extract_links",
-    },
-    BrowserControlOperation {
-        id: "browser.wait_for_selector",
-        path: "/wait_for_selector",
-    },
-    BrowserControlOperation {
-        id: "browser.click",
-        path: "/click",
-    },
-    BrowserControlOperation {
-        id: "browser.fill_form",
-        path: "/fill_form",
-    },
-    BrowserControlOperation {
-        id: "browser.evaluate_js",
-        path: "/evaluate",
-    },
-    BrowserControlOperation {
-        id: "browser.get_cookies",
-        path: "/cookies",
-    },
-    BrowserControlOperation {
-        id: "browser.set_cookies",
-        path: "/set_cookies",
-    },
-    BrowserControlOperation {
-        id: "browser.set_proxy",
-        path: "/proxy/set",
-    },
-    BrowserControlOperation {
-        id: "browser.clear_proxy",
-        path: "/proxy/clear",
-    },
+    WORKER_NAVIGATE,
+    WORKER_SCREENSHOT,
+    WORKER_RENDER_PDF,
+    WORKER_EXTRACT_TEXT,
+    WORKER_EXTRACT_LINKS,
+    WORKER_WAIT_FOR_SELECTOR,
+    WORKER_CLICK,
+    WORKER_FILL_FORM,
+    WORKER_EVALUATE_JS,
+    WORKER_GET_COOKIES,
+    WORKER_SET_COOKIES,
+    WORKER_SET_PROXY,
+    WORKER_CLEAR_PROXY,
 ];
 
 /// FCP browser-control worker contract expected by this connector client.
@@ -95,12 +133,7 @@ pub(crate) fn browser_control_contract_descriptor() -> serde_json::Value {
         "protocol_version": BROWSER_CONTROL_PROTOCOL_VERSION,
         "operations": REQUIRED_BROWSER_CONTROL_OPERATIONS
             .iter()
-            .map(|operation| {
-                serde_json::json!({
-                    "id": operation.id,
-                    "path": operation.path,
-                })
-            })
+            .map(|operation| operation.descriptor())
             .collect::<Vec<_>>(),
     })
 }
@@ -269,7 +302,7 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
         user_agent: Option<&str>,
     ) -> BrowserResult<NavigateResult> {
-        let endpoint = format!("{}/navigate", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_NAVIGATE);
         let mut body = serde_json::json!({ "url": url });
         if let Some(w) = wait_until {
             body["wait_until"] = serde_json::Value::String(w.to_string());
@@ -294,7 +327,7 @@ impl BrowserClient {
         format: Option<&str>,
         quality: Option<u32>,
     ) -> BrowserResult<ScreenshotResult> {
-        let endpoint = format!("{}/screenshot", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_SCREENSHOT);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -321,7 +354,7 @@ impl BrowserClient {
         landscape: Option<bool>,
         print_background: Option<bool>,
     ) -> BrowserResult<PdfResult> {
-        let endpoint = format!("{}/pdf", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_RENDER_PDF);
         let mut body = serde_json::json!({});
         if let Some(f) = format {
             body["format"] = serde_json::Value::String(f.to_string());
@@ -344,7 +377,7 @@ impl BrowserClient {
         selector: Option<&str>,
         include_hidden: Option<bool>,
     ) -> BrowserResult<TextResult> {
-        let endpoint = format!("{}/extract_text", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_EXTRACT_TEXT);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -358,7 +391,7 @@ impl BrowserClient {
 
     /// Extract links from the page.
     pub async fn extract_links(&self, selector: Option<&str>) -> BrowserResult<LinksResult> {
-        let endpoint = format!("{}/extract_links", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_EXTRACT_LINKS);
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -376,7 +409,7 @@ impl BrowserClient {
         state: Option<&str>,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<WaitResult> {
-        let endpoint = format!("{}/wait_for_selector", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_WAIT_FOR_SELECTOR);
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(s) = state {
             body["state"] = serde_json::Value::String(s.to_string());
@@ -396,7 +429,7 @@ impl BrowserClient {
         selector: &str,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<ClickResult> {
-        let endpoint = format!("{}/click", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_CLICK);
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(t) = timeout_ms {
             body["timeout_ms"] = serde_json::Value::Number(t.into());
@@ -411,7 +444,7 @@ impl BrowserClient {
         fields: &serde_json::Value,
         submit_selector: Option<&str>,
     ) -> BrowserResult<FormResult> {
-        let endpoint = format!("{}/fill_form", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_FILL_FORM);
         let mut body = serde_json::json!({ "fields": fields });
         if let Some(ss) = submit_selector {
             body["submit_selector"] = serde_json::Value::String(ss.to_string());
@@ -424,7 +457,7 @@ impl BrowserClient {
 
     /// Evaluate JavaScript in the page context.
     pub async fn evaluate_js(&self, expression: &str) -> BrowserResult<JsResult> {
-        let endpoint = format!("{}/evaluate", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_EVALUATE_JS);
         let body = serde_json::json!({ "expression": expression });
         let data = self.post_json(&endpoint, &body).await?;
         Ok(serde_json::from_value(data)?)
@@ -434,7 +467,7 @@ impl BrowserClient {
 
     /// Get cookies.
     pub async fn get_cookies(&self, domain: Option<&str>) -> BrowserResult<Vec<Cookie>> {
-        let endpoint = format!("{}/cookies", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_GET_COOKIES);
         let mut body = serde_json::json!({});
         if let Some(d) = domain {
             body["domain"] = serde_json::Value::String(d.to_string());
@@ -450,7 +483,7 @@ impl BrowserClient {
 
     /// Set cookies.
     pub async fn set_cookies(&self, cookies: &[Cookie]) -> BrowserResult<u32> {
-        let endpoint = format!("{}/set_cookies", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_SET_COOKIES);
         let body = serde_json::json!({ "cookies": cookies });
         let data = self.post_json(&endpoint, &body).await?;
         let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -461,7 +494,7 @@ impl BrowserClient {
 
     /// Configure outbound proxy for browser traffic.
     pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
-        let endpoint = format!("{}/proxy/set", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_SET_PROXY);
         let body = serde_json::to_value(proxy)?;
         let data = self.post_json(&endpoint, &body).await?;
         Ok(serde_json::from_value(data)?)
@@ -469,12 +502,17 @@ impl BrowserClient {
 
     /// Clear outbound proxy configuration.
     pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
-        let endpoint = format!("{}/proxy/clear", self.browser_url);
+        let endpoint = self.worker_endpoint(WORKER_CLEAR_PROXY);
         let data = self.post_json(&endpoint, &serde_json::json!({})).await?;
         Ok(serde_json::from_value(data)?)
     }
 
     // -- HTTP helpers --
+
+    fn worker_endpoint(&self, operation: BrowserControlOperation) -> String {
+        debug_assert_eq!(operation.method, "POST");
+        format!("{}{}", self.browser_url, operation.path)
+    }
 
     async fn post_json(
         &self,
@@ -602,8 +640,8 @@ fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), S
             .any(|operation| browser_control_operation_matches(operation, required))
         {
             return Err(format!(
-                "missing required operation `{}` at `{}`",
-                required.id, required.path
+                "missing required operation `{}` as {} `{}`",
+                required.id, required.method, required.path
             ));
         }
     }
@@ -619,6 +657,10 @@ fn browser_control_operation_matches(
         .get("id")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|id| id == required.id)
+        && operation
+            .get("method")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|method| method == required.method)
         && operation
             .get("path")
             .and_then(serde_json::Value::as_str)
@@ -665,11 +707,32 @@ mod tests {
     }
 
     #[test]
+    fn test_worker_contract_advertises_every_client_route() {
+        let descriptor = browser_control_contract_descriptor();
+        let operations = descriptor["operations"].as_array().unwrap();
+
+        for required in REQUIRED_BROWSER_CONTROL_OPERATIONS {
+            assert!(
+                operations.iter().any(|operation| {
+                    operation["id"] == required.id
+                        && operation["method"] == required.method
+                        && operation["path"] == required.path
+                }),
+                "missing {} {} {}",
+                required.method,
+                required.path,
+                required.id
+            );
+        }
+        assert_eq!(operations.len(), REQUIRED_BROWSER_CONTROL_OPERATIONS.len());
+    }
+
+    #[test]
     fn test_health_contract_rejects_missing_operation_advertisement() {
         let mut body = browser_control_contract_descriptor();
-        body["operations"] = serde_json::json!([
-            { "id": "browser.navigate", "path": "/navigate" },
-            { "id": "browser.screenshot", "path": "/screenshot" }
+        body["operations"] = serde_json::Value::Array(vec![
+            WORKER_NAVIGATE.descriptor(),
+            WORKER_SCREENSHOT.descriptor(),
         ]);
 
         let err = validate_fcp_browser_control_health(&body).unwrap_err();
@@ -685,6 +748,17 @@ mod tests {
         let err = validate_fcp_browser_control_health(&body).unwrap_err();
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("/navigate"));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_operation_method() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["method"] = serde_json::Value::String("GET".into());
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("POST"));
     }
 
     #[test]

@@ -1849,11 +1849,60 @@ fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
         code: 1003,
         message: format!("browser_url must be an absolute URL: {e}"),
     })?;
+    let redacted_url = redact_browser_endpoint_url(&parsed);
+
+    if is_direct_cdp_websocket_endpoint(&parsed) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "browser_url points at a direct Chrome DevTools WebSocket endpoint ({redacted_url}); configure an FCP browser-control HTTP(S) endpoint"
+            ),
+        });
+    }
+
+    if matches!(parsed.scheme(), "ws" | "wss") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "browser_url must be an FCP browser-control HTTP(S) base URL, not a WebSocket endpoint ({redacted_url})"
+            ),
+        });
+    }
 
     if !matches!(parsed.scheme(), "http" | "https") {
         return Err(FcpError::InvalidRequest {
             code: 1003,
             message: "browser_url scheme must be http or https".into(),
+        });
+    }
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("browser_url must not include userinfo ({redacted_url})"),
+        });
+    }
+
+    if parsed.query().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("browser_url must not include query parameters ({redacted_url})"),
+        });
+    }
+
+    if parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("browser_url must not include a URL fragment ({redacted_url})"),
+        });
+    }
+
+    if is_chrome_cdp_discovery_path(parsed.path()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "browser_url points at a raw Chrome DevTools discovery endpoint ({redacted_url}); configure the FCP browser-control base URL"
+            ),
         });
     }
 
@@ -1878,6 +1927,45 @@ fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
     }
 
     Ok(())
+}
+
+fn redact_browser_endpoint_url(parsed: &reqwest::Url) -> String {
+    let mut redacted = parsed.clone();
+    let _ = redacted.set_username("");
+    let _ = redacted.set_password(None);
+    redacted.set_query(None);
+    redacted.set_fragment(None);
+    redacted.to_string()
+}
+
+fn is_direct_cdp_websocket_endpoint(parsed: &reqwest::Url) -> bool {
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return false;
+    }
+
+    let Some(mut segments) = parsed.path_segments() else {
+        return false;
+    };
+    let Some("devtools") = segments.next() else {
+        return false;
+    };
+    let Some(kind) = segments.next() else {
+        return false;
+    };
+    if !matches!(
+        kind,
+        "browser" | "page" | "worker" | "shared_worker" | "service_worker"
+    ) {
+        return false;
+    }
+    let Some(target_id) = segments.next() else {
+        return false;
+    };
+    !target_id.is_empty() && segments.next().is_none()
+}
+
+fn is_chrome_cdp_discovery_path(path: &str) -> bool {
+    path == "/json" || path.starts_with("/json/")
 }
 
 fn is_browser_control_host_allowlisted(host: &str) -> bool {
@@ -2253,6 +2341,109 @@ mod tests {
             }
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_raw_chrome_cdp_discovery_url() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "browser_url": "http://localhost:9222/json/version"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("raw Chrome DevTools discovery"));
+                assert!(message.contains("http://localhost:9222/json/version"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_direct_cdp_websocket_url() {
+        let mut connector = BrowserConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "browser_url": "ws://localhost:9222/devtools/page/target-1"
+            }))
+            .await;
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("direct Chrome DevTools WebSocket"));
+                assert!(message.contains("ws://localhost:9222/devtools/page/target-1"));
+            }
+            e => panic!("Expected InvalidRequest, got: {e:?}"),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_browser_url_userinfo_query_and_fragment() {
+        for (browser_url, expected) in [
+            (
+                "https://user:private-value@control.browser.flywheel.internal:9222",
+                "must not include userinfo",
+            ),
+            (
+                "https://control.browser.flywheel.internal:9222?query=private-value",
+                "must not include query parameters",
+            ),
+            (
+                "https://control.browser.flywheel.internal:9222#private-value",
+                "must not include a URL fragment",
+            ),
+        ] {
+            let mut connector = BrowserConnector::new();
+            let result = connector
+                .handle_configure(json!({ "browser_url": browser_url }))
+                .await;
+            assert!(result.is_err());
+            match result.unwrap_err() {
+                FcpError::InvalidRequest { message, .. } => {
+                    assert!(message.contains(expected));
+                    assert!(!message.contains("private-value"));
+                    assert!(!message.contains("query=private-value"));
+                }
+                e => panic!("Expected InvalidRequest, got: {e:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn browser_endpoint_policy_identifies_direct_cdp_websocket_shapes() {
+        let direct =
+            reqwest::Url::parse("wss://localhost:9222/devtools/browser/browser-target").unwrap();
+        assert!(is_direct_cdp_websocket_endpoint(&direct));
+
+        let worker =
+            reqwest::Url::parse("ws://localhost:9222/devtools/service_worker/sw-target").unwrap();
+        assert!(is_direct_cdp_websocket_endpoint(&worker));
+
+        let missing_target = reqwest::Url::parse("ws://localhost:9222/devtools/page/").unwrap();
+        assert!(!is_direct_cdp_websocket_endpoint(&missing_target));
+
+        let non_cdp_ws = reqwest::Url::parse("ws://localhost:9222/fcp-control").unwrap();
+        assert!(!is_direct_cdp_websocket_endpoint(&non_cdp_ws));
+    }
+
+    #[test]
+    fn browser_endpoint_redaction_strips_userinfo_query_and_fragment() {
+        let parsed = reqwest::Url::parse(
+            "https://user:private-value@control.browser.flywheel.internal:9222/json/version?query=private-value#frag",
+        )
+        .unwrap();
+        let redacted = redact_browser_endpoint_url(&parsed);
+
+        assert_eq!(
+            redacted,
+            "https://control.browser.flywheel.internal:9222/json/version"
+        );
+        assert!(!redacted.contains("user"));
+        assert!(!redacted.contains("private-value"));
+        assert!(!redacted.contains("query"));
+        assert!(!redacted.contains("frag"));
     }
 
     #[fcp_async_core::runtime::test]

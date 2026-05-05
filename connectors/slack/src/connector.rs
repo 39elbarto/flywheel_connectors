@@ -1,6 +1,6 @@
 //! FCP Slack Connector implementation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -33,6 +33,8 @@ const SOCKET_EVENT_BUFFER_CAPACITY: usize = 200;
 const SOCKET_TOPIC_COMPONENT_MAX_CHARS: usize = 64;
 const SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS: usize = 128;
 const SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT: usize = 64;
+const MONITOR_POLICY_MAX_SET_ITEMS: usize = 256;
+const MONITOR_POLICY_ID_MAX_CHARS: usize = 128;
 
 fn is_local_test_host(host: &str) -> bool {
     (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -43,7 +45,7 @@ fn is_local_test_host(host: &str) -> bool {
 /// Direct-token mode pins the host to `slack.com`.
 /// Empty/whitespace overrides fall through to the client default upstream.
 /// Custom vault-proxy hosts are not supported here -
-/// Slack's connector does not yet have a credential_id auth mode.
+/// Slack's connector does not yet have a `credential_id` auth mode.
 fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -114,6 +116,7 @@ pub struct SlackConnector {
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
+    monitor_policy: Arc<RwLock<SlackMonitorPolicy>>,
 }
 
 impl SlackConnector {
@@ -133,6 +136,7 @@ impl SlackConnector {
             event_tx,
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
+            monitor_policy: Arc::new(RwLock::new(SlackMonitorPolicy::default())),
         }
     }
 
@@ -173,6 +177,7 @@ impl SlackConnector {
             .map(str::trim)
             .filter(|v| !v.is_empty());
         let socket_mode_token = app_token.unwrap_or(token).to_string();
+        let monitor_policy = SlackMonitorPolicy::from_config(params.get("monitor_policy"))?;
 
         let mut client = SlackClient::new(token).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
@@ -185,12 +190,14 @@ impl SlackConnector {
         self.client = Some(client);
         self.socket_mode_token = Some(socket_mode_token);
         *self.subscribed_topics.write().await = Vec::new();
+        *self.monitor_policy.write().await = monitor_policy.clone();
         self.base.set_configured(true);
         info!("Slack connector configured");
 
         Ok(json!({
             "status": "configured",
-            "socket_mode_auth": if app_token.is_some() { "app_token" } else { "bot_token_fallback" }
+            "socket_mode_auth": if app_token.is_some() { "app_token" } else { "bot_token_fallback" },
+            "monitor_policy": monitor_policy.to_redacted_json(),
         }))
     }
 
@@ -256,6 +263,7 @@ impl SlackConnector {
         let configured = self.client.is_some();
         let socket_mode_running = *self.socket_mode_running.read().await;
         let subscribed_topics = self.subscribed_topics.read().await.clone();
+        let monitor_policy = self.monitor_policy.read().await.to_redacted_json();
         let metrics = self.base.metrics();
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
@@ -269,6 +277,7 @@ impl SlackConnector {
                 "buffer_capacity": SOCKET_EVENT_BUFFER_CAPACITY,
                 "subscribed_topics": subscribed_topics,
             },
+            "monitor_policy": monitor_policy,
         }))
     }
 
@@ -585,9 +594,16 @@ impl SlackConnector {
             }),
         };
 
-        serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
+        let mut value = serde_json::to_value(introspection).map_err(|e| FcpError::Internal {
             message: format!("Failed to serialize introspection: {e}"),
-        })
+        })?;
+        if let Value::Object(map) = &mut value {
+            map.insert(
+                "monitor_policy".to_string(),
+                self.monitor_policy.read().await.to_redacted_json(),
+            );
+        }
+        Ok(value)
     }
 
     /// Handle simulate method.
@@ -753,6 +769,7 @@ impl SlackConnector {
         let socket_mode_running = self.socket_mode_running.clone();
         let next_event_seq = self.next_event_seq.clone();
         let subscribed_topics = self.subscribed_topics.clone();
+        let monitor_policy = self.monitor_policy.clone();
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         self.socket_mode_shutdown_tx = Some(shutdown_tx.clone());
@@ -839,6 +856,14 @@ impl SlackConnector {
                                                 topic_allowed(&topic, subscribed.as_slice())
                                             };
                                             if !allowed {
+                                                continue;
+                                            }
+                                            let policy_allowed = {
+                                                let policy = monitor_policy.read().await;
+                                                policy.allows_payload(&topic, &payload)
+                                            };
+                                            if !policy_allowed {
+                                                info!(%topic, "Slack Socket Mode event suppressed by monitor policy");
                                                 continue;
                                             }
 
@@ -1389,6 +1414,232 @@ struct SocketModeFrame {
     payload: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SlackMonitorPolicy {
+    require_mention: bool,
+    strict_mention: bool,
+    bot_user_id: Option<String>,
+    allowed_channels: BTreeSet<String>,
+    allowed_users: BTreeSet<String>,
+    free_response_channels: BTreeSet<String>,
+}
+
+impl Default for SlackMonitorPolicy {
+    fn default() -> Self {
+        Self {
+            require_mention: true,
+            strict_mention: false,
+            bot_user_id: None,
+            allowed_channels: BTreeSet::new(),
+            allowed_users: BTreeSet::new(),
+            free_response_channels: BTreeSet::new(),
+        }
+    }
+}
+
+impl SlackMonitorPolicy {
+    fn from_config(value: Option<&Value>) -> FcpResult<Self> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+
+        let Value::Object(object) = value else {
+            return Err(invalid_monitor_policy(
+                "monitor_policy must be an object when provided",
+            ));
+        };
+
+        let mut policy = Self::default();
+        if let Some(value) = object
+            .get("require_mention")
+            .filter(|value| !value.is_null())
+        {
+            policy.require_mention =
+                parse_monitor_policy_bool("monitor_policy.require_mention", value)?;
+        }
+        if let Some(value) = object
+            .get("strict_mention")
+            .filter(|value| !value.is_null())
+        {
+            policy.strict_mention =
+                parse_monitor_policy_bool("monitor_policy.strict_mention", value)?;
+        }
+        if let Some(value) = object.get("bot_user_id") {
+            policy.bot_user_id =
+                parse_monitor_policy_optional_id("monitor_policy.bot_user_id", value)?;
+        }
+        if let Some(value) = object.get("allowed_channels") {
+            policy.allowed_channels =
+                parse_monitor_policy_set("monitor_policy.allowed_channels", value)?;
+        }
+        if let Some(value) = object.get("allowed_users") {
+            policy.allowed_users = parse_monitor_policy_set("monitor_policy.allowed_users", value)?;
+        }
+        if let Some(value) = object.get("free_response_channels") {
+            policy.free_response_channels =
+                parse_monitor_policy_set("monitor_policy.free_response_channels", value)?;
+        }
+
+        Ok(policy)
+    }
+
+    fn to_redacted_json(&self) -> Value {
+        json!({
+            "require_mention": self.require_mention,
+            "strict_mention": self.strict_mention,
+            "bot_user_id_configured": self.bot_user_id.is_some(),
+            "allowed_channels_configured": !self.allowed_channels.is_empty(),
+            "allowed_channels_count": self.allowed_channels.len(),
+            "allowed_users_configured": !self.allowed_users.is_empty(),
+            "allowed_users_count": self.allowed_users.len(),
+            "free_response_channels_configured": !self.free_response_channels.is_empty(),
+            "free_response_channels_count": self.free_response_channels.len(),
+        })
+    }
+
+    fn allows_payload(&self, topic: &str, payload: &Value) -> bool {
+        if !policy_set_allows(&self.allowed_channels, socket_payload_channel(payload)) {
+            return false;
+        }
+        if !policy_set_allows(&self.allowed_users, socket_payload_user(payload)) {
+            return false;
+        }
+        if !is_monitor_message_payload(topic, payload) {
+            return true;
+        }
+        if is_socket_payload_dm(payload) {
+            return true;
+        }
+        if !self.require_mention {
+            return true;
+        }
+        if policy_set_contains(
+            &self.free_response_channels,
+            socket_payload_channel(payload),
+        ) {
+            return true;
+        }
+
+        self.bot_user_id.as_deref().is_some_and(|bot_user_id| {
+            socket_payload_text(payload)
+                .is_some_and(|text| slack_text_mentions_bot(text, bot_user_id))
+        })
+    }
+}
+
+fn invalid_monitor_policy(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn parse_monitor_policy_bool(field: &str, value: &Value) -> FcpResult<bool> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Ok(true),
+            "false" | "no" | "off" | "0" => Ok(false),
+            _ => Err(invalid_monitor_policy(format!(
+                "{field} must be a boolean or boolean-like string"
+            ))),
+        },
+        _ => Err(invalid_monitor_policy(format!(
+            "{field} must be a boolean or boolean-like string"
+        ))),
+    }
+}
+
+fn parse_monitor_policy_optional_id(field: &str, value: &Value) -> FcpResult<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(value) = value.as_str() else {
+        return Err(invalid_monitor_policy(format!("{field} must be a string")));
+    };
+    normalize_monitor_policy_id(field, value)
+}
+
+fn parse_monitor_policy_set(field: &str, value: &Value) -> FcpResult<BTreeSet<String>> {
+    let mut parsed = BTreeSet::new();
+    match value {
+        Value::Null => {}
+        Value::Array(values) => {
+            for value in values {
+                let raw = value.as_str().ok_or_else(|| {
+                    invalid_monitor_policy(format!("{field} entries must be strings"))
+                })?;
+                insert_monitor_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        Value::String(value) => {
+            for raw in value.split(',') {
+                insert_monitor_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        _ => {
+            return Err(invalid_monitor_policy(format!(
+                "{field} must be a comma-separated string or array of strings"
+            )));
+        }
+    }
+
+    Ok(parsed)
+}
+
+fn insert_monitor_policy_set_value(
+    field: &str,
+    raw: &str,
+    parsed: &mut BTreeSet<String>,
+) -> FcpResult<()> {
+    if let Some(value) = normalize_monitor_policy_id(field, raw)? {
+        parsed.insert(value);
+    }
+    if parsed.len() > MONITOR_POLICY_MAX_SET_ITEMS {
+        return Err(invalid_monitor_policy(format!(
+            "{field} must contain at most {MONITOR_POLICY_MAX_SET_ITEMS} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_monitor_policy_id(field: &str, value: &str) -> FcpResult<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.len() > MONITOR_POLICY_ID_MAX_CHARS {
+        return Err(invalid_monitor_policy(format!(
+            "{field} entries must be at most {MONITOR_POLICY_ID_MAX_CHARS} characters"
+        )));
+    }
+    if value != "*"
+        && (!value.is_ascii()
+            || value
+                .chars()
+                .any(|character| character.is_ascii_whitespace()))
+    {
+        return Err(invalid_monitor_policy(format!(
+            "{field} entries must be ASCII identifiers without whitespace"
+        )));
+    }
+
+    Ok(Some(value.to_string()))
+}
+
+fn policy_set_allows(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
+    policy_set.is_empty()
+        || policy_set.contains("*")
+        || candidate.is_some_and(|candidate| policy_set.contains(candidate))
+}
+
+fn policy_set_contains(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
+    policy_set.contains("*") || candidate.is_some_and(|candidate| policy_set.contains(candidate))
+}
+
 fn parse_subscribe_topics(params: &serde_json::Value) -> Vec<String> {
     let mut topics = params
         .get("topics")
@@ -1499,6 +1750,124 @@ fn safe_socket_topic_component(raw: &str) -> Option<&str> {
     raw.chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         .then_some(raw)
+}
+
+fn is_monitor_message_payload(topic: &str, payload: &Value) -> bool {
+    topic.starts_with("slack.message.")
+        || payload
+            .get("event")
+            .and_then(|event| event.get("type"))
+            .and_then(Value::as_str)
+            .is_some_and(|event_type| event_type == "message")
+}
+
+fn socket_payload_channel(payload: &Value) -> Option<&str> {
+    payload
+        .get("event")
+        .and_then(|event| event.get("channel"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("item"))
+                .and_then(|item| item.get("channel"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("message"))
+                .and_then(|message| message.get("channel"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("previous_message"))
+                .and_then(|message| message.get("channel"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("channel").and_then(Value::as_str))
+}
+
+fn socket_payload_user(payload: &Value) -> Option<&str> {
+    payload
+        .get("event")
+        .and_then(|event| event.get("user"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("message"))
+                .and_then(|message| message.get("user"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("previous_message"))
+                .and_then(|message| message.get("user"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("user")
+                .and_then(|user| user.get("id"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("user_id").and_then(Value::as_str))
+}
+
+fn socket_payload_channel_type(payload: &Value) -> Option<&str> {
+    payload
+        .get("event")
+        .and_then(|event| event.get("channel_type"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("message"))
+                .and_then(|message| message.get("channel_type"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("channel_type").and_then(Value::as_str))
+}
+
+fn socket_payload_text(payload: &Value) -> Option<&str> {
+    payload
+        .get("event")
+        .and_then(|event| event.get("text"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("message"))
+                .and_then(|message| message.get("text"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            payload
+                .get("event")
+                .and_then(|event| event.get("previous_message"))
+                .and_then(|message| message.get("text"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| payload.get("text").and_then(Value::as_str))
+}
+
+fn is_socket_payload_dm(payload: &Value) -> bool {
+    socket_payload_channel_type(payload) == Some("im")
+        || socket_payload_channel(payload).is_some_and(|channel| channel.starts_with('D'))
+}
+
+fn slack_text_mentions_bot(text: &str, bot_user_id: &str) -> bool {
+    text.match_indices("<@").any(|(index, _)| {
+        let after_marker = &text[index + 2..];
+        let Some(after_bot_id) = after_marker.strip_prefix(bot_user_id) else {
+            return false;
+        };
+        after_bot_id.starts_with('>') || after_bot_id.starts_with('|')
+    })
 }
 
 fn socket_frame_to_event(
@@ -1916,7 +2285,8 @@ mod tests {
             .operations(&[cap])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
-            .constraints_cbor(&cbor)
+            .try_constraints_cbor(&cbor)
+            .expect("test constraints CBOR should be valid")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -3091,6 +3461,215 @@ mod tests {
             topics[SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT - 1],
             format!("slack.event.{}", SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT - 1)
         );
+    }
+
+    // ── Monitor policy tests ────────────────────────────────────
+
+    #[test]
+    fn test_monitor_policy_parses_redacted_config() {
+        let config = json!({
+            "require_mention": "off",
+            "strict_mention": "yes",
+            "bot_user_id": "U_BOT",
+            "allowed_channels": "C_ALLOWED, C_OTHER",
+            "allowed_users": ["U_ALLOWED"],
+            "free_response_channels": ["C_FREE"]
+        });
+        let policy = SlackMonitorPolicy::from_config(Some(&config)).unwrap();
+
+        assert!(!policy.require_mention);
+        assert!(policy.strict_mention);
+        assert_eq!(policy.bot_user_id.as_deref(), Some("U_BOT"));
+        assert!(policy.allowed_channels.contains("C_ALLOWED"));
+        assert!(policy.allowed_channels.contains("C_OTHER"));
+        assert!(policy.allowed_users.contains("U_ALLOWED"));
+        assert!(policy.free_response_channels.contains("C_FREE"));
+
+        let redacted = policy.to_redacted_json();
+        assert_eq!(redacted["bot_user_id_configured"].as_bool(), Some(true));
+        assert_eq!(redacted["allowed_channels_count"], 2);
+        assert!(!redacted.to_string().contains("U_BOT"));
+    }
+
+    #[test]
+    fn test_monitor_policy_rejects_invalid_values() {
+        let invalid_bool = SlackMonitorPolicy::from_config(Some(&json!({
+            "require_mention": "maybe"
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_bool, FcpError::InvalidRequest { .. }));
+
+        let invalid_set = SlackMonitorPolicy::from_config(Some(&json!({
+            "allowed_channels": ["C_OK", 42]
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_set, FcpError::InvalidRequest { .. }));
+
+        let invalid_id = SlackMonitorPolicy::from_config(Some(&json!({
+            "allowed_users": ["U OK"]
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_id, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn test_monitor_policy_defaults_require_mentions() {
+        let policy = SlackMonitorPolicy::default();
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "channel": "C_PUBLIC",
+                "user": "U_SENDER",
+                "text": "hello"
+            }
+        });
+
+        assert!(!policy.allows_payload("slack.message.new", &payload));
+    }
+
+    #[test]
+    fn test_monitor_policy_allows_dm_without_mention() {
+        let policy = SlackMonitorPolicy::default();
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "channel": "D_DM",
+                "channel_type": "im",
+                "user": "U_SENDER",
+                "text": "hello"
+            }
+        });
+
+        assert!(policy.allows_payload("slack.message.new", &payload));
+    }
+
+    #[test]
+    fn test_monitor_policy_denies_public_message_without_configured_bot_mention() {
+        let policy = SlackMonitorPolicy {
+            bot_user_id: Some("U_BOT".to_string()),
+            ..Default::default()
+        };
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "channel": "C_PUBLIC",
+                "user": "U_SENDER",
+                "text": "hello"
+            }
+        });
+
+        assert!(!policy.allows_payload("slack.message.new", &payload));
+    }
+
+    #[test]
+    fn test_monitor_policy_allows_public_message_with_bot_mention() {
+        let policy = SlackMonitorPolicy {
+            bot_user_id: Some("U_BOT".to_string()),
+            ..Default::default()
+        };
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "channel": "C_PUBLIC",
+                "user": "U_SENDER",
+                "text": "hello <@U_BOT|bot>"
+            }
+        });
+
+        assert!(policy.allows_payload("slack.message.new", &payload));
+    }
+
+    #[test]
+    fn test_monitor_policy_free_response_channel_allows_without_mention() {
+        let policy = SlackMonitorPolicy::from_config(Some(&json!({
+            "bot_user_id": "U_BOT",
+            "free_response_channels": ["C_FREE"]
+        })))
+        .unwrap();
+        let payload = json!({
+            "event": {
+                "type": "message",
+                "channel": "C_FREE",
+                "user": "U_SENDER",
+                "text": "no mention needed here"
+            }
+        });
+
+        assert!(policy.allows_payload("slack.message.new", &payload));
+    }
+
+    #[test]
+    fn test_monitor_policy_allowed_channel_and_user_filters() {
+        let policy = SlackMonitorPolicy::from_config(Some(&json!({
+            "require_mention": false,
+            "allowed_channels": ["C_ALLOWED"],
+            "allowed_users": ["U_ALLOWED"]
+        })))
+        .unwrap();
+
+        assert!(policy.allows_payload(
+            "slack.message.new",
+            &json!({
+                "event": {
+                    "type": "message",
+                    "channel": "C_ALLOWED",
+                    "user": "U_ALLOWED",
+                    "text": "ok"
+                }
+            })
+        ));
+        assert!(!policy.allows_payload(
+            "slack.message.new",
+            &json!({
+                "event": {
+                    "type": "message",
+                    "channel": "C_DENIED",
+                    "user": "U_ALLOWED",
+                    "text": "wrong channel"
+                }
+            })
+        ));
+        assert!(!policy.allows_payload(
+            "slack.message.new",
+            &json!({
+                "event": {
+                    "type": "message",
+                    "channel": "C_ALLOWED",
+                    "user": "U_DENIED",
+                    "text": "wrong user"
+                }
+            })
+        ));
+    }
+
+    #[test]
+    fn test_monitor_policy_non_message_events_skip_mention_gate_but_honor_allowlists() {
+        let policy = SlackMonitorPolicy::from_config(Some(&json!({
+            "bot_user_id": "U_BOT",
+            "allowed_channels": ["C_ALLOWED"]
+        })))
+        .unwrap();
+
+        assert!(policy.allows_payload(
+            "slack.reaction.added",
+            &json!({
+                "event": {
+                    "type": "reaction_added",
+                    "user": "U_SENDER",
+                    "item": { "channel": "C_ALLOWED" }
+                }
+            })
+        ));
+        assert!(!policy.allows_payload(
+            "slack.reaction.added",
+            &json!({
+                "event": {
+                    "type": "reaction_added",
+                    "user": "U_SENDER",
+                    "item": { "channel": "C_DENIED" }
+                }
+            })
+        ));
     }
 
     // ── Socket frame topic mapping tests ─────────────────────────

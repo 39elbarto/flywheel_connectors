@@ -29,6 +29,7 @@ use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::future::poll_fn;
 use std::io::{self, Read, Write};
 use std::net::TcpListener as StdTcpListener;
@@ -74,7 +75,8 @@ fn generate_valid_token_for_operation(
         .operations(&[operation])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
@@ -148,7 +150,7 @@ struct StructuredHttpResponse {
 }
 
 impl StructuredHttpResponse {
-    fn json(status: u16, body: serde_json::Value) -> Self {
+    fn json(status: u16, body: &serde_json::Value) -> Self {
         Self {
             status,
             headers: vec![("content-type".into(), "application/json".into())],
@@ -262,7 +264,6 @@ fn write_structured_http_response(
     response: StructuredHttpResponse,
 ) {
     let reason = match response.status {
-        200 => "OK",
         429 => "Too Many Requests",
         _ => "OK",
     };
@@ -273,7 +274,7 @@ fn write_structured_http_response(
         response.body.len()
     );
     for (name, value) in response.headers {
-        raw.push_str(&format!("{name}: {value}\r\n"));
+        let _ = write!(raw, "{name}: {value}\r\n");
     }
     raw.push_str("\r\n");
     stream
@@ -380,7 +381,7 @@ async fn post_message_happy_path() {
         assert_eq!(body["text"], "Hello from FCP!");
         StructuredHttpResponse::json(
             200,
-            json!({
+            &json!({
                 "ok": true,
                 "channel": "C01234567",
                 "ts": "1234567890.123456",
@@ -550,12 +551,12 @@ async fn list_channels_happy_path() {
             Some("application/json")
         );
         assert!(
-            request.headers.get("content-type").is_none(),
+            !request.headers.contains_key("content-type"),
             "GET list_channels should not send a content-type header"
         );
         StructuredHttpResponse::json(
             200,
-            json!({
+            &json!({
                 "ok": true,
                 "channels": [
                     slack_channel("C01234567", "general"),
@@ -1059,7 +1060,7 @@ async fn error_not_authed_maps_to_unauthorized() {
         assert_eq!(body["text"], "hello");
         StructuredHttpResponse::json(
             200,
-            json!({
+            &json!({
                 "ok": false,
                 "error": "not_authed"
             }),
@@ -1887,7 +1888,8 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
         .handle_configure(json!({
             "token": "xoxb-test-token-xyz",
             "app_token": "xapp-test-token-xyz",
-            "base_url": mock_server.uri()
+            "base_url": mock_server.uri(),
+            "monitor_policy": { "require_mention": false }
         }))
         .await
         .expect("configure");
@@ -1925,6 +1927,119 @@ async fn socket_mode_subscribe_emits_event_envelope_and_ack() {
     let ack_value: serde_json::Value =
         serde_json::from_str(&ack_json).expect("ack should be valid json");
     assert_eq!(ack_value["envelope_id"], "envelope-1");
+
+    runtime
+        .block_on(connector.handle_shutdown(json!({})))
+        .expect("shutdown should succeed");
+
+    fcp_async_core::time::timeout(StdDuration::from_secs(3), ws_task)
+        .await
+        .expect("timeout waiting for ws task")
+        .expect("ws task join");
+}
+
+#[fcp_async_core::runtime::test]
+async fn socket_mode_monitor_policy_acks_but_drops_unauthorized_message() {
+    let _ctx = AsyncTestContext::for_scenario("slack.socket_mode.monitor_policy_drop");
+    let mock_server = MockServer::start().await;
+    let runtime = fcp_async_core::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("build async-core runtime");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let ws_url = format!(
+        "ws://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let (ack_tx, ack_rx) = oneshot::channel::<Option<String>>();
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let mut ws_stream = accept_test_websocket(tcp_stream).await;
+
+        send_json_frame(
+            &mut ws_stream,
+            json!({ "type": "hello" }),
+            "send hello frame",
+        )
+        .await;
+        send_json_frame(
+            &mut ws_stream,
+            json!({
+                "envelope_id": "envelope-policy-drop",
+                "type": "events_api",
+                "payload": {
+                    "event_id": "EvPolicyDrop",
+                    "team_id": "T_TEAM_1",
+                    "event": {
+                        "type": "message",
+                        "user": "U_EVT_1",
+                        "channel": "C_ALLOWED",
+                        "text": "public message without bot mention",
+                        "ts": "1700000000.000002"
+                    }
+                }
+            }),
+            "send unauthorized events_api frame",
+        )
+        .await;
+
+        let ack_payload = recv_text_frame(&mut ws_stream, "policy drop ack frame").await;
+        let _ = ack_tx.send(ack_payload);
+
+        close_test_websocket(&mut ws_stream).await;
+    });
+
+    Mock::given(method("POST"))
+        .and(path("/apps.connections.open"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "url": ws_url
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = SlackConnector::new();
+    let _key = setup_handshake(&mut connector, &["slack.read"]).await;
+    connector
+        .handle_configure(json!({
+            "token": "xoxb-test-token-xyz",
+            "app_token": "xapp-test-token-xyz",
+            "base_url": mock_server.uri(),
+            "monitor_policy": {
+                "bot_user_id": "U_BOT",
+                "allowed_channels": ["C_ALLOWED"]
+            }
+        }))
+        .await
+        .expect("configure");
+
+    let mut event_rx = connector.subscribe_events();
+    let subscribe_result = runtime
+        .block_on(connector.handle_subscribe(json!({
+            "topics": ["slack.message.new"]
+        })))
+        .expect("subscribe should succeed");
+    assert_eq!(subscribe_result["connection_status"], "started");
+
+    let ack_json = fcp_async_core::time::timeout(StdDuration::from_secs(3), ack_rx)
+        .await
+        .expect("timeout waiting for socket ack")
+        .expect("ack channel should complete")
+        .expect("ack payload missing");
+    let ack_value: serde_json::Value =
+        serde_json::from_str(&ack_json).expect("ack should be valid json");
+    assert_eq!(ack_value["envelope_id"], "envelope-policy-drop");
+
+    assert!(
+        fcp_async_core::time::timeout(StdDuration::from_millis(200), event_rx.recv())
+            .await
+            .is_err(),
+        "monitor policy should suppress the unauthorized message event"
+    );
 
     runtime
         .block_on(connector.handle_shutdown(json!({})))

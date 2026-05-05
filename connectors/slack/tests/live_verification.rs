@@ -57,7 +57,8 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("test constraints CBOR should be valid")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)

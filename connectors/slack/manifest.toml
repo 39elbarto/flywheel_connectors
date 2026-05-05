@@ -11,14 +11,14 @@ interface_hash = "blake3-256:fcp.interface.v2:4a6a88aae0769258235d0fa64833e87340
 id = "fcp.slack"
 name = "Slack Connector"
 version = "0.1.0"
-description = "FCP connector for Slack (channels, messages, users, files, reactions)"
+description = "FCP connector for Slack (channels, messages, users, files, reactions, policy-gated Socket Mode events)"
 archetypes = ["operational", "streaming", "bidirectional"]
 format = "wasi"
 
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "init"
+migration_hint = "socket-mode monitor policy defaults to bot-mention gating for public channel messages"
 
 [zones]
 home = "z:work"
@@ -521,27 +521,27 @@ related = ["slack.upload_file"]
 # ── Events ──────────────────────────────────────────────────────
 
 [provides.events."slack.message.new"]
-description = "New Slack message event from Socket Mode"
+description = "New Slack message event from Socket Mode after monitor-policy authorization"
 streaming = true
 replay = false
 
 [provides.events."slack.message.edited"]
-description = "Slack message edited event from Socket Mode"
+description = "Slack message edited event from Socket Mode after monitor-policy authorization"
 streaming = true
 replay = false
 
 [provides.events."slack.message.deleted"]
-description = "Slack message deleted event from Socket Mode"
+description = "Slack message deleted event from Socket Mode after monitor-policy authorization"
 streaming = true
 replay = false
 
 [provides.events."slack.reaction.added"]
-description = "Slack reaction added event from Socket Mode"
+description = "Slack reaction added event from Socket Mode after monitor-policy authorization"
 streaming = true
 replay = false
 
 [provides.events."slack.reaction.removed"]
-description = "Slack reaction removed event from Socket Mode"
+description = "Slack reaction removed event from Socket Mode after monitor-policy authorization"
 streaming = true
 replay = false
 

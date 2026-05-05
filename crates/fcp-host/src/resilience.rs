@@ -1238,6 +1238,10 @@ pub struct ResilienceMetricsSnapshot {
     pub bulkhead_rejections: u64,
     /// Requests shed due to load.
     pub load_shed: u64,
+    /// Requests admitted after an explicit backpressure delay.
+    pub backpressure_delays: u64,
+    /// Requests admitted with an operator-visible backpressure warning.
+    pub backpressure_warnings: u64,
     /// Probe requests allowed through.
     pub probe_requests: u64,
 }
@@ -1440,16 +1444,25 @@ impl ResilienceLayer {
         // violated for every elevated-risk admission.
         let delay = backpressure_delay_duration(&decision);
         if let Some(delay) = delay {
+            let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+            state
+                .metrics
+                .backpressure_delays
+                .fetch_add(1, Ordering::Relaxed);
             tracing::info!(
                 connector_id = %connector_id,
                 operation,
-                delay_ms = delay.as_millis() as u64,
+                delay_ms,
                 priority = ?priority,
                 backpressure_state = decision.state.as_str(),
                 backpressure_action = decision.action.as_str(),
                 "request delayed due to backpressure"
             );
         } else if decision.action == BackpressureAction::AdmitWithWarning {
+            state
+                .metrics
+                .backpressure_warnings
+                .fetch_add(1, Ordering::Relaxed);
             tracing::warn!(
                 connector_id = %connector_id,
                 operation,
@@ -1767,6 +1780,8 @@ struct ConnectorMetrics {
     circuit_opened: AtomicU64,
     bulkhead_rejections: AtomicU64,
     load_shed: AtomicU64,
+    backpressure_delays: AtomicU64,
+    backpressure_warnings: AtomicU64,
     probe_requests: AtomicU64,
 }
 
@@ -1781,6 +1796,8 @@ impl ConnectorMetrics {
             circuit_opened: self.circuit_opened.load(Ordering::Relaxed),
             bulkhead_rejections: self.bulkhead_rejections.load(Ordering::Relaxed),
             load_shed: self.load_shed.load(Ordering::Relaxed),
+            backpressure_delays: self.backpressure_delays.load(Ordering::Relaxed),
+            backpressure_warnings: self.backpressure_warnings.load(Ordering::Relaxed),
             probe_requests: self.probe_requests.load(Ordering::Relaxed),
         }
     }
@@ -3061,11 +3078,15 @@ mod tests {
             BackpressureCalibration::valid(),
         ));
         assert_eq!(delay_decision.action, BackpressureAction::Delay);
-        let delay = backpressure_delay_duration(&delay_decision)
-            .expect("Delay action MUST yield a real sleep duration — pre-fix it returned None");
+        let delay = backpressure_delay_duration(&delay_decision);
         assert!(
-            delay.as_millis() as u64 >= MIN_BACKPRESSURE_DELAY_MS
-                && delay.as_millis() as u64 <= MAX_BACKPRESSURE_DELAY_MS,
+            delay.is_some(),
+            "Delay action MUST yield a real sleep duration — pre-fix it returned None"
+        );
+        let delay = delay.unwrap_or(Duration::ZERO);
+        let delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX);
+        assert!(
+            (MIN_BACKPRESSURE_DELAY_MS..=MAX_BACKPRESSURE_DELAY_MS).contains(&delay_ms),
             "delay {delay:?} must be inside [{MIN_BACKPRESSURE_DELAY_MS}ms, \
              {MAX_BACKPRESSURE_DELAY_MS}ms]"
         );
@@ -3111,10 +3132,9 @@ mod tests {
 
         // Even an absurd downstream retry-after hint is clamped to MAX.
         decision.replay.input.telemetry.downstream_retry_after_ms = Some(60_000);
-        let huge = backpressure_delay_duration(&decision).unwrap();
         assert_eq!(
-            huge.as_millis() as u64,
-            MAX_BACKPRESSURE_DELAY_MS,
+            backpressure_delay_duration(&decision),
+            Some(Duration::from_millis(MAX_BACKPRESSURE_DELAY_MS)),
             "br-6bgp1: 60s downstream retry-after must clamp to MAX_BACKPRESSURE_DELAY_MS, \
              not propagate as an unbounded sleep that would let an upstream throttle starve \
              every in-flight request"
@@ -3127,13 +3147,78 @@ mod tests {
             cpu_pressure_per_mille: Some(0),
             ..BackpressureTelemetry::default()
         };
-        let tiny = backpressure_delay_duration(&decision).unwrap();
         assert_eq!(
-            tiny.as_millis() as u64,
-            MIN_BACKPRESSURE_DELAY_MS,
+            backpressure_delay_duration(&decision),
+            Some(Duration::from_millis(MIN_BACKPRESSURE_DELAY_MS)),
             "br-6bgp1: zero pressure must floor at MIN_BACKPRESSURE_DELAY_MS so the sleep \
              remains observable in tracing tests"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn br_6bgp1_delay_action_waits_and_records_metric() {
+        let layer = ResilienceLayer::default();
+        let connector_id = test_connector_id();
+        layer.set_base_load_per_mille(900);
+        assert_eq!(
+            layer
+                .backpressure_decision(&connector_id, RequestPriority::Normal, "invoke")
+                .action,
+            BackpressureAction::Delay
+        );
+
+        let operation_started_at = Arc::new(Mutex::new(None));
+        let operation_started_at_clone = Arc::clone(&operation_started_at);
+        let started_at = Instant::now();
+        let result = layer
+            .execute(
+                &connector_id,
+                RequestPriority::Normal,
+                "invoke",
+                async move {
+                    *lock_unpoisoned(&operation_started_at_clone) = Some(Instant::now());
+                    Ok::<(), &str>(())
+                },
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let observed_start = (*lock_unpoisoned(&operation_started_at))
+            .expect("operation body should run after the backpressure delay");
+        assert!(
+            observed_start.saturating_duration_since(started_at)
+                >= Duration::from_millis(MIN_BACKPRESSURE_DELAY_MS),
+            "br-6bgp1: Delay action must sleep before the operation body starts"
+        );
+        let metrics = layer.metrics(&connector_id);
+        assert_eq!(metrics.backpressure_delays, 1);
+        assert_eq!(metrics.backpressure_warnings, 0);
+        assert_eq!(metrics.successes, 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn br_uwih7_admit_with_warning_records_operator_metric() {
+        let layer = ResilienceLayer::default();
+        let connector_id = test_connector_id();
+        layer.set_base_load_per_mille(950);
+        assert_eq!(
+            layer
+                .backpressure_decision(&connector_id, RequestPriority::High, "invoke")
+                .action,
+            BackpressureAction::AdmitWithWarning
+        );
+
+        let result = layer
+            .execute(&connector_id, RequestPriority::High, "invoke", async {
+                Ok::<(), &str>(())
+            })
+            .await;
+
+        assert!(result.is_ok());
+        let metrics = layer.metrics(&connector_id);
+        assert_eq!(metrics.backpressure_delays, 0);
+        assert_eq!(metrics.backpressure_warnings, 1);
+        assert_eq!(metrics.successes, 1);
     }
 
     #[test]
@@ -4890,6 +4975,8 @@ mod tests {
         assert_eq!(snapshot.circuit_opened, 0);
         assert_eq!(snapshot.bulkhead_rejections, 0);
         assert_eq!(snapshot.load_shed, 0);
+        assert_eq!(snapshot.backpressure_delays, 0);
+        assert_eq!(snapshot.backpressure_warnings, 0);
         assert_eq!(snapshot.probe_requests, 0);
     }
 
@@ -4917,7 +5004,9 @@ mod tests {
             circuit_opened: 1,
             bulkhead_rejections: 3,
             load_shed: 4,
-            probe_requests: 5,
+            backpressure_delays: 5,
+            backpressure_warnings: 6,
+            probe_requests: 7,
         };
         let cloned = original;
         assert_eq!(original.requests, cloned.requests);
@@ -4928,6 +5017,8 @@ mod tests {
         assert_eq!(original.circuit_opened, cloned.circuit_opened);
         assert_eq!(original.bulkhead_rejections, cloned.bulkhead_rejections);
         assert_eq!(original.load_shed, cloned.load_shed);
+        assert_eq!(original.backpressure_delays, cloned.backpressure_delays);
+        assert_eq!(original.backpressure_warnings, cloned.backpressure_warnings);
         assert_eq!(original.probe_requests, cloned.probe_requests);
     }
 

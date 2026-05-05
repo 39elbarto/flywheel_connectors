@@ -11,7 +11,7 @@ interface_hash = "blake3-256:fcp.interface.v2:5ab89ccd852176277eb5686e06d05c9fdc
 id = "fcp.google-meet"
 name = "Google Meet Connector"
 version = "0.1.0"
-description = "FCP connector for Google Meet spaces, conference records, participants, sessions, and attendance"
+description = "FCP connector for Google Meet spaces, conference records, participants, sessions, attendance, recordings, transcripts, smart notes, and Drive-backed artifact text"
 archetypes = ["operational", "knowledge"]
 format = "wasi"
 
@@ -529,6 +529,362 @@ common_mistakes = ["Using this for live-meeting monitoring", "Dropping participa
 examples = ['{"meeting":"https://meet.google.com/abc-defg-hij","merge_duplicate_participants":true}', '{"conference_record":"conferenceRecords/abc","late_after_minutes":5,"early_before_minutes":5}']
 related = []
 
+[provides.operations."gmeet.recordings.list"]
+description = "List Google Meet recording artifacts for a conference record"
+capability = "meet.artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.recordings.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.recordings.list".input_schema.properties.conference_record]
+type = "string"
+description = "conferenceRecords/* resource name or bare conference record id"
+[provides.operations."gmeet.recordings.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.recordings.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.recordings.list".output_schema]
+required = ["recordings", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.recordings.list".output_schema.properties.recordings]
+type = "array"
+[provides.operations."gmeet.recordings.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.recordings.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.recordings.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.recordings.list".ai_hints]
+when_to_use = "Read completed Google Meet recording metadata for a conference record."
+common_mistakes = ["Passing spaces/* instead of conferenceRecords/*", "Expecting this to download media bytes; it returns Meet recording metadata only"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_items":10}']
+related = []
+
+[provides.operations."gmeet.transcripts.list"]
+description = "List Google Meet transcript artifacts for a conference record"
+capability = "meet.artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.transcripts.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.transcripts.list".input_schema.properties.conference_record]
+type = "string"
+[provides.operations."gmeet.transcripts.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.transcripts.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.transcripts.list".output_schema]
+required = ["transcripts", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.transcripts.list".output_schema.properties.transcripts]
+type = "array"
+[provides.operations."gmeet.transcripts.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.transcripts.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.transcripts.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.transcripts.list".ai_hints]
+when_to_use = "List completed Meet transcript resources before fetching entries or exporting docsDestination text."
+common_mistakes = ["Expecting transcript entry text in this list response", "Using Drive export without the separate meet.drive_artifact.read capability"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_items":10}']
+related = ["gmeet.transcript_entries.list", "gmeet.transcripts.with_text.list"]
+
+[provides.operations."gmeet.transcript_entries.list"]
+description = "List transcript entries for one Google Meet transcript resource"
+capability = "meet.artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.transcript_entries.list".input_schema]
+required = ["transcript"]
+type = "object"
+[provides.operations."gmeet.transcript_entries.list".input_schema.properties.transcript]
+type = "string"
+description = "conferenceRecords/*/transcripts/* resource name"
+[provides.operations."gmeet.transcript_entries.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.transcript_entries.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.transcript_entries.list".output_schema]
+required = ["transcript_entries", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.transcript_entries.list".output_schema.properties.transcript_entries]
+type = "array"
+[provides.operations."gmeet.transcript_entries.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.transcript_entries.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.transcript_entries.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.transcript_entries.list".ai_hints]
+when_to_use = "Read ordered utterance text from a completed Meet transcript resource."
+common_mistakes = ["Passing a conferenceRecords/* parent instead of conferenceRecords/*/transcripts/*", "Assuming transcript entries are live captions"]
+examples = ['{"transcript":"conferenceRecords/abc/transcripts/t1","max_items":100}']
+related = ["gmeet.transcripts.list"]
+
+[provides.operations."gmeet.smart_notes.list"]
+description = "List Google Meet smart-note artifacts for a conference record"
+capability = "meet.artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.smart_notes.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.smart_notes.list".input_schema.properties.conference_record]
+type = "string"
+[provides.operations."gmeet.smart_notes.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.smart_notes.list".input_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.smart_notes.list".output_schema]
+required = ["smart_notes", "count", "max_items"]
+type = "object"
+[provides.operations."gmeet.smart_notes.list".output_schema.properties.smart_notes]
+type = "array"
+[provides.operations."gmeet.smart_notes.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.smart_notes.list".output_schema.properties.max_items]
+type = "integer"
+
+[provides.operations."gmeet.smart_notes.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.smart_notes.list".ai_hints]
+when_to_use = "List completed Google Meet smart-note resources for a conference record."
+common_mistakes = ["Treating missing smart notes as a meeting failure", "Using Drive export without the separate meet.drive_artifact.read capability"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_items":10}']
+related = ["gmeet.smart_notes.with_text.list"]
+
+[provides.operations."gmeet.transcripts.with_text.list"]
+description = "List transcript artifacts and attach Drive-backed docsDestination text when available"
+capability = "meet.drive_artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.transcripts.with_text.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.transcripts.with_text.list".input_schema.properties.conference_record]
+type = "string"
+[provides.operations."gmeet.transcripts.with_text.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.transcripts.with_text.list".input_schema.properties.max_items]
+type = "integer"
+[provides.operations."gmeet.transcripts.with_text.list".input_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.transcripts.with_text.list".output_schema]
+required = ["transcripts", "count", "max_items", "max_document_bytes"]
+type = "object"
+[provides.operations."gmeet.transcripts.with_text.list".output_schema.properties.transcripts]
+type = "array"
+[provides.operations."gmeet.transcripts.with_text.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.transcripts.with_text.list".output_schema.properties.max_items]
+type = "integer"
+[provides.operations."gmeet.transcripts.with_text.list".output_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.transcripts.with_text.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.transcripts.with_text.list".ai_hints]
+when_to_use = "Fetch transcript metadata and export supported docsDestination document text with per-transcript partial errors."
+common_mistakes = ["Dropping documentTextError; it is partial-result evidence", "Passing arbitrary Drive file ids instead of Meet docsDestination document ids"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_document_bytes":1048576}']
+related = ["gmeet.transcripts.list", "gmeet.drive_document_text.export"]
+
+[provides.operations."gmeet.smart_notes.with_text.list"]
+description = "List smart-note artifacts and attach Drive-backed docsDestination text when available"
+capability = "meet.drive_artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.smart_notes.with_text.list".input_schema]
+required = ["conference_record"]
+type = "object"
+[provides.operations."gmeet.smart_notes.with_text.list".input_schema.properties.conference_record]
+type = "string"
+[provides.operations."gmeet.smart_notes.with_text.list".input_schema.properties.page_size]
+type = "integer"
+[provides.operations."gmeet.smart_notes.with_text.list".input_schema.properties.max_items]
+type = "integer"
+[provides.operations."gmeet.smart_notes.with_text.list".input_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.smart_notes.with_text.list".output_schema]
+required = ["smart_notes", "count", "max_items", "max_document_bytes"]
+type = "object"
+[provides.operations."gmeet.smart_notes.with_text.list".output_schema.properties.smart_notes]
+type = "array"
+[provides.operations."gmeet.smart_notes.with_text.list".output_schema.properties.count]
+type = "integer"
+[provides.operations."gmeet.smart_notes.with_text.list".output_schema.properties.max_items]
+type = "integer"
+[provides.operations."gmeet.smart_notes.with_text.list".output_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.smart_notes.with_text.list".network_constraints]
+host_allow = ["meet.googleapis.com", "www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.smart_notes.with_text.list".ai_hints]
+when_to_use = "Fetch smart-note metadata and export supported docsDestination document text with per-note partial errors."
+common_mistakes = ["Treating one failed Drive export as a full smart-note listing failure", "Passing arbitrary Drive file ids instead of Meet docsDestination document ids"]
+examples = ['{"conference_record":"conferenceRecords/abc","max_document_bytes":1048576}']
+related = ["gmeet.smart_notes.list", "gmeet.drive_document_text.export"]
+
+[provides.operations."gmeet.drive_document_text.export"]
+description = "Export text/plain from a Drive docsDestination document id"
+capability = "meet.drive_artifact.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."gmeet.drive_document_text.export".input_schema]
+type = "object"
+[provides.operations."gmeet.drive_document_text.export".input_schema.properties.document_id]
+type = "string"
+description = "Strict Drive document id extracted from a Meet docsDestination"
+[provides.operations."gmeet.drive_document_text.export".input_schema.properties.docs_destination]
+type = "object"
+description = "Meet docsDestination object containing document, documentId, or file"
+[provides.operations."gmeet.drive_document_text.export".input_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.drive_document_text.export".output_schema]
+required = ["document_id", "text", "bytes", "max_document_bytes"]
+type = "object"
+[provides.operations."gmeet.drive_document_text.export".output_schema.properties.document_id]
+type = "string"
+[provides.operations."gmeet.drive_document_text.export".output_schema.properties.text]
+type = "string"
+[provides.operations."gmeet.drive_document_text.export".output_schema.properties.bytes]
+type = "integer"
+[provides.operations."gmeet.drive_document_text.export".output_schema.properties.max_document_bytes]
+type = "integer"
+
+[provides.operations."gmeet.drive_document_text.export".network_constraints]
+host_allow = ["www.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."gmeet.drive_document_text.export".ai_hints]
+when_to_use = "Export bounded text/plain content from a Meet docsDestination Google Docs document."
+common_mistakes = ["Passing arbitrary Drive files; only docsDestination document ids are supported", "Ignoring 401/403 restricted-scope or Workspace policy failures"]
+examples = ['{"document_id":"1DocIdFromMeet","max_document_bytes":1048576}', '{"docs_destination":{"document":"https://docs.google.com/document/d/1DocIdFromMeet/edit"}}']
+related = ["gmeet.transcripts.with_text.list", "gmeet.smart_notes.with_text.list"]
+
 [event_caps]
 streaming = false
 replay = false
@@ -559,6 +915,20 @@ burst = 30
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "meet.artifact.read"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "meet.drive_artifact.read"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "meet.space.create"
 requests = 60
 window_ms = 60000
@@ -583,3 +953,10 @@ scope = "instance"
 "gmeet.participants.list" = ["meet.conference.read"]
 "gmeet.participant_sessions.list" = ["meet.conference.read"]
 "gmeet.attendance.list" = ["meet.conference.read"]
+"gmeet.recordings.list" = ["meet.artifact.read"]
+"gmeet.transcripts.list" = ["meet.artifact.read"]
+"gmeet.transcript_entries.list" = ["meet.artifact.read"]
+"gmeet.smart_notes.list" = ["meet.artifact.read"]
+"gmeet.transcripts.with_text.list" = ["meet.artifact.read", "meet.drive_artifact.read"]
+"gmeet.smart_notes.with_text.list" = ["meet.artifact.read", "meet.drive_artifact.read"]
+"gmeet.drive_document_text.export" = ["meet.drive_artifact.read"]

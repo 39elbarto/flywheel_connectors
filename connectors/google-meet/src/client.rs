@@ -15,6 +15,9 @@ use crate::error::{GoogleMeetError, GoogleMeetResult};
 /// Default Google Meet API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://meet.googleapis.com/v2";
 
+/// Default Google Drive API base URL used for Meet docsDestination exports.
+pub const DEFAULT_DRIVE_EXPORT_BASE_URL: &str = "https://www.googleapis.com/drive/v3";
+
 /// Render a redacted auth label suitable for logs and diagnostics.
 #[must_use]
 pub fn google_auth_redacted_label(auth: &GoogleMaterializedAuth) -> String {
@@ -34,6 +37,7 @@ pub const fn google_auth_is_secretless(auth: &GoogleMaterializedAuth) -> bool {
 pub struct GoogleMeetClient {
     auth: GoogleMaterializedAuth,
     base_url: String,
+    drive_base_url: String,
     http: Client,
 }
 
@@ -42,6 +46,7 @@ impl fmt::Debug for GoogleMeetClient {
         f.debug_struct("GoogleMeetClient")
             .field("auth", &google_auth_redacted_label(&self.auth))
             .field("base_url", &self.base_url)
+            .field("drive_base_url", &self.drive_base_url)
             .finish_non_exhaustive()
     }
 }
@@ -74,6 +79,7 @@ impl GoogleMeetClient {
         Ok(Self {
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
+            drive_base_url: DEFAULT_DRIVE_EXPORT_BASE_URL.to_string(),
             http,
         })
     }
@@ -85,10 +91,23 @@ impl GoogleMeetClient {
         self
     }
 
+    /// Set the Drive API base URL for tests or approved host routing.
+    #[must_use]
+    pub fn with_drive_base_url(mut self, drive_base_url: impl Into<String>) -> Self {
+        self.drive_base_url = drive_base_url.into();
+        self
+    }
+
     /// Base URL used by future Meet API calls.
     #[must_use]
     pub fn base_url(&self) -> &str {
         &self.base_url
+    }
+
+    /// Base URL used by Drive-backed text export calls.
+    #[must_use]
+    pub fn drive_base_url(&self) -> &str {
+        &self.drive_base_url
     }
 
     /// Redacted auth label for diagnostics.
@@ -111,6 +130,10 @@ impl GoogleMeetClient {
         if self.base_url.trim().is_empty() {
             Err(GoogleMeetError::InvalidConfig {
                 message: "base_url must not be empty".to_string(),
+            })
+        } else if self.drive_base_url.trim().is_empty() {
+            Err(GoogleMeetError::InvalidConfig {
+                message: "drive_base_url must not be empty".to_string(),
             })
         } else {
             Ok(())
@@ -225,6 +248,95 @@ impl GoogleMeetClient {
             .await
     }
 
+    /// List recordings for a conference record.
+    pub async fn list_recordings(
+        &self,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetRecording>> {
+        let parent = normalize_conference_record_name(conference_record)?;
+        let path = format!("{}/recordings", encode_resource_name_for_path(&parent));
+        let mut query = Vec::new();
+        if let Some(size) = page_size {
+            query.push(("pageSize", size.to_string()));
+        }
+        self.list_collection(&path, "recordings", &query, max_items)
+            .await
+    }
+
+    /// List transcripts for a conference record.
+    pub async fn list_transcripts(
+        &self,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetTranscript>> {
+        let parent = normalize_conference_record_name(conference_record)?;
+        let path = format!("{}/transcripts", encode_resource_name_for_path(&parent));
+        let mut query = Vec::new();
+        if let Some(size) = page_size {
+            query.push(("pageSize", size.to_string()));
+        }
+        self.list_collection(&path, "transcripts", &query, max_items)
+            .await
+    }
+
+    /// List transcript entries for one transcript resource.
+    pub async fn list_transcript_entries(
+        &self,
+        transcript: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetTranscriptEntry>> {
+        let transcript = normalize_transcript_name(transcript)?;
+        let path = format!("{}/entries", encode_resource_name_for_path(&transcript));
+        let mut query = Vec::new();
+        if let Some(size) = page_size {
+            query.push(("pageSize", size.to_string()));
+        }
+        self.list_collection(&path, "transcriptEntries", &query, max_items)
+            .await
+    }
+
+    /// List smart notes for a conference record.
+    pub async fn list_smart_notes(
+        &self,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetSmartNote>> {
+        let parent = normalize_conference_record_name(conference_record)?;
+        let path = format!("{}/smartNotes", encode_resource_name_for_path(&parent));
+        let mut query = Vec::new();
+        if let Some(size) = page_size {
+            query.push(("pageSize", size.to_string()));
+        }
+        self.list_collection(&path, "smartNotes", &query, max_items)
+            .await
+    }
+
+    /// Export Drive-backed docsDestination text for a Meet artifact.
+    pub async fn export_drive_document_text(
+        &self,
+        document_id: &str,
+        max_bytes: usize,
+    ) -> GoogleMeetResult<String> {
+        let document_id = validate_drive_document_id(document_id)?;
+        let path = format!(
+            "files/{}/export",
+            utf8_percent_encode(&document_id, NON_ALPHANUMERIC)
+        );
+        let url = self.build_drive_url(&path, &[("mimeType", "text/plain".to_string())])?;
+        let mut request = self.http.get(url).header(header::ACCEPT, "text/plain");
+        let auth_headers = auth_headers(&self.auth)?;
+        if !auth_headers.is_empty() {
+            request = request.headers(auth_headers);
+        }
+        let response = request.send().await.map_err(GoogleMeetError::Http)?;
+        decode_text_response(response, "Google Drive files.export", max_bytes).await
+    }
+
     async fn list_collection<T>(
         &self,
         path: &str,
@@ -323,6 +435,28 @@ impl GoogleMeetClient {
         url = url.join(path.trim_start_matches('/')).map_err(|error| {
             GoogleMeetError::InvalidConfig {
                 message: format!("invalid Google Meet request path `{path}`: {error}"),
+            }
+        })?;
+        if !query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (key, value) in query {
+                pairs.append_pair(key, value);
+            }
+        }
+        Ok(url)
+    }
+
+    fn build_drive_url(&self, path: &str, query: &[(&str, String)]) -> GoogleMeetResult<Url> {
+        let base = format!("{}/", self.drive_base_url.trim_end_matches('/'));
+        let mut url = Url::parse(&base).map_err(|error| GoogleMeetError::InvalidConfig {
+            message: format!(
+                "invalid Google Drive drive_base_url `{}`: {error}",
+                self.drive_base_url
+            ),
+        })?;
+        url = url.join(path.trim_start_matches('/')).map_err(|error| {
+            GoogleMeetError::InvalidConfig {
+                message: format!("invalid Google Drive request path `{path}`: {error}"),
             }
         })?;
         if !query.is_empty() {
@@ -470,6 +604,147 @@ pub struct GoogleMeetParticipantSession {
     pub extra: BTreeMap<String, Value>,
 }
 
+/// Google Meet recording artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetRecording {
+    /// Resource name.
+    #[serde(default)]
+    pub name: String,
+    /// Recording start time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    /// Recording end time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
+    /// Drive destination for the recording file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub drive_destination: Option<GoogleMeetDriveDestination>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet Drive destination pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetDriveDestination {
+    /// Drive file pointer when provided by Google.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Export URI when provided by Google.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub export_uri: Option<String>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet transcript artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetTranscript {
+    /// Resource name.
+    #[serde(default)]
+    pub name: String,
+    /// Transcript start time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    /// Transcript end time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
+    /// Docs destination for transcript text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_destination: Option<GoogleMeetDocsDestination>,
+    /// Strictly extracted Drive document id when text export was attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    /// Exported Drive document text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_text: Option<String>,
+    /// Non-fatal Drive export or extraction error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_text_error: Option<String>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet transcript entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetTranscriptEntry {
+    /// Resource name.
+    #[serde(default)]
+    pub name: String,
+    /// Participant resource referenced by this utterance.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub participant: Option<String>,
+    /// Transcript text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// BCP-47 language code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language_code: Option<String>,
+    /// Entry start time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    /// Entry end time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet smart note artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetSmartNote {
+    /// Resource name.
+    #[serde(default)]
+    pub name: String,
+    /// Smart note start time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start_time: Option<String>,
+    /// Smart note end time.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_time: Option<String>,
+    /// Docs destination for smart-note text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub docs_destination: Option<GoogleMeetDocsDestination>,
+    /// Strictly extracted Drive document id when text export was attempted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    /// Exported Drive document text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_text: Option<String>,
+    /// Non-fatal Drive export or extraction error.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_text_error: Option<String>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
+/// Google Meet Docs destination pointer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleMeetDocsDestination {
+    /// Google Docs document pointer or URL.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document: Option<String>,
+    /// Raw document id used by some Meet API previews.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub document_id: Option<String>,
+    /// File pointer used by some previews.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    /// Preserve future fields.
+    #[serde(flatten, default)]
+    pub extra: BTreeMap<String, Value>,
+}
+
 /// One attendance row after optional participant merge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GoogleMeetAttendanceRow {
@@ -540,6 +815,30 @@ impl NamedGoogleMeetResource for GoogleMeetParticipant {
 }
 
 impl NamedGoogleMeetResource for GoogleMeetParticipantSession {
+    fn resource_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedGoogleMeetResource for GoogleMeetRecording {
+    fn resource_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedGoogleMeetResource for GoogleMeetTranscript {
+    fn resource_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedGoogleMeetResource for GoogleMeetTranscriptEntry {
+    fn resource_name(&self) -> &str {
+        &self.name
+    }
+}
+
+impl NamedGoogleMeetResource for GoogleMeetSmartNote {
     fn resource_name(&self) -> &str {
         &self.name
     }
@@ -628,6 +927,49 @@ pub fn normalize_participant_name(input: &str) -> GoogleMeetResult<String> {
     Ok(trimmed.to_string())
 }
 
+/// Normalize a transcript input into `conferenceRecords/*/transcripts/*`.
+pub fn normalize_transcript_name(input: &str) -> GoogleMeetResult<String> {
+    let trimmed = input.trim().trim_start_matches('/');
+    validate_resource_name(trimmed, "conferenceRecords", 4)?;
+    let parts = resource_segments(trimmed);
+    if parts.get(2) != Some(&"transcripts") {
+        return Err(GoogleMeetError::InvalidConfig {
+            message: "transcript must be a conferenceRecords/*/transcripts/* resource".to_string(),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+/// Extract a strict Drive document id from a Meet docsDestination.
+pub fn extract_docs_destination_document_id(
+    destination: &GoogleMeetDocsDestination,
+) -> GoogleMeetResult<Option<String>> {
+    for value in [
+        destination.document.as_deref(),
+        destination.document_id.as_deref(),
+        destination.file.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        return parse_docs_destination_document_id(value).map(Some);
+    }
+    Ok(None)
+}
+
+/// Validate a Drive document id accepted by Drive `files.export`.
+pub fn validate_drive_document_id(document_id: &str) -> GoogleMeetResult<String> {
+    let trimmed = document_id.trim();
+    if is_valid_drive_document_id(trimmed) {
+        Ok(trimmed.to_string())
+    } else {
+        Err(GoogleMeetError::InvalidConfig {
+            message: "Drive document id must be 3-256 chars of ASCII letters, digits, '_' or '-'"
+                .to_string(),
+        })
+    }
+}
+
 /// Percent-encode a Google resource name one path segment at a time.
 #[must_use]
 pub fn encode_resource_name_for_path(name: &str) -> String {
@@ -674,6 +1016,61 @@ fn validate_resource_suffix(value: &str, message: &'static str) -> GoogleMeetRes
         });
     }
     Ok(())
+}
+
+fn parse_docs_destination_document_id(raw: &str) -> GoogleMeetResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(GoogleMeetError::InvalidConfig {
+            message: "docsDestination document id is empty".to_string(),
+        });
+    }
+    if let Some(suffix) = trimmed.strip_prefix("documents/") {
+        return validate_drive_document_id(suffix);
+    }
+    if trimmed.contains("://") {
+        let url = Url::parse(trimmed).map_err(|error| GoogleMeetError::InvalidConfig {
+            message: format!("docsDestination document URL could not be parsed: {error}"),
+        })?;
+        if url.scheme() != "https" {
+            return Err(GoogleMeetError::InvalidConfig {
+                message: "docsDestination document URL must use https".to_string(),
+            });
+        }
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(GoogleMeetError::InvalidConfig {
+                message: "docsDestination document URL must not include userinfo".to_string(),
+            });
+        }
+        let host = url.host_str().ok_or_else(|| GoogleMeetError::InvalidConfig {
+            message: "docsDestination document URL must include a host".to_string(),
+        })?;
+        if !host.eq_ignore_ascii_case("docs.google.com") {
+            return Err(GoogleMeetError::InvalidConfig {
+                message: format!("docsDestination document URL must target docs.google.com, got {host}"),
+            });
+        }
+        let segments: Vec<_> = url
+            .path_segments()
+            .map(|segments| segments.collect())
+            .unwrap_or_default();
+        let document_id = segments.windows(3).find_map(|window| {
+            (window[0] == "document" && window[1] == "d").then_some(window[2])
+        });
+        return validate_drive_document_id(document_id.ok_or_else(|| {
+            GoogleMeetError::InvalidConfig {
+                message: "docsDestination URL must include /document/d/{document_id}".to_string(),
+            }
+        })?);
+    }
+    validate_drive_document_id(trimmed)
+}
+
+fn is_valid_drive_document_id(value: &str) -> bool {
+    (3..=256).contains(&value.len())
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
 fn ensure_named<T: NamedGoogleMeetResource>(resource: &T, context: &str) -> GoogleMeetResult<()> {
@@ -725,6 +1122,50 @@ async fn decode_response<T: DeserializeOwned>(response: reqwest::Response) -> Go
     let message = google_api_error_message(&body).unwrap_or_else(|| {
         if body.trim().is_empty() {
             format!("Google Meet API returned HTTP {}", status.as_u16())
+        } else {
+            body
+        }
+    });
+    Err(GoogleMeetError::Api {
+        code: u32::from(status.as_u16()),
+        message,
+    })
+}
+
+async fn decode_text_response(
+    response: reqwest::Response,
+    context: &str,
+    max_bytes: usize,
+) -> GoogleMeetResult<String> {
+    let status = response.status();
+    if status.is_success() {
+        let body = response.bytes().await.map_err(GoogleMeetError::Http)?;
+        if body.len() > max_bytes {
+            return Err(GoogleMeetError::ResponseTooLarge {
+                context: context.to_string(),
+                max_bytes,
+            });
+        }
+        return String::from_utf8(body.to_vec()).map_err(|error| {
+            GoogleMeetError::InvalidConfig {
+                message: format!("{context} returned non-UTF-8 text/plain: {error}"),
+            }
+        });
+    }
+    let retry_after_secs = response
+        .headers()
+        .get(header::RETRY_AFTER)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.trim().parse::<u64>().ok());
+    let body = response.text().await.unwrap_or_default();
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        return Err(GoogleMeetError::RateLimited {
+            retry_after_secs: retry_after_secs.unwrap_or(60),
+        });
+    }
+    let message = google_api_error_message(&body).unwrap_or_else(|| {
+        if body.trim().is_empty() {
+            format!("{context} returned HTTP {}", status.as_u16())
         } else {
             body
         }

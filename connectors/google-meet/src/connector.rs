@@ -21,10 +21,13 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::client::{
-    DEFAULT_BASE_URL, GoogleMeetAttendanceRow, GoogleMeetClient, GoogleMeetConferenceRecord,
-    GoogleMeetParticipant, GoogleMeetParticipantSession, GoogleMeetSpaceConfig,
-    google_auth_is_secretless, google_auth_redacted_label,
+    DEFAULT_BASE_URL, DEFAULT_DRIVE_EXPORT_BASE_URL, GoogleMeetAttendanceRow, GoogleMeetClient,
+    GoogleMeetConferenceRecord, GoogleMeetDocsDestination, GoogleMeetParticipant,
+    GoogleMeetParticipantSession, GoogleMeetRecording, GoogleMeetSmartNote, GoogleMeetSpaceConfig,
+    GoogleMeetTranscript, extract_docs_destination_document_id, google_auth_is_secretless,
+    google_auth_redacted_label, validate_drive_document_id,
 };
+use crate::error::{GoogleMeetError, GoogleMeetResult};
 
 const CONNECTOR_ID: &str = "google-meet";
 const SERVICE_SELECTOR: &str = "meet";
@@ -34,6 +37,8 @@ const MEET_SPACE_READ_CAP: &str = "meet.space.read";
 const MEET_SPACE_CREATE_CAP: &str = "meet.space.create";
 const MEET_SPACE_END_CAP: &str = "meet.space.end";
 const MEET_CONFERENCE_READ_CAP: &str = "meet.conference.read";
+const MEET_ARTIFACT_READ_CAP: &str = "meet.artifact.read";
+const MEET_DRIVE_ARTIFACT_READ_CAP: &str = "meet.drive_artifact.read";
 const SPACE_GET_OP: &str = "gmeet.space.get";
 const SPACE_CREATE_OP: &str = "gmeet.space.create";
 const SPACE_END_ACTIVE_CONFERENCE_OP: &str = "gmeet.space.end_active_conference";
@@ -43,16 +48,29 @@ const CONFERENCE_RECORD_LATEST_OP: &str = "gmeet.conference_record.latest";
 const PARTICIPANTS_LIST_OP: &str = "gmeet.participants.list";
 const PARTICIPANT_SESSIONS_LIST_OP: &str = "gmeet.participant_sessions.list";
 const ATTENDANCE_LIST_OP: &str = "gmeet.attendance.list";
+const RECORDINGS_LIST_OP: &str = "gmeet.recordings.list";
+const TRANSCRIPTS_LIST_OP: &str = "gmeet.transcripts.list";
+const TRANSCRIPT_ENTRIES_LIST_OP: &str = "gmeet.transcript_entries.list";
+const SMART_NOTES_LIST_OP: &str = "gmeet.smart_notes.list";
+const TRANSCRIPTS_WITH_TEXT_LIST_OP: &str = "gmeet.transcripts.with_text.list";
+const SMART_NOTES_WITH_TEXT_LIST_OP: &str = "gmeet.smart_notes.with_text.list";
+const DRIVE_DOCUMENT_TEXT_EXPORT_OP: &str = "gmeet.drive_document_text.export";
 const DEFAULT_PAGE_SIZE: u32 = 100;
 const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
 const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
+const MAX_ARTIFACT_PAGE_SIZE: u32 = 100;
 const DEFAULT_MAX_ITEMS: usize = 100;
 const MAX_ITEMS_CAP: usize = 1_000;
+const DEFAULT_DRIVE_EXPORT_MAX_BYTES: usize = 1_048_576;
+const MAX_DRIVE_EXPORT_BYTES: usize = 10 * 1_048_576;
 const MEETINGS_SPACE_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.readonly";
 const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
 const MEETINGS_SPACE_SETTINGS_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.settings";
+const MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE: &str =
+    "https://www.googleapis.com/auth/meetings.conference.media.readonly";
+const DRIVE_MEET_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.meet.readonly";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -82,6 +100,10 @@ fn is_local_test_host(host: &str) -> bool {
 
 fn host_is_meet_googleapis(host: &str) -> bool {
     host.eq_ignore_ascii_case("meet.googleapis.com")
+}
+
+fn host_is_drive_googleapis(host: &str) -> bool {
+    host.eq_ignore_ascii_case("www.googleapis.com")
 }
 
 fn validate_meet_base_url(raw: &str) -> FcpResult<String> {
@@ -116,6 +138,44 @@ fn validate_meet_base_url(raw: &str) -> FcpResult<String> {
     if !local && !host_is_meet_googleapis(host) {
         return Err(invalid_request(format!(
             "base_url must target meet.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
+        )));
+    }
+
+    Ok(trimmed.trim_end_matches('/').to_string())
+}
+
+fn validate_drive_base_url(raw: &str) -> FcpResult<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_request("drive_base_url must not be empty"));
+    }
+
+    let parsed = Url::parse(trimmed)
+        .map_err(|error| invalid_request(format!("drive_base_url could not be parsed: {error}")))?;
+    if !matches!(parsed.scheme(), "https" | "http") {
+        return Err(invalid_request("drive_base_url must use http or https"));
+    }
+
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| invalid_request("drive_base_url must include a host"))?;
+    let local = is_local_test_host(host);
+    if parsed.scheme() == "http" && !local {
+        return Err(invalid_request(
+            "drive_base_url must use https unless targeting localhost/127.0.0.1/::1 for tests",
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(invalid_request("drive_base_url must not include userinfo"));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(invalid_request(
+            "drive_base_url must not include a query string or fragment",
+        ));
+    }
+    if !local && !host_is_drive_googleapis(host) {
+        return Err(invalid_request(format!(
+            "drive_base_url must target www.googleapis.com (localhost/127.0.0.1/::1 allowed for tests): {host}"
         )));
     }
 
@@ -290,6 +350,7 @@ fn create_space_required_scopes(config: Option<&GoogleMeetSpaceConfig>) -> Vec<&
 struct GoogleMeetConfig {
     auth: GoogleMaterializedAuth,
     base_url: String,
+    drive_base_url: String,
     service_identity: String,
     required_scopes: Vec<String>,
 }
@@ -336,10 +397,19 @@ impl GoogleMeetConfig {
             )?,
             None => DEFAULT_BASE_URL.to_string(),
         };
+        let drive_base_url = match params.get("drive_base_url") {
+            Some(value) => validate_drive_base_url(
+                value
+                    .as_str()
+                    .ok_or_else(|| invalid_request("`drive_base_url` must be a string"))?,
+            )?,
+            None => DEFAULT_DRIVE_EXPORT_BASE_URL.to_string(),
+        };
 
         Ok(Self {
             auth,
             base_url,
+            drive_base_url,
             service_identity: service.identity(),
             required_scopes,
         })
@@ -442,6 +512,27 @@ enum DoctorStatus {
     Unhealthy,
 }
 
+fn scope_doctor_check(
+    name: &str,
+    configured_scopes: &[String],
+    scope: &'static str,
+    missing_message: &'static str,
+) -> DoctorCheck {
+    if configured_scopes.iter().any(|configured| configured == scope) {
+        DoctorCheck {
+            name: name.into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Configured scope: {scope}"),
+        }
+    } else {
+        DoctorCheck {
+            name: name.into(),
+            status: DoctorStatus::Degraded,
+            message: missing_message.into(),
+        }
+    }
+}
+
 /// FCP Google Meet connector foundation.
 pub struct GoogleMeetConnector {
     base: Arc<BaseConnector>,
@@ -473,7 +564,8 @@ impl GoogleMeetConnector {
         let config = GoogleMeetConfig::from_params(&params).await?;
         let client = GoogleMeetClient::new_with_auth(config.auth.clone())
             .map_err(|error| error.to_fcp_error())?
-            .with_base_url(&config.base_url);
+            .with_base_url(&config.base_url)
+            .with_drive_base_url(&config.drive_base_url);
 
         info!(
             auth = %google_auth_redacted_label(&config.auth),
@@ -493,8 +585,10 @@ impl GoogleMeetConnector {
                 "required_scopes": config.required_scopes,
                 "auth_mode": google_auth_redacted_label(&config.auth),
                 "base_url": config.base_url,
+                "drive_base_url": config.drive_base_url,
                 "foundation_only": false,
                 "api_read_operations": true,
+                "artifact_operations": true,
                 "live_session_operations": false,
             }
         }))
@@ -565,6 +659,7 @@ impl GoogleMeetConnector {
         if let Some(config) = &self.config {
             health["auth_mode"] = json!(google_auth_redacted_label(&config.auth));
             health["base_url"] = json!(config.base_url);
+            health["drive_base_url"] = json!(config.drive_base_url);
             health["service_identity"] = json!(config.service_identity);
             health["required_scopes"] = json!(config.required_scopes);
         }
@@ -624,6 +719,23 @@ impl GoogleMeetConnector {
                 message: format!("Base URL: {}", config.base_url),
             });
             checks.push(DoctorCheck {
+                name: "drive_base_url".into(),
+                status: DoctorStatus::Healthy,
+                message: format!("Drive export base URL: {}", config.drive_base_url),
+            });
+            checks.push(scope_doctor_check(
+                "meet_artifact_scope",
+                &config.required_scopes,
+                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
+                "Recording, transcript, transcript-entry, and smart-note reads require the Meet conference media readonly scope; 401/403 can also mean restricted-scope review, developer-preview enrollment, or workspace policy denial.",
+            ));
+            checks.push(scope_doctor_check(
+                "drive_artifact_scope",
+                &config.required_scopes,
+                DRIVE_MEET_READONLY_SCOPE,
+                "Drive-backed transcript and smart-note text export requires drive.meet.readonly; 401/403 can also mean restricted-scope review or workspace policy denial.",
+            ));
+            checks.push(DoctorCheck {
                 name: "credential_injection".into(),
                 status: DoctorStatus::Healthy,
                 message: if google_auth_is_secretless(&config.auth) {
@@ -643,7 +755,7 @@ impl GoogleMeetConnector {
         checks.push(DoctorCheck {
             name: "live_session_boundary".into(),
             status: DoctorStatus::Healthy,
-            message: "No live join, leave, transcript, or speak operations are advertised".into(),
+            message: "No live join, leave, or speak operations are advertised; artifact reads only target completed conference resources".into(),
         });
 
         let status = if checks
@@ -688,7 +800,7 @@ impl GoogleMeetConnector {
         let report = match client.foundation_probe() {
             Ok(()) => SelfCheckReport::degraded(
                 "api_probe_deferred",
-                "Google Meet read API operations are configured; invoke a read operation or loopback e2e for API proof",
+                "Google Meet read and artifact API operations are configured; invoke a read operation or loopback e2e for API proof",
             ),
             Err(error) => SelfCheckReport::failed("foundation_probe_failed", error.to_string()),
         };
@@ -815,6 +927,13 @@ impl GoogleMeetConnector {
             PARTICIPANTS_LIST_OP => self.invoke_list_participants(&input).await,
             PARTICIPANT_SESSIONS_LIST_OP => self.invoke_list_participant_sessions(&input).await,
             ATTENDANCE_LIST_OP => self.invoke_list_attendance(&input).await,
+            RECORDINGS_LIST_OP => self.invoke_list_recordings(&input).await,
+            TRANSCRIPTS_LIST_OP => self.invoke_list_transcripts(&input).await,
+            TRANSCRIPT_ENTRIES_LIST_OP => self.invoke_list_transcript_entries(&input).await,
+            SMART_NOTES_LIST_OP => self.invoke_list_smart_notes(&input).await,
+            TRANSCRIPTS_WITH_TEXT_LIST_OP => self.invoke_list_transcripts_with_text(&input).await,
+            SMART_NOTES_WITH_TEXT_LIST_OP => self.invoke_list_smart_notes_with_text(&input).await,
+            DRIVE_DOCUMENT_TEXT_EXPORT_OP => self.invoke_export_drive_document_text(&input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -1114,6 +1233,190 @@ impl GoogleMeetConnector {
         }))
     }
 
+    async fn invoke_list_recordings(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            RECORDINGS_LIST_OP,
+            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let conference_record = require_str(input, "conference_record")?;
+        let recordings = client
+            .list_recordings(conference_record, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "conference_record": conference_record,
+            "recordings": recordings,
+            "count": recordings.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_transcripts(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            TRANSCRIPTS_LIST_OP,
+            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let conference_record = require_str(input, "conference_record")?;
+        let transcripts = client
+            .list_transcripts(conference_record, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "conference_record": conference_record,
+            "transcripts": transcripts,
+            "count": transcripts.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_transcript_entries(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            TRANSCRIPT_ENTRIES_LIST_OP,
+            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let transcript = require_str(input, "transcript")?;
+        let mut entries = client
+            .list_transcript_entries(transcript, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        entries.sort_by_key(|entry| {
+            (
+                parse_timestamp_ms(entry.start_time.as_deref()).unwrap_or_default(),
+                entry.name.clone(),
+            )
+        });
+        Ok(json!({
+            "transcript": transcript,
+            "transcript_entries": entries,
+            "count": entries.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_smart_notes(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            SMART_NOTES_LIST_OP,
+            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let conference_record = require_str(input, "conference_record")?;
+        let smart_notes = client
+            .list_smart_notes(conference_record, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "conference_record": conference_record,
+            "smart_notes": smart_notes,
+            "count": smart_notes.len(),
+            "max_items": max_items,
+        }))
+    }
+
+    async fn invoke_list_transcripts_with_text(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            TRANSCRIPTS_WITH_TEXT_LIST_OP,
+            &[
+                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
+                DRIVE_MEET_READONLY_SCOPE,
+            ],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let max_document_bytes = parse_max_document_bytes(input)?;
+        let conference_record = require_str(input, "conference_record")?;
+        let transcripts = client
+            .list_transcripts(conference_record, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let transcripts =
+            attach_transcript_document_texts(client, transcripts, max_document_bytes).await;
+        Ok(json!({
+            "conference_record": conference_record,
+            "transcripts": transcripts,
+            "count": transcripts.len(),
+            "max_items": max_items,
+            "max_document_bytes": max_document_bytes,
+        }))
+    }
+
+    async fn invoke_list_smart_notes_with_text(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(
+            SMART_NOTES_WITH_TEXT_LIST_OP,
+            &[
+                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
+                DRIVE_MEET_READONLY_SCOPE,
+            ],
+        )?;
+        let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
+        let max_items = parse_max_items(input)?;
+        let max_document_bytes = parse_max_document_bytes(input)?;
+        let conference_record = require_str(input, "conference_record")?;
+        let smart_notes = client
+            .list_smart_notes(conference_record, page_size, Some(max_items))
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        let smart_notes =
+            attach_smart_note_document_texts(client, smart_notes, max_document_bytes).await;
+        Ok(json!({
+            "conference_record": conference_record,
+            "smart_notes": smart_notes,
+            "count": smart_notes.len(),
+            "max_items": max_items,
+            "max_document_bytes": max_document_bytes,
+        }))
+    }
+
+    async fn invoke_export_drive_document_text(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_configured_scopes(DRIVE_DOCUMENT_TEXT_EXPORT_OP, &[DRIVE_MEET_READONLY_SCOPE])?;
+        let document_id = drive_document_id_from_input(input)?;
+        let max_document_bytes = parse_max_document_bytes(input)?;
+        let text = client
+            .export_drive_document_text(&document_id, max_document_bytes)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "document_id": document_id,
+            "text": text,
+            "bytes": text.len(),
+            "max_document_bytes": max_document_bytes,
+        }))
+    }
+
     /// Handle shutdown.
     pub async fn handle_shutdown(
         &mut self,
@@ -1350,6 +1653,62 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                 "early_before_minutes": { "type": "integer" }
             })),
         ),
+        artifact_op_info(
+            RECORDINGS_LIST_OP,
+            "List Google Meet recording artifacts for a conference record",
+            paged_input_schema(&json!({
+                "conference_record": { "type": "string" }
+            })),
+        ),
+        artifact_op_info(
+            TRANSCRIPTS_LIST_OP,
+            "List Google Meet transcript artifacts for a conference record",
+            paged_input_schema(&json!({
+                "conference_record": { "type": "string" }
+            })),
+        ),
+        artifact_op_info(
+            TRANSCRIPT_ENTRIES_LIST_OP,
+            "List transcript entries for one Google Meet transcript resource",
+            paged_input_schema(&json!({
+                "transcript": { "type": "string" }
+            })),
+        ),
+        artifact_op_info(
+            SMART_NOTES_LIST_OP,
+            "List Google Meet smart-note artifacts for a conference record",
+            paged_input_schema(&json!({
+                "conference_record": { "type": "string" }
+            })),
+        ),
+        drive_artifact_op_info(
+            TRANSCRIPTS_WITH_TEXT_LIST_OP,
+            "List transcript artifacts and attach Drive-backed docsDestination text when available",
+            paged_input_schema(&json!({
+                "conference_record": { "type": "string" },
+                "max_document_bytes": { "type": "integer" }
+            })),
+        ),
+        drive_artifact_op_info(
+            SMART_NOTES_WITH_TEXT_LIST_OP,
+            "List smart-note artifacts and attach Drive-backed docsDestination text when available",
+            paged_input_schema(&json!({
+                "conference_record": { "type": "string" },
+                "max_document_bytes": { "type": "integer" }
+            })),
+        ),
+        drive_artifact_op_info(
+            DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+            "Export text/plain from a Drive docsDestination document id",
+            json!({
+                "type": "object",
+                "properties": {
+                    "document_id": { "type": "string" },
+                    "docs_destination": { "type": "object" },
+                    "max_document_bytes": { "type": "integer" }
+                }
+            }),
+        ),
     ]
 }
 
@@ -1394,6 +1753,70 @@ fn read_api_op_info(
             examples: vec![
                 r#"{"conference_record":"conferenceRecords/abc"}"#.into(),
                 r#"{"meeting":"https://meet.google.com/abc-defg-hij","max_items":10}"#.into(),
+            ],
+            related: vec![],
+        },
+    )
+}
+
+fn artifact_op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+) -> OperationInfo {
+    op_info(
+        id,
+        summary,
+        input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+        MEET_ARTIFACT_READ_CAP,
+        RiskLevel::Low,
+        SafetyTier::Safe,
+        IdempotencyClass::Strict,
+        AgentHint {
+            when_to_use: "Read completed Google Meet recording, transcript, transcript-entry, or smart-note artifacts.".into(),
+            common_mistakes: vec![
+                "These operations require Meet conference media readonly OAuth scope and may be restricted or developer-preview gated.".into(),
+                "Use the Drive text export operation only for docsDestination document ids; do not scrape arbitrary Drive files.".into(),
+            ],
+            examples: vec![
+                r#"{"conference_record":"conferenceRecords/abc","max_items":10}"#.into(),
+                r#"{"transcript":"conferenceRecords/abc/transcripts/t1"}"#.into(),
+            ],
+            related: vec![],
+        },
+    )
+}
+
+fn drive_artifact_op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+) -> OperationInfo {
+    op_info(
+        id,
+        summary,
+        input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+        MEET_DRIVE_ARTIFACT_READ_CAP,
+        RiskLevel::Low,
+        SafetyTier::Safe,
+        IdempotencyClass::Strict,
+        AgentHint {
+            when_to_use: "Export Drive-backed text for Meet transcript or smart-note docsDestination documents.".into(),
+            common_mistakes: vec![
+                "This is limited to docsDestination document ids and text/plain Drive export.".into(),
+                "Missing drive.meet.readonly or Workspace restricted-scope policy appears as an authorization error, not a parsing failure.".into(),
+            ],
+            examples: vec![
+                r#"{"document_id":"1DocIdFromMeet","max_document_bytes":1048576}"#.into(),
+                r#"{"conference_record":"conferenceRecords/abc","max_items":10}"#.into(),
             ],
             related: vec![],
         },
@@ -1650,6 +2073,113 @@ fn sum_session_duration_ms(
     diff_ms(fallback_start, fallback_end)
 }
 
+async fn attach_transcript_document_texts(
+    client: &GoogleMeetClient,
+    mut transcripts: Vec<GoogleMeetTranscript>,
+    max_document_bytes: usize,
+) -> Vec<GoogleMeetTranscript> {
+    for transcript in &mut transcripts {
+        match document_id_from_destination(transcript.docs_destination.as_ref()) {
+            Ok(Some(document_id)) => {
+                transcript.document_id = Some(document_id.clone());
+                match client
+                    .export_drive_document_text(&document_id, max_document_bytes)
+                    .await
+                {
+                    Ok(text) => transcript.document_text = Some(text),
+                    Err(error) => transcript.document_text_error = Some(public_google_error(&error)),
+                }
+            }
+            Ok(None) => {
+                transcript.document_text_error =
+                    Some("docsDestination did not include a supported document id".into());
+            }
+            Err(error) => transcript.document_text_error = Some(public_google_error(&error)),
+        }
+    }
+    transcripts
+}
+
+async fn attach_smart_note_document_texts(
+    client: &GoogleMeetClient,
+    mut smart_notes: Vec<GoogleMeetSmartNote>,
+    max_document_bytes: usize,
+) -> Vec<GoogleMeetSmartNote> {
+    for smart_note in &mut smart_notes {
+        match document_id_from_destination(smart_note.docs_destination.as_ref()) {
+            Ok(Some(document_id)) => {
+                smart_note.document_id = Some(document_id.clone());
+                match client
+                    .export_drive_document_text(&document_id, max_document_bytes)
+                    .await
+                {
+                    Ok(text) => smart_note.document_text = Some(text),
+                    Err(error) => {
+                        smart_note.document_text_error = Some(public_google_error(&error));
+                    }
+                }
+            }
+            Ok(None) => {
+                smart_note.document_text_error =
+                    Some("docsDestination did not include a supported document id".into());
+            }
+            Err(error) => smart_note.document_text_error = Some(public_google_error(&error)),
+        }
+    }
+    smart_notes
+}
+
+fn document_id_from_destination(
+    destination: Option<&GoogleMeetDocsDestination>,
+) -> GoogleMeetResult<Option<String>> {
+    destination.map_or(Ok(None), extract_docs_destination_document_id)
+}
+
+fn drive_document_id_from_input(input: &serde_json::Value) -> FcpResult<String> {
+    if let Some(document_id) = optional_str(input, "document_id")? {
+        return validate_drive_document_id(document_id).map_err(|error| error.to_fcp_error());
+    }
+    let Some(destination) = input.get("docs_destination") else {
+        return Err(invalid_request(
+            "Missing required field: document_id or docs_destination",
+        ));
+    };
+    let destination: GoogleMeetDocsDestination =
+        serde_json::from_value(destination.clone()).map_err(|error| {
+            invalid_request(format!("`docs_destination` must be a Meet docsDestination object: {error}"))
+        })?;
+    extract_docs_destination_document_id(&destination)
+        .map_err(|error| error.to_fcp_error())?
+        .ok_or_else(|| invalid_request("docs_destination did not include a supported document id"))
+}
+
+fn parse_max_document_bytes(input: &serde_json::Value) -> FcpResult<usize> {
+    parse_optional_u64(
+        input,
+        "max_document_bytes",
+        1,
+        u64::try_from(MAX_DRIVE_EXPORT_BYTES).unwrap_or(u64::MAX),
+    )?
+    .map(usize::try_from)
+    .transpose()
+    .map_err(|_| invalid_request("`max_document_bytes` is too large"))?
+    .map_or(Ok(DEFAULT_DRIVE_EXPORT_MAX_BYTES), Ok)
+}
+
+fn public_google_error(error: &GoogleMeetError) -> String {
+    let message = error.to_string();
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("authorization")
+        || lower.contains("bearer ")
+        || lower.contains("access_token")
+        || lower.contains("refresh_token")
+    {
+        "Google API request failed; credentials redacted".to_string()
+    } else {
+        message
+    }
+}
+
 fn diff_ms(start: Option<&str>, end: Option<&str>) -> Option<u64> {
     let start = parse_timestamp_ms(start)?;
     let end = parse_timestamp_ms(end)?;
@@ -1671,6 +2201,15 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         | PARTICIPANTS_LIST_OP
         | PARTICIPANT_SESSIONS_LIST_OP
         | ATTENDANCE_LIST_OP => Ok(CapabilityId::from_static(MEET_CONFERENCE_READ_CAP)),
+        RECORDINGS_LIST_OP
+        | TRANSCRIPTS_LIST_OP
+        | TRANSCRIPT_ENTRIES_LIST_OP
+        | SMART_NOTES_LIST_OP => Ok(CapabilityId::from_static(MEET_ARTIFACT_READ_CAP)),
+        TRANSCRIPTS_WITH_TEXT_LIST_OP
+        | SMART_NOTES_WITH_TEXT_LIST_OP
+        | DRIVE_DOCUMENT_TEXT_EXPORT_OP => {
+            Ok(CapabilityId::from_static(MEET_DRIVE_ARTIFACT_READ_CAP))
+        }
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -1809,7 +2348,7 @@ mod tests {
     use super::*;
     use crate::client::{
         GoogleMeetUserIdentity, encode_resource_name_for_path, normalize_conference_record_name,
-        normalize_participant_name,
+        normalize_participant_name, normalize_transcript_name,
     };
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -1839,6 +2378,14 @@ mod tests {
             status: 200,
             headers: vec![("content-type", "application/json".to_string())],
             body: serde_json::to_string(&body).expect("serialize JSON response"),
+        }
+    }
+
+    fn text_response(body: impl Into<String>) -> StubResponse {
+        StubResponse {
+            status: 200,
+            headers: vec![("content-type", "text/plain".to_string())],
+            body: body.into(),
         }
     }
 
@@ -2285,7 +2832,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn introspection_advertises_space_conference_and_space_mutation_operations() {
+    async fn introspection_advertises_space_conference_artifact_and_space_mutation_operations() {
         let connector = GoogleMeetConnector::new();
         let result = connector.handle_introspect().await.expect("introspect");
         let ops = result["operations"].as_array().expect("operations");
@@ -2306,17 +2853,20 @@ mod tests {
                 PARTICIPANTS_LIST_OP,
                 PARTICIPANT_SESSIONS_LIST_OP,
                 ATTENDANCE_LIST_OP,
+                RECORDINGS_LIST_OP,
+                TRANSCRIPTS_LIST_OP,
+                TRANSCRIPT_ENTRIES_LIST_OP,
+                SMART_NOTES_LIST_OP,
+                TRANSCRIPTS_WITH_TEXT_LIST_OP,
+                SMART_NOTES_WITH_TEXT_LIST_OP,
+                DRIVE_DOCUMENT_TEXT_EXPORT_OP,
             ]
         );
         assert!(
             !ids.iter().any(|id| {
-                id.contains("join")
-                    || id.contains("leave")
-                    || id.contains("say")
-                    || id.contains("transcript")
-                    || id.contains("recording")
+                id.contains("join") || id.contains("leave") || id.contains("say")
             }),
-            "spaces bead must not advertise live-session or artifact operations"
+            "artifact reads must not advertise live-session control operations"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
         assert_eq!(ops[0]["safety_tier"], "safe");
@@ -2330,6 +2880,31 @@ mod tests {
         assert_eq!(ops[3]["safety_tier"], "risky");
         assert_eq!(ops[3]["requires_approval"], "policy");
         for op in &ops[4..] {
+            if [
+                RECORDINGS_LIST_OP,
+                TRANSCRIPTS_LIST_OP,
+                TRANSCRIPT_ENTRIES_LIST_OP,
+                SMART_NOTES_LIST_OP,
+            ]
+            .contains(&op["id"].as_str().expect("op id"))
+            {
+                assert_eq!(op["capability"], MEET_ARTIFACT_READ_CAP);
+                assert_eq!(op["safety_tier"], "safe");
+                assert_eq!(op["idempotency"], "strict");
+                continue;
+            }
+            if [
+                TRANSCRIPTS_WITH_TEXT_LIST_OP,
+                SMART_NOTES_WITH_TEXT_LIST_OP,
+                DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+            ]
+            .contains(&op["id"].as_str().expect("op id"))
+            {
+                assert_eq!(op["capability"], MEET_DRIVE_ARTIFACT_READ_CAP);
+                assert_eq!(op["safety_tier"], "safe");
+                assert_eq!(op["idempotency"], "strict");
+                continue;
+            }
             assert_eq!(op["capability"], MEET_CONFERENCE_READ_CAP);
             assert_eq!(op["safety_tier"], "safe");
             assert_eq!(op["idempotency"], "strict");

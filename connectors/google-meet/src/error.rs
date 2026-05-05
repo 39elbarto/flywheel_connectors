@@ -39,6 +39,15 @@ pub enum GoogleMeetError {
         retry_after_secs: u64,
     },
 
+    /// Response body exceeded the configured cap.
+    #[error("{context} response exceeded max bytes ({max_bytes})")]
+    ResponseTooLarge {
+        /// Request context.
+        context: String,
+        /// Maximum accepted bytes.
+        max_bytes: usize,
+    },
+
     /// Invalid or expired token.
     #[error("Invalid or expired Google Meet credentials")]
     Unauthorized,
@@ -118,6 +127,13 @@ impl GoogleMeetError {
             Self::RateLimited { retry_after_secs } => FcpError::RateLimited {
                 retry_after_ms: retry_after_secs * 1000,
                 violation: None,
+            },
+            Self::ResponseTooLarge { context, max_bytes } => FcpError::External {
+                service: "google-meet".into(),
+                message: format!("{context} response exceeded max bytes ({max_bytes})"),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
             },
             Self::Unauthorized => FcpError::Unauthorized {
                 code: 2001,

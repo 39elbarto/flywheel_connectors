@@ -6,12 +6,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
+use std::io::Write;
 
 use chrono::Utc;
+use fcp_host::{
+    BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOperationPriority,
+    BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchScheduleWaitPercentiles,
+    BatchSchedulerMode, BatchSchedulerOptions, OperationResultStatus,
+};
 use fcp_testkit::evidence_helpers::{
     LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION,
-    SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION, SwarmBaselineArtifactDigests, SwarmBaselinePathKind,
-    SwarmBaselinePromotionManifest, SwarmCalibrationStatus, SwarmControllerInteractionScenario,
+    SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION, SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION,
+    SwarmBaselineArtifactDigests, SwarmBaselinePathKind, SwarmBaselinePromotionManifest,
+    SwarmBatchFairnessBucket, SwarmBatchMorselizationEvidence, SwarmBatchResourceSample,
+    SwarmBatchWaitPercentiles, SwarmCalibrationStatus, SwarmControllerInteractionScenario,
     SwarmControllerMode, SwarmControllerModeEvidence, SwarmControllerModeMetrics,
     SwarmControllerSafetyOutcome, SwarmControllerSafetyReport, SwarmControllerSafetyThresholds,
     SwarmDecisionAction, SwarmDecisionCard, SwarmDecisionCounterfactual, SwarmDecisionDomain,
@@ -392,6 +400,246 @@ fn resource_snapshots(bundle: &SwarmLatencyEvidenceBundle) -> Vec<SwarmRegressio
         .collect()
 }
 
+fn batch_morselization_command_line() -> Vec<String> {
+    vec![
+        "rch".to_string(),
+        "exec".to_string(),
+        "--".to_string(),
+        "cargo".to_string(),
+        "test".to_string(),
+        "-p".to_string(),
+        "fcp-e2e".to_string(),
+        "--no-default-features".to_string(),
+        "--test".to_string(),
+        "swarm_gauntlet_e2e".to_string(),
+        "batch_morselization".to_string(),
+        "--".to_string(),
+        "--nocapture".to_string(),
+    ]
+}
+
+fn batch_operation(index: usize, root_dependency: Option<&str>) -> BatchOperation {
+    let is_long = index % 25 == 0;
+    let fairness_key = if index % 3 == 0 {
+        "zone:hot".to_string()
+    } else {
+        format!("zone:tenant:{}", index % 127)
+    };
+    BatchOperation {
+        id: format!("op_{index:05}"),
+        tool: "fcp.host.synthetic_batch".to_string(),
+        input: json!({"shape": "redacted-fixture"}),
+        depends_on: root_dependency.into_iter().map(str::to_string).collect(),
+        zone: None,
+        scheduler: BatchScheduleHint {
+            priority: if index % 257 == 0 {
+                BatchOperationPriority::Critical
+            } else {
+                BatchOperationPriority::Normal
+            },
+            estimated_duration_ms: Some(if is_long {
+                20_000
+            } else {
+                2 + u64::try_from(index % 13).unwrap_or(u64::MAX)
+            }),
+            fairness_key: Some(fairness_key),
+        },
+    }
+}
+
+fn batch_morselization_request(operation_count: usize) -> BatchInvokeRequest {
+    let mut operations = Vec::with_capacity(operation_count);
+    for index in 0..operation_count {
+        let root_dependency = (index >= operation_count / 2).then_some("op_00000");
+        operations.push(batch_operation(index, root_dependency));
+    }
+    BatchInvokeRequest {
+        operations,
+        options: BatchOptions {
+            max_parallelism: 256,
+            timeout_ms: 30_000,
+            scheduler: BatchSchedulerOptions {
+                mode: BatchSchedulerMode::Adaptive,
+                max_consecutive_per_fairness_key: 2,
+            },
+            ..Default::default()
+        },
+    }
+}
+
+fn batch_failure_request(timeout_ms: u64) -> BatchInvokeRequest {
+    BatchInvokeRequest {
+        operations: vec![
+            batch_operation(0, None),
+            batch_operation(1, Some("op_00000")),
+        ],
+        options: BatchOptions {
+            max_parallelism: 2,
+            timeout_ms,
+            scheduler: BatchSchedulerOptions {
+                mode: BatchSchedulerMode::Adaptive,
+                max_consecutive_per_fairness_key: 2,
+            },
+            ..Default::default()
+        },
+    }
+}
+
+fn injected_batch_error() -> BatchOperationError {
+    BatchOperationError {
+        code: "INJECTED_FAILURE".to_string(),
+        message: "redacted downstream failure".to_string(),
+        retry_after_ms: Some(250),
+    }
+}
+
+fn batch_failure_modes(
+    executor: &BatchExecutor,
+) -> Result<(String, String, String), Box<dyn Error>> {
+    let failure = executor.execute_sync(&batch_failure_request(30_000), |operation| {
+        if operation.id == "op_00000" {
+            Err(injected_batch_error())
+        } else {
+            Ok(json!({"ok": true}))
+        }
+    })?;
+    let error_kind = failure
+        .results
+        .iter()
+        .find(|result| result.status == OperationResultStatus::Error)
+        .and_then(|result| result.error.as_ref())
+        .map(|error| format!("downstream_error:{}", error.code))
+        .ok_or("failure scenario should include an error result")?;
+    let skip_reason = failure
+        .results
+        .iter()
+        .find(|result| result.status == OperationResultStatus::Skipped)
+        .and_then(|result| result.error.as_ref())
+        .map(|error| format!("dependency_failed:{}", error.code))
+        .ok_or("failure scenario should include dependency skip")?;
+
+    let timeout = executor.execute_sync(&batch_failure_request(0), |_| Ok(json!({"ok": true})))?;
+    let cancellation_reason = timeout
+        .results
+        .iter()
+        .find(|result| result.status == OperationResultStatus::Skipped)
+        .and_then(|result| result.error.as_ref())
+        .map(|error| format!("timeout:{}", error.code))
+        .ok_or("timeout scenario should include a skipped operation")?;
+
+    Ok((error_kind, cancellation_reason, skip_reason))
+}
+
+fn batch_wait_percentiles(wait: BatchScheduleWaitPercentiles) -> SwarmBatchWaitPercentiles {
+    SwarmBatchWaitPercentiles {
+        p50_ms: wait.p50_ms,
+        p95_ms: wait.p95_ms,
+        p99_ms: wait.p99_ms,
+        p999_ms: wait.p999_ms,
+        max_ms: wait.max_ms,
+        mean_ms: wait.mean_ms,
+    }
+}
+
+fn redacted_fairness_key(key: &str) -> String {
+    format!("blake3:{}", blake3::hash(key.as_bytes()))
+}
+
+fn fairness_distribution(report: &BatchScheduleReport) -> Vec<SwarmBatchFairnessBucket> {
+    let mut operation_counts = BTreeMap::<String, usize>::new();
+    for decision in &report.decisions {
+        let key = decision.fairness_key.as_deref().unwrap_or("unclassified");
+        *operation_counts
+            .entry(redacted_fairness_key(key))
+            .or_default() += 1;
+    }
+
+    let mut morsel_counts = BTreeMap::<String, usize>::new();
+    if let Some(morselization) = &report.morselization {
+        for morsel in &morselization.morsels {
+            for key in &morsel.fairness_keys {
+                *morsel_counts.entry(redacted_fairness_key(key)).or_default() += 1;
+            }
+        }
+    }
+
+    operation_counts
+        .into_iter()
+        .map(
+            |(fairness_key_hash, operation_count)| SwarmBatchFairnessBucket {
+                morsel_count: morsel_counts.get(&fairness_key_hash).copied().unwrap_or(1),
+                fairness_key_hash,
+                operation_count,
+            },
+        )
+        .collect()
+}
+
+fn batch_morselization_evidence(
+    operation_count: usize,
+    dependency_depth: usize,
+    report: &BatchScheduleReport,
+    error_kind: String,
+    cancellation_reason: String,
+    skip_reason: String,
+) -> Result<SwarmBatchMorselizationEvidence, Box<dyn Error>> {
+    let queueing = report
+        .queueing_summary
+        .as_ref()
+        .ok_or("batch report should include queueing summary")?;
+    let fifo_wait = queueing.fifo_wait;
+    let scheduled_wait = queueing.scheduled_wait;
+    let morselization = report
+        .morselization
+        .as_ref()
+        .ok_or("batch report should include morselization")?;
+    let operation_count_u64 = u64::try_from(operation_count).unwrap_or(u64::MAX);
+
+    Ok(SwarmBatchMorselizationEvidence {
+        schema_version: SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION.to_string(),
+        scenario_id: format!("host_batch_morselization_{operation_count}"),
+        batch_id: format!("batch:offline:{operation_count}"),
+        command_line: batch_morselization_command_line(),
+        git_revision: "e2e-smoke-revision".to_string(),
+        worker_id: "offline-e2e-runner".to_string(),
+        scheduler_mode: format!("{:?}", report.mode).to_ascii_lowercase(),
+        operation_count,
+        dependency_depth,
+        morsel_size: morselization.max_operations_per_morsel,
+        total_morsels: morselization.total_morsels,
+        split_tiers: morselization.split_tiers,
+        largest_morsel_operations: morselization.largest_morsel_operations,
+        fairness_distribution: fairness_distribution(report),
+        fifo_wait: batch_wait_percentiles(fifo_wait),
+        scheduled_wait: batch_wait_percentiles(scheduled_wait),
+        resources: SwarmBatchResourceSample {
+            rss_bytes: 128 * 1024 * 1024 + operation_count_u64.saturating_mul(512),
+            cpu_microunits: 64_000_000,
+            max_queue_depth: u64::try_from(morselization.max_operations_per_morsel)
+                .unwrap_or(u64::MAX),
+            retry_amplification_microunits: 0,
+        },
+        fallback_reason: morselization.fallback_reason.clone(),
+        error_kind: Some(error_kind),
+        cancellation_reason: Some(cancellation_reason),
+        skip_reason: Some(skip_reason),
+    })
+}
+
+fn maybe_write_batch_morselization_jsonl_artifact(jsonl: &str) -> std::io::Result<()> {
+    let Some(path) = std::env::var_os("FCP_BATCH_MORSELIZATION_JSONL_OUT") else {
+        return Ok(());
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(jsonl.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
 fn statistical_baseline_snapshot() -> SwarmRegressionMetricSnapshot {
     SwarmRegressionMetricSnapshot {
         scenario_id: "host_batch_invoke_10000".to_string(),
@@ -515,6 +763,88 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
     assert!(log_record["decision_card_ids"].is_array());
     assert!(log_record["p99_ns"].is_u64());
     assert!(log_record["throughput_ops_per_second"].is_u64());
+    for line in jsonl.lines() {
+        serde_json::from_str::<Value>(line)?;
+    }
+    assert!(!jsonl.contains("sk-live-"));
+    assert!(!jsonl.contains("Bearer test-token"));
+    assert!(!jsonl.contains("super-secret-value"));
+    Ok(())
+}
+
+#[test]
+fn batch_morselization_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>> {
+    let executor = BatchExecutor::new();
+    let (error_kind, cancellation_reason, skip_reason) = batch_failure_modes(&executor)?;
+    let mut records = Vec::new();
+
+    for operation_count in [1_000_usize, 10_000] {
+        let request = batch_morselization_request(operation_count);
+        let (plan, report) = executor.plan_with_schedule_report(&request)?;
+        let evidence = batch_morselization_evidence(
+            operation_count,
+            plan.tiers.len(),
+            &report,
+            error_kind.clone(),
+            cancellation_reason.clone(),
+            skip_reason.clone(),
+        )?;
+
+        evidence.validate()?;
+        records.push(evidence.to_jsonl_value()?);
+    }
+
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    maybe_write_batch_morselization_jsonl_artifact(&jsonl)?;
+    let types = record_types(&records);
+    let tenk_record = records
+        .iter()
+        .find(|record| record["scenario_id"] == "host_batch_morselization_10000")
+        .ok_or("10k batch morselization record should be present")?;
+
+    assert!(types.contains("swarm_batch_morselization_evidence"));
+    assert_eq!(
+        tenk_record["schema_version"],
+        SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION
+    );
+    assert_eq!(tenk_record["operation_count"], 10_000);
+    assert_eq!(tenk_record["dependency_depth"], 2);
+    assert_eq!(tenk_record["morsel_size"], 256);
+    assert!(
+        tenk_record["evidence"]["total_morsels"]
+            .as_u64()
+            .is_some_and(|total| total > 1)
+    );
+    assert!(
+        tenk_record["evidence"]["split_tiers"]
+            .as_u64()
+            .is_some_and(|tiers| tiers > 0)
+    );
+    assert_eq!(
+        tenk_record["evidence"]["largest_morsel_operations"],
+        tenk_record["morsel_size"]
+    );
+    assert!(
+        tenk_record["evidence"]["fairness_distribution"]
+            .as_array()
+            .is_some_and(|distribution| distribution.len() > 8)
+    );
+    assert!(tenk_record["p50_wait_ms"].is_u64());
+    assert!(tenk_record["p95_wait_ms"].is_u64());
+    assert!(tenk_record["p99_wait_ms"].is_u64());
+    assert!(tenk_record["p999_wait_ms"].is_u64());
+    assert!(tenk_record["rss_bytes"].is_u64());
+    assert!(tenk_record["max_queue_depth"].is_u64());
+    assert_eq!(
+        tenk_record["error_kind"],
+        "downstream_error:INJECTED_FAILURE"
+    );
+    assert_eq!(tenk_record["cancellation_reason"], "timeout:BATCH_TIMEOUT");
+    assert_eq!(tenk_record["skip_reason"], "dependency_failed:DEP_FAILED");
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

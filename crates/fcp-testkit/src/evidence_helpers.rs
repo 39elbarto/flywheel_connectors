@@ -277,6 +277,9 @@ pub const SWARM_GAUNTLET_LOG_SCHEMA_VERSION: &str = "swarm-gauntlet-log/v1";
 /// Schema tag for 64-core/256GiB promotion qualification records.
 pub const SWARM_PROMOTION_SCHEMA_VERSION: &str = "swarm-promotion/v1";
 
+/// Schema tag for batch-invoke morselization evidence records.
+pub const SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION: &str = "swarm-batch-morselization/v1";
+
 /// Synthetic-but-realistic workload families used for swarm latency baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2185,6 +2188,356 @@ impl LatencyPercentiles {
             max_ns: sorted[sorted.len() - 1],
             mean_ns,
         })
+    }
+}
+
+/// Queue-wait percentiles for batch scheduling evidence in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct SwarmBatchWaitPercentiles {
+    /// 50th percentile queue wait.
+    pub p50_ms: u64,
+    /// 95th percentile queue wait.
+    pub p95_ms: u64,
+    /// 99th percentile queue wait.
+    pub p99_ms: u64,
+    /// 99.9th percentile queue wait.
+    pub p999_ms: u64,
+    /// Maximum queue wait.
+    pub max_ms: u64,
+    /// Integer mean queue wait.
+    pub mean_ms: u64,
+}
+
+/// Redaction-safe count for one fairness bucket in a batch evidence record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmBatchFairnessBucket {
+    /// Stable redacted or hashed fairness key.
+    pub fairness_key_hash: String,
+    /// Operations assigned to this bucket.
+    pub operation_count: usize,
+    /// Morsels that included this bucket.
+    pub morsel_count: usize,
+}
+
+/// Resource sample attached to one batch morselization evidence record.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmBatchResourceSample {
+    /// Resident set size observed or bounded for the run.
+    pub rss_bytes: u64,
+    /// CPU usage in microunits, where 1_000_000 is one full core.
+    pub cpu_microunits: u64,
+    /// Maximum queue depth observed during the run.
+    pub max_queue_depth: u64,
+    /// Retry amplification in microunits, where 1_000_000 means one retry per op.
+    pub retry_amplification_microunits: u64,
+}
+
+/// Replayable JSONL evidence for host batch-invoke morselization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmBatchMorselizationEvidence {
+    /// Evidence schema version.
+    pub schema_version: String,
+    /// Swarm scenario identifier.
+    pub scenario_id: String,
+    /// Batch identifier inside the scenario.
+    pub batch_id: String,
+    /// Command line that produced or can reproduce this evidence.
+    pub command_line: Vec<String>,
+    /// Source revision associated with the run.
+    pub git_revision: String,
+    /// Worker that produced the evidence.
+    pub worker_id: String,
+    /// Scheduler mode used by the host batch planner.
+    pub scheduler_mode: String,
+    /// Number of operations submitted.
+    pub operation_count: usize,
+    /// Maximum dependency tier depth.
+    pub dependency_depth: usize,
+    /// Maximum operations per morsel.
+    pub morsel_size: usize,
+    /// Total morsels produced by the planner.
+    pub total_morsels: usize,
+    /// Number of dependency tiers split into multiple morsels.
+    pub split_tiers: usize,
+    /// Largest operation count in one morsel.
+    pub largest_morsel_operations: usize,
+    /// Redaction-safe fairness-key distribution.
+    pub fairness_distribution: Vec<SwarmBatchFairnessBucket>,
+    /// Queue wait percentiles under deterministic FIFO ordering.
+    pub fifo_wait: SwarmBatchWaitPercentiles,
+    /// Queue wait percentiles under the selected scheduler.
+    pub scheduled_wait: SwarmBatchWaitPercentiles,
+    /// Resource sample attached to this batch scenario.
+    pub resources: SwarmBatchResourceSample,
+    /// Explicit fallback reason when morselization did not split a tier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Error mode observed by the companion failure scenario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_kind: Option<String>,
+    /// Cancellation or timeout mode observed by the companion scenario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancellation_reason: Option<String>,
+    /// Skip reason observed by the companion dependency scenario.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+}
+
+impl SwarmBatchMorselizationEvidence {
+    /// Validate the evidence record before serializing it to JSONL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SwarmBatchMorselizationEvidenceError`] when required fields
+    /// are missing, internally inconsistent, or would weaken the redaction
+    /// and bounded-morsel evidence contract.
+    pub fn validate(&self) -> Result<(), SwarmBatchMorselizationEvidenceError> {
+        if self.schema_version != SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION {
+            return Err(SwarmBatchMorselizationEvidenceError::SchemaMismatch {
+                expected: SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        for (field, value) in [
+            ("scenario_id", self.scenario_id.as_str()),
+            ("batch_id", self.batch_id.as_str()),
+            ("git_revision", self.git_revision.as_str()),
+            ("worker_id", self.worker_id.as_str()),
+            ("scheduler_mode", self.scheduler_mode.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SwarmBatchMorselizationEvidenceError::EmptyField { field });
+            }
+        }
+        if self.command_line.is_empty()
+            || self.command_line.iter().any(|part| part.trim().is_empty())
+        {
+            return Err(SwarmBatchMorselizationEvidenceError::EmptyCommandLine);
+        }
+        if self.operation_count == 0 {
+            return Err(SwarmBatchMorselizationEvidenceError::EmptyOperationCount);
+        }
+        if self.dependency_depth == 0 {
+            return Err(SwarmBatchMorselizationEvidenceError::EmptyDependencyDepth);
+        }
+        if self.morsel_size == 0 {
+            return Err(SwarmBatchMorselizationEvidenceError::EmptyMorselSize);
+        }
+        if self.total_morsels == 0 {
+            return Err(SwarmBatchMorselizationEvidenceError::MissingMorselReport);
+        }
+        if self.largest_morsel_operations > self.morsel_size {
+            return Err(SwarmBatchMorselizationEvidenceError::OversizedMorsel {
+                largest: self.largest_morsel_operations,
+                limit: self.morsel_size,
+            });
+        }
+        if self.fairness_distribution.is_empty() {
+            return Err(SwarmBatchMorselizationEvidenceError::EmptyFairnessDistribution);
+        }
+        if self.fairness_distribution.iter().any(|bucket| {
+            bucket.fairness_key_hash.trim().is_empty()
+                || bucket.operation_count == 0
+                || bucket.morsel_count == 0
+        }) {
+            return Err(SwarmBatchMorselizationEvidenceError::InvalidFairnessBucket);
+        }
+        let fairness_operations = self
+            .fairness_distribution
+            .iter()
+            .fold(0_usize, |total, bucket| {
+                total.saturating_add(bucket.operation_count)
+            });
+        if fairness_operations != self.operation_count {
+            return Err(
+                SwarmBatchMorselizationEvidenceError::FairnessOperationCountMismatch {
+                    expected: self.operation_count,
+                    actual: fairness_operations,
+                },
+            );
+        }
+        if self.resources.rss_bytes == 0 {
+            return Err(
+                SwarmBatchMorselizationEvidenceError::MissingResourceMeasurement {
+                    field: "rss_bytes",
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// Render this evidence as one structured JSONL value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the evidence record is incomplete, or a
+    /// serde error when the typed evidence cannot be converted into JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, SwarmBatchMorselizationEvidenceJsonError> {
+        self.validate()?;
+        Ok(json!({
+            "record_type": "swarm_batch_morselization_evidence",
+            "schema_version": self.schema_version,
+            "scenario_id": self.scenario_id,
+            "batch_id": self.batch_id,
+            "operation_count": self.operation_count,
+            "dependency_depth": self.dependency_depth,
+            "morsel_size": self.morsel_size,
+            "scheduler_mode": self.scheduler_mode,
+            "p50_wait_ms": self.scheduled_wait.p50_ms,
+            "p95_wait_ms": self.scheduled_wait.p95_ms,
+            "p99_wait_ms": self.scheduled_wait.p99_ms,
+            "p999_wait_ms": self.scheduled_wait.p999_ms,
+            "rss_bytes": self.resources.rss_bytes,
+            "max_queue_depth": self.resources.max_queue_depth,
+            "fallback_reason": self.fallback_reason,
+            "error_kind": self.error_kind,
+            "cancellation_reason": self.cancellation_reason,
+            "skip_reason": self.skip_reason,
+            "evidence": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+/// Validation error for batch morselization evidence records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmBatchMorselizationEvidenceError {
+    /// Schema tag was unsupported.
+    SchemaMismatch {
+        /// Supported schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// A required string field was empty.
+    EmptyField {
+        /// Field name.
+        field: &'static str,
+    },
+    /// Reproduction command line was empty or contained an empty part.
+    EmptyCommandLine,
+    /// Operation count was zero.
+    EmptyOperationCount,
+    /// Dependency depth was zero.
+    EmptyDependencyDepth,
+    /// Morsel size was zero.
+    EmptyMorselSize,
+    /// Planner produced no morsel report.
+    MissingMorselReport,
+    /// Planner reported a morsel larger than the requested limit.
+    OversizedMorsel {
+        /// Largest observed morsel.
+        largest: usize,
+        /// Configured morsel size.
+        limit: usize,
+    },
+    /// Fairness distribution was empty.
+    EmptyFairnessDistribution,
+    /// A fairness bucket had an empty hash or zero counts.
+    InvalidFairnessBucket,
+    /// Fairness counts did not cover every operation.
+    FairnessOperationCountMismatch {
+        /// Expected operation count.
+        expected: usize,
+        /// Sum of fairness-bucket operation counts.
+        actual: usize,
+    },
+    /// A required resource field was absent or zero.
+    MissingResourceMeasurement {
+        /// Field name.
+        field: &'static str,
+    },
+}
+
+impl fmt::Display for SwarmBatchMorselizationEvidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => write!(
+                f,
+                "swarm batch morselization schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::EmptyField { field } => {
+                write!(f, "swarm batch morselization field '{field}' is empty")
+            }
+            Self::EmptyCommandLine => {
+                write!(f, "swarm batch morselization command line is empty")
+            }
+            Self::EmptyOperationCount => {
+                write!(f, "swarm batch morselization operation count is zero")
+            }
+            Self::EmptyDependencyDepth => {
+                write!(f, "swarm batch morselization dependency depth is zero")
+            }
+            Self::EmptyMorselSize => {
+                write!(f, "swarm batch morselization morsel size is zero")
+            }
+            Self::MissingMorselReport => {
+                write!(f, "swarm batch morselization report has no morsels")
+            }
+            Self::OversizedMorsel { largest, limit } => write!(
+                f,
+                "swarm batch morselization largest morsel {largest} exceeds limit {limit}"
+            ),
+            Self::EmptyFairnessDistribution => {
+                write!(
+                    f,
+                    "swarm batch morselization fairness distribution is empty"
+                )
+            }
+            Self::InvalidFairnessBucket => write!(
+                f,
+                "swarm batch morselization fairness bucket has empty hash or zero counts"
+            ),
+            Self::FairnessOperationCountMismatch { expected, actual } => write!(
+                f,
+                "swarm batch morselization fairness count mismatch: expected {expected}, got {actual}"
+            ),
+            Self::MissingResourceMeasurement { field } => write!(
+                f,
+                "swarm batch morselization resource field '{field}' is missing"
+            ),
+        }
+    }
+}
+
+impl Error for SwarmBatchMorselizationEvidenceError {}
+
+/// Error raised while rendering batch morselization evidence JSONL.
+#[derive(Debug)]
+pub enum SwarmBatchMorselizationEvidenceJsonError {
+    /// Validation failed.
+    Validation(SwarmBatchMorselizationEvidenceError),
+    /// JSON serialization failed.
+    Serde(serde_json::Error),
+}
+
+impl fmt::Display for SwarmBatchMorselizationEvidenceJsonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(err) => write!(f, "{err}"),
+            Self::Serde(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl Error for SwarmBatchMorselizationEvidenceJsonError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Validation(err) => Some(err),
+            Self::Serde(err) => Some(err),
+        }
+    }
+}
+
+impl From<SwarmBatchMorselizationEvidenceError> for SwarmBatchMorselizationEvidenceJsonError {
+    fn from(value: SwarmBatchMorselizationEvidenceError) -> Self {
+        Self::Validation(value)
+    }
+}
+
+impl From<serde_json::Error> for SwarmBatchMorselizationEvidenceJsonError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Serde(value)
     }
 }
 
@@ -6812,6 +7165,138 @@ mod tests {
         assert!(!serialized.contains("Bearer test-token"));
         assert!(!serialized.contains("super-secret-value"));
         Ok(())
+    }
+
+    fn batch_morselization_evidence_fixture() -> SwarmBatchMorselizationEvidence {
+        SwarmBatchMorselizationEvidence {
+            schema_version: SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION.to_string(),
+            scenario_id: "host_batch_morselization_10000".to_string(),
+            batch_id: "batch:offline:10k".to_string(),
+            command_line: vec![
+                "rch".to_string(),
+                "exec".to_string(),
+                "--".to_string(),
+                "cargo".to_string(),
+                "test".to_string(),
+                "-p".to_string(),
+                "fcp-e2e".to_string(),
+                "--test".to_string(),
+                "swarm_gauntlet_e2e".to_string(),
+            ],
+            git_revision: "abc123".to_string(),
+            worker_id: "rch-worker-64c".to_string(),
+            scheduler_mode: "adaptive".to_string(),
+            operation_count: 10_000,
+            dependency_depth: 2,
+            morsel_size: 256,
+            total_morsels: 40,
+            split_tiers: 2,
+            largest_morsel_operations: 256,
+            fairness_distribution: vec![
+                SwarmBatchFairnessBucket {
+                    fairness_key_hash: "blake3:hot-zone".to_string(),
+                    operation_count: 5_000,
+                    morsel_count: 20,
+                },
+                SwarmBatchFairnessBucket {
+                    fairness_key_hash: "blake3:cold-zone".to_string(),
+                    operation_count: 5_000,
+                    morsel_count: 20,
+                },
+            ],
+            fifo_wait: SwarmBatchWaitPercentiles {
+                p50_ms: 10_000,
+                p95_ms: 20_000,
+                p99_ms: 24_000,
+                p999_ms: 25_000,
+                max_ms: 25_000,
+                mean_ms: 12_000,
+            },
+            scheduled_wait: SwarmBatchWaitPercentiles {
+                p50_ms: 500,
+                p95_ms: 900,
+                p99_ms: 1_100,
+                p999_ms: 1_200,
+                max_ms: 1_250,
+                mean_ms: 700,
+            },
+            resources: SwarmBatchResourceSample {
+                rss_bytes: 512 * 1024 * 1024,
+                cpu_microunits: 64_000_000,
+                max_queue_depth: 256,
+                retry_amplification_microunits: 0,
+            },
+            fallback_reason: None,
+            error_kind: Some("downstream_error:INJECTED_FAILURE".to_string()),
+            cancellation_reason: Some("timeout:BATCH_TIMEOUT".to_string()),
+            skip_reason: Some("dependency_failed:DEP_FAILED".to_string()),
+        }
+    }
+
+    #[test]
+    fn swarm_batch_morselization_evidence_serializes_required_jsonl_fields()
+    -> Result<(), Box<dyn Error>> {
+        let evidence = batch_morselization_evidence_fixture();
+
+        evidence.validate()?;
+        let record = evidence.to_jsonl_value()?;
+        let serialized = serde_json::to_string(&record)?;
+
+        assert_eq!(record["record_type"], "swarm_batch_morselization_evidence");
+        assert_eq!(
+            record["schema_version"],
+            SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION
+        );
+        assert_eq!(record["operation_count"], 10_000);
+        assert_eq!(record["dependency_depth"], 2);
+        assert_eq!(record["morsel_size"], 256);
+        assert_eq!(record["p99_wait_ms"], 1_100);
+        assert_eq!(record["rss_bytes"], 512 * 1024 * 1024);
+        assert_eq!(record["max_queue_depth"], 256);
+        assert_eq!(record["error_kind"], "downstream_error:INJECTED_FAILURE");
+        assert_eq!(record["cancellation_reason"], "timeout:BATCH_TIMEOUT");
+        assert_eq!(record["skip_reason"], "dependency_failed:DEP_FAILED");
+        assert!(record["evidence"]["fairness_distribution"].is_array());
+        assert!(!serialized.contains("sk-live-"));
+        assert!(!serialized.contains("Bearer test-token"));
+        assert!(!serialized.contains("super-secret-value"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_batch_morselization_evidence_rejects_unbounded_or_incomplete_records() {
+        let mut oversized = batch_morselization_evidence_fixture();
+        oversized.largest_morsel_operations = 257;
+        assert_eq!(
+            oversized.validate(),
+            Err(SwarmBatchMorselizationEvidenceError::OversizedMorsel {
+                largest: 257,
+                limit: 256
+            })
+        );
+
+        let mut count_mismatch = batch_morselization_evidence_fixture();
+        count_mismatch.fairness_distribution[0].operation_count = 4_999;
+        assert_eq!(
+            count_mismatch.validate(),
+            Err(
+                SwarmBatchMorselizationEvidenceError::FairnessOperationCountMismatch {
+                    expected: 10_000,
+                    actual: 9_999
+                }
+            )
+        );
+
+        let mut missing_rss = batch_morselization_evidence_fixture();
+        missing_rss.resources.rss_bytes = 0;
+        assert_eq!(
+            missing_rss.validate(),
+            Err(
+                SwarmBatchMorselizationEvidenceError::MissingResourceMeasurement {
+                    field: "rss_bytes"
+                }
+            )
+        );
     }
 
     #[test]

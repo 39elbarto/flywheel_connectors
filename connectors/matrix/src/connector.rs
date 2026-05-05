@@ -14,7 +14,7 @@ use fcp_prelude::{
     HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
     InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal,
     ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeResult, TrustLevel, ZoneId,
+    SimulateRequest, SimulateResponse, SubscribeResult, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
@@ -454,20 +454,23 @@ impl MatrixConnector {
             .get("event_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("event");
-        let mut envelope = EventEnvelope::new(
-            topic,
-            EventData::new(
-                self.base.id.clone(),
-                self.base.instance_id.clone(),
-                ZoneId::community(),
-                matrix_event_principal(payload),
-                payload.clone(),
-            )
-            .with_resource_uris(matrix_event_resource_uris(payload)),
+        let event_data = EventData::new(
+            self.base.id.clone(),
+            self.base.instance_id.clone(),
+            ZoneId::community(),
+            matrix_event_principal(payload),
+            payload.clone(),
         )
-        .with_seq(seq)
-        .with_cursor(format!("{batch}:{event_id}:{seq}"))
-        .with_ordering(OrderingPolicy::PerKey);
+        .with_resource_uris(matrix_event_resource_uris(payload));
+        let event_data = if let Some(thread_info) = matrix_event_thread_info(payload) {
+            event_data.with_thread_info(thread_info)
+        } else {
+            event_data
+        };
+        let mut envelope = EventEnvelope::new(topic, event_data)
+            .with_seq(seq)
+            .with_cursor(format!("{batch}:{event_id}:{seq}"))
+            .with_ordering(OrderingPolicy::PerKey);
 
         if let Some(room_id) = payload.get("room_id").and_then(serde_json::Value::as_str) {
             envelope = envelope.with_stream_key(room_id);
@@ -1147,6 +1150,8 @@ fn resource_uris_for_operation(
 }
 
 fn normalize_message_event(room_id: &str, event: &Event) -> serde_json::Value {
+    let thread_root_event_id = matrix_thread_root_event_id(event);
+    let relation_type = matrix_relation_type(event);
     json!({
         "room_id": room_id,
         "event_id": event.event_id,
@@ -1155,6 +1160,8 @@ fn normalize_message_event(room_id: &str, event: &Event) -> serde_json::Value {
         "msgtype": event.content.get("msgtype").and_then(serde_json::Value::as_str),
         "body": event.content.get("body").and_then(serde_json::Value::as_str),
         "url": event.content.get("url").and_then(serde_json::Value::as_str),
+        "rel_type": relation_type,
+        "thread_root_event_id": thread_root_event_id,
     })
 }
 
@@ -1196,6 +1203,8 @@ fn inbound_policy_snapshot(policy: &MatrixInboundPolicy) -> serde_json::Value {
         "bot_user_id": policy.bot_user_id.clone(),
         "require_mention": policy.require_mention,
         "free_response_rooms": policy.free_response_rooms.clone(),
+        "direct_message_rooms": policy.direct_message_rooms.clone(),
+        "thread_participation_roots": policy.thread_participation_roots.clone(),
         "process_reactions": policy.process_reactions,
         "encrypted_events": encrypted_event_policy_label(policy.encrypted_events),
     })
@@ -1310,6 +1319,14 @@ fn matrix_event_resource_uris(payload: &serde_json::Value) -> Vec<String> {
     uris
 }
 
+fn matrix_event_thread_info(payload: &serde_json::Value) -> Option<ThreadInfo> {
+    let thread_root_event_id = payload
+        .get("thread_root_event_id")
+        .and_then(serde_json::Value::as_str)?;
+    let room_id = payload.get("room_id").and_then(serde_json::Value::as_str)?;
+    Some(ThreadInfo::new(thread_root_event_id, ThreadKind::Reply).with_parent_id(room_id))
+}
+
 fn sender_allowed(policy: &MatrixInboundPolicy, sender: Option<&str>) -> bool {
     policy.allowed_users.is_empty()
         || sender.is_some_and(|sender| {
@@ -1325,6 +1342,51 @@ fn room_allows_free_response(policy: &MatrixInboundPolicy, room_id: &str) -> boo
         .free_response_rooms
         .iter()
         .any(|allowed_room| allowed_room == room_id)
+}
+
+fn room_is_direct_message(policy: &MatrixInboundPolicy, room_id: &str) -> bool {
+    policy
+        .direct_message_rooms
+        .iter()
+        .any(|direct_room| direct_room == room_id)
+}
+
+fn matrix_relation(event: &Event) -> Option<&serde_json::Value> {
+    event.content.get("m.relates_to")
+}
+
+fn matrix_relation_type(event: &Event) -> Option<&str> {
+    matrix_relation(event)
+        .and_then(|relation| relation.get("rel_type"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn matrix_thread_root_event_id(event: &Event) -> Option<&str> {
+    let relation = matrix_relation(event)?;
+    if relation.get("rel_type").and_then(serde_json::Value::as_str) != Some("m.thread") {
+        return None;
+    }
+    relation.get("event_id").and_then(serde_json::Value::as_str)
+}
+
+fn event_is_participated_thread(policy: &MatrixInboundPolicy, event: &Event) -> bool {
+    let Some(thread_root_event_id) = matrix_thread_root_event_id(event) else {
+        return false;
+    };
+    policy
+        .thread_participation_roots
+        .iter()
+        .any(|known_root| known_root == thread_root_event_id)
+}
+
+fn event_allows_unmentioned_delivery(
+    policy: &MatrixInboundPolicy,
+    room_id: &str,
+    event: &Event,
+) -> bool {
+    room_allows_free_response(policy, room_id)
+        || room_is_direct_message(policy, room_id)
+        || event_is_participated_thread(policy, event)
 }
 
 fn event_mentions_bot(event: &Event, policy: &MatrixInboundPolicy) -> bool {
@@ -1371,7 +1433,7 @@ fn inbound_message_drop_reason(
     }
 
     if policy.require_mention
-        && !room_allows_free_response(policy, room_id)
+        && !event_allows_unmentioned_delivery(policy, room_id, event)
         && !event_mentions_bot(event, policy)
     {
         return Some("mention_required");
@@ -2845,85 +2907,141 @@ mod tests {
         let sync = SyncResponse {
             next_batch: "batch_2".into(),
             rooms: crate::types::SyncRooms {
-                join: BTreeMap::from([(
-                    "!ops:matrix.org".to_string(),
-                    crate::types::JoinedSyncRoom {
-                        state: crate::types::SyncEventList::default(),
-                        timeline: crate::types::SyncTimeline {
-                            events: vec![
-                                Event {
-                                    event_id: Some("$authorized".into()),
-                                    r#type: "m.room.message".into(),
-                                    state_key: None,
-                                    sender: Some("@alice:matrix.org".into()),
-                                    origin_server_ts: Some(120),
-                                    content: json!({
-                                        "msgtype": "m.text",
-                                        "body": "hi @bot:matrix.org",
-                                        "m.mentions": {
-                                            "user_ids": ["@bot:matrix.org"]
-                                        }
-                                    }),
-                                    room_id: Some("!ops:matrix.org".into()),
-                                },
-                                Event {
-                                    event_id: Some("$unmentioned".into()),
-                                    r#type: "m.room.message".into(),
-                                    state_key: None,
-                                    sender: Some("@alice:matrix.org".into()),
-                                    origin_server_ts: Some(130),
-                                    content: json!({
-                                        "msgtype": "m.text",
-                                        "body": "ambient room chatter"
-                                    }),
-                                    room_id: Some("!ops:matrix.org".into()),
-                                },
-                                Event {
-                                    event_id: Some("$denied_sender".into()),
-                                    r#type: "m.room.message".into(),
-                                    state_key: None,
-                                    sender: Some("@mallory:matrix.org".into()),
-                                    origin_server_ts: Some(140),
-                                    content: json!({
-                                        "msgtype": "m.text",
-                                        "body": "@bot:matrix.org please act"
-                                    }),
-                                    room_id: Some("!ops:matrix.org".into()),
-                                },
-                                Event {
-                                    event_id: Some("$reaction".into()),
-                                    r#type: "m.reaction".into(),
-                                    state_key: None,
-                                    sender: Some("@alice:matrix.org".into()),
-                                    origin_server_ts: Some(150),
-                                    content: json!({
-                                        "m.relates_to": {
-                                            "rel_type": "m.annotation",
-                                            "event_id": "$authorized",
-                                            "key": "approve"
-                                        }
-                                    }),
-                                    room_id: Some("!ops:matrix.org".into()),
-                                },
-                                Event {
-                                    event_id: Some("$encrypted".into()),
-                                    r#type: "m.room.encrypted".into(),
-                                    state_key: None,
-                                    sender: Some("@alice:matrix.org".into()),
-                                    origin_server_ts: Some(160),
-                                    content: json!({
-                                        "algorithm": "m.megolm.v1.aes-sha2",
-                                        "session_id": "session-1",
-                                        "ciphertext": "redacted in policy projection"
-                                    }),
-                                    room_id: Some("!ops:matrix.org".into()),
-                                },
-                            ],
-                            prev_batch: Some("prev".into()),
-                            limited: false,
+                join: BTreeMap::from([
+                    (
+                        "!ops:matrix.org".to_string(),
+                        crate::types::JoinedSyncRoom {
+                            state: crate::types::SyncEventList::default(),
+                            timeline: crate::types::SyncTimeline {
+                                events: vec![
+                                    Event {
+                                        event_id: Some("$authorized".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(120),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "hi @bot:matrix.org",
+                                            "m.mentions": {
+                                                "user_ids": ["@bot:matrix.org"]
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$unmentioned".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(130),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "ambient room chatter"
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$denied_sender".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@mallory:matrix.org".into()),
+                                        origin_server_ts: Some(140),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "@bot:matrix.org please act"
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$thread_bypass".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(145),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "thread follow-up without another mention",
+                                            "m.relates_to": {
+                                                "rel_type": "m.thread",
+                                                "event_id": "$thread-root"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$thread_unlisted".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(146),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "unlisted thread follow-up",
+                                            "m.relates_to": {
+                                                "rel_type": "m.thread",
+                                                "event_id": "$other-thread-root"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$reaction".into()),
+                                        r#type: "m.reaction".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(150),
+                                        content: json!({
+                                            "m.relates_to": {
+                                                "rel_type": "m.annotation",
+                                                "event_id": "$authorized",
+                                                "key": "approve"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$encrypted".into()),
+                                        r#type: "m.room.encrypted".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(160),
+                                        content: json!({
+                                            "algorithm": "m.megolm.v1.aes-sha2",
+                                            "session_id": "session-1",
+                                            "ciphertext": "redacted in policy projection"
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                ],
+                                prev_batch: Some("prev".into()),
+                                limited: false,
+                            },
                         },
-                    },
-                )]),
+                    ),
+                    (
+                        "!dm:matrix.org".to_string(),
+                        crate::types::JoinedSyncRoom {
+                            state: crate::types::SyncEventList::default(),
+                            timeline: crate::types::SyncTimeline {
+                                events: vec![Event {
+                                    event_id: Some("$dm_unmentioned".into()),
+                                    r#type: "m.room.message".into(),
+                                    state_key: None,
+                                    sender: Some("@alice:matrix.org".into()),
+                                    origin_server_ts: Some(170),
+                                    content: json!({
+                                        "msgtype": "m.text",
+                                        "body": "dm without mention"
+                                    }),
+                                    room_id: Some("!dm:matrix.org".into()),
+                                }],
+                                prev_batch: Some("prev-dm".into()),
+                                limited: false,
+                            },
+                        },
+                    ),
+                ]),
                 ..crate::types::SyncRooms::default()
             },
         };
@@ -2932,18 +3050,34 @@ mod tests {
             bot_user_id: Some("@bot:matrix.org".into()),
             require_mention: true,
             free_response_rooms: Vec::new(),
+            direct_message_rooms: vec!["!dm:matrix.org".into()],
+            thread_participation_roots: vec!["$thread-root".into()],
             process_reactions: true,
             encrypted_events: MatrixEncryptedEventPolicy::FailClosed,
         };
 
         let projection = project_sync_response_with_policy(&sync, &policy);
 
-        assert_eq!(projection.message_events.len(), 3);
-        assert_eq!(projection.authorized_message_events.len(), 1);
+        assert_eq!(projection.message_events.len(), 6);
+        let authorized_event_ids = projection
+            .authorized_message_events
+            .iter()
+            .map(|event| event["event_id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(projection.authorized_message_events.len(), 3);
+        assert!(authorized_event_ids.contains(&"$authorized"));
+        assert!(authorized_event_ids.contains(&"$thread_bypass"));
+        assert!(authorized_event_ids.contains(&"$dm_unmentioned"));
+        let thread_event = projection
+            .authorized_message_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$thread_bypass"))
+            .unwrap();
         assert_eq!(
-            projection.authorized_message_events[0]["event_id"].as_str(),
-            Some("$authorized")
+            thread_event["thread_root_event_id"].as_str(),
+            Some("$thread-root")
         );
+        assert_eq!(thread_event["rel_type"].as_str(), Some("m.thread"));
         assert_eq!(projection.reaction_events.len(), 1);
         assert_eq!(
             projection.reaction_events[0]["target_event_id"].as_str(),
@@ -3307,15 +3441,19 @@ mod tests {
                                     "events": [
                                         {
                                             "event_id": "$msg_stream",
-                                            "type": "m.room.message",
-                                            "sender": "@alice:matrix.org",
-                                            "origin_server_ts": 120,
-                                            "content": {
-                                                "msgtype": "m.text",
-                                                "body": "Hello from Matrix"
-                                            },
-                                            "room_id": "!room:matrix.org"
-                                        }
+                                                "type": "m.room.message",
+                                                "sender": "@alice:matrix.org",
+                                                "origin_server_ts": 120,
+                                                "content": {
+                                                    "msgtype": "m.text",
+                                                    "body": "Hello from Matrix",
+                                                    "m.relates_to": {
+                                                        "rel_type": "m.thread",
+                                                        "event_id": "$root_stream"
+                                                    }
+                                                },
+                                                "room_id": "!room:matrix.org"
+                                            }
                                     ]
                                 }
                             }
@@ -3410,6 +3548,17 @@ mod tests {
                 .resource_uris
                 .iter()
                 .any(|uri| uri == "matrix:event:$msg_stream")
+        );
+        assert_eq!(
+            event.data.payload["thread_root_event_id"].as_str(),
+            Some("$root_stream")
+        );
+        assert_eq!(
+            event.data.thread_info,
+            Some(
+                ThreadInfo::new("$root_stream", ThreadKind::Reply)
+                    .with_parent_id("!room:matrix.org")
+            )
         );
     }
 

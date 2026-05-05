@@ -89,6 +89,14 @@ pub struct MatrixInboundPolicy {
     #[serde(default)]
     pub free_response_rooms: Vec<String>,
 
+    /// Rooms classified as direct messages, where mention gating is not required.
+    #[serde(default)]
+    pub direct_message_rooms: Vec<String>,
+
+    /// Matrix thread roots where the connector has already participated.
+    #[serde(default)]
+    pub thread_participation_roots: Vec<String>,
+
     /// Whether reaction events are projected for approval/routing consumers.
     #[serde(default = "default_process_reactions")]
     pub process_reactions: bool,
@@ -105,6 +113,8 @@ impl Default for MatrixInboundPolicy {
             bot_user_id: None,
             require_mention: true,
             free_response_rooms: Vec::new(),
+            direct_message_rooms: Vec::new(),
+            thread_participation_roots: Vec::new(),
             process_reactions: true,
             encrypted_events: MatrixEncryptedEventPolicy::FailClosed,
         }
@@ -380,6 +390,8 @@ mod tests {
                 "bot_user_id": "@bot:matrix.org",
                 "require_mention": true,
                 "free_response_rooms": ["!ops:matrix.org"],
+                "direct_message_rooms": ["!dm:matrix.org"],
+                "thread_participation_roots": ["$thread-root"],
                 "process_reactions": false,
                 "encrypted_events": "metadata_only"
             }
@@ -396,6 +408,14 @@ mod tests {
         assert_eq!(
             config.inbound_policy.free_response_rooms,
             vec!["!ops:matrix.org"]
+        );
+        assert_eq!(
+            config.inbound_policy.direct_message_rooms,
+            vec!["!dm:matrix.org"]
+        );
+        assert_eq!(
+            config.inbound_policy.thread_participation_roots,
+            vec!["$thread-root"]
         );
         assert!(!config.inbound_policy.process_reactions);
         assert_eq!(

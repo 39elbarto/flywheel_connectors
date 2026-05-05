@@ -63,7 +63,7 @@ The current connector exposes:
 - Prefer `https://` homeservers for live traffic.
 - `http://localhost`, `http://127.0.0.1`, and `http://[::1]` are acceptable for deterministic verification harnesses.
 - Use a non-production account and disposable rooms when verifying room creation, joins, leaves, sends, and media mutations.
-- Configure `inbound_policy.allowed_users`, `bot_user_id`, `require_mention`, `free_response_rooms`, and `process_reactions` before treating `matrix.sync` policy projections as agent-delivery input.
+- Configure `inbound_policy.allowed_users`, `bot_user_id`, `require_mention`, `free_response_rooms`, `direct_message_rooms`, `thread_participation_roots`, and `process_reactions` before treating `matrix.sync` policy projections as agent-delivery input. Direct-message rooms and participated Matrix thread roots bypass mention gating only after sender allowlist checks pass.
 - Subscribe to the Matrix event topics before calling `matrix.sync` if the host needs streaming delivery. `persist=false` returns a preview only and does not emit events.
 - Verify with offloaded Cargo commands only:
 

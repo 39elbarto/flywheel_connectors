@@ -44,6 +44,23 @@ impl BrowserControlOperation {
     }
 }
 
+#[derive(Clone, Copy)]
+struct BrowserConnectorOperation {
+    id: &'static str,
+    mapping: &'static str,
+    worker_operation_ids: &'static [&'static str],
+}
+
+impl BrowserConnectorOperation {
+    fn descriptor(self) -> serde_json::Value {
+        serde_json::json!({
+            "id": self.id,
+            "mapping": self.mapping,
+            "worker_operation_ids": self.worker_operation_ids,
+        })
+    }
+}
+
 const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
     id: "browser.navigate",
     method: "POST",
@@ -126,12 +143,99 @@ const REQUIRED_BROWSER_CONTROL_OPERATIONS: &[BrowserControlOperation] = &[
     WORKER_CLEAR_PROXY,
 ];
 
+const BROWSER_CONNECTOR_OPERATIONS: &[BrowserConnectorOperation] = &[
+    BrowserConnectorOperation {
+        id: "browser.navigate",
+        mapping: "worker",
+        worker_operation_ids: &["browser.navigate"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.screenshot",
+        mapping: "worker",
+        worker_operation_ids: &["browser.screenshot"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.render_pdf",
+        mapping: "worker",
+        worker_operation_ids: &["browser.render_pdf"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.extract_text",
+        mapping: "worker",
+        worker_operation_ids: &["browser.extract_text"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.extract_links",
+        mapping: "worker",
+        worker_operation_ids: &["browser.extract_links"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.wait_for_selector",
+        mapping: "worker",
+        worker_operation_ids: &["browser.wait_for_selector"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.click",
+        mapping: "worker",
+        worker_operation_ids: &["browser.click"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.fill_form",
+        mapping: "worker",
+        worker_operation_ids: &["browser.fill_form"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.evaluate_js",
+        mapping: "worker",
+        worker_operation_ids: &["browser.evaluate_js"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.get_cookies",
+        mapping: "worker",
+        worker_operation_ids: &["browser.get_cookies"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.set_cookies",
+        mapping: "worker",
+        worker_operation_ids: &["browser.set_cookies"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.session.save",
+        mapping: "derived",
+        worker_operation_ids: &["browser.get_cookies"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.session.restore",
+        mapping: "derived",
+        worker_operation_ids: &["browser.set_cookies"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.session.describe",
+        mapping: "connector_state",
+        worker_operation_ids: &[],
+    },
+    BrowserConnectorOperation {
+        id: "browser.set_proxy",
+        mapping: "worker",
+        worker_operation_ids: &["browser.set_proxy"],
+    },
+    BrowserConnectorOperation {
+        id: "browser.clear_proxy",
+        mapping: "worker",
+        worker_operation_ids: &["browser.clear_proxy"],
+    },
+];
+
 /// FCP browser-control worker contract expected by this connector client.
 pub(crate) fn browser_control_contract_descriptor() -> serde_json::Value {
     serde_json::json!({
         "control_plane": "fcp-browser-control",
         "protocol_version": BROWSER_CONTROL_PROTOCOL_VERSION,
         "operations": REQUIRED_BROWSER_CONTROL_OPERATIONS
+            .iter()
+            .map(|operation| operation.descriptor())
+            .collect::<Vec<_>>(),
+        "connector_operations": BROWSER_CONNECTOR_OPERATIONS
             .iter()
             .map(|operation| operation.descriptor())
             .collect::<Vec<_>>(),
@@ -725,6 +829,46 @@ mod tests {
             );
         }
         assert_eq!(operations.len(), REQUIRED_BROWSER_CONTROL_OPERATIONS.len());
+    }
+
+    #[test]
+    fn test_worker_contract_maps_session_operations_to_worker_primitives() {
+        let descriptor = browser_control_contract_descriptor();
+        let connector_operations = descriptor["connector_operations"].as_array().unwrap();
+        assert_eq!(
+            connector_operations.len(),
+            BROWSER_CONNECTOR_OPERATIONS.len()
+        );
+
+        let session_save = connector_operations
+            .iter()
+            .find(|operation| operation["id"] == "browser.session.save")
+            .unwrap();
+        assert_eq!(session_save["mapping"], "derived");
+        assert_eq!(
+            session_save["worker_operation_ids"],
+            serde_json::json!(["browser.get_cookies"])
+        );
+
+        let session_restore = connector_operations
+            .iter()
+            .find(|operation| operation["id"] == "browser.session.restore")
+            .unwrap();
+        assert_eq!(session_restore["mapping"], "derived");
+        assert_eq!(
+            session_restore["worker_operation_ids"],
+            serde_json::json!(["browser.set_cookies"])
+        );
+
+        let session_describe = connector_operations
+            .iter()
+            .find(|operation| operation["id"] == "browser.session.describe")
+            .unwrap();
+        assert_eq!(session_describe["mapping"], "connector_state");
+        assert_eq!(
+            session_describe["worker_operation_ids"],
+            serde_json::json!([])
+        );
     }
 
     #[test]

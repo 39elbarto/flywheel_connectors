@@ -2240,6 +2240,50 @@ mod tests {
         assert_eq!(ops.len(), 16);
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn test_introspected_operations_have_control_contract_mapping() {
+        let connector = BrowserConnector::new();
+        let introspection = connector.handle_introspect().await.unwrap();
+        let ops = introspection["operations"].as_array().unwrap();
+        let descriptor = browser_control_contract_descriptor();
+        let connector_operations = descriptor["connector_operations"].as_array().unwrap();
+
+        for op in ops {
+            let id = op["id"].as_str().unwrap();
+            assert!(
+                connector_operations
+                    .iter()
+                    .any(|operation| operation["id"] == id),
+                "missing browser-control mapping for {id}"
+            );
+        }
+
+        let worker_operations = descriptor["operations"].as_array().unwrap();
+        for mapping in connector_operations {
+            let mapping_kind = mapping["mapping"].as_str().unwrap();
+            let worker_operation_ids = mapping["worker_operation_ids"].as_array().unwrap();
+            if mapping_kind == "connector_state" {
+                assert!(worker_operation_ids.is_empty());
+                continue;
+            }
+            assert!(
+                !worker_operation_ids.is_empty(),
+                "{} must name worker primitive dependencies",
+                mapping["id"].as_str().unwrap()
+            );
+            for worker_id in worker_operation_ids {
+                let worker_id = worker_id.as_str().unwrap();
+                assert!(
+                    worker_operations
+                        .iter()
+                        .any(|operation| operation["id"] == worker_id),
+                    "{} references unknown worker operation {worker_id}",
+                    mapping["id"].as_str().unwrap()
+                );
+            }
+        }
+    }
+
     // ── Provisioning automation tests ─────────────────────────────
 
     #[fcp_async_core::runtime::test]

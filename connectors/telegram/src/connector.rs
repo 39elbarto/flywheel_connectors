@@ -2103,7 +2103,16 @@ impl FcpConnector for TelegramConnector {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration as StdDuration;
+    use std::{
+        io::{Read, Write},
+        net::{TcpListener, TcpStream},
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        thread,
+        time::Duration as StdDuration,
+    };
 
     use super::*;
     use crate::types::{Chat, User};
@@ -2212,6 +2221,214 @@ mod tests {
             .join(format!("{label}-{}", Uuid::new_v4()))
             .to_string_lossy()
             .into_owned()
+    }
+
+    struct LoopbackTelegramServer {
+        base_url: String,
+        stop: Arc<AtomicBool>,
+        handle: thread::JoinHandle<()>,
+        request_log: Arc<Mutex<Vec<serde_json::Value>>>,
+    }
+
+    impl LoopbackTelegramServer {
+        fn start() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback telegram server");
+            let addr = listener.local_addr().expect("loopback local addr");
+            let stop = Arc::new(AtomicBool::new(false));
+            let request_log = Arc::new(Mutex::new(Vec::new()));
+            let get_updates_calls = Arc::new(AtomicUsize::new(0));
+            let thread_stop = Arc::clone(&stop);
+            let thread_log = Arc::clone(&request_log);
+            let thread_calls = Arc::clone(&get_updates_calls);
+            let handle = thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if thread_stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    match stream {
+                        Ok(mut stream) => {
+                            handle_loopback_telegram_request(
+                                &mut stream,
+                                &thread_log,
+                                &thread_calls,
+                            );
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+
+            Self {
+                base_url: format!("http://{addr}"),
+                stop,
+                handle,
+                request_log,
+            }
+        }
+
+        fn shutdown(self) -> Vec<serde_json::Value> {
+            self.stop.store(true, Ordering::SeqCst);
+            let _ = TcpStream::connect(self.base_url.trim_start_matches("http://"));
+            self.handle.join().expect("loopback server thread joins");
+            self.request_log.lock().expect("request log lock").clone()
+        }
+    }
+
+    fn handle_loopback_telegram_request(
+        stream: &mut TcpStream,
+        request_log: &Arc<Mutex<Vec<serde_json::Value>>>,
+        get_updates_calls: &Arc<AtomicUsize>,
+    ) {
+        let Some((method, path)) = read_loopback_http_request(stream) else {
+            return;
+        };
+        request_log.lock().expect("request log lock").push(json!({
+            "phase": "request",
+            "method": method,
+            "path": path,
+        }));
+
+        let body = if method == "GET" && path == token_path("getMe") {
+            json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Loopback Bot",
+                    "username": "loopback_bot"
+                }
+            })
+        } else if method == "POST" && path == token_path("getUpdates") {
+            let call = get_updates_calls.fetch_add(1, Ordering::SeqCst);
+            if call == 0 {
+                json!({
+                    "ok": true,
+                    "result": [
+                        {
+                            "update_id": 2000,
+                            "message": {
+                                "message_id": 10,
+                                "from": {
+                                    "id": 208214988,
+                                    "is_bot": false,
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "chat": {
+                                    "id": 208214988,
+                                    "type": "private",
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "date": 1700000000,
+                                "text": "/new"
+                            }
+                        },
+                        {
+                            "update_id": 2001,
+                            "message": {
+                                "message_id": 11,
+                                "from": {
+                                    "id": 208214988,
+                                    "is_bot": false,
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "chat": {
+                                    "id": 208214988,
+                                    "type": "private",
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "date": 1700000001,
+                                "text": "/topic 17585"
+                            }
+                        },
+                        {
+                            "update_id": 2002,
+                            "message": {
+                                "message_id": 12,
+                                "message_thread_id": 17585,
+                                "from": {
+                                    "id": 208214988,
+                                    "is_bot": false,
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "chat": {
+                                    "id": 208214988,
+                                    "type": "private",
+                                    "first_name": "Root",
+                                    "username": "root_user"
+                                },
+                                "date": 1700000002,
+                                "text": "/new inside topic"
+                            }
+                        }
+                    ]
+                })
+            } else {
+                json!({ "ok": true, "result": [] })
+            }
+        } else {
+            json!({ "ok": false, "description": "unexpected loopback telegram route" })
+        };
+
+        write_loopback_http_response(stream, &body);
+    }
+
+    fn read_loopback_http_request(stream: &mut TcpStream) -> Option<(String, String)> {
+        stream
+            .set_read_timeout(Some(StdDuration::from_secs(2)))
+            .ok();
+        let mut bytes = Vec::new();
+        let mut chunk = [0_u8; 512];
+        loop {
+            let read = stream.read(&mut chunk).ok()?;
+            if read == 0 {
+                break;
+            }
+            bytes.extend_from_slice(&chunk[..read]);
+            if loopback_http_request_complete(&bytes) {
+                break;
+            }
+            if bytes.len() > 16 * 1024 {
+                return None;
+            }
+        }
+        let request = String::from_utf8_lossy(&bytes);
+        let request_line = request.lines().next()?;
+        let mut parts = request_line.split_whitespace();
+        let method = parts.next()?.to_owned();
+        let path = parts.next()?.to_owned();
+        Some((method, path))
+    }
+
+    fn loopback_http_request_complete(bytes: &[u8]) -> bool {
+        let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") else {
+            return false;
+        };
+        let headers = String::from_utf8_lossy(&bytes[..header_end]);
+        let content_length = headers
+            .lines()
+            .find_map(|line| line.split_once(':'))
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+            .unwrap_or(0);
+        bytes.len() >= header_end + 4 + content_length
+    }
+
+    fn write_loopback_http_response(stream: &mut TcpStream, body: &serde_json::Value) {
+        let body = serde_json::to_string(body).expect("loopback response serializes");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write loopback response");
+        stream.flush().expect("flush loopback response");
     }
 
     async fn setup_connector_with_token(
@@ -3046,6 +3263,128 @@ mod tests {
             .handle_shutdown(json!({}))
             .await
             .expect("shutdown should succeed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_no_mock_loopback_polling_routes_root_and_topic_dm_events() {
+        let loopback = LoopbackTelegramServer::start();
+        let mut connector = TelegramConnector::new();
+        let mut event_rx = connector.event_tx.subscribe();
+
+        connector
+            .handle_configure(json!({
+                "credential": test_bot_credential(),
+                "base_url": loopback.base_url.clone(),
+                "poll_timeout": 1
+            }))
+            .await
+            .expect("configure should hit loopback getMe");
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let zone_dir = unique_zone_dir("no-mock-topic-routing");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": zone_dir,
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["telegram.read"]
+            }))
+            .await
+            .expect("handshake should start polling against loopback");
+
+        let mut events = Vec::new();
+        for _ in 0..3 {
+            let event = fcp_async_core::time::timeout(StdDuration::from_secs(3), event_rx.recv())
+                .await
+                .expect("timed out waiting for loopback Telegram polling event")
+                .expect("broadcast receive should succeed")
+                .expect("event payload should be ok");
+            events.push(event);
+        }
+        events.sort_by_key(|event| event.seq);
+
+        let root_new = &events[0];
+        assert_eq!(root_new.seq, 2000);
+        assert_eq!(root_new.topic, "telegram.message.new");
+        assert_eq!(
+            root_new
+                .data
+                .payload
+                .get("text")
+                .and_then(|value| value.as_str()),
+            Some("/new")
+        );
+        assert!(root_new.data.thread_info.is_none());
+        assert_eq!(
+            root_new.data.resource_uris,
+            vec!["telegram:chat:208214988", "telegram:user:208214988"]
+        );
+
+        let root_topic = &events[1];
+        assert_eq!(root_topic.seq, 2001);
+        assert_eq!(
+            root_topic
+                .data
+                .payload
+                .get("text")
+                .and_then(|value| value.as_str()),
+            Some("/topic 17585")
+        );
+        assert!(root_topic.data.thread_info.is_none());
+        assert_eq!(
+            root_topic.data.resource_uris,
+            vec!["telegram:chat:208214988", "telegram:user:208214988"]
+        );
+
+        let topic_new = &events[2];
+        assert_eq!(topic_new.seq, 2002);
+        assert_eq!(
+            topic_new
+                .data
+                .payload
+                .get("text")
+                .and_then(|value| value.as_str()),
+            Some("/new inside topic")
+        );
+        assert_eq!(
+            topic_new.data.resource_uris,
+            vec![
+                "telegram:chat:208214988:topic:17585",
+                "telegram:chat:208214988",
+                "telegram:user:208214988",
+            ]
+        );
+        let thread_info = topic_new
+            .data
+            .thread_info
+            .as_ref()
+            .expect("topic event should include thread metadata");
+        assert_eq!(thread_info.thread_id, "17585");
+        assert_eq!(thread_info.parent_id.as_deref(), Some("208214988"));
+        assert_eq!(thread_info.kind, ThreadKind::ForumTopic);
+
+        connector
+            .handle_shutdown(json!({}))
+            .await
+            .expect("shutdown should stop polling");
+        let request_log = loopback.shutdown();
+        assert!(
+            request_log.iter().any(
+                |entry| entry.get("path").and_then(serde_json::Value::as_str)
+                    == Some(token_path("getMe").as_str())
+            ),
+            "loopback getMe route should be exercised"
+        );
+        assert!(
+            request_log.iter().any(
+                |entry| entry.get("path").and_then(serde_json::Value::as_str)
+                    == Some(token_path("getUpdates").as_str())
+            ),
+            "loopback getUpdates route should be exercised"
+        );
     }
 
     #[fcp_async_core::runtime::test]

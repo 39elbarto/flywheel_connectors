@@ -44,3 +44,4 @@ hex.workspace = true
 [dev-dependencies]
 wiremock.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+sha1 = "0.10"

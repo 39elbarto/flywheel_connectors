@@ -3207,8 +3207,14 @@ fn decode_embedded_json<T: DeserializeOwned>(value: Option<&Value>) -> Option<T>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{self, Read, Write};
+    use std::net::{TcpListener as StdTcpListener, TcpStream as StdTcpStream};
+    use std::thread::{self, JoinHandle};
+
+    use base64::Engine as _;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{CapabilityToken, RequestId};
+    use sha1::{Digest as Sha1Digest, Sha1};
 
     fn invoke_request(
         connector: &MattermostConnector,
@@ -3233,6 +3239,172 @@ mod tests {
             provenance: None,
             approval_tokens: Vec::new(),
         }
+    }
+
+    fn read_websocket_handshake(stream: &mut StdTcpStream) -> String {
+        let mut request = Vec::new();
+        let mut buf = [0_u8; 1024];
+        while !request.ends_with(b"\r\n\r\n") {
+            let read = stream
+                .read(&mut buf)
+                .expect("loopback websocket handshake should be readable");
+            assert!(read > 0, "client closed before websocket handshake");
+            request.extend(buf.iter().take(read).copied());
+        }
+        String::from_utf8(request).expect("loopback websocket handshake should be UTF-8")
+    }
+
+    fn websocket_accept_value(key: &str) -> String {
+        let mut digest = Sha1::new();
+        digest.update(key.as_bytes());
+        digest.update(b"258EAFA5-E914-47DA-95CA-C5AB0DC85B11");
+        base64::engine::general_purpose::STANDARD.encode(digest.finalize())
+    }
+
+    fn complete_websocket_handshake(stream: &mut StdTcpStream) {
+        let request = read_websocket_handshake(stream);
+        let key = request
+            .lines()
+            .find_map(|line| line.strip_prefix("Sec-WebSocket-Key: "))
+            .expect("websocket client should send Sec-WebSocket-Key");
+        let response = format!(
+            "HTTP/1.1 101 Switching Protocols\r\n\
+             Connection: Upgrade\r\n\
+             Upgrade: websocket\r\n\
+             Sec-WebSocket-Accept: {}\r\n\
+             \r\n",
+            websocket_accept_value(key.trim())
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("websocket handshake response should write");
+        stream
+            .flush()
+            .expect("websocket handshake response should flush");
+    }
+
+    fn write_websocket_text_frame(stream: &mut StdTcpStream, payload: &str) -> io::Result<()> {
+        let bytes = payload.as_bytes();
+        if bytes.len() > 65_535 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("test websocket payload too large: {} bytes", bytes.len()),
+            ));
+        }
+
+        let mut frame = vec![0x81];
+        if bytes.len() <= 125 {
+            frame.push(u8::try_from(bytes.len()).expect("short websocket payload length"));
+        } else {
+            frame.push(126);
+            frame.extend_from_slice(
+                &u16::try_from(bytes.len())
+                    .expect("medium websocket payload length")
+                    .to_be_bytes(),
+            );
+        }
+        frame.extend_from_slice(bytes);
+        stream.write_all(&frame)?;
+        stream.flush()
+    }
+
+    fn write_websocket_close_frame(stream: &mut StdTcpStream) {
+        stream
+            .write_all(&[0x88, 0])
+            .expect("websocket close frame should write");
+        stream.flush().expect("websocket close frame should flush");
+    }
+
+    fn spawn_mattermost_loopback_websocket(frames: Vec<String>) -> (String, JoinHandle<()>) {
+        let listener =
+            StdTcpListener::bind("127.0.0.1:0").expect("loopback websocket listener should bind");
+        let address = listener
+            .local_addr()
+            .expect("loopback websocket listener should have an address");
+        let handle = thread::spawn(move || {
+            let (mut stream, _) = listener
+                .accept()
+                .expect("loopback websocket server should accept one client");
+            complete_websocket_handshake(&mut stream);
+            for frame in frames {
+                write_websocket_text_frame(&mut stream, &frame)
+                    .expect("websocket text frame should write");
+            }
+            write_websocket_close_frame(&mut stream);
+        });
+        (format!("http://{address}"), handle)
+    }
+
+    fn mattermost_hello_frame() -> String {
+        json!({
+            "event": "hello",
+            "seq": 0,
+            "data": {
+                "connection_id": "conn-loopback"
+            }
+        })
+        .to_string()
+    }
+
+    #[derive(Clone, Copy)]
+    struct MattermostLoopbackPost<'a> {
+        seq: u64,
+        post_id: &'a str,
+        channel_id: &'a str,
+        user_id: &'a str,
+        channel_type: &'a str,
+        message: &'a str,
+        root_id: Option<&'a str>,
+        mention_ids: &'a [&'a str],
+    }
+
+    fn mattermost_post_frame(post_frame: MattermostLoopbackPost<'_>) -> String {
+        let mut post = serde_json::Map::new();
+        post.insert("id".into(), json!(post_frame.post_id));
+        post.insert("channel_id".into(), json!(post_frame.channel_id));
+        post.insert("user_id".into(), json!(post_frame.user_id));
+        post.insert("message".into(), json!(post_frame.message));
+        if let Some(root_id) = post_frame.root_id {
+            post.insert("root_id".into(), json!(root_id));
+        }
+
+        let mut data = serde_json::Map::new();
+        data.insert("channel_type".into(), json!(post_frame.channel_type));
+        data.insert("post".into(), Value::Object(post).to_string().into());
+        if !post_frame.mention_ids.is_empty() {
+            data.insert("mentions".into(), json!(post_frame.mention_ids));
+        }
+
+        json!({
+            "event": "posted",
+            "seq": post_frame.seq,
+            "data": Value::Object(data),
+            "broadcast": {
+                "channel_id": post_frame.channel_id,
+                "user_id": post_frame.user_id
+            }
+        })
+        .to_string()
+    }
+
+    async fn recv_loopback_event(
+        receiver: &mut broadcast::Receiver<FcpResult<EventEnvelope>>,
+    ) -> EventEnvelope {
+        fcp_async_core::time::timeout(Duration::from_secs(2), receiver.recv())
+            .await
+            .expect("timed out waiting for loopback Mattermost event")
+            .expect("event receiver should remain open")
+            .expect("loopback event should be successful")
+    }
+
+    fn event_post_id(event: &EventEnvelope) -> Option<&str> {
+        event
+            .data
+            .payload
+            .get("data")?
+            .get("post")?
+            .get("id")?
+            .as_str()
     }
 
     #[test]
@@ -4053,6 +4225,142 @@ mod tests {
         assert!(!health.to_string().contains("u_allowed"));
         assert!(!health.to_string().contains("c_allowed"));
         assert!(!health.to_string().contains("u_bot"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn websocket_loopback_applies_monitor_policy_before_broadcast() {
+        let (base_url, server) = spawn_mattermost_loopback_websocket(vec![
+            mattermost_hello_frame(),
+            mattermost_post_frame(MattermostLoopbackPost {
+                seq: 1,
+                post_id: "p_denied",
+                channel_id: "c_general",
+                user_id: "u_alice",
+                channel_type: "O",
+                message: "unmentioned channel message",
+                root_id: None,
+                mention_ids: &[],
+            }),
+            mattermost_post_frame(MattermostLoopbackPost {
+                seq: 2,
+                post_id: "p_mention",
+                channel_id: "c_general",
+                user_id: "u_alice",
+                channel_type: "O",
+                message: "explicit bot mention",
+                root_id: None,
+                mention_ids: &["u_bot"],
+            }),
+            mattermost_post_frame(MattermostLoopbackPost {
+                seq: 3,
+                post_id: "p_dm",
+                channel_id: "d_bot_alice",
+                user_id: "u_alice",
+                channel_type: "D",
+                message: "dm should pass without mention",
+                root_id: None,
+                mention_ids: &[],
+            }),
+            mattermost_post_frame(MattermostLoopbackPost {
+                seq: 4,
+                post_id: "p_free",
+                channel_id: "c_free",
+                user_id: "u_alice",
+                channel_type: "O",
+                message: "free-response channel should pass",
+                root_id: None,
+                mention_ids: &[],
+            }),
+            mattermost_post_frame(MattermostLoopbackPost {
+                seq: 5,
+                post_id: "p_thread",
+                channel_id: "c_general",
+                user_id: "u_alice",
+                channel_type: "O",
+                message: "thread participation should pass",
+                root_id: Some("root_allowed"),
+                mention_ids: &[],
+            }),
+        ]);
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": base_url,
+                "token": "tok_123",
+                "monitor_policy": {
+                    "bot_user_id": "u_bot",
+                    "free_response_channels": ["c_free"],
+                    "thread_participation_roots": ["root_allowed"]
+                }
+            }))
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(&HandshakeRequest {
+                protocol_version: "1.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0_u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static("mattermost.read")],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .unwrap();
+
+        let mut events = connector.subscribe_events();
+        let subscribe = connector
+            .handle_subscribe(json!({
+                "type": "subscribe",
+                "id": "sub_loopback",
+                "topics": ["mattermost.posted"]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            subscribe.get("connection_status").and_then(Value::as_str),
+            Some("started")
+        );
+
+        let mut emitted = Vec::new();
+        for _ in 0..4 {
+            let event = recv_loopback_event(&mut events).await;
+            emitted.push((
+                event.seq,
+                event.stream_key.as_ref().map(ToString::to_string),
+                event_post_id(&event).map(ToOwned::to_owned),
+            ));
+        }
+
+        assert_eq!(
+            emitted,
+            vec![
+                (
+                    2,
+                    Some("c_general".to_string()),
+                    Some("p_mention".to_string())
+                ),
+                (3, Some("d_bot_alice".to_string()), Some("p_dm".to_string())),
+                (4, Some("c_free".to_string()), Some("p_free".to_string())),
+                (
+                    5,
+                    Some("c_general".to_string()),
+                    Some("p_thread".to_string())
+                ),
+            ]
+        );
+        let extra = fcp_async_core::time::timeout(Duration::from_millis(200), events.recv()).await;
+        assert!(
+            extra.is_err(),
+            "unauthorized loopback websocket frame must not be broadcast"
+        );
+
+        connector.handle_shutdown(json!({})).await.unwrap();
+        server
+            .join()
+            .expect("loopback websocket server thread should finish");
     }
 
     #[test]

@@ -771,6 +771,7 @@ impl BrowserClient {
                                 Ok(body) => body,
                                 Err(err) => return AttemptOutcome::Terminal(err),
                             };
+                            let body = redact_browser_control_error_text(&body);
                             let err = BrowserError::Api {
                                 message: format!("Server error {status}: {body}"),
                                 status_code: Some(status.as_u16()),
@@ -793,11 +794,13 @@ impl BrowserClient {
                             };
                             let api_err: Option<ApiErrorResponse> =
                                 serde_json::from_str(&body).ok();
+                            let redacted_body = redact_browser_control_error_text(&body);
                             let message = api_err
                                 .as_ref()
                                 .and_then(|e| e.error.as_ref())
                                 .and_then(|d| d.message.clone())
-                                .unwrap_or(format!("HTTP {status}: {body}"));
+                                .map(|message| redact_browser_control_error_text(&message))
+                                .unwrap_or(format!("HTTP {status}: {redacted_body}"));
                             return AttemptOutcome::Terminal(BrowserError::Api {
                                 message,
                                 status_code: Some(status.as_u16()),
@@ -890,6 +893,76 @@ fn response_size_limit_error(
         message,
         status_code: Some(status.as_u16()),
     }
+}
+
+fn redact_browser_control_error_text(body: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(body) {
+        redact_sensitive_json(&mut value);
+        return serde_json::to_string(&value)
+            .unwrap_or_else(|_| "[redacted browser-control error body]".to_string());
+    }
+
+    if contains_sensitive_marker(body) {
+        "[redacted browser-control error body]".to_string()
+    } else {
+        body.to_string()
+    }
+}
+
+fn redact_sensitive_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            for (key, child) in map.iter_mut() {
+                if is_sensitive_error_key(key) {
+                    *child = redacted_json_value();
+                } else {
+                    redact_sensitive_json(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                redact_sensitive_json(item);
+            }
+        }
+        serde_json::Value::String(text) => {
+            if contains_sensitive_marker(text) {
+                *text = "[redacted]".to_string();
+            }
+        }
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn redacted_json_value() -> serde_json::Value {
+    serde_json::Value::String("[redacted]".to_string())
+}
+
+fn is_sensitive_error_key(key: &str) -> bool {
+    let normalized = key.replace(['-', '_'], "").to_ascii_lowercase();
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("cookie")
+        || normalized.contains("authorization")
+        || normalized.contains("apikey")
+        || normalized.contains("credential")
+}
+
+fn contains_sensitive_marker(text: &str) -> bool {
+    let normalized = text.to_ascii_lowercase();
+    normalized.contains("bearer ")
+        || normalized.contains("authorization")
+        || normalized.contains("access_token")
+        || normalized.contains("refresh_token")
+        || normalized.contains("id_token")
+        || normalized.contains("api_key")
+        || normalized.contains("apikey")
+        || normalized.contains("password")
+        || normalized.contains("secret")
+        || normalized.contains("cookie")
+        || normalized.contains("set-cookie")
+        || normalized.contains("credential")
 }
 
 fn validate_fcp_browser_control_health(body: &serde_json::Value) -> Result<(), String> {
@@ -1619,6 +1692,62 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.is_retryable());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_server_error_redacts_sensitive_body_fields() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/navigate"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(serde_json::json!({
+                "error": "upstream failed",
+                "access_token": "browser-worker-token",
+                "cookies": [{ "name": "session", "value": "cookie-secret" }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let err = client
+            .navigate("https://example.com", None, None, None)
+            .await
+            .unwrap_err();
+        let message = format!("{err}");
+        assert!(!message.contains("browser-worker-token"));
+        assert!(!message.contains("cookie-secret"));
+        assert!(message.contains("[redacted]"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_client_error_redacts_sensitive_api_message() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/click"))
+            .respond_with(ResponseTemplate::new(400).set_body_json(serde_json::json!({
+                "error": {
+                    "message": "Authorization failed for Bearer browser-worker-token",
+                    "code": "auth_failed"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url(&mock_server.uri())
+            .with_retry_config(0);
+
+        let err = client.click(".submit", None).await.unwrap_err();
+        let message = format!("{err}");
+        assert!(!message.contains("browser-worker-token"));
+        assert!(!message.contains("Bearer"));
+        assert!(message.contains("[redacted browser-control error body]"));
     }
 
     #[fcp_async_core::runtime::test]

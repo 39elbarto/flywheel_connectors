@@ -124,6 +124,7 @@ impl NextcloudTalkConnector {
     }
 
     /// Run connector diagnostics without performing network calls.
+    #[allow(clippy::too_many_lines)]
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = Vec::new();
 
@@ -352,15 +353,17 @@ fn attach_self_check_details(
     mut report: SelfCheckReport,
     config: Option<&NextcloudTalkConfig>,
 ) -> SelfCheckReport {
-    report.details = Some(match config {
-        Some(config) => json!({
+    report.details = Some(config.map_or_else(
+        || json!({ "configured": false }),
+        |config| {
+            json!({
             "setup": setup_details(config),
             "webhook": webhook_details(config),
             "inbound_policy": inbound_policy_details(config),
             "network_policy": runtime_network_constraints_projection(config),
-        }),
-        None => json!({ "configured": false }),
-    });
+            })
+        },
+    ));
     report
 }
 
@@ -1103,10 +1106,11 @@ impl FcpConnector for NextcloudTalkConnector {
         };
         snapshot.uptime_ms =
             u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
-        snapshot.details = Some(match &self.config {
-            Some(config) => setup_details(config),
-            None => json!({ "configured": false }),
-        });
+        snapshot.details = Some(
+            self.config
+                .as_ref()
+                .map_or_else(|| json!({ "configured": false }), setup_details),
+        );
         snapshot
     }
 
@@ -1466,6 +1470,7 @@ mod tests {
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
+    use fcp_prelude::InstanceId;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

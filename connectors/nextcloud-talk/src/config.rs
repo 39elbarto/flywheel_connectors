@@ -297,15 +297,14 @@ impl NextcloudTalkConfig {
     /// Return the configured account display label without exposing secrets.
     #[must_use]
     pub fn account_label(&self) -> String {
-        match self
-            .account_name
+        self.account_name
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
-        {
-            Some(name) => format!("{} ({})", self.account_id(), name),
-            None => self.account_id().to_string(),
-        }
+            .map_or_else(
+                || self.account_id().to_string(),
+                |name| format!("{} ({})", self.account_id(), name),
+            )
     }
 
     /// Report the configured server URL policy decision.
@@ -431,7 +430,7 @@ impl NextcloudTalkWebhookConfig {
 
     /// Return whether webhook mode has enough local configuration to start.
     #[must_use]
-    pub fn readiness_label(&self) -> &'static str {
+    pub const fn readiness_label(&self) -> &'static str {
         if !self.enabled {
             "manual_poll"
         } else if self.bot_secret.is_some() {
@@ -605,7 +604,10 @@ fn classify_host(host: &str) -> NetworkHostClass {
     if host.ends_with(".ts.net") || host == "ts.net" {
         return NetworkHostClass::Tailnet;
     }
-    if host.ends_with(".local") || host.ends_with(".internal") || host.ends_with(".home.arpa") {
+    if has_domain_suffix(host, "local")
+        || has_domain_suffix(host, "internal")
+        || has_domain_suffix(host, "home.arpa")
+    {
         return NetworkHostClass::InternalName;
     }
     if let Ok(ip) = host.parse::<IpAddr>() {
@@ -630,16 +632,14 @@ fn classify_ip(ip: IpAddr) -> NetworkHostClass {
 }
 
 fn is_tailnet_ipv4(ip: Ipv4Addr) -> bool {
-    let octets = ip.octets();
-    octets[0] == 100 && (64..=127).contains(&octets[1])
+    matches!(ip.octets(), [100, second, _, _] if (64..=127).contains(&second))
 }
 
-fn is_tailnet_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    segments[0] == 0xfd7a && segments[1] == 0x115c && segments[2] == 0xa1e0
+const fn is_tailnet_ipv6(ip: Ipv6Addr) -> bool {
+    matches!(ip.segments(), [0xfd7a, 0x115c, 0xa1e0, _, _, _, _, _])
 }
 
-fn is_private_ipv4(ip: Ipv4Addr) -> bool {
+const fn is_private_ipv4(ip: Ipv4Addr) -> bool {
     ip.is_private()
         || ip.is_link_local()
         || ip.is_unspecified()
@@ -647,11 +647,19 @@ fn is_private_ipv4(ip: Ipv4Addr) -> bool {
         || ip.is_multicast()
 }
 
-fn is_private_ipv6(ip: Ipv6Addr) -> bool {
-    let segments = ip.segments();
-    let unique_local = (segments[0] & 0xfe00) == 0xfc00;
-    let link_local = (segments[0] & 0xffc0) == 0xfe80;
-    ip.is_unspecified() || ip.is_multicast() || unique_local || link_local
+const fn is_private_ipv6(ip: Ipv6Addr) -> bool {
+    let [first, _, _, _, _, _, _, _] = ip.segments();
+    ip.is_unspecified()
+        || ip.is_multicast()
+        || (first & 0xfe00) == 0xfc00
+        || (first & 0xffc0) == 0xfe80
+}
+
+fn has_domain_suffix(host: &str, suffix: &str) -> bool {
+    host == suffix
+        || host
+            .strip_suffix(suffix)
+            .is_some_and(|prefix| prefix.ends_with('.') && prefix.len() > 1)
 }
 
 #[cfg(test)]

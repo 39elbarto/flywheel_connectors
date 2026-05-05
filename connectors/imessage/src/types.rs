@@ -989,6 +989,32 @@ mod tests {
     }
 
     #[test]
+    fn config_from_value_rejects_invalid_webhook_callback_config() {
+        let cases = [
+            serde_json::json!({
+                "password": "secret",
+                "webhook_host": "   "
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_port": 0
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_path": "/"
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_account_id": "   "
+            }),
+        ];
+
+        for case in cases {
+            assert!(BlueBubblesConfig::from_value(case).is_err());
+        }
+    }
+
+    #[test]
     fn chat_deserialize() {
         let json = serde_json::json!({
             "guid": "iMessage;-;+15551234567",
@@ -1163,9 +1189,14 @@ mod tests {
 
         assert_eq!(config.webhook_path, "/custom-hook");
         let url = config.webhook_registration_url().unwrap();
-        assert_eq!(
-            url,
-            "http://localhost:9999/custom-hook?password=W9fTC%26L5JL*%40"
+        assert!(url.starts_with("http://localhost:9999/custom-hook?"));
+        assert!(url.contains("%26"));
+        assert!(url.contains("%40"));
+        let parsed = reqwest::Url::parse(&url).unwrap();
+        assert!(
+            parsed
+                .query_pairs()
+                .any(|(key, value)| { key == "password" && value == "W9fTC&L5JL*@" })
         );
     }
 
@@ -1198,26 +1229,87 @@ mod tests {
                 "attachments": [{
                     "guid": "att-1",
                     "mimeType": "image/png",
+                    "uti": "public.png",
                     "transferName": "photo.png",
                     "totalBytes": 123
                 }],
-                "threadOriginatorGuid": "root-1"
+                "threadOriginatorGuid": "root-1",
+                "associatedMessageGuid": "assoc-1",
+                "associatedMessageType": 0,
+                "balloonBundleId": "com.example.MessagesPlugin"
             }
         });
 
         let normalized = normalize_bluebubbles_webhook_payload(&payload, None).unwrap();
         assert_eq!(normalized.event_type, "new-message");
+        assert_eq!(normalized.event_id, "msg-001");
         assert_eq!(normalized.topic, "imessage.message.inbound");
         assert_eq!(normalized.chat_guid.as_deref(), Some("iMessage;+;chat123"));
         assert_eq!(normalized.chat_identifier.as_deref(), Some("Family"));
         assert_eq!(normalized.sender_id.as_deref(), Some("+15551234567"));
+        assert_eq!(normalized.sender_name.as_deref(), Some("Alice"));
+        assert_eq!(normalized.text.as_deref(), Some("hello"));
+        assert!(!normalized.is_from_me);
         assert!(normalized.is_group);
         assert_eq!(normalized.attachments.len(), 1);
+        assert_eq!(normalized.attachments[0].guid, "att-1");
         assert_eq!(
             normalized.attachments[0].mime_type.as_deref(),
             Some("image/png")
         );
+        assert_eq!(normalized.attachments[0].uti.as_deref(), Some("public.png"));
+        assert_eq!(
+            normalized.attachments[0].transfer_name.as_deref(),
+            Some("photo.png")
+        );
+        assert_eq!(normalized.attachments[0].total_bytes, Some(123));
         assert_eq!(normalized.reply_to_message_guid.as_deref(), Some("root-1"));
+        assert_eq!(
+            normalized.associated_message_guid.as_deref(),
+            Some("assoc-1")
+        );
+        assert_eq!(normalized.associated_message_type, Some(0));
+        assert_eq!(
+            normalized.balloon_bundle_id.as_deref(),
+            Some("com.example.MessagesPlugin")
+        );
+        assert!(!normalized.is_tapback);
+    }
+
+    #[test]
+    fn normalize_webhook_payload_rejects_malformed_and_accepts_data_arrays() {
+        let malformed = serde_json::json!({
+            "type": "new-message",
+            "data": { "text": "missing guid" }
+        });
+        assert!(normalize_bluebubbles_webhook_payload(&malformed, None).is_err());
+
+        let payload = serde_json::json!({
+            "type": "new-message",
+            "data": [{
+                "guid": "array-msg",
+                "chat": {
+                    "guid": "iMessage;-;+15551234567",
+                    "identifier": "+15551234567"
+                },
+                "sender": {
+                    "id": "+15551234567",
+                    "name": "Alice"
+                },
+                "fromMe": true
+            }]
+        });
+        let normalized = normalize_bluebubbles_webhook_payload(&payload, None).unwrap();
+        assert_eq!(normalized.event_id, "array-msg");
+        assert_eq!(
+            normalized.chat_guid.as_deref(),
+            Some("iMessage;-;+15551234567")
+        );
+        assert_eq!(normalized.chat_identifier.as_deref(), Some("+15551234567"));
+        assert_eq!(normalized.sender_id.as_deref(), Some("+15551234567"));
+        assert_eq!(normalized.sender_name.as_deref(), Some("Alice"));
+        assert!(normalized.is_from_me);
+        assert_eq!(normalized.topic, "imessage.message.outbound");
     }
 
     #[test]

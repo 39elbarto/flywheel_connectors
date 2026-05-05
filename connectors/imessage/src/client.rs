@@ -81,7 +81,7 @@ fn parse_webhook_registrations(
     let data = value
         .get("data")
         .filter(|value| value.is_array() || value.is_object())
-        .unwrap_or(&value);
+        .unwrap_or(value);
 
     if let Some(webhooks) = data.as_array() {
         return webhooks

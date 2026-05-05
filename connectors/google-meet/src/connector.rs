@@ -1,9 +1,12 @@
 //! FCP Google Meet connector foundation.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::sync::Arc;
+use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
+use fcp_async_core::{AsyncError, ExecutionContext};
 use fcp_google_discovery::{
     ServiceAliasRegistry,
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
@@ -63,6 +66,7 @@ const DEFAULT_MAX_ITEMS: usize = 100;
 const MAX_ITEMS_CAP: usize = 1_000;
 const DEFAULT_DRIVE_EXPORT_MAX_BYTES: usize = 1_048_576;
 const MAX_DRIVE_EXPORT_BYTES: usize = 10 * 1_048_576;
+const ARTIFACT_OPERATION_TIMEOUT: StdDuration = StdDuration::from_secs(30);
 const MEETINGS_SPACE_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.readonly";
 const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
@@ -491,6 +495,46 @@ fn invalid_request(message: impl Into<String>) -> FcpError {
     }
 }
 
+fn artifact_operation_context() -> ExecutionContext {
+    ExecutionContext::request_scoped(ARTIFACT_OPERATION_TIMEOUT)
+}
+
+async fn run_google_artifact<T, Fut>(
+    ctx: &ExecutionContext,
+    future: Fut,
+    operation: &'static str,
+) -> FcpResult<T>
+where
+    Fut: Future<Output = GoogleMeetResult<T>>,
+{
+    ctx.run(future)
+        .await
+        .map_err(|error| map_artifact_async_error(error, operation))?
+        .map_err(|error| error.to_fcp_error())
+}
+
+fn map_artifact_async_error(error: AsyncError, operation: &'static str) -> FcpError {
+    match error {
+        AsyncError::Timeout { timeout_ms } => FcpError::External {
+            service: "google-meet".into(),
+            message: format!("{operation} timed out after {timeout_ms}ms"),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        AsyncError::Cancelled => FcpError::External {
+            service: "google-meet".into(),
+            message: format!("{operation} was cancelled before completion"),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        other => FcpError::Internal {
+            message: format!("{operation} async substrate failure: {other}"),
+        },
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct DoctorResult {
     status: DoctorStatus,
@@ -518,7 +562,10 @@ fn scope_doctor_check(
     scope: &'static str,
     missing_message: &'static str,
 ) -> DoctorCheck {
-    if configured_scopes.iter().any(|configured| configured == scope) {
+    if configured_scopes
+        .iter()
+        .any(|configured| configured == scope)
+    {
         DoctorCheck {
             name: name.into(),
             status: DoctorStatus::Healthy,
@@ -1245,10 +1292,13 @@ impl GoogleMeetConnector {
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
-        let recordings = client
-            .list_recordings(conference_record, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let recordings = run_google_artifact(
+            &ctx,
+            client.list_recordings(conference_record, page_size, Some(max_items)),
+            RECORDINGS_LIST_OP,
+        )
+        .await?;
         Ok(json!({
             "conference_record": conference_record,
             "recordings": recordings,
@@ -1269,10 +1319,13 @@ impl GoogleMeetConnector {
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
-        let transcripts = client
-            .list_transcripts(conference_record, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let transcripts = run_google_artifact(
+            &ctx,
+            client.list_transcripts(conference_record, page_size, Some(max_items)),
+            TRANSCRIPTS_LIST_OP,
+        )
+        .await?;
         Ok(json!({
             "conference_record": conference_record,
             "transcripts": transcripts,
@@ -1293,10 +1346,13 @@ impl GoogleMeetConnector {
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let transcript = require_str(input, "transcript")?;
-        let mut entries = client
-            .list_transcript_entries(transcript, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let mut entries = run_google_artifact(
+            &ctx,
+            client.list_transcript_entries(transcript, page_size, Some(max_items)),
+            TRANSCRIPT_ENTRIES_LIST_OP,
+        )
+        .await?;
         entries.sort_by_key(|entry| {
             (
                 parse_timestamp_ms(entry.start_time.as_deref()).unwrap_or_default(),
@@ -1323,10 +1379,13 @@ impl GoogleMeetConnector {
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
-        let smart_notes = client
-            .list_smart_notes(conference_record, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let smart_notes = run_google_artifact(
+            &ctx,
+            client.list_smart_notes(conference_record, page_size, Some(max_items)),
+            SMART_NOTES_LIST_OP,
+        )
+        .await?;
         Ok(json!({
             "conference_record": conference_record,
             "smart_notes": smart_notes,
@@ -1351,12 +1410,15 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
         let conference_record = require_str(input, "conference_record")?;
-        let transcripts = client
-            .list_transcripts(conference_record, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let transcripts = run_google_artifact(
+            &ctx,
+            client.list_transcripts(conference_record, page_size, Some(max_items)),
+            TRANSCRIPTS_WITH_TEXT_LIST_OP,
+        )
+        .await?;
         let transcripts =
-            attach_transcript_document_texts(client, transcripts, max_document_bytes).await;
+            attach_transcript_document_texts(&ctx, client, transcripts, max_document_bytes).await;
         Ok(json!({
             "conference_record": conference_record,
             "transcripts": transcripts,
@@ -1382,12 +1444,15 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
         let conference_record = require_str(input, "conference_record")?;
-        let smart_notes = client
-            .list_smart_notes(conference_record, page_size, Some(max_items))
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let smart_notes = run_google_artifact(
+            &ctx,
+            client.list_smart_notes(conference_record, page_size, Some(max_items)),
+            SMART_NOTES_WITH_TEXT_LIST_OP,
+        )
+        .await?;
         let smart_notes =
-            attach_smart_note_document_texts(client, smart_notes, max_document_bytes).await;
+            attach_smart_note_document_texts(&ctx, client, smart_notes, max_document_bytes).await;
         Ok(json!({
             "conference_record": conference_record,
             "smart_notes": smart_notes,
@@ -1405,10 +1470,13 @@ impl GoogleMeetConnector {
         self.ensure_configured_scopes(DRIVE_DOCUMENT_TEXT_EXPORT_OP, &[DRIVE_MEET_READONLY_SCOPE])?;
         let document_id = drive_document_id_from_input(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
-        let text = client
-            .export_drive_document_text(&document_id, max_document_bytes)
-            .await
-            .map_err(|error| error.to_fcp_error())?;
+        let ctx = artifact_operation_context();
+        let text = run_google_artifact(
+            &ctx,
+            client.export_drive_document_text(&document_id, max_document_bytes),
+            DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+        )
+        .await?;
         Ok(json!({
             "document_id": document_id,
             "text": text,
@@ -2074,6 +2142,7 @@ fn sum_session_duration_ms(
 }
 
 async fn attach_transcript_document_texts(
+    ctx: &ExecutionContext,
     client: &GoogleMeetClient,
     mut transcripts: Vec<GoogleMeetTranscript>,
     max_document_bytes: usize,
@@ -2082,12 +2151,18 @@ async fn attach_transcript_document_texts(
         match document_id_from_destination(transcript.docs_destination.as_ref()) {
             Ok(Some(document_id)) => {
                 transcript.document_id = Some(document_id.clone());
-                match client
-                    .export_drive_document_text(&document_id, max_document_bytes)
+                match ctx
+                    .run(client.export_drive_document_text(&document_id, max_document_bytes))
                     .await
                 {
-                    Ok(text) => transcript.document_text = Some(text),
-                    Err(error) => transcript.document_text_error = Some(public_google_error(&error)),
+                    Ok(Ok(text)) => transcript.document_text = Some(text),
+                    Ok(Err(error)) => {
+                        transcript.document_text_error = Some(public_google_error(&error));
+                    }
+                    Err(error) => {
+                        transcript.document_text_error =
+                            Some(public_async_error(&error, TRANSCRIPTS_WITH_TEXT_LIST_OP));
+                    }
                 }
             }
             Ok(None) => {
@@ -2101,6 +2176,7 @@ async fn attach_transcript_document_texts(
 }
 
 async fn attach_smart_note_document_texts(
+    ctx: &ExecutionContext,
     client: &GoogleMeetClient,
     mut smart_notes: Vec<GoogleMeetSmartNote>,
     max_document_bytes: usize,
@@ -2109,13 +2185,17 @@ async fn attach_smart_note_document_texts(
         match document_id_from_destination(smart_note.docs_destination.as_ref()) {
             Ok(Some(document_id)) => {
                 smart_note.document_id = Some(document_id.clone());
-                match client
-                    .export_drive_document_text(&document_id, max_document_bytes)
+                match ctx
+                    .run(client.export_drive_document_text(&document_id, max_document_bytes))
                     .await
                 {
-                    Ok(text) => smart_note.document_text = Some(text),
-                    Err(error) => {
+                    Ok(Ok(text)) => smart_note.document_text = Some(text),
+                    Ok(Err(error)) => {
                         smart_note.document_text_error = Some(public_google_error(&error));
+                    }
+                    Err(error) => {
+                        smart_note.document_text_error =
+                            Some(public_async_error(&error, SMART_NOTES_WITH_TEXT_LIST_OP));
                     }
                 }
             }
@@ -2144,9 +2224,11 @@ fn drive_document_id_from_input(input: &serde_json::Value) -> FcpResult<String> 
             "Missing required field: document_id or docs_destination",
         ));
     };
-    let destination: GoogleMeetDocsDestination =
-        serde_json::from_value(destination.clone()).map_err(|error| {
-            invalid_request(format!("`docs_destination` must be a Meet docsDestination object: {error}"))
+    let destination: GoogleMeetDocsDestination = serde_json::from_value(destination.clone())
+        .map_err(|error| {
+            invalid_request(format!(
+                "`docs_destination` must be a Meet docsDestination object: {error}"
+            ))
         })?;
     extract_docs_destination_document_id(&destination)
         .map_err(|error| error.to_fcp_error())?
@@ -2177,6 +2259,14 @@ fn public_google_error(error: &GoogleMeetError) -> String {
         "Google API request failed; credentials redacted".to_string()
     } else {
         message
+    }
+}
+
+fn public_async_error(error: &AsyncError, operation: &'static str) -> String {
+    match error {
+        AsyncError::Timeout { timeout_ms } => format!("{operation} timed out after {timeout_ms}ms"),
+        AsyncError::Cancelled => format!("{operation} was cancelled before completion"),
+        other => format!("{operation} async substrate failure: {other}"),
     }
 }
 
@@ -2863,9 +2953,8 @@ mod tests {
             ]
         );
         assert!(
-            !ids.iter().any(|id| {
-                id.contains("join") || id.contains("leave") || id.contains("say")
-            }),
+            !ids.iter()
+                .any(|id| { id.contains("join") || id.contains("leave") || id.contains("say") }),
             "artifact reads must not advertise live-session control operations"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
@@ -3243,6 +3332,11 @@ mod tests {
             "conferenceRecords/rec-1/participants/p1"
         );
         assert_eq!(
+            normalize_transcript_name("conferenceRecords/rec-1/transcripts/t1")
+                .expect("transcript resource"),
+            "conferenceRecords/rec-1/transcripts/t1"
+        );
+        assert_eq!(
             encode_resource_name_for_path("conferenceRecords/rec 1/participants/user@example.com"),
             "conferenceRecords/rec%201/participants/user%40example%2Ecom"
         );
@@ -3274,6 +3368,83 @@ mod tests {
                 "{raw:?} should reject as a participant resource"
             );
         }
+        for raw in [
+            "conferenceRecords/rec-1",
+            "conferenceRecords/rec-1/participants/p1",
+            "conferenceRecords/rec-1/transcripts/",
+            "conferenceRecords/rec-1/transcripts/t1/entries/e1",
+        ] {
+            assert!(
+                normalize_transcript_name(raw).is_err(),
+                "{raw:?} should reject as a transcript resource"
+            );
+        }
+    }
+
+    #[test]
+    fn docs_destination_document_id_extraction_is_strict_and_drive_export_safe() {
+        for raw in [
+            "Doc_123-456",
+            "documents/Doc_123-456",
+            "https://docs.google.com/document/d/Doc_123-456/edit?tab=t.0",
+        ] {
+            let destination = GoogleMeetDocsDestination {
+                document: Some(raw.to_string()),
+                document_id: None,
+                file: None,
+                extra: BTreeMap::new(),
+            };
+            assert_eq!(
+                extract_docs_destination_document_id(&destination).expect("document id"),
+                Some("Doc_123-456".to_string()),
+                "{raw} should extract"
+            );
+        }
+
+        for raw in [
+            "",
+            "ab",
+            "Doc 123",
+            "https://drive.google.com/file/d/Doc_123-456/view",
+            "https://user@docs.google.com/document/d/Doc_123-456/edit",
+            "https://docs.google.com/spreadsheets/d/Doc_123-456/edit",
+        ] {
+            let destination = GoogleMeetDocsDestination {
+                document: Some(raw.to_string()),
+                document_id: None,
+                file: None,
+                extra: BTreeMap::new(),
+            };
+            assert!(
+                extract_docs_destination_document_id(&destination).is_err(),
+                "{raw:?} should reject"
+            );
+        }
+    }
+
+    #[test]
+    fn artifact_async_errors_and_secret_redaction_stay_operator_safe() {
+        assert!(matches!(
+            map_artifact_async_error(
+                AsyncError::Timeout { timeout_ms: 25 },
+                TRANSCRIPTS_WITH_TEXT_LIST_OP
+            ),
+            FcpError::External {
+                retryable: true,
+                message,
+                ..
+            } if message.contains("timed out")
+        ));
+        assert_eq!(
+            public_async_error(&AsyncError::Cancelled, SMART_NOTES_WITH_TEXT_LIST_OP),
+            "gmeet.smart_notes.with_text.list was cancelled before completion"
+        );
+        assert_eq!(
+            public_google_error(&GoogleMeetError::InvalidConfig {
+                message: "Authorization: Bearer secret-token".to_string()
+            }),
+            "Google API request failed; credentials redacted"
+        );
     }
 
     #[test]
@@ -3765,6 +3936,338 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn artifact_operations_cover_loopback_drive_export_and_partial_errors() {
+        let (base_url, requests, server) = spawn_loopback(vec![
+            json_response(json!({
+                "recordings": [{
+                    "name": "conferenceRecords/rec-1/recordings/r1",
+                    "startTime": "2026-05-04T10:00:00Z",
+                    "endTime": "2026-05-04T10:30:00Z",
+                    "driveDestination": {
+                        "file": "driveFiles/file-1"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcripts": [{
+                    "name": "conferenceRecords/rec-1/transcripts/t1",
+                    "startTime": "2026-05-04T10:00:00Z",
+                    "docsDestination": {
+                        "document": "https://docs.google.com/document/d/Doc_Transcript-1/edit"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcriptEntries": [
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t1/entries/e2",
+                        "participant": "conferenceRecords/rec-1/participants/p1",
+                        "text": "second",
+                        "languageCode": "en-US",
+                        "startTime": "2026-05-04T10:02:00Z"
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t1/entries/e1",
+                        "participant": "conferenceRecords/rec-1/participants/p1",
+                        "text": "first",
+                        "languageCode": "en-US",
+                        "startTime": "2026-05-04T10:01:00Z"
+                    }
+                ]
+            })),
+            json_response(json!({
+                "smartNotes": [{
+                    "name": "conferenceRecords/rec-1/smartNotes/sn1",
+                    "docsDestination": {
+                        "documentId": "DocSmart_1"
+                    }
+                }]
+            })),
+            json_response(json!({
+                "transcripts": [
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t1",
+                        "docsDestination": {
+                            "document": "https://docs.google.com/document/d/Doc_Transcript-1/edit"
+                        }
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/transcripts/t2"
+                    }
+                ]
+            })),
+            text_response("Transcript body"),
+            json_response(json!({
+                "smartNotes": [
+                    {
+                        "name": "conferenceRecords/rec-1/smartNotes/sn1",
+                        "docsDestination": {
+                            "documentId": "DocSmart_1"
+                        }
+                    },
+                    {
+                        "name": "conferenceRecords/rec-1/smartNotes/sn2"
+                    }
+                ]
+            })),
+            error_response(
+                404,
+                json!({ "error": { "message": "Drive document missing" } }),
+                Vec::new(),
+            ),
+            text_response("Direct export"),
+            text_response("too large"),
+        ]);
+        let drive_base_url = base_url.replace("/v2", "/drive/v3");
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([
+                ("base_url", json!(base_url)),
+                ("drive_base_url", json!(drive_base_url)),
+                (
+                    "required_scopes",
+                    json!([
+                        MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
+                        DRIVE_MEET_READONLY_SCOPE
+                    ]),
+                ),
+            ]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_ARTIFACT_READ_CAP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let recordings = connector
+            .handle_invoke(json!({
+                "operation": RECORDINGS_LIST_OP,
+                "input": {
+                    "conference_record": "conferenceRecords/rec-1",
+                    "page_size": 2
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    RECORDINGS_LIST_OP,
+                    MEET_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("recordings");
+        assert_eq!(
+            recordings["recordings"][0]["name"],
+            "conferenceRecords/rec-1/recordings/r1"
+        );
+
+        let transcripts = connector
+            .handle_invoke(json!({
+                "operation": TRANSCRIPTS_LIST_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    TRANSCRIPTS_LIST_OP,
+                    MEET_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("transcripts");
+        assert_eq!(
+            transcripts["transcripts"][0]["docsDestination"]["document"],
+            "https://docs.google.com/document/d/Doc_Transcript-1/edit"
+        );
+
+        let entries = connector
+            .handle_invoke(json!({
+                "operation": TRANSCRIPT_ENTRIES_LIST_OP,
+                "input": { "transcript": "conferenceRecords/rec-1/transcripts/t1" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    TRANSCRIPT_ENTRIES_LIST_OP,
+                    MEET_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("entries");
+        assert_eq!(entries["transcript_entries"][0]["text"], "first");
+        assert_eq!(entries["transcript_entries"][1]["text"], "second");
+
+        let smart_notes = connector
+            .handle_invoke(json!({
+                "operation": SMART_NOTES_LIST_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SMART_NOTES_LIST_OP,
+                    MEET_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("smart notes");
+        assert_eq!(
+            smart_notes["smart_notes"][0]["docsDestination"]["documentId"],
+            "DocSmart_1"
+        );
+
+        let transcripts_with_text = connector
+            .handle_invoke(json!({
+                "operation": TRANSCRIPTS_WITH_TEXT_LIST_OP,
+                "input": {
+                    "conference_record": "conferenceRecords/rec-1",
+                    "max_document_bytes": 1024
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    TRANSCRIPTS_WITH_TEXT_LIST_OP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("transcripts with text");
+        assert_eq!(
+            transcripts_with_text["transcripts"][0]["documentText"],
+            "Transcript body"
+        );
+        assert_eq!(
+            transcripts_with_text["transcripts"][0]["documentId"],
+            "Doc_Transcript-1"
+        );
+        assert!(
+            transcripts_with_text["transcripts"][1]["documentTextError"]
+                .as_str()
+                .expect("partial text error")
+                .contains("docsDestination")
+        );
+
+        let smart_notes_with_text = connector
+            .handle_invoke(json!({
+                "operation": SMART_NOTES_WITH_TEXT_LIST_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    SMART_NOTES_WITH_TEXT_LIST_OP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("smart notes with text");
+        assert!(
+            smart_notes_with_text["smart_notes"][0]["documentTextError"]
+                .as_str()
+                .expect("drive export error")
+                .contains("Drive document missing")
+        );
+        assert!(
+            smart_notes_with_text["smart_notes"][1]["documentTextError"]
+                .as_str()
+                .expect("missing docs destination")
+                .contains("docsDestination")
+        );
+
+        let direct_export = connector
+            .handle_invoke(json!({
+                "operation": DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                "input": {
+                    "docs_destination": {
+                        "document": "documents/Doc_Direct"
+                    },
+                    "max_document_bytes": 1024
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect("direct export");
+        assert_eq!(direct_export["text"], "Direct export");
+
+        let too_large = connector
+            .handle_invoke(json!({
+                "operation": DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                "input": {
+                    "document_id": "DocTooLarge",
+                    "max_document_bytes": 3
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                    MEET_DRIVE_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect_err("oversized text must fail");
+        finish_loopback(server);
+        assert!(
+            matches!(too_large, FcpError::External { message, .. } if message.contains("exceeded max bytes"))
+        );
+
+        let recorded = requests.lock().expect("requests").clone();
+        assert_eq!(recorded.len(), 10, "artifact transcript: {recorded:#?}");
+        assert_eq!(
+            recorded[0].target,
+            "/v2/conferenceRecords/rec%2D1/recordings?pageSize=2"
+        );
+        assert_eq!(
+            recorded[1].target,
+            "/v2/conferenceRecords/rec%2D1/transcripts?pageSize=100"
+        );
+        assert_eq!(
+            recorded[2].target,
+            "/v2/conferenceRecords/rec%2D1/transcripts/t1/entries?pageSize=100"
+        );
+        assert_eq!(
+            recorded[3].target,
+            "/v2/conferenceRecords/rec%2D1/smartNotes?pageSize=100"
+        );
+        assert!(
+            recorded[5]
+                .target
+                .contains("/drive/v3/files/Doc%5FTranscript%2D1/export")
+        );
+        assert!(recorded[5].target.contains("mimeType=text%2Fplain"));
+        assert!(
+            recorded[7]
+                .target
+                .contains("/drive/v3/files/DocSmart%5F1/export")
+        );
+        assert!(
+            recorded[8]
+                .target
+                .contains("/drive/v3/files/Doc%5FDirect/export")
+        );
+        assert!(
+            recorded[9]
+                .target
+                .contains("/drive/v3/files/DocTooLarge/export")
+        );
+        assert!(
+            recorded
+                .iter()
+                .all(|request| request.authorization.as_deref() == Some("Bearer test-access")),
+            "every Meet and Drive artifact request must carry auth"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn read_api_rate_limit_preserves_retry_after() {
         let (base_url, _requests, server) = spawn_loopback(vec![error_response(
             429,
@@ -3989,11 +4492,18 @@ mod tests {
                         | PARTICIPANTS_LIST_OP
                         | PARTICIPANT_SESSIONS_LIST_OP
                         | ATTENDANCE_LIST_OP
+                        | RECORDINGS_LIST_OP
+                        | TRANSCRIPTS_LIST_OP
+                        | TRANSCRIPT_ENTRIES_LIST_OP
+                        | SMART_NOTES_LIST_OP
+                        | TRANSCRIPTS_WITH_TEXT_LIST_OP
+                        | SMART_NOTES_WITH_TEXT_LIST_OP
+                        | DRIVE_DOCUMENT_TEXT_EXPORT_OP
                 )
             }),
-            "manifest should advertise only the spaces and conference-read operations"
+            "manifest should advertise only the space, conference-read, artifact, and Drive artifact operations"
         );
-        assert_eq!(manifest.provides.operations.len(), 10);
+        assert_eq!(manifest.provides.operations.len(), 17);
         assert_eq!(
             manifest
                 .provides
@@ -4017,6 +4527,30 @@ mod tests {
                 .capability
                 .as_str(),
             MEET_CONFERENCE_READ_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == RECORDINGS_LIST_OP)
+                .map(|(_id, operation)| operation)
+                .expect("recordings op")
+                .capability
+                .as_str(),
+            MEET_ARTIFACT_READ_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == DRIVE_DOCUMENT_TEXT_EXPORT_OP)
+                .map(|(_id, operation)| operation)
+                .expect("drive text export op")
+                .capability
+                .as_str(),
+            MEET_DRIVE_ARTIFACT_READ_CAP
         );
     }
 }

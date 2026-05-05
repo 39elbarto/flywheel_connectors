@@ -1042,21 +1042,25 @@ fn parse_docs_destination_document_id(raw: &str) -> GoogleMeetResult<String> {
                 message: "docsDestination document URL must not include userinfo".to_string(),
             });
         }
-        let host = url.host_str().ok_or_else(|| GoogleMeetError::InvalidConfig {
-            message: "docsDestination document URL must include a host".to_string(),
-        })?;
+        let host = url
+            .host_str()
+            .ok_or_else(|| GoogleMeetError::InvalidConfig {
+                message: "docsDestination document URL must include a host".to_string(),
+            })?;
         if !host.eq_ignore_ascii_case("docs.google.com") {
             return Err(GoogleMeetError::InvalidConfig {
-                message: format!("docsDestination document URL must target docs.google.com, got {host}"),
+                message: format!(
+                    "docsDestination document URL must target docs.google.com, got {host}"
+                ),
             });
         }
         let segments: Vec<_> = url
             .path_segments()
             .map(|segments| segments.collect())
             .unwrap_or_default();
-        let document_id = segments.windows(3).find_map(|window| {
-            (window[0] == "document" && window[1] == "d").then_some(window[2])
-        });
+        let document_id = segments
+            .windows(3)
+            .find_map(|window| (window[0] == "document" && window[1] == "d").then_some(window[2]));
         return validate_drive_document_id(document_id.ok_or_else(|| {
             GoogleMeetError::InvalidConfig {
                 message: "docsDestination URL must include /document/d/{document_id}".to_string(),
@@ -1146,10 +1150,8 @@ async fn decode_text_response(
                 max_bytes,
             });
         }
-        return String::from_utf8(body.to_vec()).map_err(|error| {
-            GoogleMeetError::InvalidConfig {
-                message: format!("{context} returned non-UTF-8 text/plain: {error}"),
-            }
+        return String::from_utf8(body.to_vec()).map_err(|error| GoogleMeetError::InvalidConfig {
+            message: format!("{context} returned non-UTF-8 text/plain: {error}"),
         });
     }
     let retry_after_secs = response

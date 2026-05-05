@@ -25643,8 +25643,7 @@ mod tests {
         host_tool_when_to_use, live_pipeline_operation_metadata, mcp_tool_invoke_args,
         normalize_args, pipeline_dry_run_can_materialize_output, prepare_cli,
         resolve_install_activation_truth, resolve_mesh_live_truth, serve_mcp,
-        try_host_mcp_tool_definitions, try_host_tool_operation_info,
-        validate_registry_binary_name,
+        try_host_mcp_tool_definitions, try_host_tool_operation_info, validate_registry_binary_name,
     };
     use chrono::{Duration as ChronoDuration, Utc};
     use clap::CommandFactory;
@@ -38268,12 +38267,12 @@ require_attestation_types = ["in-toto"]"#,
         // registry cache" message regardless of WHERE the offending
         // component sits.
         let traversal_cases = [
-            "../escaped-binary",       // ParentDir at start
-            "foo/../bar",              // ParentDir in middle
-            "../../etc/passwd",        // multiple ParentDir
-            "foo/bar/..",              // ParentDir at end
-            "/absolute/path",          // unix absolute
-            "/etc/passwd",             // unix absolute system path
+            "../escaped-binary", // ParentDir at start
+            "foo/../bar",        // ParentDir in middle
+            "../../etc/passwd",  // multiple ParentDir
+            "foo/bar/..",        // ParentDir at end
+            "/absolute/path",    // unix absolute
+            "/etc/passwd",       // unix absolute system path
         ];
         for raw in traversal_cases {
             let err = validate_registry_binary_name(raw)

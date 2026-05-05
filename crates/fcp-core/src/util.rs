@@ -25,8 +25,8 @@ pub fn to_kebab_case(input: &str) -> String {
             let next_is_lowercase = chars.peek().is_some_and(|next| next.is_ascii_lowercase());
             let camel_boundary = matches!(
                 (previous_kind, kind),
-                (Some(KebabCharKind::Lower | KebabCharKind::Digit), KebabCharKind::Upper)
-                    | (Some(KebabCharKind::Upper), KebabCharKind::Upper) if next_is_lowercase
+                (Some(KebabCharKind::Lower | KebabCharKind::Digit | KebabCharKind::Upper), KebabCharKind::Upper)
+                    if next_is_lowercase
             );
 
             if (pending_separator || camel_boundary) && !output.is_empty() {

@@ -31,7 +31,7 @@ impl SafeUri {
 
     /// Return the parsed URL object.
     #[must_use]
-    pub fn as_url(&self) -> &url::Url {
+    pub const fn as_url(&self) -> &url::Url {
         &self.0
     }
 }

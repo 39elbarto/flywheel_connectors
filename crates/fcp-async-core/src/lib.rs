@@ -887,13 +887,14 @@ pub mod channel {
 
             fn pop_or_closed(&self) -> Result<Option<T>, ()> {
                 let mut state = self.state.lock().expect("unbounded queue poisoned");
-                if let Some(value) = state.queue.pop_front() {
-                    return Ok(Some(value));
-                }
-                if state.closed {
-                    return Err(());
-                }
-                Ok(None)
+                let result = state.queue.pop_front().map_or_else(
+                    || {
+                        if state.closed { Err(()) } else { Ok(None) }
+                    },
+                    |value| Ok(Some(value)),
+                );
+                drop(state);
+                result
             }
 
             fn close(&self) {
@@ -4058,8 +4059,10 @@ mod tests {
 
             let rx_for_close = Arc::clone(&rx);
             let closer = scope.spawn(move || {
-                let mut receiver = rx_for_close.lock().expect("receiver mutex poisoned");
-                receiver.close();
+                rx_for_close
+                    .lock()
+                    .expect("receiver mutex poisoned")
+                    .close();
                 close_done_tx.send(()).expect("close done signal");
             });
 
@@ -4270,16 +4273,17 @@ mod tests {
     // `Drop`) fails the await here with `RecvError`.
     #[runtime::test]
     async fn spawn_detached_keeps_task_running_past_caller_scope() {
-        let (tx, rx) = channel::oneshot::channel::<u32>();
-
         // The `spawn_detached` helper must return nothing abortable, so the
         // caller cannot accidentally cancel the task by dropping a handle.
         fn assert_returns_unit<F>(f: F)
         where
-            F: FnOnce() -> (),
+            F: FnOnce(),
         {
             f();
         }
+
+        let (tx, rx) = channel::oneshot::channel::<u32>();
+
         assert_returns_unit(|| {
             task::spawn_detached(async move {
                 time::sleep(Duration::from_millis(20)).await;

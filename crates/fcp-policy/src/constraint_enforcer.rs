@@ -479,11 +479,10 @@ impl CapabilityConstraintEnforcer for DefaultConstraintEnforcer {
 }
 
 fn pattern_matches(pattern: &str, observed: &str) -> bool {
-    if let Some(prefix) = pattern.strip_suffix('*') {
-        observed.starts_with(prefix)
-    } else {
-        pattern == observed
-    }
+    pattern.strip_suffix('*').map_or_else(
+        || pattern == observed,
+        |prefix| observed.starts_with(prefix),
+    )
 }
 
 impl CapabilityConstraintEvaluator<RequestDescriptor> for DefaultConstraintEnforcer {

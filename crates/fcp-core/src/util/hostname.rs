@@ -62,11 +62,11 @@ fn validate_label(label: &str) -> Result<(), HostnameValidationError> {
     let starts_alnum = label
         .as_bytes()
         .first()
-        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+        .is_some_and(u8::is_ascii_alphanumeric);
     let ends_alnum = label
         .as_bytes()
         .last()
-        .is_some_and(|byte| byte.is_ascii_alphanumeric());
+        .is_some_and(u8::is_ascii_alphanumeric);
     let allowed_chars = label
         .bytes()
         .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-');

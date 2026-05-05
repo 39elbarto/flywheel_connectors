@@ -496,7 +496,7 @@ impl EventNack {
 #[serde(rename_all = "snake_case")]
 pub enum ConnectorEvent {
     /// Connector-emitted event envelope.
-    Envelope(EventEnvelope),
+    Envelope(Box<EventEnvelope>),
     /// Positive acknowledgment for one or more event sequence numbers.
     Ack(EventAck),
     /// Negative acknowledgment requesting redelivery.
@@ -505,7 +505,7 @@ pub enum ConnectorEvent {
 
 impl From<EventEnvelope> for ConnectorEvent {
     fn from(value: EventEnvelope) -> Self {
-        Self::Envelope(value)
+        Self::Envelope(Box::new(value))
     }
 }
 

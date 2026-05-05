@@ -856,6 +856,7 @@ impl NodeKeyAttestation {
     /// covers the new field. Intended for use during the V3→V4
     /// rollover, where a node first publishes a V3 attestation, then
     /// is re-attested by the owner with the new V4 key attached.
+    #[must_use]
     pub fn with_xwing_public_key(mut self, key: XWingPublicKey) -> Self {
         self.xwing_public_key = Some(key);
         self

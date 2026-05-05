@@ -259,7 +259,7 @@ pub struct RegistryEntry {
 impl RegistryEntry {
     /// Construct a registry entry for a mirrored connector package.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         connector_id: ConnectorId,
         version: ConnectorVersion,
         target: ConnectorTarget,
@@ -278,7 +278,7 @@ impl RegistryEntry {
 
     /// Attach the optional repair-symbol descriptor object id.
     #[must_use]
-    pub fn with_symbol_set_object_id(mut self, symbol_set_object_id: ObjectId) -> Self {
+    pub const fn with_symbol_set_object_id(mut self, symbol_set_object_id: ObjectId) -> Self {
         self.symbol_set_object_id = Some(symbol_set_object_id);
         self
     }

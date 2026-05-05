@@ -116,37 +116,34 @@ pub struct OperationalModelSelection {
 /// Return true when the raw env value requests legacy V1 host-first mode.
 #[must_use]
 pub fn truth_precedence_env_requests_v1(raw: Option<&str>) -> bool {
-    match raw {
-        Some(value) => matches!(
+    raw.is_some_and(|value| {
+        matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "v1" | "v1-host-first" | "v1_host_first" | "host-first" | "host_first"
-        ),
-        None => false,
-    }
+        )
+    })
 }
 
 /// Return true when the raw env value explicitly requests V2 mesh-native mode.
 #[must_use]
 pub fn truth_precedence_env_requests_v2(raw: Option<&str>) -> bool {
-    match raw {
-        Some(value) => matches!(
+    raw.is_some_and(|value| {
+        matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "v2" | "v2-mesh-native" | "v2_mesh_native" | "mesh-native" | "mesh_native"
-        ),
-        None => false,
-    }
+        )
+    })
 }
 
 /// Return true when the raw env value accepts degraded V2 single-host mode.
 #[must_use]
 pub fn truth_precedence_accepts_degraded_single_host(raw: Option<&str>) -> bool {
-    match raw {
-        Some(value) => matches!(
+    raw.is_some_and(|value| {
+        matches!(
             value.trim().to_ascii_lowercase().as_str(),
             "1" | "true" | "yes" | "on" | "accept" | "accept-degraded" | "accept_degraded"
-        ),
-        None => false,
-    }
+        )
+    })
 }
 
 /// Resolve the requested operational model from a raw env value.

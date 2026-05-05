@@ -273,8 +273,8 @@ pub enum CapabilityConstraintErrorKind {
     /// bound principal, object id not in `object_id_allowlist`).
     ExactMismatch,
     /// Observed value fell outside an allowed numeric or temporal range
-    /// (e.g. request_time before `not_before`, observed_calls > `max_calls`,
-    /// observed_bytes > `max_bytes`).
+    /// (e.g. `request_time` before `not_before`, `observed_calls` > `max_calls`,
+    /// `observed_bytes` > `max_bytes`).
     OutOfRange,
     /// The constraint claim referenced a type that this enforcer does not
     /// know how to evaluate. Indicates either a forward-rolled token

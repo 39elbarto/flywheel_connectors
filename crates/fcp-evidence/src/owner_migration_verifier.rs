@@ -238,7 +238,7 @@ impl TrustedV3OwnerMap {
 
     /// True when no V3 owner roots are configured.
     #[must_use]
-    pub fn is_empty(&self) -> bool {
+    pub const fn is_empty(&self) -> bool {
         self.owner_keys.is_empty()
     }
 }

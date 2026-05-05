@@ -67,7 +67,7 @@ fn assert_cbor_tag(value: &ConnectorEvent, expected_tag: &str) -> TestResult<()>
 
 #[test]
 fn connector_event_envelope_json_and_cbor_tag_roundtrip() -> TestResult {
-    let event = ConnectorEvent::Envelope(sample_envelope());
+    let event = ConnectorEvent::Envelope(Box::new(sample_envelope()));
 
     let encoded = assert_json_tag(&event, "envelope")?;
     let decoded: ConnectorEvent = serde_json::from_value(encoded)?;

@@ -166,10 +166,10 @@ impl ConnectorManifest {
             .policy
             .as_ref()
             .is_some_and(|policy| policy.require_transparency_log)
-            && !self
+            && self
                 .signatures
                 .as_ref()
-                .is_some_and(|signatures| signatures.transparency_log_entry.is_some())
+                .is_none_or(|signatures| signatures.transparency_log_entry.is_none())
         {
             return Err(ManifestError::Invalid {
                 field: "signatures.transparency_log_entry",

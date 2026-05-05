@@ -305,7 +305,7 @@ impl CompatibilityLedgerBody {
     /// # Errors
     /// Returns [`CompatibilityLedgerError::Encoding`] if root derivation fails.
     pub fn signing_bytes(&self) -> Result<Vec<u8>, CompatibilityLedgerError> {
-        signing_bytes_for_root(&self.ledger_root()?)
+        Ok(signing_bytes_for_root(&self.ledger_root()?))
     }
 }
 
@@ -647,13 +647,11 @@ impl From<SerializationError> for CompatibilityLedgerError {
     }
 }
 
-fn signing_bytes_for_root(
-    root: &CompatibilityLedgerRoot,
-) -> Result<Vec<u8>, CompatibilityLedgerError> {
+fn signing_bytes_for_root(root: &CompatibilityLedgerRoot) -> Vec<u8> {
     let mut out = Vec::with_capacity(COMPATIBILITY_LEDGER_SIGNATURE_DOMAIN.len() + 32);
     out.extend_from_slice(COMPATIBILITY_LEDGER_SIGNATURE_DOMAIN);
     out.extend_from_slice(root.as_bytes());
-    Ok(out)
+    out
 }
 
 #[cfg(test)]

@@ -132,7 +132,7 @@ mod operator_evidence_object_id {
             E: Error,
         {
             if value.len() != 32 {
-                return Err(E::invalid_length(value.len(), &ObjectIdVisitor));
+                return Err(E::invalid_length(value.len(), &Self));
             }
 
             let mut bytes = [0_u8; 32];

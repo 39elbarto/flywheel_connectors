@@ -240,15 +240,15 @@ pub struct ConstraintsEvaluatedSummary {
     /// `"principal_binding"`, `"resource_uri_allow"`,
     /// `"resource_uri_deny"`, `"credential_allow"`).
     pub evaluated_kinds: Vec<String>,
-    /// Number of resource_allow patterns the request was checked against.
+    /// Number of `resource_allow` patterns the request was checked against.
     pub resource_allow_count: u32,
-    /// Number of resource_deny patterns the request was checked against.
+    /// Number of `resource_deny` patterns the request was checked against.
     pub resource_deny_count: u32,
     /// Whether `max_calls` was set on the constraint set.
     pub max_calls_set: bool,
     /// Whether `max_bytes` was set on the constraint set.
     pub max_bytes_set: bool,
-    /// Number of credential_allow entries on the constraint set.
+    /// Number of `credential_allow` entries on the constraint set.
     pub credential_allow_count: u32,
 }
 
@@ -431,7 +431,7 @@ pub struct ReceiptVerificationContext {
 impl ReceiptVerificationContext {
     /// Build a verification context.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         token_id: ObjectId,
         zone_id: ZoneId,
         current_revocation_head_seq: u64,

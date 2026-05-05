@@ -46,7 +46,7 @@ impl HybridOwnerObjectKind {
             Self::AuditEvent => "audit-event",
             Self::AuditHead => "audit-head",
             Self::EmergencyRevocation => "emergency-revocation",
-            _ => "capability-token",
+            Self::CapabilityToken => "capability-token",
         }
     }
 }

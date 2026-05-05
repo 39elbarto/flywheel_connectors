@@ -118,22 +118,17 @@ pub enum ZoneKeyAlgorithm {
 /// window. See `docs/post-quantum/x_wing_kem_design.md` §3.2 + §6.
 ///
 /// Introduced under sub-bead `kyopb.1.2.3`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ZoneKemAlgorithm {
     /// V3 baseline: HPKE(DHKEM-X25519, HKDF-SHA256, ChaCha20-Poly1305).
+    ///
+    /// This is the default for absent V3 manifest `kem` fields so the inferred
+    /// KEM matches the V3 wire format.
+    #[default]
     HpkeX25519,
     /// V4 hybrid: X-Wing (X25519 + ML-KEM-768) + ChaCha20-Poly1305.
     XWing,
-}
-
-impl Default for ZoneKemAlgorithm {
-    fn default() -> Self {
-        // Backward compatibility: V3 manifests have no `kem` field;
-        // serde substitutes the default, which MUST be `HpkeX25519`
-        // so the inferred KEM matches the V3 wire format.
-        Self::HpkeX25519
-    }
 }
 
 /// Per-recipient sealed-box variant: discriminates V3 HPKE wrap vs V4
@@ -201,9 +196,10 @@ impl WrappedKey {
     }
 }
 
-/// br-gtplu: tagged result type for
-/// [`ZoneKeyManifest::resolved_wrapped_key_observable_for`]. Surfaces
-/// the resolution path (V4 direct vs V3 fallback) so callers can emit
+/// Tagged result type for
+/// [`ZoneKeyManifest::resolved_wrapped_key_observable_for`].
+///
+/// Surfaces the resolution path (V4 direct vs V3 fallback) so callers can emit
 /// per-call observability for the V3-deprecation cutover.
 ///
 /// Once the compatibility-ledger phase advances to `V4Required` (see
@@ -480,7 +476,7 @@ impl ZoneKeyManifest {
     ///
     /// **Observability note (br-gtplu):** this method is OPAQUE about
     /// whether the result came from the V4 list or fell back to the V3
-    /// list. Once the compatibility-ledger phase advances to V4Required
+    /// list. Once the compatibility-ledger phase advances to `V4Required`
     /// (see `docs/post-quantum/v3_v4_compatibility_ledger.md`), every
     /// V3 fallback is a deprecation event the operator should know
     /// about — but this method gives them no signal. Prefer the
@@ -579,17 +575,17 @@ impl ZoneKeyManifest {
         issued_at: u64,
         sealed: XWingSealedBox,
     ) {
+        let existing_slot = self
+            .wrapped_keys_v4
+            .iter()
+            .position(|entry| entry.recipient == recipient);
         let entry = WrappedZoneKeyV4 {
-            recipient: recipient.clone(),
+            recipient,
             issued_at,
             sealed: WrappedKey::from_xwing(sealed),
         };
-        if let Some(slot) = self
-            .wrapped_keys_v4
-            .iter_mut()
-            .find(|e| e.recipient == recipient)
-        {
-            *slot = entry;
+        if let Some(index) = existing_slot {
+            self.wrapped_keys_v4[index] = entry;
         } else {
             self.wrapped_keys_v4.push(entry);
         }
@@ -762,7 +758,7 @@ impl UnsignedV4Manifest {
     /// every owner-signature check, so the safety property holds
     /// even under defeated typestate.
     #[must_use]
-    pub fn as_payload(&self) -> &ZoneKeyManifest {
+    pub const fn as_payload(&self) -> &ZoneKeyManifest {
         &self.inner
     }
 
@@ -789,7 +785,7 @@ impl UnsignedV4Manifest {
     /// recipients as `self` when the wraps already cover every V3
     /// recipient.
     #[must_use]
-    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> UnsignedV4Manifest {
+    pub fn migrated_to_v4(&self, manifest_kem: ZoneKemAlgorithm) -> Self {
         self.inner.migrated_to_v4(manifest_kem)
     }
 
@@ -930,7 +926,7 @@ impl IndexedZoneKeyManifest {
     /// Borrow the underlying [`ZoneKeyManifest`] for fields that are
     /// not lookup-critical (e.g. `kem`, `valid_from`, `signature`).
     #[must_use]
-    pub fn manifest(&self) -> &ZoneKeyManifest {
+    pub const fn manifest(&self) -> &ZoneKeyManifest {
         &self.inner
     }
 

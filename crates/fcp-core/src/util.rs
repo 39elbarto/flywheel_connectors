@@ -22,7 +22,7 @@ pub fn to_kebab_case(input: &str) -> String {
     while let Some(ch) = chars.next() {
         if ch.is_ascii_alphanumeric() {
             let kind = KebabCharKind::from_ascii_alphanumeric(ch);
-            let next_is_lowercase = chars.peek().is_some_and(|next| next.is_ascii_lowercase());
+            let next_is_lowercase = chars.peek().is_some_and(char::is_ascii_lowercase);
             let camel_boundary = matches!(
                 (previous_kind, kind),
                 (Some(KebabCharKind::Lower | KebabCharKind::Digit | KebabCharKind::Upper), KebabCharKind::Upper)
@@ -53,7 +53,7 @@ enum KebabCharKind {
 }
 
 impl KebabCharKind {
-    fn from_ascii_alphanumeric(ch: char) -> Self {
+    const fn from_ascii_alphanumeric(ch: char) -> Self {
         if ch.is_ascii_digit() {
             Self::Digit
         } else if ch.is_ascii_uppercase() {
@@ -78,7 +78,7 @@ impl CanonicalDuration {
     ///
     /// Returns an error when `duration` exceeds [`MAX_CANONICAL_DURATION`] or
     /// carries sub-millisecond precision.
-    pub fn new(duration: Duration) -> Result<Self, CanonicalDurationParseError> {
+    pub const fn new(duration: Duration) -> Result<Self, CanonicalDurationParseError> {
         if duration.subsec_nanos() % 1_000_000 != 0 {
             return Err(CanonicalDurationParseError::SubMillisecondPrecision);
         }
@@ -227,7 +227,7 @@ impl RelativeTime {
     /// # Errors
     ///
     /// Returns an error when `duration` carries sub-second precision.
-    pub fn new(duration: Duration) -> Result<Self, RelativeTimeParseError> {
+    pub const fn new(duration: Duration) -> Result<Self, RelativeTimeParseError> {
         if duration.subsec_nanos() != 0 {
             return Err(RelativeTimeParseError::SubsecondPrecision);
         }

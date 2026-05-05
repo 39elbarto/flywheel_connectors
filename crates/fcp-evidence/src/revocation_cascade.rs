@@ -17,7 +17,7 @@
 //!
 //! - **Bounded walk.** [`CascadeConfig::max_hops`] caps the per-token walk
 //!   depth and is itself capped by [`MAX_CASCADE_WALK_HOPS`] (default 4:
-//!   token → issuance_key → node_signing_key → owner_key).
+//!   token → `issuance_key` → `node_signing_key` → `owner_key`).
 //!   A malformed chain that points at itself transitively can never
 //!   force the verifier into an unbounded loop — it terminates with
 //!   [`CascadeRejection::WalkDepthExceeded`].
@@ -38,7 +38,7 @@
 //!   snapshot is rejected via [`CascadeRejection::RegistryStale`] so
 //!   the cascade cannot silently miss a revocation that landed after
 //!   the snapshot was taken. Caller supplies the snapshot age.
-//! - **O(walk_depth) per verification.** No per-token cost in
+//! - **`O(walk_depth)` per verification.** No per-token cost in
 //!   `num_tokens` or `registry_size` (other than the caller's lookup
 //!   closure, which is typically a `HashMap` lookup or equivalent).
 //!   1000 tokens minted by a revoked issuer all reject with the same
@@ -144,7 +144,7 @@ pub struct AttestationChain {
 impl AttestationChain {
     /// Construct an empty chain rooted at `owner_key`.
     #[must_use]
-    pub fn rooted_at(owner_key: KeyId) -> Self {
+    pub const fn rooted_at(owner_key: KeyId) -> Self {
         Self {
             issuance_to_node: Vec::new(),
             node_to_owner: Vec::new(),
@@ -213,7 +213,7 @@ impl AttestationChain {
         Ok(())
     }
 
-    fn validate_bounds(&self) -> Result<(), CascadeRejection> {
+    const fn validate_bounds(&self) -> Result<(), CascadeRejection> {
         let edge_count = self.edge_count();
         if edge_count > MAX_ATTESTATION_CHAIN_EDGES {
             return Err(CascadeRejection::AttestationChainTooLarge {
@@ -226,7 +226,7 @@ impl AttestationChain {
 
     /// Total attestation edges in this chain.
     #[must_use]
-    pub fn edge_count(&self) -> usize {
+    pub const fn edge_count(&self) -> usize {
         self.issuance_to_node
             .len()
             .saturating_add(self.node_to_owner.len())
@@ -264,7 +264,7 @@ impl AttestationChain {
 pub struct CascadeConfig {
     /// Maximum hops to walk before rejecting as malformed.
     /// Default: 4 — the architectural maximum
-    /// (token → issuance_key → node_signing_key → owner_key).
+    /// (token → `issuance_key` → `node_signing_key` → `owner_key`).
     pub max_hops: usize,
     /// Maximum acceptable age of the registry snapshot used for the
     /// walk (seconds). Walks against an older snapshot are rejected so
@@ -286,7 +286,7 @@ impl Default for CascadeConfig {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CascadeRejection {
-    /// Token's own ObjectId is in the revocation registry.
+    /// Token's own `ObjectId` is in the revocation registry.
     #[error("token {} is directly revoked", token_id)]
     TokenRevoked {
         /// The revoked token's content-addressed id.
@@ -310,7 +310,7 @@ pub enum CascadeRejection {
     /// Walk exhausted `max_hops` without reaching `owner_key`.
     #[error("walk depth exceeded: walked {} hops, max {}", hops_walked, max_hops)]
     WalkDepthExceeded {
-        /// Number of hops actually walked (always == max_hops).
+        /// Number of hops actually walked (always == `max_hops`).
         hops_walked: usize,
         /// The configured maximum (echoed for clarity in audit).
         max_hops: usize,
@@ -530,7 +530,7 @@ const fn scope_for_hop(hop: usize) -> Option<CascadeHop> {
     }
 }
 
-fn ensure_chain_can_accept_edge(edge_count: usize) -> Result<(), CascadeRejection> {
+const fn ensure_chain_can_accept_edge(edge_count: usize) -> Result<(), CascadeRejection> {
     let new_edge_count = edge_count.saturating_add(1);
     if new_edge_count > MAX_ATTESTATION_CHAIN_EDGES {
         return Err(CascadeRejection::AttestationChainTooLarge {

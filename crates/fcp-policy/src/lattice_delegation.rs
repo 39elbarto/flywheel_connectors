@@ -3,7 +3,7 @@
 //!
 //! This module is the **policy-layer abstraction** for the V4 lattice-
 //! trapdoor capability scheme. The cryptographic primitives
-//! (TrapGen / Delegate / SamplePre / Verify) live in
+//! (`TrapGen` / `Delegate` / `SamplePre` / `Verify`) live in
 //! [`fcp_crypto_pq`] (br-kyopb.1.3.1 scaffolded them); the Lean 4
 //! soundness proof and throughput benchmark are still pending — see
 //! `docs/post-quantum/lattice_trapdoor_delegation.md` §8 for the
@@ -58,8 +58,8 @@
 //! mutually exclusive per-token (a token is either V3-CWT or
 //! V4-lattice, never both, distinguished by an envelope tag). A V4
 //! token that passes [`verify_sub_token`] still flows through the
-//! downstream checks (DeploymentTier, RevocationCascade,
-//! CapabilityConstraints, etc.) just like a V3 token would.
+//! downstream checks (`DeploymentTier`, `RevocationCascade`,
+//! `CapabilityConstraints`, etc.) just like a V3 token would.
 //!
 //! See bead `flywheel_connectors-kyopb.1.3` and the full design at
 //! `docs/post-quantum/lattice_trapdoor_delegation.md`.
@@ -98,7 +98,7 @@ impl DelegationPeriod {
 /// Opaque content-addressed identifier for a [`DelegationCertificate`].
 ///
 /// Computed via BLAKE3 over the certificate's canonical encoding —
-/// schema TBD in kyopb.1.3.1. Audit consumers index DelegationReceipts
+/// schema TBD in kyopb.1.3.1. Audit consumers index `DelegationReceipts`
 /// by this id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -190,8 +190,9 @@ pub struct LatticeSubToken {
     pub preimage_bytes: Vec<u8>,
 }
 
-/// Outcome of [`LatticeDelegationVerifier::verify_sub_token`] on
-/// success. A separate type from `()` so future audit consumers can
+/// Outcome of [`LatticeDelegationVerifier::verify_sub_token`] on success.
+///
+/// A separate type from `()` so future audit consumers can
 /// carry the reconstructed verification context (matrix dimensions,
 /// detected delegation depth, period observed at verify time) without
 /// changing the trait return type.
@@ -252,7 +253,7 @@ pub enum LatticeDelegationError {
     #[error("delegation chain incomplete: missing parent for cert {cert_id}")]
     IncompleteDelegationChain { cert_id: String },
     /// Delegation chain exceeded the verifier's maximum-depth bound.
-    /// This is a DoS defense — a malicious issuance node could
+    /// This is a `DoS` defense — a malicious issuance node could
     /// otherwise produce arbitrarily long chains and exhaust the
     /// verifier's stack/CPU walking them. The bound is set from the
     /// `depth` field of the lattice parameters profile (br-kyopb.1.3.1
@@ -380,10 +381,10 @@ const REFERENCE_PREIMAGE_BYTES: usize = 64;
 ///    → [`LatticeDelegationError::OutsidePeriod`].
 /// 4. Walk the parent chain from leaf to root, asserting each ancestor
 ///    exists in the trust set AND its period contains `now_unix_ms`,
-///    capped at `params.depth` hops to bound DoS exposure
+///    capped at `params.depth` hops to bound `DoS` exposure
 ///    → [`LatticeDelegationError::IncompleteDelegationChain`] /
-///      [`LatticeDelegationError::OutsidePeriod`] /
-///      [`LatticeDelegationError::ChainTooDeep`].
+///    [`LatticeDelegationError::OutsidePeriod`] /
+///    [`LatticeDelegationError::ChainTooDeep`].
 /// 5. Validate the preimage byte-length matches the wire format
 ///    → [`LatticeDelegationError::PreimageEncodingMismatch`].
 /// 6. Construct the [`fcp_crypto_pq`] view of the certificate and
@@ -460,7 +461,7 @@ impl LatticeDelegationVerifierImpl {
     /// `crypto.contains(now_unix_ms / 1000)` (proven by the `+ 1`
     /// after flooring, which lifts the exclusive crypto upper to be
     /// strictly above any flooring of the inclusive policy upper).
-    fn period_to_crypto(period: DelegationPeriod) -> pq::DelegationPeriod {
+    const fn period_to_crypto(period: DelegationPeriod) -> pq::DelegationPeriod {
         pq::DelegationPeriod {
             start_secs: period.start_unix_ms / 1000,
             end_secs: period.end_unix_ms / 1000 + 1,
@@ -478,40 +479,51 @@ impl LatticeDelegationVerifierImpl {
         h.update(zone.as_str().as_bytes());
         *h.finalize().as_bytes()
     }
-}
 
-impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
-    fn verify_sub_token(
+    fn leaf_for_sub_token(
         &self,
         sub_token: &LatticeSubToken,
-        request_zone: &ZoneId,
-        now_unix_ms: u64,
-    ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
-        // Step 1 — leaf lookup.
-        let leaf = self.certificates.get(&sub_token.cert_id).ok_or_else(|| {
+    ) -> Result<&DelegationCertificate, LatticeDelegationError> {
+        self.certificates.get(&sub_token.cert_id).ok_or_else(|| {
             LatticeDelegationError::UnknownCertificate {
                 cert_id: sub_token.cert_id.to_hex(),
             }
-        })?;
+        })
+    }
 
-        // Step 2 — zone agreement.
+    fn validate_leaf_request(
+        leaf: &DelegationCertificate,
+        request_zone: &ZoneId,
+        now_unix_ms: u64,
+    ) -> Result<(), LatticeDelegationError> {
         if &leaf.zone_id != request_zone {
             return Err(LatticeDelegationError::ZoneMismatch {
                 cert_zone: leaf.zone_id.as_str().to_string(),
                 request_zone: request_zone.as_str().to_string(),
             });
         }
+        Self::validate_certificate_period(leaf, now_unix_ms)
+    }
 
-        // Step 3 — leaf-period containment.
-        if !leaf.period.contains(now_unix_ms) {
-            return Err(LatticeDelegationError::OutsidePeriod {
-                now_unix_ms,
-                start_unix_ms: leaf.period.start_unix_ms,
-                end_unix_ms: leaf.period.end_unix_ms,
-            });
+    const fn validate_certificate_period(
+        certificate: &DelegationCertificate,
+        now_unix_ms: u64,
+    ) -> Result<(), LatticeDelegationError> {
+        if certificate.period.contains(now_unix_ms) {
+            return Ok(());
         }
+        Err(LatticeDelegationError::OutsidePeriod {
+            now_unix_ms,
+            start_unix_ms: certificate.period.start_unix_ms,
+            end_unix_ms: certificate.period.end_unix_ms,
+        })
+    }
 
-        // Step 4 — parent-chain walk (depth-bounded).
+    fn validate_parent_chain(
+        &self,
+        leaf: &DelegationCertificate,
+        now_unix_ms: u64,
+    ) -> Result<(), LatticeDelegationError> {
         let mut hops: u8 = 0;
         let mut current = leaf;
         while let Some(parent_id) = &current.parent_cert_id {
@@ -527,17 +539,16 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
                     cert_id: current.cert_id.to_hex(),
                 }
             })?;
-            if !parent.period.contains(now_unix_ms) {
-                return Err(LatticeDelegationError::OutsidePeriod {
-                    now_unix_ms,
-                    start_unix_ms: parent.period.start_unix_ms,
-                    end_unix_ms: parent.period.end_unix_ms,
-                });
-            }
+            Self::validate_certificate_period(parent, now_unix_ms)?;
             current = parent;
         }
+        Ok(())
+    }
 
-        // Step 5 — preimage encoding length.
+    fn preimage_for_sub_token(
+        sub_token: &LatticeSubToken,
+        leaf: &DelegationCertificate,
+    ) -> Result<pq::LatticePreimage, LatticeDelegationError> {
         if sub_token.preimage_bytes.len() != REFERENCE_PREIMAGE_BYTES {
             return Err(LatticeDelegationError::PreimageEncodingMismatch {
                 cert_id: leaf.cert_id.to_hex(),
@@ -545,13 +556,18 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
                 got: sub_token.preimage_bytes.len(),
             });
         }
-        let mut preimage_arr = [0_u8; REFERENCE_PREIMAGE_BYTES];
-        preimage_arr.copy_from_slice(&sub_token.preimage_bytes);
-        let preimage = pq::LatticePreimage {
-            bytes: preimage_arr,
-        };
+        let mut bytes = [0_u8; REFERENCE_PREIMAGE_BYTES];
+        bytes.copy_from_slice(&sub_token.preimage_bytes);
+        Ok(pq::LatticePreimage { bytes })
+    }
 
-        // Step 6 — bridge into fcp-crypto-pq + invoke verify.
+    fn verify_crypto_preimage(
+        &self,
+        leaf: &DelegationCertificate,
+        sub_token: &LatticeSubToken,
+        preimage: &pq::LatticePreimage,
+        now_unix_ms: u64,
+    ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
         let crypto_period = Self::period_to_crypto(leaf.period);
         let crypto_zone = Self::zone_to_crypto(&leaf.zone_id);
         let zp_pub = pq::ZonePeriodPublicKey {
@@ -568,15 +584,13 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
         );
         let now_secs = now_unix_ms / 1000;
 
-        match pq::verify(&zp_pub, h, &preimage, now_secs, self.params) {
+        match pq::verify(&zp_pub, h, preimage, now_secs, self.params) {
             Ok(()) => Ok(LatticeVerificationReceipt {
                 cert_id: leaf.cert_id,
                 period: leaf.period,
                 verified_at_unix_ms: now_unix_ms,
             }),
             Err(pq::LatticePqError::NotImplemented { .. }) => {
-                // Crypto stub hit. Surface as the policy-layer
-                // NotImplemented sentinel; callers fall back to V3.
                 Err(LatticeDelegationError::NotImplemented)
             }
             Err(pq::LatticePqError::VerificationEquationFailed) => {
@@ -593,17 +607,11 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
                 now_secs: ns,
                 start_secs,
                 end_secs,
-            }) => {
-                // Defense-in-depth re-check: should be impossible since
-                // step 3 already gated on the policy-layer period, but
-                // the crypto layer's own bounds-check is the source of
-                // truth for the cryptographic verification equation.
-                Err(LatticeDelegationError::OutsidePeriod {
-                    now_unix_ms: ns.saturating_mul(1000),
-                    start_unix_ms: start_secs.saturating_mul(1000),
-                    end_unix_ms: end_secs.saturating_mul(1000),
-                })
-            }
+            }) => Err(LatticeDelegationError::OutsidePeriod {
+                now_unix_ms: ns.saturating_mul(1000),
+                start_unix_ms: start_secs.saturating_mul(1000),
+                end_unix_ms: end_secs.saturating_mul(1000),
+            }),
             Err(pq::LatticePqError::ParameterMismatch { caller, key }) => {
                 Err(LatticeDelegationError::ParameterMismatch {
                     verifier_n: caller.n,
@@ -611,14 +619,35 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
                 })
             }
             Err(pq::LatticePqError::InvalidPeriod { .. }) => {
-                // Should be impossible: we constructed the period.
-                // If it ever fires, surface as IncompleteDelegationChain
-                // so the operator notices a verifier-internal bug.
                 Err(LatticeDelegationError::IncompleteDelegationChain {
                     cert_id: leaf.cert_id.to_hex(),
                 })
             }
         }
+    }
+}
+
+impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
+    fn verify_sub_token(
+        &self,
+        sub_token: &LatticeSubToken,
+        request_zone: &ZoneId,
+        now_unix_ms: u64,
+    ) -> Result<LatticeVerificationReceipt, LatticeDelegationError> {
+        // Step 1 — leaf lookup.
+        let leaf = self.leaf_for_sub_token(sub_token)?;
+
+        // Steps 2-3 — zone agreement and leaf-period containment.
+        Self::validate_leaf_request(leaf, request_zone, now_unix_ms)?;
+
+        // Step 4 — parent-chain walk (depth-bounded).
+        self.validate_parent_chain(leaf, now_unix_ms)?;
+
+        // Step 5 — preimage encoding length.
+        let preimage = Self::preimage_for_sub_token(sub_token, leaf)?;
+
+        // Step 6 — bridge into fcp-crypto-pq + invoke verify.
+        self.verify_crypto_preimage(leaf, sub_token, &preimage, now_unix_ms)
     }
 
     fn has_certificate(&self, cert_id: &DelegationCertificateId) -> bool {

@@ -1141,6 +1141,11 @@ pub trait CapabilityConstraintEvaluator<Request> {
     ///
     /// Returning `Ok(())` is the only success witness accepted by
     /// [`CapabilityToken::promote_with_constraints`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Self::Denial`] when `request` violates the supplied
+    /// [`CapabilityConstraints`].
     fn evaluate_constraints(
         &self,
         constraints: &CapabilityConstraints,
@@ -2729,10 +2734,8 @@ fn next_backoff_delay(delay: Duration, max_delay: Duration, multiplier: f64) -> 
         return max_delay;
     }
 
-    match Duration::try_from_secs_f64(scaled_secs) {
-        Ok(scaled) => std::cmp::min(scaled, max_delay),
-        Err(_) => max_delay,
-    }
+    Duration::try_from_secs_f64(scaled_secs)
+        .map_or(max_delay, |scaled| std::cmp::min(scaled, max_delay))
 }
 
 /// Retry with exponential backoff.

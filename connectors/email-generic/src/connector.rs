@@ -78,7 +78,15 @@ impl EmailGenericConnector {
         json!({
             "status": "deferred",
             "streaming": false,
-            "reason": "supervised inbound polling is tracked by flywheel_connectors-4kw5f.4.2",
+            "reason": "supervised inbound polling/event fan-out is tracked by flywheel_connectors-4kw5f.4.2",
+            "pre_emission_policy": {
+                "sender_allowlist": true,
+                "automated_sender_suppression": true,
+                "bounded_uid_cache": true,
+                "body_length_bound": true,
+                "attachment_classification": true,
+                "thread_metadata": true,
+            },
         })
     }
 
@@ -110,7 +118,7 @@ impl EmailGenericConnector {
                 name: "inbound_monitor".into(),
                 passed: false,
                 message:
-                    "Inbound monitor is deferred; sender policy is parsed before event support"
+                    "Supervised poller is deferred; pre-emission sender, UID, body, attachment, and thread guardrails are available"
                         .into(),
                 critical: false,
             });

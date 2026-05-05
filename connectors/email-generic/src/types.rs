@@ -1,7 +1,7 @@
 //! Configuration types for the generic email connector.
 
 use fcp_prelude::{FcpError, FcpResult};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
@@ -57,11 +57,83 @@ impl std::fmt::Debug for SmtpConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum EmailInboundPolicyDecision {
     Accept,
     DropAutomated,
     DropSenderNotAllowed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailAttachmentClass {
+    Image,
+    Document,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailAttachmentCandidate {
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailAttachmentSummary {
+    pub filename: String,
+    pub media_type: String,
+    pub size_bytes: usize,
+    pub class: EmailAttachmentClass,
+    pub exposed: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailBoundedBody {
+    pub text: String,
+    pub original_chars: usize,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailThreadMetadata {
+    pub subject: String,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    pub reply_subject: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailInboundMessage {
+    pub uid: String,
+    pub sender: String,
+    #[serde(default)]
+    pub headers: Vec<(String, String)>,
+    pub subject: String,
+    pub body: String,
+    pub message_id: Option<String>,
+    pub in_reply_to: Option<String>,
+    pub references: Option<String>,
+    #[serde(default)]
+    pub attachments: Vec<EmailAttachmentCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailInboundPreview {
+    pub decision: EmailInboundPolicyDecision,
+    pub text: Option<EmailBoundedBody>,
+    pub attachments: Vec<EmailAttachmentSummary>,
+    pub thread: Option<EmailThreadMetadata>,
+    pub tainted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmailSeenUidCache {
+    cap: usize,
+    seen: BTreeSet<String>,
+    order: VecDeque<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -239,6 +311,96 @@ pub fn is_automated_sender(address: &str, headers: &[(&str, &str)]) -> bool {
     })
 }
 
+#[must_use]
+pub fn classify_email_attachment(filename: &str, media_type: &str) -> EmailAttachmentClass {
+    const IMAGE_EXTS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp"];
+
+    let media_type = media_type.trim().to_ascii_lowercase();
+    if media_type.starts_with("image/") {
+        return EmailAttachmentClass::Image;
+    }
+    let ext = filename
+        .rsplit_once('.')
+        .map(|(_, ext)| ext.trim().to_ascii_lowercase());
+    if ext.as_deref().is_some_and(|ext| IMAGE_EXTS.contains(&ext)) {
+        return EmailAttachmentClass::Image;
+    }
+    EmailAttachmentClass::Document
+}
+
+impl EmailSeenUidCache {
+    pub fn new(cap: usize) -> FcpResult<Self> {
+        if cap == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "seen UID cache cap must be greater than zero".into(),
+            });
+        }
+        Ok(Self {
+            cap,
+            seen: BTreeSet::new(),
+            order: VecDeque::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.seen.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.seen.is_empty()
+    }
+
+    #[must_use]
+    pub fn contains(&self, uid: &str) -> bool {
+        self.seen.contains(uid)
+    }
+
+    pub fn observe(&mut self, uid: impl Into<String>) -> bool {
+        let uid = uid.into();
+        if self.seen.contains(&uid) {
+            return false;
+        }
+        self.seen.insert(uid.clone());
+        self.order.push_back(uid);
+        if self.seen.len() > self.cap {
+            self.trim_to_recent_half();
+        }
+        true
+    }
+
+    fn trim_to_recent_half(&mut self) {
+        let keep = (self.cap / 2).max(1);
+        let parsed = self
+            .seen
+            .iter()
+            .map(|uid| uid.parse::<u128>().ok().map(|number| (number, uid.clone())))
+            .collect::<Option<Vec<_>>>();
+
+        if let Some(mut parsed) = parsed {
+            parsed.sort_by_key(|(number, _)| *number);
+            let keep_start = parsed.len().saturating_sub(keep);
+            self.seen = parsed
+                .into_iter()
+                .skip(keep_start)
+                .map(|(_, uid)| uid)
+                .collect();
+            self.order.retain(|uid| self.seen.contains(uid));
+            return;
+        }
+
+        while self.seen.len() > keep {
+            if let Some(uid) = self.order.pop_front() {
+                self.seen.remove(&uid);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
 impl EmailMonitorPolicy {
     pub fn validate(&self) -> FcpResult<()> {
         let senders = self.normalized_allowed_senders()?;
@@ -330,6 +492,104 @@ impl EmailMonitorPolicy {
             "seen_uid_cap": self.seen_uid_cap,
         })
     }
+
+    #[must_use]
+    pub fn bound_body(&self, body: &str) -> EmailBoundedBody {
+        let original_chars = body.chars().count();
+        if original_chars <= self.max_body_chars {
+            return EmailBoundedBody {
+                text: body.to_owned(),
+                original_chars,
+                truncated: false,
+            };
+        }
+        EmailBoundedBody {
+            text: body.chars().take(self.max_body_chars).collect(),
+            original_chars,
+            truncated: true,
+        }
+    }
+
+    #[must_use]
+    pub fn event_text(&self, subject: &str, body: &str) -> EmailBoundedBody {
+        let subject = subject.trim();
+        let body = body.trim();
+        let text = if subject.is_empty() || subject.to_ascii_lowercase().starts_with("re:") {
+            body.to_owned()
+        } else {
+            format!("[Subject: {subject}]\n\n{body}")
+        };
+        self.bound_body(&text)
+    }
+
+    #[must_use]
+    pub fn evaluate_attachment(
+        &self,
+        attachment: &EmailAttachmentCandidate,
+    ) -> EmailAttachmentSummary {
+        let class = classify_email_attachment(&attachment.filename, &attachment.media_type);
+        let exposed = self.allow_attachments;
+        EmailAttachmentSummary {
+            filename: attachment.filename.clone(),
+            media_type: attachment.media_type.clone(),
+            size_bytes: attachment.size_bytes,
+            class,
+            exposed,
+            reason: (!exposed).then(|| "attachments_disabled".to_owned()),
+        }
+    }
+
+    #[must_use]
+    pub fn prepare_inbound_message(&self, message: &EmailInboundMessage) -> EmailInboundPreview {
+        let headers = message
+            .headers
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<Vec<_>>();
+        let decision = self.evaluate_sender(&message.sender, &headers);
+        if decision != EmailInboundPolicyDecision::Accept {
+            return EmailInboundPreview {
+                decision,
+                text: None,
+                attachments: Vec::new(),
+                thread: None,
+                tainted: true,
+            };
+        }
+
+        EmailInboundPreview {
+            decision,
+            text: Some(self.event_text(&message.subject, &message.body)),
+            attachments: message
+                .attachments
+                .iter()
+                .map(|attachment| self.evaluate_attachment(attachment))
+                .collect(),
+            thread: Some(EmailThreadMetadata::from_inbound(message)),
+            tainted: true,
+        }
+    }
+}
+
+impl EmailThreadMetadata {
+    #[must_use]
+    pub fn from_inbound(message: &EmailInboundMessage) -> Self {
+        let subject = message.subject.trim();
+        let reply_subject = if subject.is_empty() {
+            "Re: (no subject)".to_owned()
+        } else if subject.to_ascii_lowercase().starts_with("re:") {
+            subject.to_owned()
+        } else {
+            format!("Re: {subject}")
+        };
+        Self {
+            subject: subject.to_owned(),
+            message_id: message.message_id.clone(),
+            in_reply_to: message.in_reply_to.clone(),
+            references: message.references.clone(),
+            reply_subject,
+        }
+    }
 }
 
 impl EmailGenericConfig {
@@ -390,6 +650,24 @@ mod tests {
                 "from_address": "user@example.com"
             }
         })
+    }
+
+    fn inbound_message() -> EmailInboundMessage {
+        EmailInboundMessage {
+            uid: "42".into(),
+            sender: "Allowed@Example.com".into(),
+            headers: Vec::new(),
+            subject: "Deploy status".into(),
+            body: "green".into(),
+            message_id: Some("<msg-42@example.com>".into()),
+            in_reply_to: Some("<parent@example.com>".into()),
+            references: Some("<root@example.com> <parent@example.com>".into()),
+            attachments: vec![EmailAttachmentCandidate {
+                filename: "report.pdf".into(),
+                media_type: "application/pdf".into(),
+                size_bytes: 256,
+            }],
+        }
     }
 
     #[test]
@@ -674,5 +952,160 @@ mod tests {
             }));
             assert!(result.is_err());
         }
+    }
+
+    #[test]
+    fn classify_email_attachment_detects_images_from_type_or_extension() {
+        assert_eq!(
+            classify_email_attachment("photo.bin", "image/png"),
+            EmailAttachmentClass::Image
+        );
+        assert_eq!(
+            classify_email_attachment("photo.WEBP", "application/octet-stream"),
+            EmailAttachmentClass::Image
+        );
+        assert_eq!(
+            classify_email_attachment("report.pdf", "application/pdf"),
+            EmailAttachmentClass::Document
+        );
+    }
+
+    #[test]
+    fn monitor_policy_denies_attachment_exposure_by_default() {
+        let policy = EmailMonitorPolicy::default();
+        let summary = policy.evaluate_attachment(&EmailAttachmentCandidate {
+            filename: "photo.png".into(),
+            media_type: "image/png".into(),
+            size_bytes: 1024,
+        });
+        assert_eq!(summary.class, EmailAttachmentClass::Image);
+        assert!(!summary.exposed);
+        assert_eq!(summary.reason.as_deref(), Some("attachments_disabled"));
+    }
+
+    #[test]
+    fn monitor_policy_allows_attachment_exposure_when_configured() {
+        let policy = EmailMonitorPolicy {
+            allow_attachments: true,
+            ..EmailMonitorPolicy::default()
+        };
+        let summary = policy.evaluate_attachment(&EmailAttachmentCandidate {
+            filename: "report.pdf".into(),
+            media_type: "application/pdf".into(),
+            size_bytes: 2048,
+        });
+        assert_eq!(summary.class, EmailAttachmentClass::Document);
+        assert!(summary.exposed);
+        assert_eq!(summary.reason, None);
+    }
+
+    #[test]
+    fn monitor_policy_bounds_event_text_after_subject_context() {
+        let policy = EmailMonitorPolicy {
+            max_body_chars: 12,
+            ..EmailMonitorPolicy::default()
+        };
+        let body = policy.event_text("Deploy", "abcdefghijkl");
+        assert!(body.truncated);
+        assert_eq!(body.original_chars, 31);
+        assert_eq!(body.text, "[Subject: De");
+    }
+
+    #[test]
+    fn monitor_policy_does_not_prefix_reply_subjects() {
+        let policy = EmailMonitorPolicy {
+            max_body_chars: 100,
+            ..EmailMonitorPolicy::default()
+        };
+        let body = policy.event_text("Re: Deploy", "body");
+        assert_eq!(body.text, "body");
+        assert!(!body.truncated);
+    }
+
+    #[test]
+    fn prepare_inbound_message_drops_disallowed_before_body_or_thread_context() {
+        let policy = EmailMonitorPolicy {
+            allowed_senders: vec!["other@example.com".into()],
+            ..EmailMonitorPolicy::default()
+        };
+        let preview = policy.prepare_inbound_message(&inbound_message());
+        assert_eq!(
+            preview.decision,
+            EmailInboundPolicyDecision::DropSenderNotAllowed
+        );
+        assert_eq!(preview.text, None);
+        assert!(preview.attachments.is_empty());
+        assert_eq!(preview.thread, None);
+        assert!(preview.tainted);
+    }
+
+    #[test]
+    fn prepare_inbound_message_shapes_allowed_content_without_exposing_attachments() {
+        let policy = EmailMonitorPolicy {
+            allowed_senders: vec!["allowed@example.com".into()],
+            max_body_chars: 1000,
+            ..EmailMonitorPolicy::default()
+        };
+        let preview = policy.prepare_inbound_message(&inbound_message());
+        assert_eq!(preview.decision, EmailInboundPolicyDecision::Accept);
+        assert_eq!(
+            preview.text.expect("accepted text").text,
+            "[Subject: Deploy status]\n\ngreen"
+        );
+        assert_eq!(preview.attachments.len(), 1);
+        assert!(!preview.attachments[0].exposed);
+        let thread = preview.thread.expect("thread metadata");
+        assert_eq!(thread.reply_subject, "Re: Deploy status");
+        assert_eq!(thread.message_id.as_deref(), Some("<msg-42@example.com>"));
+    }
+
+    #[test]
+    fn prepare_inbound_message_drops_automated_before_allowlisted_content() {
+        let policy = EmailMonitorPolicy {
+            allowed_senders: vec!["allowed@example.com".into()],
+            ..EmailMonitorPolicy::default()
+        };
+        let mut message = inbound_message();
+        message
+            .headers
+            .push(("Auto-Submitted".into(), "auto-generated".into()));
+        let preview = policy.prepare_inbound_message(&message);
+        assert_eq!(preview.decision, EmailInboundPolicyDecision::DropAutomated);
+        assert_eq!(preview.text, None);
+        assert_eq!(preview.thread, None);
+    }
+
+    #[test]
+    fn seen_uid_cache_rejects_duplicates_and_trims_numeric_uids() {
+        let mut cache = EmailSeenUidCache::new(4).expect("cache");
+        for uid in ["1", "2", "3", "4"] {
+            assert!(cache.observe(uid));
+        }
+        assert_eq!(cache.len(), 4);
+        assert!(!cache.observe("3"));
+        assert!(cache.observe("5"));
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains("1"));
+        assert!(!cache.contains("3"));
+        assert!(cache.contains("4"));
+        assert!(cache.contains("5"));
+    }
+
+    #[test]
+    fn seen_uid_cache_trims_nonnumeric_uids_by_insertion_order() {
+        let mut cache = EmailSeenUidCache::new(4).expect("cache");
+        for uid in ["a", "b", "c", "d", "e"] {
+            assert!(cache.observe(uid));
+        }
+        assert_eq!(cache.len(), 2);
+        assert!(!cache.contains("a"));
+        assert!(!cache.contains("c"));
+        assert!(cache.contains("d"));
+        assert!(cache.contains("e"));
+    }
+
+    #[test]
+    fn seen_uid_cache_rejects_zero_cap() {
+        assert!(EmailSeenUidCache::new(0).is_err());
     }
 }

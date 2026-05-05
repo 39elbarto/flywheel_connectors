@@ -248,6 +248,9 @@ async fn test_render_pdf() {
 
     assert_eq!(result["page_count"], 3);
     assert!(result["pdf_data"].as_str().unwrap().starts_with("JVBER"));
+    assert_eq!(result["external_content"]["untrusted"], true);
+    assert_eq!(result["external_content"]["kind"], "rendered_pdf");
+    assert_eq!(result["document_extraction"]["decision"], "deferred");
 }
 
 #[fcp_async_core::runtime::test]
@@ -280,6 +283,84 @@ async fn test_extract_text() {
 
     assert_eq!(result["text"], "Hello, world! This is example content.");
     assert_eq!(result["word_count"], 6);
+    assert_eq!(result["output_mode"], "text");
+    assert_eq!(result["external_content"]["untrusted"], true);
+    assert_eq!(result["external_content"]["kind"], "page_text");
+    assert_eq!(
+        result["readability"]["decision"],
+        "adopted_for_active_page_text"
+    );
+    assert_eq!(result["guardrails"]["truncated"], false);
+    assert_eq!(result["guardrails"]["stripped_invisible_chars"], 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_extract_text_applies_readable_content_guardrails() {
+    let _ctx = AsyncTestContext::for_scenario("browser-extract-text-guardrails");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/extract_text"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "text": " First\u{200B} paragraph \n\n Second paragraph with more words ",
+            "word_count": 8
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.extract_text"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, &connector, "browser.extract_text");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "browser.extract_text",
+            "input": {
+                "output_mode": "markdown",
+                "max_chars": 28
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["text"], "First paragraph\n\nSecond p");
+    assert_eq!(result["output_mode"], "markdown");
+    assert_eq!(result["guardrails"]["stripped_invisible_chars"], 1);
+    assert_eq!(result["guardrails"]["truncated"], true);
+    assert_eq!(result["guardrails"]["requested_max_chars"], 28);
+}
+
+#[fcp_async_core::runtime::test]
+async fn test_render_pdf_rejects_page_count_over_requested_cap() {
+    let _ctx = AsyncTestContext::for_scenario("browser-render-pdf-page-cap");
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/pdf"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "pdf_data": "JVBERi0xLjQK...",
+            "page_count": 5
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = BrowserConnector::new();
+    let key = setup_handshake(&mut connector, &["browser.render_pdf"]).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let token = generate_valid_token(&key, &connector, "browser.render_pdf");
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "browser.render_pdf",
+            "input": { "max_pages": 3 },
+            "capability_token": token
+        }))
+        .await
+        .unwrap_err();
+
+    assert!(format!("{err}").contains("exceeds max_pages"));
 }
 
 #[fcp_async_core::runtime::test]

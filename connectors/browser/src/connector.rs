@@ -48,6 +48,10 @@ const BROWSER_SANDBOX_CPU_PERCENT: u8 = 75;
 const BROWSER_SANDBOX_WALL_CLOCK_TIMEOUT_MS: u64 = 300_000;
 const BROWSER_SANDBOX_DENY_EXEC: bool = true;
 const BROWSER_SANDBOX_DENY_PTRACE: bool = true;
+const READABLE_CONTENT_DEFAULT_MAX_CHARS: usize = 200_000;
+const READABLE_CONTENT_ABSOLUTE_MAX_CHARS: usize = 1_000_000;
+const DOCUMENT_TEXT_EXTRACTION_CAP_CHARS: usize = 200_000;
+const DOCUMENT_RENDER_PIXEL_CAP: usize = 4_000_000;
 
 #[derive(Debug, Clone, Serialize)]
 struct BrowserNetworkGuardProfile {
@@ -625,7 +629,8 @@ impl BrowserConnector {
                         "properties": {
                             "format": { "type": "string" },
                             "landscape": { "type": "boolean" },
-                            "print_background": { "type": "boolean" }
+                            "print_background": { "type": "boolean" },
+                            "max_pages": { "type": "integer" }
                         }
                     }),
                     json!({
@@ -633,7 +638,9 @@ impl BrowserConnector {
                         "required": ["pdf_data", "page_count"],
                         "properties": {
                             "pdf_data": { "type": "string" },
-                            "page_count": { "type": "integer" }
+                            "page_count": { "type": "integer" },
+                            "external_content": { "type": "object" },
+                            "document_extraction": { "type": "object" }
                         }
                     }),
                     "browser.capture",
@@ -654,7 +661,9 @@ impl BrowserConnector {
                         "type": "object",
                         "properties": {
                             "selector": { "type": "string" },
-                            "include_hidden": { "type": "boolean" }
+                            "include_hidden": { "type": "boolean" },
+                            "output_mode": { "type": "string", "enum": ["text", "markdown"] },
+                            "max_chars": { "type": "integer" }
                         }
                     }),
                     json!({
@@ -662,7 +671,11 @@ impl BrowserConnector {
                         "required": ["text"],
                         "properties": {
                             "text": { "type": "string" },
-                            "word_count": { "type": "integer" }
+                            "word_count": { "type": "integer" },
+                            "output_mode": { "type": "string" },
+                            "guardrails": { "type": "object" },
+                            "external_content": { "type": "object" },
+                            "readability": { "type": "object" }
                         }
                     }),
                     "browser.extract",
@@ -1360,22 +1373,49 @@ impl BrowserConnector {
         let format = input.get("format").and_then(|v| v.as_str());
         let landscape = input.get("landscape").and_then(|v| v.as_bool());
         let print_background = input.get("print_background").and_then(|v| v.as_bool());
+        let max_pages = parse_optional_u32_field(&input, "max_pages")?;
         let result = client
             .render_pdf(format, landscape, print_background)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "pdf_data": result.pdf_data, "page_count": result.page_count }))
+        if let Some(max_pages) = max_pages
+            && result.page_count > max_pages
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Rendered PDF page_count {} exceeds max_pages {max_pages}",
+                    result.page_count
+                ),
+            });
+        }
+        Ok(json!({
+            "pdf_data": result.pdf_data,
+            "page_count": result.page_count,
+            "external_content": external_content_metadata("rendered_pdf"),
+            "document_extraction": document_extraction_deferral_metadata(),
+        }))
     }
 
     async fn invoke_extract_text(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let selector = input.get("selector").and_then(|v| v.as_str());
         let include_hidden = input.get("include_hidden").and_then(|v| v.as_bool());
+        let output_mode = parse_readable_output_mode(&input)?;
+        let max_chars = parse_readable_max_chars(&input)?;
         let result = client
             .extract_text(selector, include_hidden)
             .await
             .map_err(|e: BrowserError| e.to_fcp_error())?;
-        Ok(json!({ "text": result.text, "word_count": result.word_count }))
+        let readable = prepare_readable_content(&result.text, max_chars, output_mode);
+        Ok(json!({
+            "text": readable.text,
+            "word_count": result.word_count,
+            "output_mode": readable.output_mode.as_str(),
+            "guardrails": readable.guardrails,
+            "external_content": external_content_metadata("page_text"),
+            "readability": readability_metadata(readable.output_mode),
+        }))
     }
 
     async fn invoke_extract_links(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1822,8 +1862,191 @@ fn parse_required_u64_field(input: &serde_json::Value, field: &str) -> FcpResult
         })
 }
 
+fn parse_optional_u32_field(input: &serde_json::Value, field: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let raw = value.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a positive integer"),
+    })?;
+    if raw == 0 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be greater than zero"),
+        });
+    }
+    u32::try_from(raw)
+        .map(Some)
+        .map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} is too large"),
+        })
+}
+
 fn current_unix_timestamp_secs() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp()).unwrap_or(0)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReadableOutputMode {
+    Text,
+    Markdown,
+}
+
+impl ReadableOutputMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Text => "text",
+            Self::Markdown => "markdown",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PreparedReadableContent {
+    text: String,
+    output_mode: ReadableOutputMode,
+    guardrails: serde_json::Value,
+}
+
+fn parse_readable_output_mode(input: &serde_json::Value) -> FcpResult<ReadableOutputMode> {
+    match input.get("output_mode").and_then(|value| value.as_str()) {
+        None | Some("text") => Ok(ReadableOutputMode::Text),
+        Some("markdown") => Ok(ReadableOutputMode::Markdown),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Unsupported output_mode `{other}`; expected `text` or `markdown`"),
+        }),
+    }
+}
+
+fn parse_readable_max_chars(input: &serde_json::Value) -> FcpResult<usize> {
+    let Some(value) = input.get("max_chars") else {
+        return Ok(READABLE_CONTENT_DEFAULT_MAX_CHARS);
+    };
+    let raw = value.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "max_chars must be a positive integer".into(),
+    })?;
+    if raw == 0 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "max_chars must be greater than zero".into(),
+        });
+    }
+    let max_chars = usize::try_from(raw).map_err(|_| FcpError::InvalidRequest {
+        code: 1003,
+        message: "max_chars is too large for this platform".into(),
+    })?;
+    if max_chars > READABLE_CONTENT_ABSOLUTE_MAX_CHARS {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "max_chars {max_chars} exceeds absolute cap {READABLE_CONTENT_ABSOLUTE_MAX_CHARS}"
+            ),
+        });
+    }
+    Ok(max_chars)
+}
+
+fn prepare_readable_content(
+    raw_text: &str,
+    max_chars: usize,
+    output_mode: ReadableOutputMode,
+) -> PreparedReadableContent {
+    let (sanitized, stripped_invisible_chars) = strip_invisible_unicode(raw_text);
+    let original_chars = sanitized.chars().count();
+    let (bounded, truncated) = truncate_to_char_limit(&sanitized, max_chars);
+    let text = match output_mode {
+        ReadableOutputMode::Text => bounded,
+        ReadableOutputMode::Markdown => plain_text_to_markdown(&bounded),
+    };
+    PreparedReadableContent {
+        text,
+        output_mode,
+        guardrails: json!({
+            "html_cap_chars": READABLE_CONTENT_ABSOLUTE_MAX_CHARS,
+            "default_text_cap_chars": READABLE_CONTENT_DEFAULT_MAX_CHARS,
+            "requested_max_chars": max_chars,
+            "original_chars_after_unicode_strip": original_chars,
+            "stripped_invisible_chars": stripped_invisible_chars,
+            "truncated": truncated,
+            "deep_html_nesting_policy": "raw_html_not_accepted_by_connector",
+            "raw_html_sanitization": "browser_control_worker_extracts_active_page_text; connector strips invisible Unicode and bounds text output",
+        }),
+    }
+}
+
+fn strip_invisible_unicode(input: &str) -> (String, usize) {
+    let mut stripped = 0;
+    let output = input
+        .chars()
+        .filter(|ch| {
+            if is_invisible_unicode(*ch) {
+                stripped += 1;
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
+    (output, stripped)
+}
+
+const fn is_invisible_unicode(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{200B}'..='\u{200F}' | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{206F}' | '\u{FEFF}'
+    )
+}
+
+fn truncate_to_char_limit(input: &str, max_chars: usize) -> (String, bool) {
+    let mut chars = input.chars();
+    let bounded: String = chars.by_ref().take(max_chars).collect();
+    let truncated = chars.next().is_some();
+    (bounded, truncated)
+}
+
+fn plain_text_to_markdown(input: &str) -> String {
+    let mut markdown = String::new();
+    for line in input.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if !markdown.is_empty() {
+            markdown.push_str("\n\n");
+        }
+        markdown.push_str(line);
+    }
+    markdown
+}
+
+fn external_content_metadata(kind: &'static str) -> serde_json::Value {
+    json!({
+        "untrusted": true,
+        "source": "browser",
+        "kind": kind,
+        "taint": "tainted",
+        "origin_zone": "z:public",
+    })
+}
+
+fn readability_metadata(output_mode: ReadableOutputMode) -> serde_json::Value {
+    json!({
+        "decision": "adopted_for_active_page_text",
+        "engine": "fcp_browser_control_extract_text",
+        "output_mode": output_mode.as_str(),
+        "html_readability_parser": "deferred_until_raw_html_fetch_or_shared_document_extraction_helper_exists",
+        "no_interpreted_runtime_dependency": true,
+    })
+}
+
+fn document_extraction_deferral_metadata() -> serde_json::Value {
+    json!({
+        "decision": "deferred",
+        "reason": "browser.render_pdf exports the active page; local PDF/document text extraction needs a self-contained Rust extractor or shared FCP document helper",
+        "pdf_text_cap_chars": DOCUMENT_TEXT_EXTRACTION_CAP_CHARS,
+        "render_pixel_cap": DOCUMENT_RENDER_PIXEL_CAP,
+        "dependency_missing_degrade_path": "not_applicable_no_optional_renderer_dependency",
+    })
 }
 
 fn browser_placement_profile() -> BrowserPlacementProfile {
@@ -2212,6 +2435,63 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => assert!(message.contains("selector")),
             e => panic!("Expected InvalidRequest, got: {e:?}"),
         }
+    }
+
+    #[test]
+    fn readable_content_strips_invisible_unicode() {
+        let (sanitized, stripped) = strip_invisible_unicode("hel\u{200B}lo\u{202E} world");
+
+        assert_eq!(sanitized, "hello world");
+        assert_eq!(stripped, 2);
+    }
+
+    #[test]
+    fn readable_content_truncates_after_unicode_strip() {
+        let prepared = prepare_readable_content("a\u{200B}bcdef", 3, ReadableOutputMode::Text);
+
+        assert_eq!(prepared.text, "abc");
+        assert_eq!(prepared.guardrails["stripped_invisible_chars"], 1);
+        assert_eq!(prepared.guardrails["truncated"], true);
+        assert_eq!(prepared.guardrails["requested_max_chars"], 3);
+    }
+
+    #[test]
+    fn readable_content_markdown_mode_normalizes_paragraphs() {
+        let prepared = prepare_readable_content(
+            " First paragraph \n\n Second paragraph ",
+            100,
+            ReadableOutputMode::Markdown,
+        );
+
+        assert_eq!(prepared.text, "First paragraph\n\nSecond paragraph");
+        assert_eq!(prepared.output_mode, ReadableOutputMode::Markdown);
+    }
+
+    #[test]
+    fn readable_content_rejects_oversized_requested_cap() {
+        let err = parse_readable_max_chars(&json!({
+            "max_chars": READABLE_CONTENT_ABSOLUTE_MAX_CHARS + 1
+        }))
+        .unwrap_err();
+
+        assert!(format!("{err}").contains("exceeds absolute cap"));
+    }
+
+    #[test]
+    fn document_extraction_deferral_metadata_pins_fcp_decision() {
+        let metadata = document_extraction_deferral_metadata();
+
+        assert_eq!(metadata["decision"], "deferred");
+        assert_eq!(
+            metadata["pdf_text_cap_chars"],
+            DOCUMENT_TEXT_EXTRACTION_CAP_CHARS
+        );
+        assert_eq!(metadata["render_pixel_cap"], DOCUMENT_RENDER_PIXEL_CAP);
+        assert!(
+            metadata["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("self-contained Rust extractor"))
+        );
     }
 
     #[fcp_async_core::runtime::test]

@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 
 use axum::{
     Json, Router,
-    body::Body,
+    body::{Body, Bytes},
     extract::{Path, State},
     http::{
-        HeaderMap, HeaderValue, Request, StatusCode,
+        HeaderMap, HeaderValue, Request, StatusCode, Uri,
         header::{CACHE_CONTROL, ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED, VARY},
     },
     middleware::{Next, from_fn_with_state},
@@ -82,9 +82,9 @@ use fcp_host::{DeploymentClassification, DeploymentTierRefusal, HostError, HostR
 use fcp_kernel::{
     ApprovalMode, ConnectorHealth, ConnectorId, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, InvokeStatus, LifecycleError,
-    LifecycleManager, LifecycleState, LifecycleStatus, LimitType, RateLimitDeclarations,
-    RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit, RequestId, SelfCheckReport,
-    SimulateRequest, SimulateResponse,
+    LifecycleManager, LifecycleState, LifecycleStatus, LimitType, OperationId,
+    RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
+    RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
@@ -93,10 +93,11 @@ use fcp_policy::{
     select_operational_model_from_env_for_deployment,
 };
 use fcp_prelude::{
-    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CostEstimateConfidence, Decision,
-    LeasePurpose as CoreLeasePurpose, ObjectId, PolicySimulationInput, ResourceAvailability,
-    RolloutPolicy, SafetyTier, TailscaleNodeId, TransportMode, UsageMetric, UsageMetricKind,
-    ZoneId, ZonePolicyObject, simulate_policy_decision,
+    ApprovalToken, CapabilityConstraints, CapabilityVerifier, CorrelationId,
+    CostEstimateConfidence, Decision, LeasePurpose as CoreLeasePurpose, ObjectId,
+    PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId,
+    TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
+    simulate_policy_decision,
 };
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
@@ -116,6 +117,28 @@ type ConnectorConfig = ManagedConnectorConfig;
 
 const HYBRID_OWNER_EVIDENCE_TAG: &str = "fcp.hybrid_owner.evidence_cbor";
 const HYBRID_OWNER_CONTEXT_FILE_ENV: &str = "FCP_HOST_HYBRID_OWNER_CONTEXT_FILE";
+const BLUEBUBBLES_INGRESS_ROUTE: &str = "/bluebubbles-webhook";
+const BLUEBUBBLES_INGRESS_OPERATION: &str = "imessage.ingest_webhook_request";
+const BLUEBUBBLES_INGRESS_CONNECTOR_ID_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_CONNECTOR_ID";
+const BLUEBUBBLES_INGRESS_ZONE_ID_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_ZONE_ID";
+const BLUEBUBBLES_INGRESS_TOKEN_B64_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_CAPABILITY_TOKEN_B64";
+const BLUEBUBBLES_INGRESS_TOKEN_FILE_ENV: &str =
+    "FCP_HOST_BLUEBUBBLES_INGRESS_CAPABILITY_TOKEN_FILE";
+const BLUEBUBBLES_INGRESS_MAX_BODY_BYTES_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_MAX_BODY_BYTES";
+const BLUEBUBBLES_INGRESS_TIMEOUT_MS_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_TIMEOUT_MS";
+const BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT_ENV: &str =
+    "FCP_HOST_BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT";
+const BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX";
+const BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS_ENV: &str =
+    "FCP_HOST_BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS";
+const BLUEBUBBLES_INGRESS_LOAD_SHED_ENV: &str = "FCP_HOST_BLUEBUBBLES_INGRESS_LOAD_SHED";
+const DEFAULT_BLUEBUBBLES_INGRESS_CONNECTOR_ID: &str = "fcp.imessage";
+const DEFAULT_BLUEBUBBLES_INGRESS_ZONE_ID: &str = "z:private";
+const DEFAULT_BLUEBUBBLES_INGRESS_MAX_BODY_BYTES: usize = 256 * 1024;
+const DEFAULT_BLUEBUBBLES_INGRESS_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
+const DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX: u64 = 120;
+const DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HybridOwnerInvokeEvidence {
@@ -3931,6 +3954,16 @@ fn read_env_usize(name: &str) -> HostResult<Option<usize>> {
     Ok(Some(parsed))
 }
 
+fn read_env_u64(name: &str) -> HostResult<Option<u64>> {
+    let Some(raw) = read_optional_trimmed_env_string(name)? else {
+        return Ok(None);
+    };
+    let parsed = raw
+        .parse()
+        .map_err(|err| HostError::InvalidFilter(format!("invalid {name}: {err}")))?;
+    Ok(Some(parsed))
+}
+
 fn resolve_bind_target() -> HostResult<BindTarget> {
     let raw =
         read_optional_env_string("FCP_HOST_BIND")?.unwrap_or_else(|| "127.0.0.1:9090".to_string());
@@ -4224,6 +4257,10 @@ async fn async_main() -> HostResult<()> {
         ));
 
     let app = Router::new()
+        .route(
+            BLUEBUBBLES_INGRESS_ROUTE,
+            post(bluebubbles_webhook_ingress_handler),
+        )
         .route("/doctor", post(doctor_handler))
         .route("/rpc/discover", post(discover_handler))
         .route("/rpc/connectors/{connector_id}", get(connector_handler))
@@ -5826,6 +5863,287 @@ async fn cancel_self_handler(
         "owner-scoped cancellation request complete"
     );
     Ok(Json(response))
+}
+
+#[derive(Debug, Clone)]
+struct BlueBubblesIngressConfig {
+    connector_id: ConnectorId,
+    zone_id: ZoneId,
+    capability_token: fcp_core::CapabilityToken,
+    max_body_bytes: usize,
+    timeout_ms: u64,
+    concurrency_limit: u64,
+    rate_limit_max: u64,
+    rate_limit_window_ms: u64,
+    load_shed: bool,
+}
+
+#[allow(clippy::too_many_lines)]
+async fn bluebubbles_webhook_ingress_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    uri: Uri,
+    body: Bytes,
+) -> Result<(StatusCode, Json<Value>), (StatusCode, String)> {
+    let config = resolve_bluebubbles_ingress_config().map_err(map_host_error)?;
+    if body.len() > config.max_body_bytes {
+        return Ok(bluebubbles_ingress_admission_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "BlueBubbles webhook body exceeds configured host ingress maximum",
+            body.len(),
+        ));
+    }
+
+    let body_value = match serde_json::from_slice::<Value>(&body) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(bluebubbles_ingress_admission_response(
+                StatusCode::BAD_REQUEST,
+                "malformed_payload",
+                &format!("BlueBubbles webhook body must be valid JSON: {error}"),
+                body.len(),
+            ));
+        }
+    };
+
+    let request =
+        bluebubbles_ingress_invoke_request(&config, &headers, &uri, body_value, body.len())
+            .map_err(map_host_error)?;
+
+    // External webhook headers are intentionally not forwarded to invoke_handler.
+    // The public provider authenticates with BlueBubbles callback auth; FCP
+    // authorization comes from the host-provisioned capability token above.
+    let Json(response) = invoke_handler(State(state), HeaderMap::new(), Json(request)).await?;
+    let fallback_status = if matches!(response.status, InvokeStatus::Ok) {
+        StatusCode::OK
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    };
+    let output = response.result.unwrap_or_else(|| {
+        json!({
+            "accepted": false,
+            "status_code": fallback_status.as_u16(),
+            "reason_code": "invoke_error",
+            "reason": response
+                .error
+                .map_or_else(|| "BlueBubbles ingress invoke failed".to_string(), |error| error.to_string()),
+            "body_bytes": body.len(),
+            "tainted": true,
+            "clean_shutdown": true,
+        })
+    });
+    let status = bluebubbles_ingress_status_from_output(&output, fallback_status);
+    Ok((status, Json(output)))
+}
+
+fn resolve_bluebubbles_ingress_config() -> HostResult<BlueBubblesIngressConfig> {
+    let connector_id = read_optional_trimmed_env_string(BLUEBUBBLES_INGRESS_CONNECTOR_ID_ENV)?
+        .unwrap_or_else(|| DEFAULT_BLUEBUBBLES_INGRESS_CONNECTOR_ID.to_string())
+        .parse()
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid {BLUEBUBBLES_INGRESS_CONNECTOR_ID_ENV}: {error}"
+            ))
+        })?;
+    let zone_id = read_optional_trimmed_env_string(BLUEBUBBLES_INGRESS_ZONE_ID_ENV)?
+        .unwrap_or_else(|| DEFAULT_BLUEBUBBLES_INGRESS_ZONE_ID.to_string())
+        .parse()
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid {BLUEBUBBLES_INGRESS_ZONE_ID_ENV}: {error}"
+            ))
+        })?;
+    let token_b64 = read_bluebubbles_ingress_token_b64()?;
+    let capability_token =
+        capability_token_from_cbor_b64(&token_b64, BLUEBUBBLES_INGRESS_TOKEN_B64_ENV)?;
+    Ok(BlueBubblesIngressConfig {
+        connector_id,
+        zone_id,
+        capability_token,
+        max_body_bytes: read_env_usize(BLUEBUBBLES_INGRESS_MAX_BODY_BYTES_ENV)?
+            .unwrap_or(DEFAULT_BLUEBUBBLES_INGRESS_MAX_BODY_BYTES),
+        timeout_ms: read_env_u64(BLUEBUBBLES_INGRESS_TIMEOUT_MS_ENV)?
+            .unwrap_or(DEFAULT_BLUEBUBBLES_INGRESS_TIMEOUT_MS),
+        concurrency_limit: read_env_u64(BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT_ENV)?
+            .unwrap_or(DEFAULT_BLUEBUBBLES_INGRESS_CONCURRENCY_LIMIT),
+        rate_limit_max: read_env_u64(BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX_ENV)?
+            .unwrap_or(DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_MAX),
+        rate_limit_window_ms: read_env_u64(BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS_ENV)?
+            .unwrap_or(DEFAULT_BLUEBUBBLES_INGRESS_RATE_LIMIT_WINDOW_MS),
+        load_shed: read_env_bool(BLUEBUBBLES_INGRESS_LOAD_SHED_ENV)?.unwrap_or(true),
+    })
+}
+
+fn read_bluebubbles_ingress_token_b64() -> HostResult<String> {
+    if let Some(path) = read_optional_trimmed_env_string(BLUEBUBBLES_INGRESS_TOKEN_FILE_ENV)? {
+        let token = std::fs::read_to_string(&path).map_err(|error| {
+            HostError::Unavailable(format!(
+                "failed to read {BLUEBUBBLES_INGRESS_TOKEN_FILE_ENV} '{}': {error}",
+                path
+            ))
+        })?;
+        let token = token.trim();
+        if token.is_empty() {
+            return Err(HostError::Unavailable(format!(
+                "{BLUEBUBBLES_INGRESS_TOKEN_FILE_ENV} '{}' is empty",
+                path
+            )));
+        }
+        return Ok(token.to_string());
+    }
+
+    read_optional_trimmed_env_string(BLUEBUBBLES_INGRESS_TOKEN_B64_ENV)?.ok_or_else(|| {
+        HostError::Unavailable(format!(
+            "BlueBubbles host ingress requires {BLUEBUBBLES_INGRESS_TOKEN_FILE_ENV} or {BLUEBUBBLES_INGRESS_TOKEN_B64_ENV}"
+        ))
+    })
+}
+
+fn capability_token_from_cbor_b64(
+    token_cbor_b64: &str,
+    source_name: &str,
+) -> HostResult<fcp_core::CapabilityToken> {
+    let token_bytes = base64::engine::general_purpose::STANDARD
+        .decode(token_cbor_b64.trim())
+        .map_err(|error| {
+            HostError::InvalidFilter(format!("invalid base64 in {source_name}: {error}"))
+        })?;
+    let raw = fcp_crypto::cose::CoseToken::from_cbor(&token_bytes).map_err(|error| {
+        HostError::InvalidFilter(format!("invalid COSE token in {source_name}: {error}"))
+    })?;
+    Ok(fcp_core::CapabilityToken::from_raw(raw))
+}
+
+fn bluebubbles_ingress_invoke_request(
+    config: &BlueBubblesIngressConfig,
+    headers: &HeaderMap,
+    uri: &Uri,
+    body: Value,
+    body_size_bytes: usize,
+) -> HostResult<InvokeRequest> {
+    let input = bluebubbles_ingress_input(config, headers, uri, body, body_size_bytes)?;
+    Ok(InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::random(),
+        connector_id: config.connector_id.clone(),
+        operation: OperationId::from_static(BLUEBUBBLES_INGRESS_OPERATION),
+        zone_id: config.zone_id.clone(),
+        input,
+        capability_token: config.capability_token.clone(),
+        holder_proof: None,
+        context: None,
+        idempotency_key: Some(format!("bluebubbles-webhook-{}", RequestId::random())),
+        lease_seq: None,
+        deadline_ms: Some(config.timeout_ms),
+        correlation_id: Some(CorrelationId::new()),
+        provenance: None,
+        approval_tokens: Vec::new(),
+    })
+}
+
+fn bluebubbles_ingress_input(
+    config: &BlueBubblesIngressConfig,
+    headers: &HeaderMap,
+    uri: &Uri,
+    body: Value,
+    body_size_bytes: usize,
+) -> HostResult<Value> {
+    Ok(json!({
+        "method": "POST",
+        "url": bluebubbles_ingress_observed_url(headers, uri)?,
+        "headers": bluebubbles_ingress_forwarded_headers(headers),
+        "body": body,
+        "body_size_bytes": body_size_bytes,
+        "max_body_bytes": config.max_body_bytes,
+        "timeout_ms": config.timeout_ms,
+        "concurrency_limit": config.concurrency_limit,
+        "rate_limit_max": config.rate_limit_max,
+        "rate_limit_window_ms": config.rate_limit_window_ms,
+        "load_shed": config.load_shed,
+        "source": "fcp_host_native_bluebubbles_ingress",
+        "cancelled": false,
+        "deadline_exceeded": false,
+    }))
+}
+
+fn bluebubbles_ingress_observed_url(headers: &HeaderMap, uri: &Uri) -> HostResult<String> {
+    let scheme = header_value(headers, "x-forwarded-proto").unwrap_or("http");
+    let scheme = first_forwarded_value(scheme);
+    if !matches!(scheme, "http" | "https") {
+        return Err(HostError::InvalidFilter(format!(
+            "invalid x-forwarded-proto for BlueBubbles webhook ingress: {scheme}"
+        )));
+    }
+
+    let host = header_value(headers, "x-forwarded-host")
+        .or_else(|| header_value(headers, "host"))
+        .unwrap_or("localhost");
+    let host = first_forwarded_value(host);
+    if host.is_empty() || host.contains('/') {
+        return Err(HostError::InvalidFilter(format!(
+            "invalid host header for BlueBubbles webhook ingress: {host}"
+        )));
+    }
+
+    let path_and_query = uri.path_and_query().map_or_else(
+        || BLUEBUBBLES_INGRESS_ROUTE.to_string(),
+        ToString::to_string,
+    );
+    Ok(format!("{scheme}://{host}{path_and_query}"))
+}
+
+fn bluebubbles_ingress_forwarded_headers(headers: &HeaderMap) -> Value {
+    let mut forwarded = serde_json::Map::new();
+    for name in ["x-bluebubbles-auth", "x-bluebubbles-event"] {
+        if let Some(value) = header_value(headers, name) {
+            forwarded.insert(name.to_string(), Value::String(value.to_string()));
+        }
+    }
+    Value::Object(forwarded)
+}
+
+fn header_value<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn first_forwarded_value(value: &str) -> &str {
+    value.split(',').next().unwrap_or(value).trim()
+}
+
+fn bluebubbles_ingress_status_from_output(output: &Value, fallback: StatusCode) -> StatusCode {
+    output
+        .get("status_code")
+        .and_then(Value::as_u64)
+        .and_then(|status| u16::try_from(status).ok())
+        .filter(|status| (100..=599).contains(status))
+        .and_then(|status| StatusCode::from_u16(status).ok())
+        .unwrap_or(fallback)
+}
+
+fn bluebubbles_ingress_admission_response(
+    status: StatusCode,
+    reason_code: &str,
+    reason: &str,
+    body_bytes: usize,
+) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "accepted": false,
+            "status_code": status.as_u16(),
+            "reason_code": reason_code,
+            "reason": reason,
+            "ingest": null,
+            "body_bytes": body_bytes,
+            "tainted": true,
+            "clean_shutdown": true,
+        })),
+    )
 }
 
 /// Handle POST /invoke.
@@ -11736,6 +12054,111 @@ done"#;
         let (status, msg) = map_host_error(HostError::Unavailable("circuit open".into()));
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert!(msg.contains("unavailable"));
+    }
+
+    fn test_bluebubbles_ingress_config() -> BlueBubblesIngressConfig {
+        BlueBubblesIngressConfig {
+            connector_id: ConnectorId::from_static("fcp.imessage"),
+            zone_id: "z:private".parse().expect("private zone should parse"),
+            capability_token: fcp_core::CapabilityToken::test_token(),
+            max_body_bytes: 4096,
+            timeout_ms: 1500,
+            concurrency_limit: 8,
+            rate_limit_max: 16,
+            rate_limit_window_ms: 30_000,
+            load_shed: true,
+        }
+    }
+
+    #[test]
+    fn bluebubbles_ingress_input_preserves_host_route_contract() {
+        let config = test_bluebubbles_ingress_config();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("hooks.example.test"),
+        );
+        headers.insert(
+            "x-bluebubbles-auth",
+            HeaderValue::from_static("callback-secret"),
+        );
+        headers.insert(
+            "x-bluebubbles-event",
+            HeaderValue::from_static("new-message"),
+        );
+        let uri: Uri = "/bluebubbles-webhook?password=callback-secret"
+            .parse()
+            .expect("uri should parse");
+
+        let input =
+            bluebubbles_ingress_input(&config, &headers, &uri, json!({"type": "new-message"}), 24)
+                .expect("input should build");
+
+        assert_eq!(input["method"], "POST");
+        assert_eq!(
+            input["url"],
+            "https://hooks.example.test/bluebubbles-webhook?password=callback-secret"
+        );
+        assert_eq!(input["headers"]["x-bluebubbles-auth"], "callback-secret");
+        assert_eq!(input["headers"]["x-bluebubbles-event"], "new-message");
+        assert_eq!(input["body"]["type"], "new-message");
+        assert_eq!(input["body_size_bytes"], 24);
+        assert_eq!(input["max_body_bytes"], 4096);
+        assert_eq!(input["timeout_ms"], 1500);
+        assert_eq!(input["concurrency_limit"], 8);
+        assert_eq!(input["rate_limit_max"], 16);
+        assert_eq!(input["rate_limit_window_ms"], 30_000);
+        assert_eq!(input["source"], "fcp_host_native_bluebubbles_ingress");
+        assert_eq!(input["cancelled"], false);
+        assert_eq!(input["deadline_exceeded"], false);
+    }
+
+    #[test]
+    fn bluebubbles_ingress_observed_url_rejects_bad_forwarded_proto() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("javascript"));
+        headers.insert("host", HeaderValue::from_static("hooks.example.test"));
+        let uri: Uri = "/bluebubbles-webhook".parse().expect("uri should parse");
+
+        let error = bluebubbles_ingress_observed_url(&headers, &uri)
+            .expect_err("bad forwarded proto must be rejected");
+
+        assert!(error.to_string().contains("x-forwarded-proto"));
+    }
+
+    #[test]
+    fn bluebubbles_ingress_status_uses_connector_output_code() {
+        assert_eq!(
+            bluebubbles_ingress_status_from_output(&json!({"status_code": 409}), StatusCode::OK),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            bluebubbles_ingress_status_from_output(
+                &json!({"status_code": 799}),
+                StatusCode::ACCEPTED
+            ),
+            StatusCode::ACCEPTED
+        );
+    }
+
+    #[test]
+    fn bluebubbles_ingress_admission_response_is_machine_readable() {
+        let (status, Json(body)) = bluebubbles_ingress_admission_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            "too large",
+            5000,
+        );
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(body["accepted"], false);
+        assert_eq!(body["status_code"], 413);
+        assert_eq!(body["reason_code"], "payload_too_large");
+        assert_eq!(body["reason"], "too large");
+        assert_eq!(body["body_bytes"], 5000);
+        assert_eq!(body["tainted"], true);
+        assert_eq!(body["clean_shutdown"], true);
     }
 
     #[test]

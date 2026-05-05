@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.whatsapp"
 name = "WhatsApp Business"
 version = "0.1.0"
-description = "WhatsApp Business API connector for sending messages, templates, and managing business profiles"
+description = "WhatsApp Business Cloud API connector for messages, templates, business profiles, and signed webhooks; personal WhatsApp Web bridges are intentionally out of scope"
 archetype = "operational"
 homepage = "https://developers.facebook.com/docs/whatsapp/cloud-api"
 
@@ -19,7 +19,7 @@ tailscale_tag = "tag:fcp-private"
 [capabilities]
 required = ["network.dns", "network.outbound"]
 optional = []
-forbidden = ["system.exec", "system.privileged"]
+forbidden = ["system.exec", "system.privileged", "network.listen", "browser.control"]
 
 [provides.operations.send_text]
 summary = "Send a text message"
@@ -83,6 +83,27 @@ max_redirects = 0
 
 [provides.operations.get_profile.ai_hints]
 when_to_use = "When you need to check or display the business profile"
+
+[provides.operations.webhook_verify]
+summary = "Verify a WhatsApp Cloud API webhook challenge"
+capability = "whatsapp.webhook"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.webhook_verify.ai_hints]
+when_to_use = "When Meta sends a Cloud API webhook verification challenge through host-managed ingress"
+
+[provides.operations.webhook_receive]
+summary = "Verify and normalize signed WhatsApp Cloud API webhook events"
+capability = "whatsapp.webhook"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.webhook_receive.ai_hints]
+when_to_use = "When host ingress forwards a signed WhatsApp Cloud API webhook body for signature, replay, and sender-policy checks"
+common_mistakes = ["Do not use this connector as a personal WhatsApp Web bridge; network.listen and browser.control are forbidden."]
 
 [sandbox]
 profile = "strict"

@@ -13,7 +13,8 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
-    HealthState, InvokeRequest, OperationId, RequestId, SelfCheckStatus, ShutdownRequest, ZoneId,
+    HealthState, InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus,
+    ShutdownRequest, ZoneId,
 };
 use fcp_testkit::AsyncTestContext;
 use hmac::{Hmac, Mac};
@@ -47,6 +48,7 @@ fn generate_valid_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &InstanceId,
 ) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -62,8 +64,10 @@ fn generate_valid_token(
         .principal("user:test")
         .operations(operations)
         .issuer("node:test")
+        .target_instance(instance_id.as_str())
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints cbor should be valid")
         .sign(signing_key)
         .expect("token should sign");
     CapabilityToken::from_raw(cose)
@@ -101,10 +105,11 @@ async fn setup_handshake(
     signing_key
 }
 
-async fn configure_connector(
+async fn configure_connector_with_sender_policy(
     connector: &mut WhatsAppConnector,
     base_url: &str,
     webhook_enabled: bool,
+    allowed_senders: &[&str],
 ) {
     let mut config = json!({
         "base_url": base_url,
@@ -118,10 +123,21 @@ async fn configure_connector(
         config["app_secret"] = json!(APP_SECRET);
         config["webhook_verify_token"] = json!(VERIFY_TOKEN);
     }
+    if !allowed_senders.is_empty() {
+        config["webhook_allowed_senders"] = json!(allowed_senders);
+    }
     connector
         .configure(config)
         .await
         .expect("configure should succeed");
+}
+
+async fn configure_connector(
+    connector: &mut WhatsAppConnector,
+    base_url: &str,
+    webhook_enabled: bool,
+) {
+    configure_connector_with_sender_policy(connector, base_url, webhook_enabled, &[]).await;
 }
 
 async fn setup_connector(
@@ -131,6 +147,17 @@ async fn setup_connector(
 ) -> (WhatsAppConnector, Ed25519SigningKey) {
     let mut connector = WhatsAppConnector::new();
     configure_connector(&mut connector, base_url, webhook_enabled).await;
+    let signing_key = setup_handshake(&mut connector, capabilities).await;
+    (connector, signing_key)
+}
+
+async fn setup_connector_with_sender_policy(
+    base_url: &str,
+    capabilities: &[&str],
+    allowed_senders: &[&str],
+) -> (WhatsAppConnector, Ed25519SigningKey) {
+    let mut connector = WhatsAppConnector::new();
+    configure_connector_with_sender_policy(&mut connector, base_url, true, allowed_senders).await;
     let signing_key = setup_handshake(&mut connector, capabilities).await;
     (connector, signing_key)
 }
@@ -375,7 +402,12 @@ async fn send_text_happy_path() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEXT,
@@ -403,7 +435,12 @@ async fn send_text_unauthorized_maps_to_fcp_error() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEXT,
@@ -428,7 +465,12 @@ async fn send_text_rate_limited_maps_to_fcp_error() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEXT,
@@ -453,7 +495,12 @@ async fn send_text_rate_limited_maps_to_fcp_error() {
 async fn send_text_invalid_preview_url_is_rejected() {
     let server = MockServer::start().await;
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEXT,
@@ -506,7 +553,12 @@ async fn send_template_happy_path() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEMPLATE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEMPLATE],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEMPLATE,
@@ -528,7 +580,12 @@ async fn send_template_happy_path() {
 async fn send_template_invalid_components_is_rejected() {
     let server = MockServer::start().await;
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEMPLATE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEMPLATE],
+        connector.instance_id(),
+    );
     let result = invoke(
         &connector,
         OP_SEND_TEMPLATE,
@@ -570,7 +627,12 @@ async fn get_profile_happy_path_returns_flat_profile() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_READ], false).await;
-    let token = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_PROFILE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_READ,
+        &[OP_GET_PROFILE],
+        connector.instance_id(),
+    );
     let result = invoke(&connector, OP_GET_PROFILE, json!({}), token)
         .await
         .expect("get_profile should succeed");
@@ -594,7 +656,12 @@ async fn get_profile_rate_limited_maps_to_fcp_error() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_READ], false).await;
-    let token = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_PROFILE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_READ,
+        &[OP_GET_PROFILE],
+        connector.instance_id(),
+    );
     let result = invoke(&connector, OP_GET_PROFILE, json!({}), token).await;
 
     assert!(matches!(
@@ -621,7 +688,12 @@ async fn get_profile_empty_response_returns_empty_object() {
         .await;
 
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_READ], false).await;
-    let token = generate_valid_token(&signing_key, CAP_READ, &[OP_GET_PROFILE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_READ,
+        &[OP_GET_PROFILE],
+        connector.instance_id(),
+    );
     let result = invoke(&connector, OP_GET_PROFILE, json!({}), token)
         .await
         .expect("get_profile should succeed");
@@ -633,7 +705,12 @@ async fn get_profile_empty_response_returns_empty_object() {
 async fn invoke_not_configured_is_rejected() {
     let mut connector = WhatsAppConnector::new();
     let signing_key = setup_handshake(&mut connector, &[CAP_SEND]).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
 
     let result = invoke(
         &connector,
@@ -654,7 +731,12 @@ async fn webhook_verify_via_invoke() {
     let _ctx = AsyncTestContext::for_scenario("whatsapp.webhook_verify.happy_path");
     let (connector, signing_key) =
         setup_connector("http://127.0.0.1:1", &[CAP_WEBHOOK], true).await;
-    let token = generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_VERIFY]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_VERIFY],
+        connector.instance_id(),
+    );
 
     let result = invoke(
         &connector,
@@ -676,7 +758,12 @@ async fn webhook_verify_via_invoke() {
 async fn webhook_verify_wrong_token_is_unauthorized() {
     let (connector, signing_key) =
         setup_connector("http://127.0.0.1:1", &[CAP_WEBHOOK], true).await;
-    let token = generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_VERIFY]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_VERIFY],
+        connector.instance_id(),
+    );
 
     let result = invoke(
         &connector,
@@ -698,7 +785,12 @@ async fn webhook_receive_via_invoke_parses_events() {
     let _ctx = AsyncTestContext::for_scenario("whatsapp.webhook_receive.happy_path");
     let (connector, signing_key) =
         setup_connector("http://127.0.0.1:1", &[CAP_WEBHOOK], true).await;
-    let token = generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_RECEIVE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_RECEIVE],
+        connector.instance_id(),
+    );
 
     let body = serde_json::to_vec(&sample_text_notification()).expect("body json");
     let result = invoke(
@@ -714,10 +806,19 @@ async fn webhook_receive_via_invoke_parses_events() {
     .expect("webhook receive should succeed");
 
     assert_eq!(result["event_count"], 1);
+    assert_eq!(result["dropped_event_count"], 0);
+    assert_eq!(result["connector_scope"], "whatsapp_business_cloud_api");
+    assert_eq!(result["personal_bridge_supported"], false);
     assert_eq!(result["events"][0]["event_type"], "message.text");
+    assert_eq!(result["events"][0]["event_kind"], "message");
+    assert_eq!(result["events"][0]["agent_turn_eligible"], true);
     assert_eq!(
         result["events"][0]["id"],
         "wamid.HBgLMTU1NTk4NzY1NDMVAgASGBQzQUY5MTcxMkFCRTY1RTM5REI0MAA="
+    );
+    assert_eq!(
+        result["policy_decisions"][0]["reason"],
+        "sender_policy_allow_all"
     );
 }
 
@@ -735,7 +836,12 @@ async fn webhook_receive_filters_replayed_events() {
             "headers": { "x-hub-signature-256": sign_payload(&body) },
             "body": String::from_utf8(body.clone()).expect("utf8 body"),
         }),
-        generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_RECEIVE]),
+        generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_WEBHOOK_RECEIVE],
+            connector.instance_id(),
+        ),
     )
     .await
     .expect("first webhook receive should succeed");
@@ -747,20 +853,177 @@ async fn webhook_receive_filters_replayed_events() {
             "headers": { "x-hub-signature-256": sign_payload(&body) },
             "body": String::from_utf8(body).expect("utf8 body"),
         }),
-        generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_RECEIVE]),
+        generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_WEBHOOK_RECEIVE],
+            connector.instance_id(),
+        ),
     )
     .await
     .expect("second webhook receive should succeed");
 
     assert_eq!(first["event_count"], 1);
     assert_eq!(second["event_count"], 0);
+    assert_eq!(second["replay_dropped_count"], 1);
+    assert_eq!(second["policy_decisions"][0]["reason"], "replay_detected");
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_receive_records_sender_policy_for_authorized_message() {
+    let _ctx = AsyncTestContext::for_scenario("whatsapp.webhook_receive.sender_policy.allowed");
+    let (connector, signing_key) =
+        setup_connector_with_sender_policy("http://127.0.0.1:1", &[CAP_WEBHOOK], &["+15559876543"])
+            .await;
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_RECEIVE],
+        connector.instance_id(),
+    );
+
+    let body = serde_json::to_vec(&sample_text_notification()).expect("body json");
+    let result = invoke(
+        &connector,
+        OP_WEBHOOK_RECEIVE,
+        json!({
+            "headers": { "x-hub-signature-256": sign_payload(&body) },
+            "body": String::from_utf8(body).expect("utf8 body"),
+        }),
+        token,
+    )
+    .await
+    .expect("webhook receive should succeed");
+
+    assert_eq!(result["event_count"], 1);
+    assert_eq!(result["dropped_event_count"], 0);
+    assert_eq!(result["replay_dropped_count"], 0);
+    assert_eq!(result["connector_scope"], "whatsapp_business_cloud_api");
+    assert_eq!(result["personal_bridge_supported"], false);
+    assert_eq!(result["events"][0]["event_kind"], "message");
+    assert_eq!(result["events"][0]["agent_turn_eligible"], true);
+    assert_eq!(result["events"][0]["policy"]["decision"], "accepted");
+    assert_eq!(result["events"][0]["policy"]["reason"], "sender_allowed");
+    assert_eq!(result["policy_decisions"][0]["decision"], "accepted");
+    assert_eq!(result["policy_decisions"][0]["reason"], "sender_allowed");
+
+    let sender_redacted = result["policy_decisions"][0]["sender_redacted"]
+        .as_str()
+        .expect("redacted sender");
+    assert_ne!(sender_redacted, "15559876543");
+    assert!(!sender_redacted.contains("9876543"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_receive_drops_signed_unauthorized_sender_and_preserves_replay_claim() {
+    let _ctx =
+        AsyncTestContext::for_scenario("whatsapp.webhook_receive.sender_policy.unauthorized");
+    let (connector, signing_key) =
+        setup_connector_with_sender_policy("http://127.0.0.1:1", &[CAP_WEBHOOK], &["+111"]).await;
+    let body = serde_json::to_vec(&sample_text_notification()).expect("body json");
+
+    let first = invoke(
+        &connector,
+        OP_WEBHOOK_RECEIVE,
+        json!({
+            "headers": { "x-hub-signature-256": sign_payload(&body) },
+            "body": String::from_utf8(body.clone()).expect("utf8 body"),
+        }),
+        generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_WEBHOOK_RECEIVE],
+            connector.instance_id(),
+        ),
+    )
+    .await
+    .expect("signed unauthorized sender should be handled by policy");
+
+    let second = invoke(
+        &connector,
+        OP_WEBHOOK_RECEIVE,
+        json!({
+            "headers": { "x-hub-signature-256": sign_payload(&body) },
+            "body": String::from_utf8(body).expect("utf8 body"),
+        }),
+        generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_WEBHOOK_RECEIVE],
+            connector.instance_id(),
+        ),
+    )
+    .await
+    .expect("replayed unauthorized sender should be handled by replay policy");
+
+    assert_eq!(first["event_count"], 0);
+    assert_eq!(first["dropped_event_count"], 1);
+    assert_eq!(first["replay_dropped_count"], 0);
+    assert_eq!(first["policy_decisions"][0]["decision"], "dropped");
+    assert_eq!(first["policy_decisions"][0]["reason"], "sender_not_allowed");
+    assert_eq!(first["policy_decisions"][0]["event_kind"], "message");
+
+    let sender_redacted = first["policy_decisions"][0]["sender_redacted"]
+        .as_str()
+        .expect("redacted sender");
+    assert_ne!(sender_redacted, "15559876543");
+
+    assert_eq!(second["event_count"], 0);
+    assert_eq!(second["dropped_event_count"], 1);
+    assert_eq!(second["replay_dropped_count"], 1);
+    assert_eq!(second["policy_decisions"][0]["reason"], "replay_detected");
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_receive_keeps_status_updates_audit_only_under_sender_policy() {
+    let _ctx = AsyncTestContext::for_scenario("whatsapp.webhook_receive.status_audit_policy");
+    let (connector, signing_key) =
+        setup_connector_with_sender_policy("http://127.0.0.1:1", &[CAP_WEBHOOK], &["+111"]).await;
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_RECEIVE],
+        connector.instance_id(),
+    );
+
+    let body = serde_json::to_vec(&sample_status_notification()).expect("body json");
+    let result = invoke(
+        &connector,
+        OP_WEBHOOK_RECEIVE,
+        json!({
+            "headers": { "x-hub-signature-256": sign_payload(&body) },
+            "body": String::from_utf8(body).expect("utf8 body"),
+        }),
+        token,
+    )
+    .await
+    .expect("signed status update should be accepted as audit event");
+
+    assert_eq!(result["event_count"], 1);
+    assert_eq!(result["dropped_event_count"], 0);
+    assert_eq!(result["events"][0]["event_kind"], "status");
+    assert_eq!(result["events"][0]["agent_turn_eligible"], false);
+    assert_eq!(result["events"][0]["policy"]["decision"], "accepted");
+    assert_eq!(
+        result["events"][0]["policy"]["reason"],
+        "status_update_audit_only"
+    );
+    assert_eq!(
+        result["policy_decisions"][0]["reason"],
+        "status_update_audit_only"
+    );
 }
 
 #[fcp_async_core::runtime::test]
 async fn webhook_receive_invalid_signature_is_rejected() {
     let (connector, signing_key) =
         setup_connector("http://127.0.0.1:1", &[CAP_WEBHOOK], true).await;
-    let token = generate_valid_token(&signing_key, CAP_WEBHOOK, &[OP_WEBHOOK_RECEIVE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_WEBHOOK,
+        &[OP_WEBHOOK_RECEIVE],
+        connector.instance_id(),
+    );
     let body = serde_json::to_vec(&sample_text_notification()).expect("body json");
 
     let result = invoke(
@@ -786,7 +1049,12 @@ async fn capability_mismatch_rejects_send_text() {
     let server = MockServer::start().await;
     let (connector, signing_key) =
         setup_connector(&server.uri(), &[CAP_SEND, CAP_READ], false).await;
-    let token = generate_valid_token(&signing_key, CAP_READ, &[OP_SEND_TEXT]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_READ,
+        &[OP_SEND_TEXT],
+        connector.instance_id(),
+    );
 
     let result = invoke(
         &connector,
@@ -838,7 +1106,12 @@ async fn lifecycle_shutdown_succeeds() {
 async fn operation_mismatch_rejects_send_text() {
     let server = MockServer::start().await;
     let (connector, signing_key) = setup_connector(&server.uri(), &[CAP_SEND], false).await;
-    let token = generate_valid_token(&signing_key, CAP_SEND, &[OP_GET_PROFILE]);
+    let token = generate_valid_token(
+        &signing_key,
+        CAP_SEND,
+        &[OP_GET_PROFILE],
+        connector.instance_id(),
+    );
 
     let result = invoke(
         &connector,

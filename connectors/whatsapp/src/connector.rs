@@ -6,15 +6,15 @@ use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
-use fcp_webhook::WebhookError;
+use fcp_webhook::{WebhookError, WebhookEvent};
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::WhatsAppClient;
@@ -35,6 +35,21 @@ const CAP_SEND: &str = "whatsapp.send";
 const CAP_READ: &str = "whatsapp.read";
 const CAP_WEBHOOK: &str = "whatsapp.webhook";
 
+const PERSONAL_BRIDGE_CONFIG_KEYS: &[&str] = &[
+    "personal_bridge",
+    "bridge_script",
+    "bridge_port",
+    "session_path",
+    "dm_policy",
+    "allow_from",
+    "allowFrom",
+    "group_policy",
+    "group_allow_from",
+    "groupAllowFrom",
+    "require_mention",
+    "free_response_chats",
+];
+
 /// WhatsApp connector configuration.
 #[derive(Clone, Deserialize)]
 struct WhatsAppConfig {
@@ -52,6 +67,13 @@ struct WhatsAppConfig {
     /// Token for webhook challenge-response verification.
     #[serde(default)]
     webhook_verify_token: Option<String>,
+    /// Optional Cloud API sender allowlist for inbound webhook messages.
+    ///
+    /// Empty means every signed Cloud API message sender is accepted. Status
+    /// updates are never converted into agent-turn inputs, but they remain
+    /// accepted as audit events.
+    #[serde(default)]
+    webhook_allowed_senders: Vec<String>,
 }
 
 impl std::fmt::Debug for WhatsAppConfig {
@@ -70,6 +92,10 @@ impl std::fmt::Debug for WhatsAppConfig {
                 "webhook_verify_token",
                 &self.webhook_verify_token.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "webhook_allowed_senders",
+                &redacted_sender_list(&self.webhook_allowed_senders),
+            )
             .finish()
     }
 }
@@ -80,6 +106,129 @@ fn default_base_url() -> String {
 
 const fn default_request_timeout_ms() -> u64 {
     30_000
+}
+
+fn reject_personal_bridge_config(config: &Value) -> FcpResult<()> {
+    let Some(object) = config.as_object() else {
+        return Ok(());
+    };
+    if let Some(key) = PERSONAL_BRIDGE_CONFIG_KEYS
+        .iter()
+        .find(|key| object.contains_key(**key))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!(
+                "WhatsApp connector is Cloud API-only; personal WhatsApp Web bridge config key `{key}` is not supported in this connector"
+            ),
+        });
+    }
+    Ok(())
+}
+
+fn normalize_whatsapp_identifier(value: &str) -> String {
+    let without_prefix = value
+        .trim()
+        .strip_prefix("whatsapp:")
+        .unwrap_or(value.trim());
+    let before_jid_suffix = without_prefix.split('@').next().unwrap_or(without_prefix);
+    before_jid_suffix
+        .trim_start_matches('+')
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn webhook_sender_allowed(allowed_senders: &[String], sender: &str) -> bool {
+    if allowed_senders.is_empty() {
+        return true;
+    }
+    let sender = normalize_whatsapp_identifier(sender);
+    !sender.is_empty()
+        && allowed_senders.iter().any(|allowed| {
+            allowed.trim() == "*" || normalize_whatsapp_identifier(allowed) == sender
+        })
+}
+
+fn redacted_sender_list(senders: &[String]) -> Vec<String> {
+    senders
+        .iter()
+        .map(|sender| {
+            if sender.trim() == "*" {
+                "*".to_string()
+            } else {
+                WhatsAppWebhook::redact_phone(sender)
+            }
+        })
+        .collect()
+}
+
+fn cloud_event_kind(event_type: &str) -> &'static str {
+    if event_type.starts_with("message.") {
+        "message"
+    } else if event_type.starts_with("status.") {
+        "status"
+    } else {
+        "unknown"
+    }
+}
+
+fn cloud_webhook_policy_decision(config: &WhatsAppConfig, event: &WebhookEvent) -> Value {
+    let event_kind = cloud_event_kind(&event.event_type);
+    let sender = event
+        .payload
+        .pointer("/message/from")
+        .and_then(Value::as_str);
+    let recipient = event
+        .payload
+        .pointer("/status/recipient_id")
+        .and_then(Value::as_str);
+    let (decision, reason, agent_turn_eligible) = match event_kind {
+        "message" => match sender {
+            Some(sender) if webhook_sender_allowed(&config.webhook_allowed_senders, sender) => (
+                "accepted",
+                if config.webhook_allowed_senders.is_empty() {
+                    "sender_policy_allow_all"
+                } else {
+                    "sender_allowed"
+                },
+                true,
+            ),
+            Some(_) => ("dropped", "sender_not_allowed", false),
+            None => ("dropped", "message_sender_missing", false),
+        },
+        "status" => ("accepted", "status_update_audit_only", false),
+        _ => ("dropped", "unsupported_cloud_event_type", false),
+    };
+
+    json!({
+        "schema_version": "whatsapp.cloud_webhook_policy.v1",
+        "connector_scope": "whatsapp_business_cloud_api",
+        "personal_bridge_supported": false,
+        "decision": decision,
+        "reason": reason,
+        "event_id": event.id,
+        "event_type": event.event_type,
+        "event_kind": event_kind,
+        "agent_turn_eligible": agent_turn_eligible,
+        "sender_redacted": sender.map(WhatsAppWebhook::redact_phone),
+        "recipient_redacted": recipient.map(WhatsAppWebhook::redact_phone),
+    })
+}
+
+fn replay_policy_decision(event: &WebhookEvent) -> Value {
+    json!({
+        "schema_version": "whatsapp.cloud_webhook_policy.v1",
+        "connector_scope": "whatsapp_business_cloud_api",
+        "personal_bridge_supported": false,
+        "decision": "dropped",
+        "reason": "replay_detected",
+        "event_id": event.id,
+        "event_type": event.event_type,
+        "event_kind": cloud_event_kind(&event.event_type),
+        "agent_turn_eligible": false,
+    })
 }
 
 // Doctor types
@@ -131,6 +280,12 @@ impl WhatsAppConnector {
             verifier: None,
             webhook: None,
         }
+    }
+
+    /// Return this connector instance ID for host-issued capability token binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -236,11 +391,19 @@ impl WhatsAppConnector {
                 name: "webhook".into(),
                 passed: webhook_ok,
                 message: Some(if webhook_ok {
-                    "Webhook handler configured (app_secret + verify_token)".into()
+                    "Cloud API webhook handler configured (app_secret + verify_token)".into()
                 } else {
-                    "Webhook not configured (set app_secret and webhook_verify_token to enable)"
-                        .into()
+                    "Cloud API webhook not configured (set app_secret and webhook_verify_token to enable)".into()
                 }),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "personal_bridge_boundary".into(),
+                passed: true,
+                message: Some(
+                    "Personal WhatsApp Web bridge config is intentionally rejected; this connector is Cloud API-only"
+                        .into(),
+                ),
                 critical: false,
             });
         }
@@ -397,7 +560,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
         OperationInfo {
             id: OperationId::from_static(OP_WEBHOOK_RECEIVE),
             summary: "Receive and verify a WhatsApp webhook notification".into(),
-            description: Some("Verifies HMAC-SHA256 signature, parses incoming messages and status updates, applies replay detection".into()),
+            description: Some("Cloud API-only receiver: verifies HMAC-SHA256 signature, parses incoming messages and status updates, applies replay detection, and records connector-owned sender policy decisions before emitting agent-turn-eligible message events".into()),
             input_schema: json!({
                 "type": "object",
                 "required": ["headers", "body"],
@@ -420,11 +583,19 @@ pub fn operations_info() -> Vec<OperationInfo> {
                             "properties": {
                                 "id": { "type": "string" },
                                 "event_type": { "type": "string" },
-                                "payload": { "type": "object" }
+                                "event_kind": { "type": "string", "enum": ["message", "status", "unknown"] },
+                                "agent_turn_eligible": { "type": "boolean" },
+                                "payload": { "type": "object" },
+                                "policy": { "type": "object" }
                             }
                         }
                     },
-                    "event_count": { "type": "integer" }
+                    "event_count": { "type": "integer" },
+                    "dropped_event_count": { "type": "integer" },
+                    "replay_dropped_count": { "type": "integer" },
+                    "policy_decisions": { "type": "array", "items": { "type": "object" } },
+                    "connector_scope": { "type": "string", "const": "whatsapp_business_cloud_api" },
+                    "personal_bridge_supported": { "type": "boolean", "const": false }
                 }
             }),
             capability: CapabilityId::from_static(CAP_WEBHOOK),
@@ -437,6 +608,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "Body must be the raw JSON string, not pre-parsed".into(),
                     "X-Hub-Signature-256 header is required for verification".into(),
                     "app_secret must be configured for webhook verification to work".into(),
+                    "This connector does not run a personal WhatsApp Web bridge; use Cloud API webhook payloads only".into(),
                 ],
                 examples: Vec::new(),
                 related: vec![CapabilityId::from_static(OP_WEBHOOK_VERIFY)],
@@ -456,6 +628,7 @@ impl FcpConnector for WhatsAppConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        reject_personal_bridge_config(&config)?;
         let config: WhatsAppConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
@@ -783,6 +956,9 @@ impl WhatsAppConnector {
                     message: "Webhook not configured (set app_secret and webhook_verify_token)"
                         .into(),
                 })?;
+                let config = self.config.as_ref().ok_or(FcpError::Internal {
+                    message: "WhatsApp config missing after configure".into(),
+                })?;
 
                 let headers_value = req.input.get("headers").ok_or(FcpError::InvalidRequest {
                     code: 1005,
@@ -824,19 +1000,49 @@ impl WhatsAppConnector {
 
                 // Apply replay detection to each event
                 let mut accepted = Vec::new();
+                let mut policy_decisions = Vec::new();
                 for event in &events {
                     if webhook.claim_event(&event.id).is_ok() {
-                        accepted.push(json!({
-                            "id": event.id,
-                            "event_type": event.event_type,
-                            "payload": event.payload,
-                        }));
+                        let policy = cloud_webhook_policy_decision(config, event);
+                        let accepted_by_policy = policy["decision"] == "accepted";
+                        if accepted_by_policy {
+                            let event_kind = policy["event_kind"].clone();
+                            let agent_turn_eligible = policy["agent_turn_eligible"].clone();
+                            accepted.push(json!({
+                                "id": event.id,
+                                "event_type": event.event_type,
+                                "event_kind": event_kind,
+                                "agent_turn_eligible": agent_turn_eligible,
+                                "payload": event.payload,
+                                "policy": policy.clone(),
+                            }));
+                        } else {
+                            policy_decisions.push(policy);
+                            continue;
+                        }
+                        policy_decisions.push(policy);
+                    } else {
+                        policy_decisions.push(replay_policy_decision(event));
                     }
                 }
+                let event_count = accepted.len();
+                let dropped_event_count = policy_decisions
+                    .iter()
+                    .filter(|decision| decision["decision"] == "dropped")
+                    .count();
+                let replay_dropped_count = policy_decisions
+                    .iter()
+                    .filter(|decision| decision["reason"] == "replay_detected")
+                    .count();
 
                 json!({
                     "events": accepted,
-                    "event_count": accepted.len(),
+                    "event_count": event_count,
+                    "dropped_event_count": dropped_event_count,
+                    "replay_dropped_count": replay_dropped_count,
+                    "policy_decisions": policy_decisions,
+                    "connector_scope": "whatsapp_business_cloud_api",
+                    "personal_bridge_supported": false,
                 })
             }
             _ => {
@@ -886,6 +1092,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &str,
         operation: &str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -900,6 +1107,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id.as_str())
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("valid constraints cbor")
@@ -956,6 +1164,35 @@ mod tests {
         let mut connector = WhatsAppConnector::new();
         let result = connector.configure(json!({})).await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_personal_bridge_keys() {
+        for (key, value) in [
+            ("bridge_script", json!("bridge.js")),
+            ("allowFrom", json!(["15559876543"])),
+            ("dm_policy", json!("allowlist")),
+        ] {
+            let mut connector = WhatsAppConnector::new();
+            let mut config = json!({
+                "phone_number_id": "123456",
+                "access_token": "test_token",
+            });
+            config[key] = value;
+
+            let err = connector
+                .configure(config)
+                .await
+                .expect_err("personal bridge config must be rejected");
+            assert!(
+                matches!(
+                    err,
+                    FcpError::InvalidRequest { ref message, .. }
+                        if message.contains("Cloud API-only") && message.contains(key)
+                ),
+                "unexpected error for key {key}: {err:?}"
+            );
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1157,7 +1394,7 @@ mod tests {
         let config = json!({
             "phone_number_id": "123456",
             "access_token": "test_token",
-            "app_secret": "test_app_secret",
+            "app_secret": "test_app_secret_12345",
             "webhook_verify_token": "test_verify_token"
         });
         let result = connector.configure(config).await;
@@ -1183,7 +1420,7 @@ mod tests {
             .configure(json!({
                 "phone_number_id": "123456",
                 "access_token": "test_token",
-                "app_secret": "test_app_secret",
+                "app_secret": "test_app_secret_12345",
                 "webhook_verify_token": "test_verify_token"
             }))
             .await
@@ -1227,7 +1464,7 @@ mod tests {
             .configure(json!({
                 "phone_number_id": "123",
                 "access_token": "tok",
-                "app_secret": "secret",
+                "app_secret": "test_app_secret_12345",
                 "webhook_verify_token": "my_token"
             }))
             .await
@@ -1246,7 +1483,7 @@ mod tests {
             .configure(json!({
                 "phone_number_id": "123",
                 "access_token": "tok",
-                "app_secret": "secret",
+                "app_secret": "test_app_secret_12345",
                 "webhook_verify_token": "my_token"
             }))
             .await
@@ -1285,7 +1522,7 @@ mod tests {
             .configure(json!({
                 "phone_number_id": "123",
                 "access_token": "tok",
-                "app_secret": "secret",
+                "app_secret": "test_app_secret_12345",
                 "webhook_verify_token": "verify"
             }))
             .await
@@ -1297,7 +1534,12 @@ mod tests {
             .unwrap();
 
         let mut req = base_invoke(connector.id(), OP_WEBHOOK_RECEIVE);
-        let signed_grant = signed_capability_token(&signing_key, CAP_WEBHOOK, OP_WEBHOOK_RECEIVE);
+        let signed_grant = signed_capability_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            OP_WEBHOOK_RECEIVE,
+            connector.instance_id(),
+        );
         req.capability_token.clone_from(&signed_grant);
         req.input = json!({
             "headers": {
@@ -1331,6 +1573,29 @@ mod tests {
     }
 
     #[test]
+    fn webhook_receive_operation_is_cloud_api_only() {
+        let ops = operations_info();
+        let receive_op = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_WEBHOOK_RECEIVE)
+            .unwrap();
+        let description = receive_op
+            .description
+            .as_deref()
+            .expect("webhook receive description");
+
+        assert!(description.contains("Cloud API-only"));
+        assert!(description.contains("sender policy decisions"));
+        assert!(
+            receive_op
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| hint.contains("personal WhatsApp Web bridge"))
+        );
+    }
+
+    #[test]
     fn debug_redacts_config_secrets() {
         let config = WhatsAppConfig {
             base_url: default_base_url(),
@@ -1340,6 +1605,7 @@ mod tests {
             request_timeout_ms: default_request_timeout_ms(),
             app_secret: Some("super_secret_app_key".into()),
             webhook_verify_token: Some("super_secret_webhook_key".into()),
+            webhook_allowed_senders: vec!["+15559876543".into()],
         };
         let debug_output = format!("{config:?}");
         assert!(
@@ -1355,6 +1621,14 @@ mod tests {
             "Debug output must not contain the raw webhook_verify_token"
         );
         assert!(
+            !debug_output.contains("+15559876543"),
+            "Debug output must not contain raw webhook sender allowlist entries"
+        );
+        assert!(
+            debug_output.contains("15*******43"),
+            "Debug output should redact webhook sender allowlist entries"
+        );
+        assert!(
             debug_output.contains("[REDACTED]"),
             "Debug output should show [REDACTED] for sensitive fields"
         );
@@ -1367,7 +1641,7 @@ mod tests {
         let mut connector = WhatsAppConnector::new();
         // Simulate having webhook configured by manually setting it
         connector.webhook = Some(crate::webhook::WhatsAppWebhook::new(
-            b"secret",
+            b"test_app_secret_12345",
             "token".to_string(),
         ));
         connector.config = Some(WhatsAppConfig {
@@ -1376,8 +1650,9 @@ mod tests {
             access_token: "tok".into(),
             retry: HttpRetryConfig::default(),
             request_timeout_ms: default_request_timeout_ms(),
-            app_secret: Some("secret".into()),
+            app_secret: Some("test_app_secret_12345".into()),
             webhook_verify_token: Some("token".into()),
+            webhook_allowed_senders: Vec::new(),
         });
         connector.client = Some(
             WhatsAppClient::new(

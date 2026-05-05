@@ -3,7 +3,7 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, HandshakeRequest,
-    InvokeRequest, OperationId, RequestId, ZoneId,
+    InstanceId, InvokeRequest, OperationId, RequestId, ZoneId,
 };
 use fcp_whatsapp::connector::WhatsAppConnector;
 use hmac::{Hmac, Mac};
@@ -31,7 +31,7 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -45,6 +45,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .zone_id("z:work")
         .principal("user:test")
         .operations(&[OP_WEBHOOK_RECEIVE])
+        .target_instance(instance_id.as_str())
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
@@ -95,6 +96,7 @@ async fn connector_suite_happy_path_verifies_webhook_signature() {
     let signing_key = Ed25519SigningKey::generate();
     let handshake = handshake_request(signing_key.verifying_key().to_bytes());
     let (body, signature) = signed_webhook_body();
+    let mut connector = WhatsAppConnector::new();
 
     let invoke = InvokeRequest {
         r#type: "invoke".into(),
@@ -108,7 +110,7 @@ async fn connector_suite_happy_path_verifies_webhook_signature() {
             },
             "body": body
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, connector.instance_id()),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -134,7 +136,6 @@ async fn connector_suite_happy_path_verifies_webhook_signature() {
         invoke_expectations: InvokeExpectations::default(),
     };
 
-    let mut connector = WhatsAppConnector::new();
     let mut runner = E2eRunner::new("fcp-whatsapp");
     let report = runner
         .run_connector_suite(&mut connector, suite)

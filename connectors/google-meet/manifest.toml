@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:3353b18caf2bae4bc94447813600590594f30a0ce047bef97f06942cef9d421c"
+interface_hash = "blake3-256:fcp.interface.v2:46142b762672a8991cd91cb04cc3eda213219188a63b0ae7235fa3ac846512d8"
 
 [connector]
 id = "fcp.google-meet"
@@ -35,8 +35,11 @@ optional = [
     "meet.conference.read",
     "meet.artifact.read",
     "meet.drive_artifact.read",
+    "meeting.live_join",
+    "meeting.live_read",
+    "meeting.live_leave",
 ]
-forbidden = ["system.exec", "network.listen", "browser.control", "meeting.live_join", "meeting.live_speak"]
+forbidden = ["system.exec", "network.listen", "browser.control", "meeting.live_speak"]
 
 [provides.operations."gmeet.normalize_space_name"]
 description = "Normalize a Google Meet URL, meeting code, or spaces/* name into a Meet API spaces/* resource name"
@@ -885,6 +888,182 @@ common_mistakes = ["Passing arbitrary Drive files; only docsDestination document
 examples = ['{"document_id":"1DocIdFromMeet","max_document_bytes":1048576}', '{"docs_destination":{"document":"https://docs.google.com/document/d/1DocIdFromMeet/edit"}}']
 related = ["gmeet.transcripts.with_text.list", "gmeet.smart_notes.with_text.list"]
 
+[provides.operations."gmeet.live.join"]
+description = "Create or replace a Google Meet live-session browser handoff contract"
+capability = "meeting.live_join"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "interactive"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.live.join".input_schema]
+required = ["meeting_url"]
+type = "object"
+[provides.operations."gmeet.live.join".input_schema.properties.meeting_url]
+type = "string"
+description = "Canonical https://meet.google.com/<meeting-code> URL"
+[provides.operations."gmeet.live.join".input_schema.properties.mode]
+type = "string"
+enum = ["transcribe", "realtime"]
+default = "transcribe"
+[provides.operations."gmeet.live.join".input_schema.properties.max_duration_minutes]
+type = "integer"
+minimum = 1
+maximum = 480
+
+[provides.operations."gmeet.live.join".output_schema]
+required = ["accepted", "status", "session", "browser_handoff"]
+type = "object"
+[provides.operations."gmeet.live.join".output_schema.properties.accepted]
+type = "boolean"
+[provides.operations."gmeet.live.join".output_schema.properties.status]
+type = "string"
+[provides.operations."gmeet.live.join".output_schema.properties.session]
+type = "object"
+[provides.operations."gmeet.live.join".output_schema.properties.browser_handoff]
+type = "object"
+[provides.operations."gmeet.live.join".output_schema.properties.replaced_session]
+type = ["object", "null"]
+
+[provides.operations."gmeet.live.join".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.join".ai_hints]
+when_to_use = "Request a supervised fcp.browser handoff for an active Google Meet session after explicit consent."
+common_mistakes = ["Passing Calendar, redirect, alternate host, http, or userinfo URLs", "Assuming this connector embeds a browser runtime; it returns a browser handoff contract"]
+examples = ['{"meeting_url":"https://meet.google.com/abc-defg-hij","mode":"transcribe"}']
+related = ["gmeet.live.status"]
+
+[provides.operations."gmeet.live.status"]
+description = "Return the active Google Meet live-session status and latest stop reason"
+capability = "meeting.live_read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."gmeet.live.status".input_schema]
+type = "object"
+
+[provides.operations."gmeet.live.status".output_schema]
+type = "object"
+
+[provides.operations."gmeet.live.status".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.status".ai_hints]
+when_to_use = "Inspect the current Google Meet live-session handoff contract without controlling the browser."
+common_mistakes = ["Treating live status as completed artifact metadata; live status uses a separate capability"]
+examples = ['{}']
+related = ["gmeet.live.join", "gmeet.live.leave"]
+
+[provides.operations."gmeet.live.transcript"]
+description = "Return the transcript buffer for the active or most recently stopped live session"
+capability = "meeting.live_read"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."gmeet.live.transcript".input_schema]
+type = "object"
+[provides.operations."gmeet.live.transcript".input_schema.properties.session_id]
+type = "string"
+
+[provides.operations."gmeet.live.transcript".output_schema]
+type = "object"
+
+[provides.operations."gmeet.live.transcript".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.transcript".ai_hints]
+when_to_use = "Read the live-session transcript buffer after a consented join handoff."
+common_mistakes = ["Using completed-conference transcript operations for an active call", "Expecting this read to speak or control the call"]
+examples = ['{"session_id":"<session-id>"}']
+related = ["gmeet.live.join", "gmeet.live.status"]
+
+[provides.operations."gmeet.live.leave"]
+description = "Stop the active Google Meet live-session handoff contract"
+capability = "meeting.live_leave"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."gmeet.live.leave".input_schema]
+type = "object"
+[provides.operations."gmeet.live.leave".input_schema.properties.session_id]
+type = "string"
+
+[provides.operations."gmeet.live.leave".output_schema]
+required = ["accepted", "status", "active"]
+type = "object"
+[provides.operations."gmeet.live.leave".output_schema.properties.accepted]
+type = "boolean"
+[provides.operations."gmeet.live.leave".output_schema.properties.status]
+type = "string"
+[provides.operations."gmeet.live.leave".output_schema.properties.active]
+type = "boolean"
+[provides.operations."gmeet.live.leave".output_schema.properties.stopped_session]
+type = "object"
+
+[provides.operations."gmeet.live.leave".network_constraints]
+host_allow = ["meet.google.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."gmeet.live.leave".ai_hints]
+when_to_use = "Leave the currently active Google Meet handoff session and preserve a structured stop reason."
+common_mistakes = ["Calling leave with a stale session_id after replacement already stopped the session"]
+examples = ['{"session_id":"<session-id>"}']
+related = ["gmeet.live.status"]
+
 [event_caps]
 streaming = false
 replay = false
@@ -942,6 +1121,27 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "meeting.live_join"
+requests = 20
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "meeting.live_read"
+requests = 300
+window_ms = 60000
+burst = 30
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "meeting.live_leave"
+requests = 60
+window_ms = 60000
+burst = 10
+scope = "instance"
+
 [rate_limits.operation_pools]
 "gmeet.normalize_space_name" = ["meet.space.read"]
 "gmeet.space.get" = ["meet.space.read"]
@@ -960,3 +1160,7 @@ scope = "instance"
 "gmeet.transcripts.with_text.list" = ["meet.artifact.read", "meet.drive_artifact.read"]
 "gmeet.smart_notes.with_text.list" = ["meet.artifact.read", "meet.drive_artifact.read"]
 "gmeet.drive_document_text.export" = ["meet.drive_artifact.read"]
+"gmeet.live.join" = ["meeting.live_join"]
+"gmeet.live.status" = ["meeting.live_read"]
+"gmeet.live.transcript" = ["meeting.live_read"]
+"gmeet.live.leave" = ["meeting.live_leave"]

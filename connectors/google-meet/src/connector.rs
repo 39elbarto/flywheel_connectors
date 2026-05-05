@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -42,6 +42,9 @@ const MEET_SPACE_END_CAP: &str = "meet.space.end";
 const MEET_CONFERENCE_READ_CAP: &str = "meet.conference.read";
 const MEET_ARTIFACT_READ_CAP: &str = "meet.artifact.read";
 const MEET_DRIVE_ARTIFACT_READ_CAP: &str = "meet.drive_artifact.read";
+const MEET_LIVE_JOIN_CAP: &str = "meeting.live_join";
+const MEET_LIVE_READ_CAP: &str = "meeting.live_read";
+const MEET_LIVE_LEAVE_CAP: &str = "meeting.live_leave";
 const SPACE_GET_OP: &str = "gmeet.space.get";
 const SPACE_CREATE_OP: &str = "gmeet.space.create";
 const SPACE_END_ACTIVE_CONFERENCE_OP: &str = "gmeet.space.end_active_conference";
@@ -58,6 +61,10 @@ const SMART_NOTES_LIST_OP: &str = "gmeet.smart_notes.list";
 const TRANSCRIPTS_WITH_TEXT_LIST_OP: &str = "gmeet.transcripts.with_text.list";
 const SMART_NOTES_WITH_TEXT_LIST_OP: &str = "gmeet.smart_notes.with_text.list";
 const DRIVE_DOCUMENT_TEXT_EXPORT_OP: &str = "gmeet.drive_document_text.export";
+const LIVE_JOIN_OP: &str = "gmeet.live.join";
+const LIVE_STATUS_OP: &str = "gmeet.live.status";
+const LIVE_TRANSCRIPT_OP: &str = "gmeet.live.transcript";
+const LIVE_LEAVE_OP: &str = "gmeet.live.leave";
 const DEFAULT_PAGE_SIZE: u32 = 100;
 const MAX_CONFERENCE_RECORD_PAGE_SIZE: u32 = 100;
 const MAX_PARTICIPANT_PAGE_SIZE: u32 = 250;
@@ -67,14 +74,16 @@ const MAX_ITEMS_CAP: usize = 1_000;
 const DEFAULT_DRIVE_EXPORT_MAX_BYTES: usize = 1_048_576;
 const MAX_DRIVE_EXPORT_BYTES: usize = 10 * 1_048_576;
 const ARTIFACT_OPERATION_TIMEOUT: StdDuration = StdDuration::from_secs(30);
+const DEFAULT_LIVE_SESSION_DURATION_MINUTES: u64 = 60;
+const MAX_LIVE_SESSION_DURATION_MINUTES: u64 = 8 * 60;
 const MEETINGS_SPACE_READONLY_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.readonly";
 const MEETINGS_SPACE_CREATED_SCOPE: &str = "https://www.googleapis.com/auth/meetings.space.created";
 const MEETINGS_SPACE_SETTINGS_SCOPE: &str =
     "https://www.googleapis.com/auth/meetings.space.settings";
-const MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE: &str =
-    "https://www.googleapis.com/auth/meetings.conference.media.readonly";
 const DRIVE_MEET_READONLY_SCOPE: &str = "https://www.googleapis.com/auth/drive.meet.readonly";
+const MEET_REST_READ_SCOPES: &[&str] =
+    &[MEETINGS_SPACE_CREATED_SCOPE, MEETINGS_SPACE_READONLY_SCOPE];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -93,6 +102,53 @@ struct NormalizedMeetSpace {
     meeting_uri: Option<String>,
     input_kind: MeetSpaceInputKind,
     live_session: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum GoogleMeetLiveMode {
+    Transcribe,
+    Realtime,
+}
+
+impl GoogleMeetLiveMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Transcribe => "transcribe",
+            Self::Realtime => "realtime",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetStopReason {
+    code: String,
+    message: String,
+    stopped_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetLiveSession {
+    session_id: String,
+    meeting_url: String,
+    meeting_code: String,
+    mode: GoogleMeetLiveMode,
+    max_duration_minutes: u64,
+    started_at: String,
+    browser_handoff: serde_json::Value,
+    transcript: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleMeetStoppedSession {
+    session: GoogleMeetLiveSession,
+    stop_reason: GoogleMeetStopReason,
+}
+
+#[derive(Debug, Clone, Default)]
+struct GoogleMeetLiveState {
+    active: Option<GoogleMeetLiveSession>,
+    last_stopped: Option<GoogleMeetStoppedSession>,
 }
 
 fn is_local_test_host(host: &str) -> bool {
@@ -246,6 +302,62 @@ fn normalize_meet_space_name(input: &str) -> FcpResult<NormalizedMeetSpace> {
         meeting_uri: Some(format!("https://meet.google.com/{trimmed}")),
         input_kind: MeetSpaceInputKind::MeetingCode,
         live_session: false,
+    })
+}
+
+fn validate_live_meet_url(input: &str) -> FcpResult<NormalizedMeetSpace> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        return Err(invalid_request("meeting_url is required"));
+    }
+
+    let url = Url::parse(trimmed)
+        .map_err(|error| invalid_request(format!("meeting_url could not be parsed: {error}")))?;
+    if url.scheme() != "https" {
+        return Err(invalid_request("meeting_url must use https"));
+    }
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(invalid_request("meeting_url must not include userinfo"));
+    }
+    let host = url
+        .host_str()
+        .ok_or_else(|| invalid_request("meeting_url must include a host"))?;
+    if !host.eq_ignore_ascii_case("meet.google.com") {
+        return Err(invalid_request(format!(
+            "meeting_url must target canonical meet.google.com, received {host}"
+        )));
+    }
+    if url.query().is_some() || url.fragment().is_some() {
+        return Err(invalid_request(
+            "meeting_url must not include a query string or fragment",
+        ));
+    }
+
+    let segments: Vec<_> = url
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.trim().is_empty())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if segments.len() != 1 {
+        return Err(invalid_request(
+            "meeting_url must be a canonical https://meet.google.com/<meeting-code> URL",
+        ));
+    }
+    let code = segments
+        .first()
+        .copied()
+        .ok_or_else(|| invalid_request("meeting_url did not include a valid meeting code"))?;
+    validate_space_suffix(code, "meeting_url did not include a valid meeting code")?;
+
+    Ok(NormalizedMeetSpace {
+        space_name: format!("spaces/{code}"),
+        meeting_code: Some(code.to_string()),
+        meeting_uri: Some(format!("https://meet.google.com/{code}")),
+        input_kind: MeetSpaceInputKind::MeetingUrl,
+        live_session: true,
     })
 }
 
@@ -603,6 +715,31 @@ fn scope_doctor_check(
     }
 }
 
+fn scope_any_doctor_check(
+    name: &str,
+    configured_scopes: &[String],
+    scopes: &[&'static str],
+    missing_message: &'static str,
+) -> DoctorCheck {
+    if scopes.iter().any(|scope| {
+        configured_scopes
+            .iter()
+            .any(|configured| configured == scope)
+    }) {
+        DoctorCheck {
+            name: name.into(),
+            status: DoctorStatus::Healthy,
+            message: format!("Configured scope: one of {}", scopes.join(", ")),
+        }
+    } else {
+        DoctorCheck {
+            name: name.into(),
+            status: DoctorStatus::Degraded,
+            message: missing_message.into(),
+        }
+    }
+}
+
 /// FCP Google Meet connector foundation.
 pub struct GoogleMeetConnector {
     base: Arc<BaseConnector>,
@@ -610,6 +747,7 @@ pub struct GoogleMeetConnector {
     client: Option<GoogleMeetClient>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
+    live_state: Mutex<GoogleMeetLiveState>,
 }
 
 impl GoogleMeetConnector {
@@ -622,6 +760,7 @@ impl GoogleMeetConnector {
             client: None,
             verifier: None,
             session_id: None,
+            live_state: Mutex::new(GoogleMeetLiveState::default()),
         }
     }
 
@@ -659,7 +798,8 @@ impl GoogleMeetConnector {
                 "foundation_only": false,
                 "api_read_operations": true,
                 "artifact_operations": true,
-                "live_session_operations": false,
+                "live_session_operations": true,
+                "live_session_contract": "browser_handoff_only",
             }
         }))
     }
@@ -720,7 +860,8 @@ impl GoogleMeetConnector {
             "status": if configured { "healthy" } else { "not_configured" },
             "foundation_only": false,
             "api_read_operations": true,
-            "live_session_operations": false,
+            "live_session_operations": true,
+            "live_session_contract": "browser_handoff_only",
             "metrics": {
                 "requests_total": metrics.requests_total,
                 "requests_error": metrics.requests_error,
@@ -793,11 +934,11 @@ impl GoogleMeetConnector {
                 status: DoctorStatus::Healthy,
                 message: format!("Drive export base URL: {}", config.drive_base_url),
             });
-            checks.push(scope_doctor_check(
-                "meet_artifact_scope",
+            checks.push(scope_any_doctor_check(
+                "meet_rest_read_scope",
                 &config.required_scopes,
-                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
-                "Recording, transcript, transcript-entry, and smart-note reads require the Meet conference media readonly scope; 401/403 can also mean restricted-scope review, developer-preview enrollment, or workspace policy denial.",
+                MEET_REST_READ_SCOPES,
+                "Conference records, participants, recordings, transcripts, transcript entries, and smart notes require meetings.space.readonly or meetings.space.created; 401/403 can also mean restricted-scope review, developer-preview enrollment, or workspace policy denial.",
             ));
             checks.push(scope_doctor_check(
                 "drive_artifact_scope",
@@ -825,7 +966,7 @@ impl GoogleMeetConnector {
         checks.push(DoctorCheck {
             name: "live_session_boundary".into(),
             status: DoctorStatus::Healthy,
-            message: "No live join, leave, or speak operations are advertised; artifact reads only target completed conference resources".into(),
+            message: "Live join/status/transcript/leave are available as a browser-handoff contract; browser automation remains delegated to fcp.browser and live speak remains deferred".into(),
         });
 
         let status = if checks
@@ -1004,9 +1145,194 @@ impl GoogleMeetConnector {
             TRANSCRIPTS_WITH_TEXT_LIST_OP => self.invoke_list_transcripts_with_text(&input).await,
             SMART_NOTES_WITH_TEXT_LIST_OP => self.invoke_list_smart_notes_with_text(&input).await,
             DRIVE_DOCUMENT_TEXT_EXPORT_OP => self.invoke_export_drive_document_text(&input).await,
+            LIVE_JOIN_OP => self.invoke_live_join(&input),
+            LIVE_STATUS_OP => self.invoke_live_status(),
+            LIVE_TRANSCRIPT_OP => self.invoke_live_transcript(&input),
+            LIVE_LEAVE_OP => self.invoke_live_leave(&input),
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
+        }
+    }
+
+    fn invoke_live_join(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let normalized = validate_live_meet_url(require_str(input, "meeting_url")?)?;
+        let mode = parse_live_mode(input)?;
+        let max_duration_minutes = parse_optional_u64(
+            input,
+            "max_duration_minutes",
+            1,
+            MAX_LIVE_SESSION_DURATION_MINUTES,
+        )?
+        .unwrap_or(DEFAULT_LIVE_SESSION_DURATION_MINUTES);
+        let session_id = SessionId::new().to_string();
+        let meeting_url = normalized
+            .meeting_uri
+            .ok_or_else(|| invalid_request("meeting_url did not normalize to a Meet URL"))?;
+        let meeting_code = normalized
+            .meeting_code
+            .ok_or_else(|| invalid_request("meeting_url did not normalize to a meeting code"))?;
+        let started_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let browser_handoff =
+            browser_handoff_contract(&session_id, &meeting_url, mode, max_duration_minutes);
+        let session = GoogleMeetLiveSession {
+            session_id,
+            meeting_url,
+            meeting_code,
+            mode,
+            max_duration_minutes,
+            started_at,
+            browser_handoff,
+            transcript: Vec::new(),
+        };
+
+        let replaced_session = {
+            let mut state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            let replaced_session = state.active.take().map(|previous| {
+                let stopped = GoogleMeetStoppedSession {
+                    session: previous,
+                    stop_reason: stop_reason(
+                        "replaced_by_new_join",
+                        "Previous live session was replaced by a new join request",
+                    ),
+                };
+                let value = stopped_session_json(&stopped);
+                state.last_stopped = Some(stopped);
+                value
+            });
+            state.active = Some(session.clone());
+            replaced_session
+        };
+
+        Ok(json!({
+            "accepted": true,
+            "status": "active",
+            "session": live_session_json(&session),
+            "browser_handoff": session.browser_handoff,
+            "replaced_session": replaced_session,
+        }))
+    }
+
+    fn invoke_live_status(&self) -> FcpResult<serde_json::Value> {
+        let state = self.live_state.lock().map_err(|_| FcpError::Internal {
+            message: "Google Meet live-session state lock poisoned".into(),
+        })?;
+        Ok(live_state_json(&state))
+    }
+
+    fn invoke_live_transcript(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        let session_filter = optional_str(input, "session_id")?;
+        let session_payload = {
+            let state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            state
+                .active
+                .as_ref()
+                .filter(|session| {
+                    session_filter.is_none_or(|expected| expected == session.session_id)
+                })
+                .map(|session| {
+                    (
+                        true,
+                        live_session_summary_json(session),
+                        session.transcript.clone(),
+                        session.transcript.len(),
+                    )
+                })
+                .or_else(|| {
+                    state.last_stopped.as_ref().and_then(|stopped| {
+                        session_filter
+                            .is_none_or(|expected| expected == stopped.session.session_id)
+                            .then(|| {
+                                (
+                                    false,
+                                    live_session_summary_json(&stopped.session),
+                                    stopped.session.transcript.clone(),
+                                    stopped.session.transcript.len(),
+                                )
+                            })
+                    })
+                })
+        };
+        let Some((active, session, entries, entry_count)) = session_payload else {
+            return Ok(json!({
+                "active": false,
+                "session": null,
+                "entries": [],
+                "entry_count": 0,
+            }));
+        };
+        Ok(json!({
+            "active": active,
+            "session": session,
+            "entries": entries,
+            "entry_count": entry_count,
+        }))
+    }
+
+    fn invoke_live_leave(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
+        enum LeaveOutcome {
+            NoActive {
+                stop_reason: Option<serde_json::Value>,
+            },
+            Stopped {
+                stopped_session: serde_json::Value,
+            },
+        }
+
+        let session_filter = optional_str(input, "session_id")?;
+        let outcome = {
+            let mut state = self.live_state.lock().map_err(|_| FcpError::Internal {
+                message: "Google Meet live-session state lock poisoned".into(),
+            })?;
+            let mismatch = state.active.as_ref().and_then(|active| {
+                session_filter.filter(|expected| *expected != active.session_id)
+            });
+            if let Some(expected) = mismatch {
+                let expected = expected.to_string();
+                drop(state);
+                return Err(invalid_request(format!(
+                    "session_id {expected} does not match active Google Meet live session"
+                )));
+            }
+            if let Some(active) = state.active.take() {
+                let stopped = GoogleMeetStoppedSession {
+                    session: active,
+                    stop_reason: stop_reason(
+                        "leave_requested",
+                        "Live session was stopped by an explicit leave request",
+                    ),
+                };
+                let stopped_session = stopped_session_json(&stopped);
+                state.last_stopped = Some(stopped);
+                drop(state);
+                LeaveOutcome::Stopped { stopped_session }
+            } else {
+                let stop_reason = state
+                    .last_stopped
+                    .as_ref()
+                    .map(|stopped| stop_reason_json(&stopped.stop_reason));
+                drop(state);
+                LeaveOutcome::NoActive { stop_reason }
+            }
+        };
+        match outcome {
+            LeaveOutcome::NoActive { stop_reason } => Ok(json!({
+                "accepted": true,
+                "status": "stopped",
+                "active": false,
+                "session": null,
+                "stop_reason": stop_reason,
+            })),
+            LeaveOutcome::Stopped { stopped_session } => Ok(json!({
+                "accepted": true,
+                "status": "stopped",
+                "active": false,
+                "stopped_session": stopped_session,
+            })),
         }
     }
 
@@ -1059,6 +1385,10 @@ impl GoogleMeetConnector {
                 allowed_scopes.join(", ")
             )))
         }
+    }
+
+    fn ensure_meet_rest_read_scope(&self, operation: &str) -> FcpResult<()> {
+        self.ensure_any_configured_scope(operation, MEET_REST_READ_SCOPES)
     }
 
     async fn invoke_get_space(&self, input: &serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1133,6 +1463,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(CONFERENCE_RECORD_GET_OP)?;
         let record = client
             .get_conference_record(require_str(input, "conference_record")?)
             .await
@@ -1145,6 +1476,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(CONFERENCE_RECORDS_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_CONFERENCE_RECORD_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let meeting = optional_str(input, "meeting")?;
@@ -1165,6 +1497,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(CONFERENCE_RECORD_LATEST_OP)?;
         let meeting = require_str(input, "meeting")?;
         let space = normalize_meet_space_name(meeting)?;
         let records = client
@@ -1184,6 +1517,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(PARTICIPANTS_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let participants = client
@@ -1206,6 +1540,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(PARTICIPANT_SESSIONS_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let sessions = client
@@ -1228,6 +1563,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        self.ensure_meet_rest_read_scope(ATTENDANCE_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_PARTICIPANT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let merge = parse_optional_bool(input, "merge_duplicate_participants")?.unwrap_or(true);
@@ -1308,10 +1644,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            RECORDINGS_LIST_OP,
-            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
-        )?;
+        self.ensure_meet_rest_read_scope(RECORDINGS_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
@@ -1338,10 +1671,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            TRANSCRIPTS_LIST_OP,
-            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
-        )?;
+        self.ensure_meet_rest_read_scope(TRANSCRIPTS_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
@@ -1368,10 +1698,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            TRANSCRIPT_ENTRIES_LIST_OP,
-            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
-        )?;
+        self.ensure_meet_rest_read_scope(TRANSCRIPT_ENTRIES_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let transcript = require_str(input, "transcript")?;
@@ -1408,10 +1735,7 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            SMART_NOTES_LIST_OP,
-            &[MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE],
-        )?;
+        self.ensure_meet_rest_read_scope(SMART_NOTES_LIST_OP)?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
@@ -1438,13 +1762,8 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            TRANSCRIPTS_WITH_TEXT_LIST_OP,
-            &[
-                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
-                DRIVE_MEET_READONLY_SCOPE,
-            ],
-        )?;
+        self.ensure_meet_rest_read_scope(TRANSCRIPTS_WITH_TEXT_LIST_OP)?;
+        self.ensure_configured_scopes(TRANSCRIPTS_WITH_TEXT_LIST_OP, &[DRIVE_MEET_READONLY_SCOPE])?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
@@ -1479,13 +1798,8 @@ impl GoogleMeetConnector {
         input: &serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        self.ensure_configured_scopes(
-            SMART_NOTES_WITH_TEXT_LIST_OP,
-            &[
-                MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
-                DRIVE_MEET_READONLY_SCOPE,
-            ],
-        )?;
+        self.ensure_meet_rest_read_scope(SMART_NOTES_WITH_TEXT_LIST_OP)?;
+        self.ensure_configured_scopes(SMART_NOTES_WITH_TEXT_LIST_OP, &[DRIVE_MEET_READONLY_SCOPE])?;
         let page_size = parse_page_size(input, MAX_ARTIFACT_PAGE_SIZE)?;
         let max_items = parse_max_items(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
@@ -1561,6 +1875,127 @@ impl Default for GoogleMeetConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn parse_live_mode(input: &serde_json::Value) -> FcpResult<GoogleMeetLiveMode> {
+    let Some(raw) = optional_str(input, "mode")? else {
+        return Ok(GoogleMeetLiveMode::Transcribe);
+    };
+    match raw {
+        "transcribe" => Ok(GoogleMeetLiveMode::Transcribe),
+        "realtime" => Ok(GoogleMeetLiveMode::Realtime),
+        _ => Err(invalid_request(
+            "`mode` must be either `transcribe` or `realtime`",
+        )),
+    }
+}
+
+fn stop_reason(code: &str, message: &str) -> GoogleMeetStopReason {
+    GoogleMeetStopReason {
+        code: code.to_string(),
+        message: message.to_string(),
+        stopped_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+    }
+}
+
+fn stop_reason_json(reason: &GoogleMeetStopReason) -> serde_json::Value {
+    json!({
+        "code": &reason.code,
+        "message": &reason.message,
+        "stopped_at": &reason.stopped_at,
+    })
+}
+
+fn live_session_summary_json(session: &GoogleMeetLiveSession) -> serde_json::Value {
+    json!({
+        "session_id": &session.session_id,
+        "meeting_url": &session.meeting_url,
+        "meeting_code": &session.meeting_code,
+        "mode": session.mode.as_str(),
+        "max_duration_minutes": session.max_duration_minutes,
+        "started_at": &session.started_at,
+    })
+}
+
+fn live_session_json(session: &GoogleMeetLiveSession) -> serde_json::Value {
+    let mut value = live_session_summary_json(session);
+    value["browser_handoff"] = session.browser_handoff.clone();
+    value["transcript_entry_count"] = json!(session.transcript.len());
+    value
+}
+
+fn stopped_session_json(stopped: &GoogleMeetStoppedSession) -> serde_json::Value {
+    json!({
+        "session": live_session_summary_json(&stopped.session),
+        "stop_reason": stop_reason_json(&stopped.stop_reason),
+    })
+}
+
+fn live_state_json(state: &GoogleMeetLiveState) -> serde_json::Value {
+    json!({
+        "active": state.active.is_some(),
+        "session": state.active.as_ref().map(live_session_json),
+        "last_stopped": state.last_stopped.as_ref().map(stopped_session_json),
+    })
+}
+
+fn browser_handoff_contract(
+    session_id: &str,
+    meeting_url: &str,
+    mode: GoogleMeetLiveMode,
+    max_duration_minutes: u64,
+) -> serde_json::Value {
+    json!({
+        "contract_version": "gmeet_live_browser_handoff.v1",
+        "target_connector": "fcp.browser",
+        "target_capabilities": [
+            "browser.navigate",
+            "browser.capture",
+            "browser.extract",
+            "browser.interact"
+        ],
+        "local_control_policy": {
+            "bind": "loopback_only",
+            "remote_exposure": "deny_by_default",
+            "secret_files": "avoid",
+            "owner_only_files_required": true
+        },
+        "session": {
+            "session_id": session_id,
+            "meeting_url": meeting_url,
+            "mode": mode.as_str(),
+            "max_duration_minutes": max_duration_minutes
+        },
+        "worker_plan": [
+            {
+                "operation": "browser.navigate",
+                "input": {
+                    "url": meeting_url,
+                    "wait_until": "domcontentloaded",
+                    "timeout_ms": 30000
+                }
+            },
+            {
+                "operation": "browser.wait_for_selector",
+                "input": {
+                    "selector": "body",
+                    "timeout_ms": 30000
+                }
+            },
+            {
+                "operation": "browser.extract_text",
+                "input": {
+                    "selector": "body",
+                    "timeout_ms": 5000
+                }
+            }
+        ],
+        "audit": {
+            "source_connector": CONNECTOR_ID,
+            "reason": "google_meet_live_session_handoff",
+            "no_embedded_browser_runtime": true
+        }
+    })
 }
 
 fn meet_operation_catalog() -> Vec<OperationInfo> {
@@ -1836,6 +2271,26 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                 }
             }),
         ),
+        live_join_op_info(),
+        live_read_op_info(
+            LIVE_STATUS_OP,
+            "Return the active Google Meet live-session status and latest stop reason",
+            json!({
+                "type": "object",
+                "properties": {}
+            }),
+        ),
+        live_read_op_info(
+            LIVE_TRANSCRIPT_OP,
+            "Return the transcript buffer for the active or most recently stopped live session",
+            json!({
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string" }
+                }
+            }),
+        ),
+        live_leave_op_info(),
     ]
 }
 
@@ -1906,7 +2361,7 @@ fn artifact_op_info(
         AgentHint {
             when_to_use: "Read completed Google Meet recording, transcript, transcript-entry, or smart-note artifacts.".into(),
             common_mistakes: vec![
-                "These operations require Meet conference media readonly OAuth scope and may be restricted or developer-preview gated.".into(),
+                "These operations require meetings.space.readonly or meetings.space.created OAuth scope and may be restricted or developer-preview gated.".into(),
                 "Use the Drive text export operation only for docsDestination document ids; do not scrape arbitrary Drive files.".into(),
             ],
             examples: vec![
@@ -1948,6 +2403,129 @@ fn drive_artifact_op_info(
             related: vec![],
         },
     )
+}
+
+fn live_join_op_info() -> OperationInfo {
+    let mut info = op_info(
+        LIVE_JOIN_OP,
+        "Create or replace a Google Meet live-session browser handoff contract",
+        json!({
+            "type": "object",
+            "required": ["meeting_url"],
+            "properties": {
+                "meeting_url": {
+                    "type": "string",
+                    "description": "Canonical https://meet.google.com/<meeting-code> URL"
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["transcribe", "realtime"],
+                    "default": "transcribe"
+                },
+                "max_duration_minutes": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": MAX_LIVE_SESSION_DURATION_MINUTES
+                }
+            }
+        }),
+        json!({
+            "type": "object",
+            "required": ["accepted", "status", "session", "browser_handoff"],
+            "properties": {
+                "accepted": { "type": "boolean" },
+                "status": { "type": "string" },
+                "session": { "type": "object" },
+                "browser_handoff": { "type": "object" },
+                "replaced_session": { "type": ["object", "null"] }
+            }
+        }),
+        MEET_LIVE_JOIN_CAP,
+        RiskLevel::High,
+        SafetyTier::Dangerous,
+        IdempotencyClass::BestEffort,
+        AgentHint {
+            when_to_use: "Request a supervised browser-connector handoff for an active Google Meet session after explicit user consent.".into(),
+            common_mistakes: vec![
+                "Passing Calendar or redirect URLs; only canonical https://meet.google.com/<meeting-code> URLs are accepted.".into(),
+                "Assuming this connector embeds a browser runtime; the response is a strict fcp.browser handoff contract.".into(),
+            ],
+            examples: vec![
+                r#"{"meeting_url":"https://meet.google.com/abc-defg-hij","mode":"transcribe"}"#.into(),
+            ],
+            related: vec![CapabilityId::from_static(LIVE_STATUS_OP)],
+        },
+    );
+    info.requires_approval = Some(ApprovalMode::Interactive);
+    info
+}
+
+fn live_read_op_info(
+    id: &'static str,
+    summary: &str,
+    input_schema: serde_json::Value,
+) -> OperationInfo {
+    let mut info = op_info(
+        id,
+        summary,
+        input_schema,
+        json!({
+            "type": "object",
+            "additionalProperties": true
+        }),
+        MEET_LIVE_READ_CAP,
+        RiskLevel::Medium,
+        SafetyTier::Risky,
+        IdempotencyClass::Strict,
+        AgentHint {
+            when_to_use: "Inspect an authorized Google Meet live-session control contract or transcript buffer.".into(),
+            common_mistakes: vec![
+                "Treating live transcript reads like completed artifact reads; live content uses a separate capability.".into(),
+                "Expecting browser automation side effects from status or transcript reads.".into(),
+            ],
+            examples: vec![r"{}".into()],
+            related: vec![CapabilityId::from_static(LIVE_JOIN_OP)],
+        },
+    );
+    info.requires_approval = Some(ApprovalMode::Policy);
+    info
+}
+
+fn live_leave_op_info() -> OperationInfo {
+    let mut info = op_info(
+        LIVE_LEAVE_OP,
+        "Stop the active Google Meet live-session handoff contract",
+        json!({
+            "type": "object",
+            "properties": {
+                "session_id": { "type": "string" }
+            }
+        }),
+        json!({
+            "type": "object",
+            "required": ["accepted", "status", "active"],
+            "properties": {
+                "accepted": { "type": "boolean" },
+                "status": { "type": "string" },
+                "active": { "type": "boolean" },
+                "stopped_session": { "type": "object" }
+            }
+        }),
+        MEET_LIVE_LEAVE_CAP,
+        RiskLevel::Medium,
+        SafetyTier::Risky,
+        IdempotencyClass::BestEffort,
+        AgentHint {
+            when_to_use: "Leave the currently active Google Meet browser handoff session and preserve a structured stop reason.".into(),
+            common_mistakes: vec![
+                "Calling leave with a stale session_id after a replacement join has already stopped that session.".into(),
+            ],
+            examples: vec![r#"{"session_id":"<session-id>"}"#.into()],
+            related: vec![CapabilityId::from_static(LIVE_STATUS_OP)],
+        },
+    );
+    info.requires_approval = Some(ApprovalMode::Policy);
+    info
 }
 
 fn space_mutation_op_info(
@@ -2385,6 +2963,9 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         | DRIVE_DOCUMENT_TEXT_EXPORT_OP => {
             Ok(CapabilityId::from_static(MEET_DRIVE_ARTIFACT_READ_CAP))
         }
+        LIVE_JOIN_OP => Ok(CapabilityId::from_static(MEET_LIVE_JOIN_CAP)),
+        LIVE_STATUS_OP | LIVE_TRANSCRIPT_OP => Ok(CapabilityId::from_static(MEET_LIVE_READ_CAP)),
+        LIVE_LEAVE_OP => Ok(CapabilityId::from_static(MEET_LIVE_LEAVE_CAP)),
         _ => Err(FcpError::OperationNotGranted {
             operation: operation.into(),
         }),
@@ -2782,7 +3363,7 @@ mod tests {
     }
 
     fn direct_test_auth_config() -> serde_json::Value {
-        serde_json::Value::Object(direct_test_auth_fields())
+        direct_test_auth_config_with([("required_scopes", json!([MEETINGS_SPACE_READONLY_SCOPE]))])
     }
 
     fn direct_test_bearer_header() -> String {
@@ -3124,6 +3705,61 @@ mod tests {
     }
 
     #[test]
+    fn validate_live_meet_url_accepts_only_canonical_meet_urls() {
+        let normalized =
+            validate_live_meet_url("https://meet.google.com/abc-defg-hij").expect("live url");
+        assert_eq!(normalized.space_name, "spaces/abc-defg-hij");
+        assert_eq!(
+            normalized.meeting_uri.as_deref(),
+            Some("https://meet.google.com/abc-defg-hij")
+        );
+        assert!(normalized.live_session);
+
+        let meet_userinfo_url = format!("https://{}@meet.google.com/abc-defg-hij", "user");
+        for raw in [
+            "",
+            "http://meet.google.com/abc-defg-hij",
+            "https://calendar.google.com/calendar/event?eid=abc",
+            "https://meet.google.com.evil.example/abc-defg-hij",
+            meet_userinfo_url.as_str(),
+            "https://meet.google.com/abc-defg-hij?pli=1",
+            "https://meet.google.com/abc-defg-hij#frag",
+            "https://meet.google.com/lookup/abc-defg-hij",
+            "https://meet.google.com/",
+        ] {
+            assert!(
+                matches!(
+                    validate_live_meet_url(raw),
+                    Err(FcpError::InvalidRequest { .. })
+                ),
+                "{raw:?} should be rejected for live control"
+            );
+        }
+    }
+
+    #[test]
+    fn live_mode_and_duration_bounds_are_strict() {
+        assert_eq!(
+            parse_live_mode(&json!({})).expect("default mode"),
+            GoogleMeetLiveMode::Transcribe
+        );
+        assert_eq!(
+            parse_live_mode(&json!({ "mode": "realtime" })).expect("realtime mode"),
+            GoogleMeetLiveMode::Realtime
+        );
+        assert!(parse_live_mode(&json!({ "mode": "voice" })).is_err());
+        assert!(
+            parse_optional_u64(
+                &json!({ "max_duration_minutes": MAX_LIVE_SESSION_DURATION_MINUTES + 1 }),
+                "max_duration_minutes",
+                1,
+                MAX_LIVE_SESSION_DURATION_MINUTES
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn normalize_space_config_accepts_only_supported_access_and_entry_point_enums() {
         let config = normalize_space_config(&json!({
             "config": {
@@ -3185,7 +3821,11 @@ mod tests {
             config.required_scopes,
             vec![MEETINGS_SPACE_READONLY_SCOPE.to_string()]
         );
-        assert_eq!(result["details"]["live_session_operations"], false);
+        assert_eq!(result["details"]["live_session_operations"], true);
+        assert_eq!(
+            result["details"]["live_session_contract"],
+            "browser_handoff_only"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -3198,7 +3838,8 @@ mod tests {
 
         let health = connector.handle_health().await.expect("health");
         assert_eq!(health["api_read_operations"], true);
-        assert_eq!(health["live_session_operations"], false);
+        assert_eq!(health["live_session_operations"], true);
+        assert_eq!(health["live_session_contract"], "browser_handoff_only");
 
         let doctor = connector.handle_doctor().await.expect("doctor");
         let checks = doctor["checks"].as_array().expect("doctor checks");
@@ -3211,7 +3852,7 @@ mod tests {
             live_boundary["message"]
                 .as_str()
                 .expect("live boundary message")
-                .contains("No live join, leave, or speak operations are advertised")
+                .contains("browser-handoff contract")
         );
     }
 
@@ -3236,6 +3877,75 @@ mod tests {
                 MEETINGS_SPACE_CREATED_SCOPE.to_string(),
                 MEETINGS_SPACE_READONLY_SCOPE.to_string()
             ]
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn read_and_artifact_operations_reject_missing_meet_rest_scope_before_network_io() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config_with([(
+                "required_scopes",
+                json!([DRIVE_MEET_READONLY_SCOPE]),
+            )]))
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [MEET_CONFERENCE_READ_CAP, MEET_ARTIFACT_READ_CAP],
+            }))
+            .await
+            .expect("handshake");
+
+        let read_err = connector
+            .handle_invoke(json!({
+                "operation": CONFERENCE_RECORDS_LIST_OP,
+                "input": {},
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    CONFERENCE_RECORDS_LIST_OP,
+                    MEET_CONFERENCE_READ_CAP
+                ),
+            }))
+            .await
+            .expect_err("conference reads require a Meet REST read scope");
+        assert!(
+            matches!(
+                read_err,
+                FcpError::InvalidRequest { ref message, .. }
+                    if message.contains(MEETINGS_SPACE_READONLY_SCOPE)
+                        && message.contains(MEETINGS_SPACE_CREATED_SCOPE)
+            ),
+            "unexpected read scope error: {read_err:?}"
+        );
+
+        let artifact_err = connector
+            .handle_invoke(json!({
+                "operation": RECORDINGS_LIST_OP,
+                "input": { "conference_record": "conferenceRecords/rec-1" },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    RECORDINGS_LIST_OP,
+                    MEET_ARTIFACT_READ_CAP
+                ),
+            }))
+            .await
+            .expect_err("artifact reads require a Meet REST read scope");
+        assert!(
+            matches!(
+                artifact_err,
+                FcpError::InvalidRequest { ref message, .. }
+                    if message.contains(MEETINGS_SPACE_READONLY_SCOPE)
+                        && message.contains(MEETINGS_SPACE_CREATED_SCOPE)
+            ),
+            "unexpected artifact scope error: {artifact_err:?}"
         );
     }
 
@@ -3295,12 +4005,15 @@ mod tests {
                 TRANSCRIPTS_WITH_TEXT_LIST_OP,
                 SMART_NOTES_WITH_TEXT_LIST_OP,
                 DRIVE_DOCUMENT_TEXT_EXPORT_OP,
+                LIVE_JOIN_OP,
+                LIVE_STATUS_OP,
+                LIVE_TRANSCRIPT_OP,
+                LIVE_LEAVE_OP,
             ]
         );
         assert!(
-            !ids.iter()
-                .any(|id| { id.contains("join") || id.contains("leave") || id.contains("say") }),
-            "artifact reads must not advertise live-session control operations"
+            !ids.iter().any(|id| id.contains("say")),
+            "voice/speak operations are intentionally deferred to a separate child"
         );
         assert_eq!(ops[0]["capability"], MEET_SPACE_READ_CAP);
         assert_eq!(ops[0]["safety_tier"], "safe");
@@ -3339,10 +4052,33 @@ mod tests {
                 assert_eq!(op["idempotency"], "strict");
                 continue;
             }
+            if [
+                LIVE_JOIN_OP,
+                LIVE_STATUS_OP,
+                LIVE_TRANSCRIPT_OP,
+                LIVE_LEAVE_OP,
+            ]
+            .contains(&op["id"].as_str().expect("op id"))
+            {
+                continue;
+            }
             assert_eq!(op["capability"], MEET_CONFERENCE_READ_CAP);
             assert_eq!(op["safety_tier"], "safe");
             assert_eq!(op["idempotency"], "strict");
         }
+        let live_join = ops
+            .iter()
+            .find(|op| op["id"] == LIVE_JOIN_OP)
+            .expect("live join op");
+        assert_eq!(live_join["capability"], MEET_LIVE_JOIN_CAP);
+        assert_eq!(live_join["safety_tier"], "dangerous");
+        assert_eq!(live_join["requires_approval"], "interactive");
+        let live_status = ops
+            .iter()
+            .find(|op| op["id"] == LIVE_STATUS_OP)
+            .expect("live status op");
+        assert_eq!(live_status["capability"], MEET_LIVE_READ_CAP);
+        assert_eq!(live_status["requires_approval"], "policy");
     }
 
     #[fcp_async_core::runtime::test]
@@ -3363,6 +4099,199 @@ mod tests {
 
         assert_eq!(result["space_name"], "spaces/abc-defg-hij");
         assert_eq!(result["live_session"], false);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn live_session_contract_joins_replaces_reads_and_leaves() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        connector
+            .handle_configure(direct_test_auth_config())
+            .await
+            .expect("configure");
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [
+                    MEET_LIVE_JOIN_CAP,
+                    MEET_LIVE_READ_CAP,
+                    MEET_LIVE_LEAVE_CAP
+                ],
+            }))
+            .await
+            .expect("handshake");
+
+        let first = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/abc-defg-hij",
+                    "mode": "transcribe",
+                    "max_duration_minutes": 15
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("join live session");
+        assert_eq!(first["accepted"], true);
+        assert_eq!(first["session"]["meeting_code"], "abc-defg-hij");
+        assert_eq!(first["session"]["mode"], "transcribe");
+        assert_eq!(first["browser_handoff"]["target_connector"], "fcp.browser");
+        assert_eq!(
+            first["browser_handoff"]["local_control_policy"]["bind"],
+            "loopback_only"
+        );
+        assert_eq!(
+            first["browser_handoff"]["worker_plan"][0]["input"]["url"],
+            "https://meet.google.com/abc-defg-hij"
+        );
+        assert_eq!(
+            first["browser_handoff"]["audit"]["no_embedded_browser_runtime"],
+            true
+        );
+        let first_session_id = first["session"]["session_id"]
+            .as_str()
+            .expect("first session id")
+            .to_string();
+
+        let status = connector
+            .handle_invoke(json!({
+                "operation": LIVE_STATUS_OP,
+                "input": {},
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_STATUS_OP,
+                    MEET_LIVE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("live status");
+        assert_eq!(status["active"], true);
+        assert_eq!(status["session"]["session_id"], first_session_id);
+
+        let transcript = connector
+            .handle_invoke(json!({
+                "operation": LIVE_TRANSCRIPT_OP,
+                "input": { "session_id": first_session_id },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_TRANSCRIPT_OP,
+                    MEET_LIVE_READ_CAP
+                ),
+            }))
+            .await
+            .expect("live transcript");
+        assert_eq!(transcript["active"], true);
+        assert_eq!(transcript["entry_count"], 0);
+        assert_eq!(transcript["entries"], json!([]));
+
+        let second = connector
+            .handle_invoke(json!({
+                "operation": LIVE_JOIN_OP,
+                "input": {
+                    "meeting_url": "https://meet.google.com/xyz-abcd-efg",
+                    "mode": "realtime"
+                },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_JOIN_OP,
+                    MEET_LIVE_JOIN_CAP
+                ),
+            }))
+            .await
+            .expect("replacement join");
+        assert_eq!(
+            second["replaced_session"]["stop_reason"]["code"],
+            "replaced_by_new_join"
+        );
+        let second_session_id = second["session"]["session_id"]
+            .as_str()
+            .expect("second session id")
+            .to_string();
+        assert_ne!(first_session_id, second_session_id);
+
+        let stale_leave = connector
+            .handle_invoke(json!({
+                "operation": LIVE_LEAVE_OP,
+                "input": { "session_id": first_session_id },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_LEAVE_OP,
+                    MEET_LIVE_LEAVE_CAP
+                ),
+            }))
+            .await
+            .expect_err("stale leave should not stop replacement session");
+        assert!(
+            matches!(stale_leave, FcpError::InvalidRequest { message, .. } if message.contains("does not match active"))
+        );
+
+        let left = connector
+            .handle_invoke(json!({
+                "operation": LIVE_LEAVE_OP,
+                "input": { "session_id": second_session_id },
+                "capability_token": capability_for_cap(
+                    &connector,
+                    &signing_key,
+                    LIVE_LEAVE_OP,
+                    MEET_LIVE_LEAVE_CAP
+                ),
+            }))
+            .await
+            .expect("leave active session");
+        assert_eq!(left["active"], false);
+        assert_eq!(
+            left["stopped_session"]["stop_reason"]["code"],
+            "leave_requested"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn live_session_operations_use_distinct_capability_gates() {
+        let signing_key = Ed25519SigningKey::generate();
+        let mut connector = GoogleMeetConnector::new();
+        configure_and_handshake(&mut connector, &signing_key).await;
+
+        let denied = connector
+            .handle_simulate(simulate_request_json(
+                &connector,
+                &signing_key,
+                LIVE_JOIN_OP,
+                MEET_SPACE_READ_CAP,
+            ))
+            .await
+            .expect("simulate denied");
+        assert_eq!(denied["would_succeed"], false);
+        assert!(
+            denied["missing_capabilities"]
+                .as_array()
+                .expect("missing capabilities")
+                .iter()
+                .any(|capability| capability == MEET_LIVE_JOIN_CAP)
+        );
+
+        let allowed = connector
+            .handle_simulate(simulate_request_json(
+                &connector,
+                &signing_key,
+                LIVE_JOIN_OP,
+                MEET_LIVE_JOIN_CAP,
+            ))
+            .await
+            .expect("simulate allowed");
+        assert_eq!(allowed["would_succeed"], true);
     }
 
     #[fcp_async_core::runtime::test]
@@ -3585,7 +4514,7 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn simulate_denies_unknown_live_session_operation() {
+    async fn simulate_denies_deferred_live_speak_operation() {
         let signing_key = Ed25519SigningKey::generate();
         let mut connector = GoogleMeetConnector::new();
         configure_and_handshake(&mut connector, &signing_key).await;
@@ -3594,8 +4523,8 @@ mod tests {
             .handle_simulate(simulate_request_json(
                 &connector,
                 &signing_key,
-                "gmeet.live.join",
-                "meeting.live_join",
+                "gmeet.live.say",
+                "meeting.live_speak",
             ))
             .await
             .expect("simulate response");
@@ -3605,7 +4534,7 @@ mod tests {
             result["failure_reason"]
                 .as_str()
                 .expect("failure reason")
-                .contains("gmeet.live.join")
+                .contains("gmeet.live.say")
         );
         assert!(
             result["missing_capabilities"]
@@ -4378,10 +5307,7 @@ mod tests {
                 ("drive_base_url", json!(drive_base_url)),
                 (
                     "required_scopes",
-                    json!([
-                        MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
-                        DRIVE_MEET_READONLY_SCOPE
-                    ]),
+                    json!([MEETINGS_SPACE_READONLY_SCOPE, DRIVE_MEET_READONLY_SCOPE]),
                 ),
             ]))
             .await
@@ -5039,7 +5965,6 @@ mod tests {
                         MEETINGS_SPACE_READONLY_SCOPE,
                         MEETINGS_SPACE_CREATED_SCOPE,
                         MEETINGS_SPACE_SETTINGS_SCOPE,
-                        MEETINGS_CONFERENCE_MEDIA_READONLY_SCOPE,
                         DRIVE_MEET_READONLY_SCOPE
                     ]),
                 ),
@@ -5501,6 +6426,9 @@ mod tests {
             "meet.conference.read",
             "meet.artifact.read",
             "meet.drive_artifact.read",
+            "meeting.live_join",
+            "meeting.live_read",
+            "meeting.live_leave",
         ] {
             assert!(
                 optional
@@ -5514,7 +6442,6 @@ mod tests {
             "system.exec",
             "network.listen",
             "browser.control",
-            "meeting.live_join",
             "meeting.live_speak",
         ] {
             assert!(
@@ -5545,11 +6472,15 @@ mod tests {
                         | TRANSCRIPTS_WITH_TEXT_LIST_OP
                         | SMART_NOTES_WITH_TEXT_LIST_OP
                         | DRIVE_DOCUMENT_TEXT_EXPORT_OP
+                        | LIVE_JOIN_OP
+                        | LIVE_STATUS_OP
+                        | LIVE_TRANSCRIPT_OP
+                        | LIVE_LEAVE_OP
                 )
             }),
-            "manifest should advertise only the space, conference-read, artifact, and Drive artifact operations"
+            "manifest should advertise only the space, conference-read, artifact, Drive artifact, and live handoff operations"
         );
-        assert_eq!(manifest.provides.operations.len(), 17);
+        assert_eq!(manifest.provides.operations.len(), 21);
         assert_eq!(
             manifest
                 .provides
@@ -5597,6 +6528,30 @@ mod tests {
                 .capability
                 .as_str(),
             MEET_DRIVE_ARTIFACT_READ_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == LIVE_JOIN_OP)
+                .map(|(_id, operation)| operation)
+                .expect("live join op")
+                .capability
+                .as_str(),
+            MEET_LIVE_JOIN_CAP
+        );
+        assert_eq!(
+            manifest
+                .provides
+                .operations
+                .iter()
+                .find(|(id, _operation)| id.as_str() == LIVE_STATUS_OP)
+                .map(|(_id, operation)| operation)
+                .expect("live status op")
+                .capability
+                .as_str(),
+            MEET_LIVE_READ_CAP
         );
     }
 }

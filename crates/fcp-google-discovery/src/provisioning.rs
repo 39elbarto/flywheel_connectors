@@ -1599,6 +1599,16 @@ mod tests {
         assert!(
             scopes.contains(&"https://www.googleapis.com/auth/drive.meet.readonly".to_string())
         );
+        let artifact_scopes = bundle
+            .scopes_for_triggers(Vec::<&str>::new())
+            .expect("default meet artifact scope should resolve");
+        assert_eq!(artifact_scopes, bundle.surface.default_scopes);
+        assert!(
+            !artifact_scopes
+                .iter()
+                .any(|scope| scope.contains("conference.media")),
+            "Meet REST artifacts should not request the live Meet Media API scope"
+        );
     }
 
     #[test]

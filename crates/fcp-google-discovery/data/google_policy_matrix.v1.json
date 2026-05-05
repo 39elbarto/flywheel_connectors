@@ -207,15 +207,6 @@
             ]
           },
           {
-            "trigger": "User enables Google Meet conference media artifact reads.",
-            "add_scopes": [
-              "https://www.googleapis.com/auth/meetings.conference.media.readonly"
-            ],
-            "notes": [
-              "Conference media reads are privacy-sensitive and should be explicit above ordinary space metadata reads."
-            ]
-          },
-          {
             "trigger": "User enables Google Meet Drive-backed transcript or smart-note text export.",
             "add_scopes": [
               "https://www.googleapis.com/auth/drive.meet.readonly"
@@ -227,12 +218,12 @@
         ],
         "gcloud_assisted_steps": [
           "Confirm Google Meet API enablement before launching user consent.",
-          "Preflight whether the selected workflow can stay on meetings.space.readonly before requesting creation, settings, media, or Drive-backed artifact scopes.",
+          "Preflight whether the selected workflow can stay on meetings.space.readonly before requesting creation, settings, or Drive-backed artifact scopes.",
           "Use gcloud-authenticated setup only for project/bootstrap checks; final runtime output must still be a credential_id or in-memory token path."
         ],
         "fallback_steps": [
           "Provide manual console steps for Google Meet API enablement and OAuth client selection when gcloud cannot manage the project.",
-          "Keep space creation, conference termination, settings, media, and Drive-backed artifact scopes as explicit opt-ins in the manual fallback path.",
+          "Keep space creation, conference termination, settings, and Drive-backed artifact scopes as explicit opt-ins in the manual fallback path.",
           "Do not mark runtime readiness until the host has materialized a runtime-safe credential reference or ephemeral access token."
         ],
         "runtime_materialization": [

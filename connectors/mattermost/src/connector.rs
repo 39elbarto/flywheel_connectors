@@ -685,7 +685,7 @@ impl MattermostConnector {
             let mut connection_id = String::new();
             let mut expected_server_seq = 0_u64;
 
-            loop {
+            'reconnect: loop {
                 if *shutdown_rx.borrow() {
                     break;
                 }
@@ -706,17 +706,20 @@ impl MattermostConnector {
                         reconnect_delay_ms = SOCKET_RECONNECT_MIN_MS;
                         let mut request_seq = 1_u64;
 
+                        let mut auth_request_seq = None;
                         if let Some(token) = auth_token.as_deref() {
+                            let challenge_seq = request_seq;
                             if let Err(err) = send_socket_action(
                                 &mut ws_stream,
                                 "authentication_challenge",
-                                request_seq,
+                                challenge_seq,
                                 json!({"token": token}),
                             )
                             .await
                             {
                                 warn!("Mattermost websocket auth challenge failed: {err}");
                             } else {
+                                auth_request_seq = Some(challenge_seq);
                                 request_seq = request_seq.saturating_add(1);
                             }
                         }
@@ -764,14 +767,24 @@ impl MattermostConnector {
                                             };
 
                                             if message.seq_reply.is_some() {
-                                                if message.status.as_deref() != Some("OK")
-                                                    || message.error.is_some()
-                                                {
+                                                let request_failed =
+                                                    socket_request_reply_failed(&message);
+                                                if request_failed {
                                                     warn!(
                                                         seq_reply = ?message.seq_reply,
                                                         error = ?message.error,
                                                         "Mattermost websocket request returned an error"
                                                     );
+                                                }
+                                                if auth_request_seq == message.seq_reply {
+                                                    auth_request_seq = None;
+                                                    if request_failed {
+                                                        warn!(
+                                                            error = ?message.error,
+                                                            "Mattermost websocket authentication rejected; stopping reconnect loop"
+                                                        );
+                                                        break 'reconnect;
+                                                    }
                                                 }
                                                 continue;
                                             }
@@ -3275,6 +3288,10 @@ async fn send_socket_action(
         .await
 }
 
+fn socket_request_reply_failed(message: &MattermostWebSocketMessage) -> bool {
+    message.status.as_deref() != Some("OK") || message.error.is_some()
+}
+
 fn mattermost_event_topic(event_name: &str) -> String {
     match event_name {
         "posted" => "mattermost.posted".to_string(),
@@ -3727,6 +3744,18 @@ mod tests {
         .to_string()
     }
 
+    fn mattermost_auth_failure_frame() -> String {
+        json!({
+            "status": "FAIL",
+            "seq_reply": 1,
+            "error": {
+                "id": "api.context.invalid_param.app_error",
+                "message": "invalid token"
+            }
+        })
+        .to_string()
+    }
+
     #[derive(Clone, Copy)]
     struct MattermostLoopbackPost<'a> {
         seq: u64,
@@ -3776,6 +3805,24 @@ mod tests {
             .expect("timed out waiting for loopback Mattermost event")
             .expect("event receiver should remain open")
             .expect("loopback event should be successful")
+    }
+
+    async fn wait_for_socket_stopped(connector: &MattermostConnector) -> Value {
+        fcp_async_core::time::timeout(Duration::from_secs(3), async {
+            loop {
+                let health = connector.handle_health().await.unwrap();
+                if health
+                    .pointer("/details/streaming/socket_running")
+                    .and_then(Value::as_bool)
+                    == Some(false)
+                {
+                    return health;
+                }
+                fcp_async_core::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("Mattermost websocket task should stop")
     }
 
     fn event_post_id(event: &EventEnvelope) -> Option<&str> {
@@ -4912,6 +4959,66 @@ mod tests {
         assert!(!health.to_string().contains("unmentioned channel message"));
 
         connector.handle_shutdown(json!({})).await.unwrap();
+        server
+            .join()
+            .expect("loopback websocket server thread should finish");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn websocket_loopback_stops_reconnecting_after_auth_rejection() {
+        let (base_url, server) = spawn_mattermost_loopback_websocket(vec![
+            mattermost_hello_frame(),
+            mattermost_auth_failure_frame(),
+        ]);
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": base_url,
+                "token": "tok_123"
+            }))
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(&HandshakeRequest {
+                protocol_version: "1.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0_u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static("mattermost.read")],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .unwrap();
+
+        let subscribe = connector
+            .handle_subscribe(json!({
+                "type": "subscribe",
+                "id": "sub_auth_rejection",
+                "topics": ["mattermost.posted"]
+            }))
+            .await
+            .unwrap();
+        assert_eq!(
+            subscribe.get("connection_status").and_then(Value::as_str),
+            Some("started")
+        );
+
+        let health = wait_for_socket_stopped(&connector).await;
+        assert_eq!(
+            health
+                .pointer("/details/streaming/socket_running")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            health
+                .pointer("/details/streaming/socket_connected")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
         server
             .join()
             .expect("loopback websocket server thread should finish");

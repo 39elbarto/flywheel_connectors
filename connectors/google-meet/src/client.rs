@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Duration;
 
+use fcp_async_core::Cx;
 use fcp_google_discovery::auth::{GoogleAuthSourceKind, GoogleMaterializedAuth};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use reqwest::{Client, StatusCode, Url, header};
@@ -255,13 +256,26 @@ impl GoogleMeetClient {
         page_size: Option<u32>,
         max_items: Option<usize>,
     ) -> GoogleMeetResult<Vec<GoogleMeetRecording>> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.list_recordings_with_cx(&cx, conference_record, page_size, max_items)
+            .await
+    }
+
+    /// List recordings for a conference record under an FCP async context.
+    pub async fn list_recordings_with_cx(
+        &self,
+        cx: &Cx,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetRecording>> {
         let parent = normalize_conference_record_name(conference_record)?;
         let path = format!("{}/recordings", encode_resource_name_for_path(&parent));
         let mut query = Vec::new();
         if let Some(size) = page_size {
             query.push(("pageSize", size.to_string()));
         }
-        self.list_collection(&path, "recordings", &query, max_items)
+        self.list_collection_with_cx(cx, &path, "recordings", &query, max_items)
             .await
     }
 
@@ -272,13 +286,26 @@ impl GoogleMeetClient {
         page_size: Option<u32>,
         max_items: Option<usize>,
     ) -> GoogleMeetResult<Vec<GoogleMeetTranscript>> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.list_transcripts_with_cx(&cx, conference_record, page_size, max_items)
+            .await
+    }
+
+    /// List transcripts for a conference record under an FCP async context.
+    pub async fn list_transcripts_with_cx(
+        &self,
+        cx: &Cx,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetTranscript>> {
         let parent = normalize_conference_record_name(conference_record)?;
         let path = format!("{}/transcripts", encode_resource_name_for_path(&parent));
         let mut query = Vec::new();
         if let Some(size) = page_size {
             query.push(("pageSize", size.to_string()));
         }
-        self.list_collection(&path, "transcripts", &query, max_items)
+        self.list_collection_with_cx(cx, &path, "transcripts", &query, max_items)
             .await
     }
 
@@ -289,13 +316,26 @@ impl GoogleMeetClient {
         page_size: Option<u32>,
         max_items: Option<usize>,
     ) -> GoogleMeetResult<Vec<GoogleMeetTranscriptEntry>> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.list_transcript_entries_with_cx(&cx, transcript, page_size, max_items)
+            .await
+    }
+
+    /// List transcript entries under an FCP async context.
+    pub async fn list_transcript_entries_with_cx(
+        &self,
+        cx: &Cx,
+        transcript: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetTranscriptEntry>> {
         let transcript = normalize_transcript_name(transcript)?;
         let path = format!("{}/entries", encode_resource_name_for_path(&transcript));
         let mut query = Vec::new();
         if let Some(size) = page_size {
             query.push(("pageSize", size.to_string()));
         }
-        self.list_collection(&path, "transcriptEntries", &query, max_items)
+        self.list_collection_with_cx(cx, &path, "transcriptEntries", &query, max_items)
             .await
     }
 
@@ -306,13 +346,26 @@ impl GoogleMeetClient {
         page_size: Option<u32>,
         max_items: Option<usize>,
     ) -> GoogleMeetResult<Vec<GoogleMeetSmartNote>> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.list_smart_notes_with_cx(&cx, conference_record, page_size, max_items)
+            .await
+    }
+
+    /// List smart notes for a conference record under an FCP async context.
+    pub async fn list_smart_notes_with_cx(
+        &self,
+        cx: &Cx,
+        conference_record: &str,
+        page_size: Option<u32>,
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<GoogleMeetSmartNote>> {
         let parent = normalize_conference_record_name(conference_record)?;
         let path = format!("{}/smartNotes", encode_resource_name_for_path(&parent));
         let mut query = Vec::new();
         if let Some(size) = page_size {
             query.push(("pageSize", size.to_string()));
         }
-        self.list_collection(&path, "smartNotes", &query, max_items)
+        self.list_collection_with_cx(cx, &path, "smartNotes", &query, max_items)
             .await
     }
 
@@ -322,19 +375,35 @@ impl GoogleMeetClient {
         document_id: &str,
         max_bytes: usize,
     ) -> GoogleMeetResult<String> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.export_drive_document_text_with_cx(&cx, document_id, max_bytes)
+            .await
+    }
+
+    /// Export Drive-backed docsDestination text under an FCP async context.
+    pub async fn export_drive_document_text_with_cx(
+        &self,
+        cx: &Cx,
+        document_id: &str,
+        max_bytes: usize,
+    ) -> GoogleMeetResult<String> {
+        checkpoint(cx, "Google Drive files.export: validate document id")?;
         let document_id = validate_drive_document_id(document_id)?;
         let path = format!(
             "files/{}/export",
             utf8_percent_encode(&document_id, NON_ALPHANUMERIC)
         );
+        checkpoint(cx, "Google Drive files.export: build export URL")?;
         let url = self.build_drive_url(&path, &[("mimeType", "text/plain".to_string())])?;
         let mut request = self.http.get(url).header(header::ACCEPT, "text/plain");
         let auth_headers = auth_headers(&self.auth)?;
         if !auth_headers.is_empty() {
             request = request.headers(auth_headers);
         }
+        checkpoint(cx, "Google Drive files.export: send request")?;
         let response = request.send().await.map_err(GoogleMeetError::Http)?;
-        decode_text_response(response, "Google Drive files.export", max_bytes).await
+        checkpoint(cx, "Google Drive files.export: decode response")?;
+        decode_text_response_with_cx(cx, response, "Google Drive files.export", max_bytes).await
     }
 
     async fn list_collection<T>(
@@ -347,15 +416,41 @@ impl GoogleMeetClient {
     where
         T: DeserializeOwned + NamedGoogleMeetResource,
     {
+        let cx = fcp_async_core::compatibility_cx();
+        self.list_collection_with_cx(&cx, path, collection_key, query, max_items)
+            .await
+    }
+
+    async fn list_collection_with_cx<T>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        collection_key: &str,
+        query: &[(&str, String)],
+        max_items: Option<usize>,
+    ) -> GoogleMeetResult<Vec<T>>
+    where
+        T: DeserializeOwned + NamedGoogleMeetResource,
+    {
         let mut items = Vec::new();
         let mut next_page_cursor: Option<String> = None;
 
         loop {
+            checkpoint(
+                cx,
+                format!(
+                    "Google Meet {collection_key}: paginate after {} items",
+                    items.len()
+                ),
+            )?;
             let mut page_query = query.to_vec();
             if let Some(cursor) = &next_page_cursor {
                 page_query.push(("pageToken", cursor.clone()));
             }
-            let page_body = self.get_json::<Value>(path, &page_query).await?;
+            let page_body = self
+                .get_json_with_cx::<Value>(cx, path, &page_query)
+                .await?;
+            checkpoint(cx, format!("Google Meet {collection_key}: decode page"))?;
             let page_items_value = page_body
                 .get(collection_key)
                 .cloned()
@@ -370,6 +465,7 @@ impl GoogleMeetClient {
             let page_items: Vec<T> =
                 serde_json::from_value(page_items_value).map_err(GoogleMeetError::Json)?;
             for item in page_items {
+                checkpoint(cx, format!("Google Meet {collection_key}: assemble item"))?;
                 ensure_named(&item, collection_key)?;
                 items.push(item);
                 if max_items.is_some_and(|limit| items.len() >= limit) {
@@ -391,14 +487,27 @@ impl GoogleMeetClient {
         path: &str,
         query: &[(&str, String)],
     ) -> GoogleMeetResult<T> {
+        let cx = fcp_async_core::compatibility_cx();
+        self.get_json_with_cx(&cx, path, query).await
+    }
+
+    async fn get_json_with_cx<T: DeserializeOwned>(
+        &self,
+        cx: &Cx,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> GoogleMeetResult<T> {
+        checkpoint(cx, "Google Meet request: build URL")?;
         let url = self.build_url(path, query)?;
         let mut request = self.http.get(url);
         let auth_headers = auth_headers(&self.auth)?;
         if !auth_headers.is_empty() {
             request = request.headers(auth_headers);
         }
+        checkpoint(cx, "Google Meet request: send")?;
         let response = request.send().await.map_err(GoogleMeetError::Http)?;
-        decode_response(response).await
+        checkpoint(cx, "Google Meet request: decode response")?;
+        decode_response_with_cx(cx, response).await
     }
 
     async fn post_json<T: DeserializeOwned>(
@@ -500,7 +609,7 @@ pub struct GoogleMeetSpaceConfig {
     /// Access type: OPEN, TRUSTED, or RESTRICTED.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub access_type: Option<String>,
-    /// Entry point policy: ALL or CREATOR_APP_ONLY.
+    /// Entry point policy: `ALL` or `CREATOR_APP_ONLY`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entry_point_access: Option<String>,
 }
@@ -944,13 +1053,14 @@ pub fn normalize_transcript_name(input: &str) -> GoogleMeetResult<String> {
 pub fn extract_docs_destination_document_id(
     destination: &GoogleMeetDocsDestination,
 ) -> GoogleMeetResult<Option<String>> {
-    for value in [
+    if let Some(value) = [
         destination.document.as_deref(),
         destination.document_id.as_deref(),
         destination.file.as_deref(),
     ]
     .into_iter()
     .flatten()
+    .next()
     {
         return parse_docs_destination_document_id(value).map(Some);
     }
@@ -1056,7 +1166,7 @@ fn parse_docs_destination_document_id(raw: &str) -> GoogleMeetResult<String> {
         }
         let segments: Vec<_> = url
             .path_segments()
-            .map(|segments| segments.collect())
+            .map(std::iter::Iterator::collect)
             .unwrap_or_default();
         let document_id = segments
             .windows(3)
@@ -1106,17 +1216,39 @@ fn auth_headers(auth: &GoogleMaterializedAuth) -> GoogleMeetResult<header::Heade
     Ok(headers)
 }
 
+fn checkpoint(cx: &Cx, checkpoint: impl Into<String>) -> GoogleMeetResult<()> {
+    let checkpoint = checkpoint.into();
+    cx.checkpoint_with(checkpoint.clone())
+        .map_err(|error| GoogleMeetError::AsyncCheckpoint {
+            checkpoint,
+            message: error.to_string(),
+        })
+}
+
 async fn decode_response<T: DeserializeOwned>(response: reqwest::Response) -> GoogleMeetResult<T> {
+    let cx = fcp_async_core::compatibility_cx();
+    decode_response_with_cx(&cx, response).await
+}
+
+async fn decode_response_with_cx<T: DeserializeOwned>(
+    cx: &Cx,
+    response: reqwest::Response,
+) -> GoogleMeetResult<T> {
+    checkpoint(cx, "Google Meet response: inspect status")?;
     let status = response.status();
     if status.is_success() {
+        checkpoint(cx, "Google Meet response: read JSON body")?;
         let body = response.bytes().await.map_err(GoogleMeetError::Http)?;
+        checkpoint(cx, "Google Meet response: parse JSON body")?;
         return serde_json::from_slice(&body).map_err(GoogleMeetError::Json);
     }
+    checkpoint(cx, "Google Meet response: parse retry-after")?;
     let retry_after_secs = response
         .headers()
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok());
+    checkpoint(cx, "Google Meet response: read error body")?;
     let body = response.text().await.unwrap_or_default();
     if status == StatusCode::TOO_MANY_REQUESTS {
         return Err(GoogleMeetError::RateLimited {
@@ -1141,24 +1273,40 @@ async fn decode_text_response(
     context: &str,
     max_bytes: usize,
 ) -> GoogleMeetResult<String> {
+    let cx = fcp_async_core::compatibility_cx();
+    decode_text_response_with_cx(&cx, response, context, max_bytes).await
+}
+
+async fn decode_text_response_with_cx(
+    cx: &Cx,
+    response: reqwest::Response,
+    context: &str,
+    max_bytes: usize,
+) -> GoogleMeetResult<String> {
+    checkpoint(cx, format!("{context}: inspect status"))?;
     let status = response.status();
     if status.is_success() {
+        checkpoint(cx, format!("{context}: read text body"))?;
         let body = response.bytes().await.map_err(GoogleMeetError::Http)?;
+        checkpoint(cx, format!("{context}: enforce max bytes"))?;
         if body.len() > max_bytes {
             return Err(GoogleMeetError::ResponseTooLarge {
                 context: context.to_string(),
                 max_bytes,
             });
         }
+        checkpoint(cx, format!("{context}: decode UTF-8 body"))?;
         return String::from_utf8(body.to_vec()).map_err(|error| GoogleMeetError::InvalidConfig {
             message: format!("{context} returned non-UTF-8 text/plain: {error}"),
         });
     }
+    checkpoint(cx, format!("{context}: parse retry-after"))?;
     let retry_after_secs = response
         .headers()
         .get(header::RETRY_AFTER)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.trim().parse::<u64>().ok());
+    checkpoint(cx, format!("{context}: read error body"))?;
     let body = response.text().await.unwrap_or_default();
     if status == StatusCode::TOO_MANY_REQUESTS {
         return Err(GoogleMeetError::RateLimited {

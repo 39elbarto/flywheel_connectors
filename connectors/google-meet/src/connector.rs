@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, SecondsFormat, Utc};
-use fcp_async_core::{AsyncError, ExecutionContext};
+use fcp_async_core::{AsyncError, Cx, ExecutionContext, compatibility_cx};
 use fcp_google_discovery::{
     ServiceAliasRegistry,
     auth::{GoogleAuthError, GoogleAuthSelection, GoogleMaterializedAuth},
@@ -499,18 +499,41 @@ fn artifact_operation_context() -> ExecutionContext {
     ExecutionContext::request_scoped(ARTIFACT_OPERATION_TIMEOUT)
 }
 
+fn artifact_operation_cx(operation: &'static str) -> Cx {
+    let cx = compatibility_cx();
+    cx.set_task_type(operation);
+    cx
+}
+
+fn artifact_checkpoint(cx: &Cx, checkpoint: impl Into<String>) -> FcpResult<()> {
+    let checkpoint = checkpoint.into();
+    cx.checkpoint_with(checkpoint.clone())
+        .map_err(|error| FcpError::External {
+            service: "google-meet".into(),
+            message: format!("{checkpoint} async checkpoint failed: {error}"),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        })
+}
+
 async fn run_google_artifact<T, Fut>(
     ctx: &ExecutionContext,
+    cx: &Cx,
     future: Fut,
     operation: &'static str,
 ) -> FcpResult<T>
 where
     Fut: Future<Output = GoogleMeetResult<T>>,
 {
-    ctx.run(future)
+    artifact_checkpoint(cx, format!("{operation}: enter timeout budget"))?;
+    let result = ctx
+        .run(future)
         .await
         .map_err(|error| map_artifact_async_error(error, operation))?
-        .map_err(|error| error.to_fcp_error())
+        .map_err(|error| error.to_fcp_error())?;
+    artifact_checkpoint(cx, format!("{operation}: leave timeout budget"))?;
+    Ok(result)
 }
 
 fn map_artifact_async_error(error: AsyncError, operation: &'static str) -> FcpError {
@@ -1293,12 +1316,15 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(RECORDINGS_LIST_OP);
         let recordings = run_google_artifact(
             &ctx,
-            client.list_recordings(conference_record, page_size, Some(max_items)),
+            &cx,
+            client.list_recordings_with_cx(&cx, conference_record, page_size, Some(max_items)),
             RECORDINGS_LIST_OP,
         )
         .await?;
+        artifact_checkpoint(&cx, format!("{RECORDINGS_LIST_OP}: assemble response"))?;
         Ok(json!({
             "conference_record": conference_record,
             "recordings": recordings,
@@ -1320,12 +1346,15 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(TRANSCRIPTS_LIST_OP);
         let transcripts = run_google_artifact(
             &ctx,
-            client.list_transcripts(conference_record, page_size, Some(max_items)),
+            &cx,
+            client.list_transcripts_with_cx(&cx, conference_record, page_size, Some(max_items)),
             TRANSCRIPTS_LIST_OP,
         )
         .await?;
+        artifact_checkpoint(&cx, format!("{TRANSCRIPTS_LIST_OP}: assemble response"))?;
         Ok(json!({
             "conference_record": conference_record,
             "transcripts": transcripts,
@@ -1347,18 +1376,25 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let transcript = require_str(input, "transcript")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(TRANSCRIPT_ENTRIES_LIST_OP);
         let mut entries = run_google_artifact(
             &ctx,
-            client.list_transcript_entries(transcript, page_size, Some(max_items)),
+            &cx,
+            client.list_transcript_entries_with_cx(&cx, transcript, page_size, Some(max_items)),
             TRANSCRIPT_ENTRIES_LIST_OP,
         )
         .await?;
+        artifact_checkpoint(&cx, format!("{TRANSCRIPT_ENTRIES_LIST_OP}: sort entries"))?;
         entries.sort_by_key(|entry| {
             (
                 parse_timestamp_ms(entry.start_time.as_deref()).unwrap_or_default(),
                 entry.name.clone(),
             )
         });
+        artifact_checkpoint(
+            &cx,
+            format!("{TRANSCRIPT_ENTRIES_LIST_OP}: assemble response"),
+        )?;
         Ok(json!({
             "transcript": transcript,
             "transcript_entries": entries,
@@ -1380,12 +1416,15 @@ impl GoogleMeetConnector {
         let max_items = parse_max_items(input)?;
         let conference_record = require_str(input, "conference_record")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(SMART_NOTES_LIST_OP);
         let smart_notes = run_google_artifact(
             &ctx,
-            client.list_smart_notes(conference_record, page_size, Some(max_items)),
+            &cx,
+            client.list_smart_notes_with_cx(&cx, conference_record, page_size, Some(max_items)),
             SMART_NOTES_LIST_OP,
         )
         .await?;
+        artifact_checkpoint(&cx, format!("{SMART_NOTES_LIST_OP}: assemble response"))?;
         Ok(json!({
             "conference_record": conference_record,
             "smart_notes": smart_notes,
@@ -1411,14 +1450,21 @@ impl GoogleMeetConnector {
         let max_document_bytes = parse_max_document_bytes(input)?;
         let conference_record = require_str(input, "conference_record")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(TRANSCRIPTS_WITH_TEXT_LIST_OP);
         let transcripts = run_google_artifact(
             &ctx,
-            client.list_transcripts(conference_record, page_size, Some(max_items)),
+            &cx,
+            client.list_transcripts_with_cx(&cx, conference_record, page_size, Some(max_items)),
             TRANSCRIPTS_WITH_TEXT_LIST_OP,
         )
         .await?;
         let transcripts =
-            attach_transcript_document_texts(&ctx, client, transcripts, max_document_bytes).await;
+            attach_transcript_document_texts(&ctx, &cx, client, transcripts, max_document_bytes)
+                .await;
+        artifact_checkpoint(
+            &cx,
+            format!("{TRANSCRIPTS_WITH_TEXT_LIST_OP}: assemble response"),
+        )?;
         Ok(json!({
             "conference_record": conference_record,
             "transcripts": transcripts,
@@ -1445,14 +1491,21 @@ impl GoogleMeetConnector {
         let max_document_bytes = parse_max_document_bytes(input)?;
         let conference_record = require_str(input, "conference_record")?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(SMART_NOTES_WITH_TEXT_LIST_OP);
         let smart_notes = run_google_artifact(
             &ctx,
-            client.list_smart_notes(conference_record, page_size, Some(max_items)),
+            &cx,
+            client.list_smart_notes_with_cx(&cx, conference_record, page_size, Some(max_items)),
             SMART_NOTES_WITH_TEXT_LIST_OP,
         )
         .await?;
         let smart_notes =
-            attach_smart_note_document_texts(&ctx, client, smart_notes, max_document_bytes).await;
+            attach_smart_note_document_texts(&ctx, &cx, client, smart_notes, max_document_bytes)
+                .await;
+        artifact_checkpoint(
+            &cx,
+            format!("{SMART_NOTES_WITH_TEXT_LIST_OP}: assemble response"),
+        )?;
         Ok(json!({
             "conference_record": conference_record,
             "smart_notes": smart_notes,
@@ -1471,12 +1524,18 @@ impl GoogleMeetConnector {
         let document_id = drive_document_id_from_input(input)?;
         let max_document_bytes = parse_max_document_bytes(input)?;
         let ctx = artifact_operation_context();
+        let cx = artifact_operation_cx(DRIVE_DOCUMENT_TEXT_EXPORT_OP);
         let text = run_google_artifact(
             &ctx,
-            client.export_drive_document_text(&document_id, max_document_bytes),
+            &cx,
+            client.export_drive_document_text_with_cx(&cx, &document_id, max_document_bytes),
             DRIVE_DOCUMENT_TEXT_EXPORT_OP,
         )
         .await?;
+        artifact_checkpoint(
+            &cx,
+            format!("{DRIVE_DOCUMENT_TEXT_EXPORT_OP}: assemble response"),
+        )?;
         Ok(json!({
             "document_id": document_id,
             "text": text,
@@ -1625,7 +1684,7 @@ fn meet_operation_catalog() -> Vec<OperationInfo> {
                     "This does not start or join a live conference.".into(),
                 ],
                 examples: vec![
-                    r#"{}"#.into(),
+                    r"{}".into(),
                     r#"{"config":{"access_type":"TRUSTED","entry_point_access":"ALL"}}"#.into(),
                 ],
                 related: vec![CapabilityId::from_static(SPACE_GET_OP)],
@@ -2143,16 +2202,29 @@ fn sum_session_duration_ms(
 
 async fn attach_transcript_document_texts(
     ctx: &ExecutionContext,
+    cx: &Cx,
     client: &GoogleMeetClient,
     mut transcripts: Vec<GoogleMeetTranscript>,
     max_document_bytes: usize,
 ) -> Vec<GoogleMeetTranscript> {
     for transcript in &mut transcripts {
+        if let Err(error) = cx.checkpoint_with(format!(
+            "{TRANSCRIPTS_WITH_TEXT_LIST_OP}: assemble transcript document text"
+        )) {
+            transcript.document_text_error = Some(format!(
+                "{TRANSCRIPTS_WITH_TEXT_LIST_OP} async checkpoint failed during partial assembly: {error}"
+            ));
+            break;
+        }
         match document_id_from_destination(transcript.docs_destination.as_ref()) {
             Ok(Some(document_id)) => {
                 transcript.document_id = Some(document_id.clone());
                 match ctx
-                    .run(client.export_drive_document_text(&document_id, max_document_bytes))
+                    .run(client.export_drive_document_text_with_cx(
+                        cx,
+                        &document_id,
+                        max_document_bytes,
+                    ))
                     .await
                 {
                     Ok(Ok(text)) => transcript.document_text = Some(text),
@@ -2177,16 +2249,29 @@ async fn attach_transcript_document_texts(
 
 async fn attach_smart_note_document_texts(
     ctx: &ExecutionContext,
+    cx: &Cx,
     client: &GoogleMeetClient,
     mut smart_notes: Vec<GoogleMeetSmartNote>,
     max_document_bytes: usize,
 ) -> Vec<GoogleMeetSmartNote> {
     for smart_note in &mut smart_notes {
+        if let Err(error) = cx.checkpoint_with(format!(
+            "{SMART_NOTES_WITH_TEXT_LIST_OP}: assemble smart-note document text"
+        )) {
+            smart_note.document_text_error = Some(format!(
+                "{SMART_NOTES_WITH_TEXT_LIST_OP} async checkpoint failed during partial assembly: {error}"
+            ));
+            break;
+        }
         match document_id_from_destination(smart_note.docs_destination.as_ref()) {
             Ok(Some(document_id)) => {
                 smart_note.document_id = Some(document_id.clone());
                 match ctx
-                    .run(client.export_drive_document_text(&document_id, max_document_bytes))
+                    .run(client.export_drive_document_text_with_cx(
+                        cx,
+                        &document_id,
+                        max_document_bytes,
+                    ))
                     .await
                 {
                     Ok(Ok(text)) => smart_note.document_text = Some(text),

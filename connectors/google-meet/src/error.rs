@@ -48,6 +48,15 @@ pub enum GoogleMeetError {
         max_bytes: usize,
     },
 
+    /// FCP async context checkpoint reported cancellation or budget exhaustion.
+    #[error("async checkpoint failed during {checkpoint}: {message}")]
+    AsyncCheckpoint {
+        /// Checkpoint label.
+        checkpoint: String,
+        /// Runtime checkpoint detail.
+        message: String,
+    },
+
     /// Invalid or expired token.
     #[error("Invalid or expired Google Meet credentials")]
     Unauthorized,
@@ -65,7 +74,7 @@ impl GoogleMeetError {
     #[must_use]
     pub const fn is_retryable(&self) -> bool {
         match self {
-            Self::Http(_) | Self::RateLimited { .. } => true,
+            Self::Http(_) | Self::RateLimited { .. } | Self::AsyncCheckpoint { .. } => true,
             Self::Api { code, .. } => matches!(code, 408 | 429 | 500 | 502 | 503 | 504),
             _ => false,
         }
@@ -133,6 +142,16 @@ impl GoogleMeetError {
                 message: format!("{context} response exceeded max bytes ({max_bytes})"),
                 status_code: None,
                 retryable: false,
+                retry_after: None,
+            },
+            Self::AsyncCheckpoint {
+                checkpoint,
+                message,
+            } => FcpError::External {
+                service: "google-meet".into(),
+                message: format!("{checkpoint} async checkpoint failed: {message}"),
+                status_code: None,
+                retryable: true,
                 retry_after: None,
             },
             Self::Unauthorized => FcpError::Unauthorized {

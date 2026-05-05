@@ -121,11 +121,7 @@ fn render_golden() -> String {
         ),
         // 5. Single-suite overlap (only Suite2). Responder must pick
         //    Suite2 even though it also offers Suite1.
-        (
-            "single_overlap_suite2",
-            vec![Suite2],
-            vec![Suite1, Suite2],
-        ),
+        ("single_overlap_suite2", vec![Suite2], vec![Suite1, Suite2]),
         // 6. Single-suite overlap (only Suite1). Responder picks
         //    Suite1 (above floor; the only candidate).
         (
@@ -147,17 +143,9 @@ fn render_golden() -> String {
         // 9. Both lists empty. Result: <none>.
         ("both_empty", vec![], vec![]),
         // 10. Initiator empty, responder non-empty.
-        (
-            "initiator_empty",
-            vec![],
-            vec![Suite1, Suite2],
-        ),
+        ("initiator_empty", vec![], vec![Suite1, Suite2]),
         // 11. Responder empty, initiator non-empty.
-        (
-            "responder_empty",
-            vec![Suite1, Suite2],
-            vec![],
-        ),
+        ("responder_empty", vec![Suite1, Suite2], vec![]),
     ];
 
     for (label, initiator, responder) in cells {

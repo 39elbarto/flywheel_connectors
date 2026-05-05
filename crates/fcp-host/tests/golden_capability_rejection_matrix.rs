@@ -56,8 +56,7 @@ const FIXED_OCCURRED_AT: u64 = 1_735_689_600;
 /// Deterministic Ed25519 signing key. NEVER change in-place; bump
 /// the fixture if the schema actually changes.
 fn deterministic_signing_key() -> Ed25519SigningKey {
-    Ed25519SigningKey::from_bytes(&[0xC4; 32])
-        .expect("32-byte seed is a valid Ed25519 key")
+    Ed25519SigningKey::from_bytes(&[0xC4; 32]).expect("32-byte seed is a valid Ed25519 key")
 }
 
 /// Fixed validity window in 2026 so the token is byte-stable AND in

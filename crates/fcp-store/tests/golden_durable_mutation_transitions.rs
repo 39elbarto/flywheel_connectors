@@ -81,12 +81,8 @@ async fn probe(store: &DurableSymbolStore) -> String {
     let used = store.storage_used().await;
     let zone = zone();
     let zone_objects = store.list_zone(&zone).await.len();
-    let count_a = store
-        .symbol_count(&ObjectId::from_bytes([0xA1; 32]))
-        .await;
-    let count_b = store
-        .symbol_count(&ObjectId::from_bytes([0xB2; 32]))
-        .await;
+    let count_a = store.symbol_count(&ObjectId::from_bytes([0xA1; 32])).await;
+    let count_b = store.symbol_count(&ObjectId::from_bytes([0xB2; 32])).await;
     format!(
         "  used={used:>6}  zone_objects={zone_objects}  count(a1)={count_a}  count(b2)={count_b}"
     )
@@ -100,19 +96,29 @@ async fn run_script(temp: &TempDir) -> String {
     log.push("# DurableSymbolStore canonical mutation script golden".to_string());
     log.push("# br-38cd93962: read-validate / write-publish split".to_string());
     log.push("# Each step emits one probe line of observable state.".to_string());
-    log.push("# 'used' = storage_used (bytes); 'zone_objects' = list_zone(work).len();".to_string());
-    log.push("# count(a1) = symbol_count for object 0xA1...; count(b2) = ditto for 0xB2...".to_string());
+    log.push(
+        "# 'used' = storage_used (bytes); 'zone_objects' = list_zone(work).len();".to_string(),
+    );
+    log.push(
+        "# count(a1) = symbol_count for object 0xA1...; count(b2) = ditto for 0xB2...".to_string(),
+    );
     log.push("#".to_string());
     log.push("# Load-bearing invariants visible in the diff:".to_string());
     log.push("#   1. each symbol contributes 192 bytes to used (128 data +".to_string());
     log.push("#      64 metadata overhead per Self::symbol_size). A drift in".to_string());
     log.push("#      this constant becomes visible as a per-row delta change.".to_string());
-    log.push("#   2. idempotent duplicate put leaves used unchanged (zero double-count)".to_string());
+    log.push(
+        "#   2. idempotent duplicate put leaves used unchanged (zero double-count)".to_string(),
+    );
     log.push("#      — visible as steps 02/03 producing identical lines.".to_string());
-    log.push("#   3. delete_symbol releases the symbol's bytes; delete_object releases".to_string());
+    log.push(
+        "#   3. delete_symbol releases the symbol's bytes; delete_object releases".to_string(),
+    );
     log.push("#      the sum of its remaining symbols.".to_string());
     log.push("#   4. failed validate (conflicting bytes) leaves state byte-identical".to_string());
-    log.push("#      to pre-attempt — visible as steps 03/04 producing identical lines.".to_string());
+    log.push(
+        "#      to pre-attempt — visible as steps 03/04 producing identical lines.".to_string(),
+    );
     log.push("#   5. reopen-from-disk recovers the full applied state — step 10's".to_string());
     log.push("#      line MUST match step 09's line. Pre-fix the read-validate /".to_string());
     log.push("#      write-publish split could (under refactor) advance next_seq".to_string());
@@ -128,7 +134,10 @@ async fn run_script(temp: &TempDir) -> String {
     log.push(probe(&store).await);
 
     log.push("step 02 put_symbol(a1, esi=0, fill=AA)    ".to_string());
-    store.put_symbol(symbol(0xA1, 0, 0xAA)).await.expect("put a1/0");
+    store
+        .put_symbol(symbol(0xA1, 0, 0xAA))
+        .await
+        .expect("put a1/0");
     log.push(probe(&store).await);
 
     log.push("step 03 put_symbol(a1, esi=0, fill=AA) (dup)".to_string());
@@ -148,7 +157,10 @@ async fn run_script(temp: &TempDir) -> String {
     log.push(probe(&store).await);
 
     log.push("step 05 put_symbol(a1, esi=1, fill=CC)    ".to_string());
-    store.put_symbol(symbol(0xA1, 1, 0xCC)).await.expect("put a1/1");
+    store
+        .put_symbol(symbol(0xA1, 1, 0xCC))
+        .await
+        .expect("put a1/1");
     log.push(probe(&store).await);
 
     log.push("step 06 put_object_meta(b2, K=2)          ".to_string());
@@ -156,7 +168,10 @@ async fn run_script(temp: &TempDir) -> String {
     log.push(probe(&store).await);
 
     log.push("step 07 put_symbol(b2, esi=0, fill=DD)    ".to_string());
-    store.put_symbol(symbol(0xB2, 0, 0xDD)).await.expect("put b2/0");
+    store
+        .put_symbol(symbol(0xB2, 0, 0xDD))
+        .await
+        .expect("put b2/0");
     log.push(probe(&store).await);
 
     log.push("step 08 delete_symbol(a1, esi=1)          ".to_string());
@@ -175,10 +190,9 @@ async fn run_script(temp: &TempDir) -> String {
 
     log.push("step 10 reopen + probe (recovery floor)   ".to_string());
     drop(store);
-    let reopened = DurableSymbolStore::open(DurableSymbolStoreConfig::new(
-        temp.path().join("symbols"),
-    ))
-    .expect("reopen");
+    let reopened =
+        DurableSymbolStore::open(DurableSymbolStoreConfig::new(temp.path().join("symbols")))
+            .expect("reopen");
     log.push(probe(&reopened).await);
 
     log.join("\n") + "\n"

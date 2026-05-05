@@ -137,10 +137,7 @@ fn github_cell(
     };
     let sig = HmacSha256Verifier::new(secret).compute(body);
     let mut headers = HashMap::new();
-    headers.insert(
-        "X-Hub-Signature-256".to_string(),
-        format!("sha256={sig}"),
-    );
+    headers.insert("X-Hub-Signature-256".to_string(), format!("sha256={sig}"));
     headers.insert("X-GitHub-Event".to_string(), "push".to_string());
     let event_id = match cell.replay {
         ReplayState::First => format!("delivery-{}-first", cell.label),
@@ -249,8 +246,7 @@ fn slack_cell(
 
     let parsed = receiver.verify_and_parse(&headers, body_bytes);
 
-    let canonical_event_id =
-        format!("EvGolden{}", cell.label.replace('-', "_"));
+    let canonical_event_id = format!("EvGolden{}", cell.label.replace('-', "_"));
     if matches!(cell.replay, ReplayState::Replay) {
         let _ = replay_handler.claim_event(&canonical_event_id);
     }

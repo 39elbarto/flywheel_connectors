@@ -57,7 +57,7 @@ use std::time::Duration;
 use chrono::Utc;
 use fcp_webhook::{
     FCP_BACKPRESSURE_BUDGET_EXHAUSTED, FCP_BACKPRESSURE_REASON_HEADER,
-    FCP_BACKPRESSURE_RETRY_AFTER_HEADER, HmacSha256Verifier, HOST_BACKPRESSURE_STATUS,
+    FCP_BACKPRESSURE_RETRY_AFTER_HEADER, HOST_BACKPRESSURE_STATUS, HmacSha256Verifier,
     StripeWebhook, WebhookError, WebhookHandler, WebhookRetryDecision,
     host_retry_decision_from_response,
 };
@@ -151,9 +151,8 @@ fn write_response(
     reason: &str,
     extra_headers: &[(&str, String)],
 ) {
-    let mut response = format!(
-        "HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n"
-    );
+    let mut response =
+        format!("HTTP/1.1 {status} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n");
     for (name, value) in extra_headers {
         response.push_str(name);
         response.push_str(": ");
@@ -183,9 +182,7 @@ fn handle_verified(
     }
 }
 
-fn spawn_scripted_endpoint(
-    script: Vec<DeliveryStep>,
-) -> (SocketAddr, thread::JoinHandle<()>) {
+fn spawn_scripted_endpoint(script: Vec<DeliveryStep>) -> (SocketAddr, thread::JoinHandle<()>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind webhook endpoint");
     let address = listener.local_addr().expect("webhook endpoint addr");
     let state = Arc::new(WebhookEndpointState::new());
@@ -212,10 +209,7 @@ fn spawn_scripted_endpoint(
                 DeliveryStep::ForceBackpressureRetryAfter { seconds, reason } => {
                     let extra = vec![
                         (FCP_BACKPRESSURE_REASON_HEADER, reason),
-                        (
-                            FCP_BACKPRESSURE_RETRY_AFTER_HEADER,
-                            seconds.to_string(),
-                        ),
+                        (FCP_BACKPRESSURE_RETRY_AFTER_HEADER, seconds.to_string()),
                     ];
                     write_response(
                         &mut stream,
@@ -269,9 +263,7 @@ fn post_signed_webhook(
     stream.flush().expect("flush request");
 
     let mut response = String::new();
-    stream
-        .read_to_string(&mut response)
-        .expect("read response");
+    stream.read_to_string(&mut response).expect("read response");
     let mut lines = response.split("\r\n");
     let status_line = lines.next().expect("status line");
     let status: u16 = status_line
@@ -331,11 +323,8 @@ fn run_delivery_retry_loop(
     let mut cumulative: u64 = 0;
     for attempt in 0..MAX_RETRIES {
         let outcome = post_signed_webhook(addr, &headers, body);
-        let decision = host_retry_decision_from_response(
-            outcome.status,
-            &outcome.headers,
-            DEFAULT_DELAY,
-        );
+        let decision =
+            host_retry_decision_from_response(outcome.status, &outcome.headers, DEFAULT_DELAY);
 
         let row = RetryTraceRow {
             attempt,
@@ -344,10 +333,8 @@ fn run_delivery_retry_loop(
             cumulative_backoff_secs: cumulative,
         };
         let status = outcome.status;
-        let is_terminal_4xx = treat_4xx_as_terminal
-            && (400..500).contains(&status)
-            && status != 408
-            && status != 429;
+        let is_terminal_4xx =
+            treat_4xx_as_terminal && (400..500).contains(&status) && status != 408 && status != 429;
         trace.push(row);
 
         if (200..300).contains(&status) {
@@ -462,7 +449,10 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
         }
         other => panic!("phase B first attempt: expected RetryAfter, got {other:?}"),
     }
-    assert_eq!(trace_b[1].status, 202, "phase B: second attempt must succeed");
+    assert_eq!(
+        trace_b[1].status, 202,
+        "phase B: second attempt must succeed"
+    );
 
     // ── Phase C: budget-exhausted = RefuseRetry, terminal ───────
     let body_c = br#"{"id":"evt_phase_c","type":"payment_intent.succeeded","data":{"object":{}}}"#;
@@ -480,13 +470,12 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
                 "phase C: signal MUST report budget-exhausted, got {signal:?}",
             );
         }
-        other => panic!(
-            "phase C: budget-exhausted MUST surface as RefuseRetry, got {other:?}"
-        ),
+        other => panic!("phase C: budget-exhausted MUST surface as RefuseRetry, got {other:?}"),
     }
 
     // ── Phase D: replay rejection terminates at the app layer ───
-    let body_d = br#"{"id":"evt_phase_d_replay","type":"payment_intent.succeeded","data":{"object":{}}}"#;
+    let body_d =
+        br#"{"id":"evt_phase_d_replay","type":"payment_intent.succeeded","data":{"object":{}}}"#;
     let headers_d_first = build_stripe_request(body_d, now);
     let trace_d_first = run_delivery_retry_loop(addr, headers_d_first.clone(), body_d, true);
     assert_eq!(trace_d_first.len(), 1, "phase D first delivery accepted");

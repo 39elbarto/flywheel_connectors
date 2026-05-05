@@ -192,7 +192,10 @@ async fn scenario_a_promote_with_instance_for_every_activate() {
             // this branch ever fires with anything else, it would be
             // a type-system breach (caught at compile time) — at
             // runtime we just record that the path executed.
-            assert!(execute_with_bound(&bound), "executor must accept BoundVerified");
+            assert!(
+                execute_with_bound(&bound),
+                "executor must accept BoundVerified"
+            );
             executor_calls.fetch_add(1, Ordering::Relaxed);
         }));
     }
@@ -532,7 +535,8 @@ async fn scenario_c_four_rejection_paths_emit_warning() {
 // ────────────────────────────────────────────────────────────────────
 
 async fn scenario_d_revocation_seal_sla_under_jitter() {
-    let registry: Arc<RwLock<RevocationRegistry>> = Arc::new(RwLock::new(RevocationRegistry::new()));
+    let registry: Arc<RwLock<RevocationRegistry>> =
+        Arc::new(RwLock::new(RevocationRegistry::new()));
     let revocation_publish_t = Arc::new(RwLock::new(Vec::<Instant>::new()));
 
     // Pre-fab N candidate ObjectIds and revocation objects. Each
@@ -593,9 +597,8 @@ async fn scenario_d_revocation_seal_sla_under_jitter() {
                 let mut guard = registry.write().await;
                 guard.add_revocation(&rev);
                 let next_seq = guard.head_seq + 1;
-                let head_obj = ObjectId::from_unscoped_bytes(
-                    format!("scenario-D-head-{next_seq}").as_bytes(),
-                );
+                let head_obj =
+                    ObjectId::from_unscoped_bytes(format!("scenario-D-head-{next_seq}").as_bytes());
                 guard.update_head(head_obj, next_seq, 1_700_000_000 + i as u64);
             }
             let t = Instant::now();
@@ -614,8 +617,8 @@ async fn scenario_d_revocation_seal_sla_under_jitter() {
         let target = candidate_ids[w % N_REVOCATORS_D];
         handles.push(tokio::spawn(async move {
             // Stagger seal-take across [0, NETWORK_JITTER_MAX_MS/2).
-            let pre_jitter = ((w as u64).wrapping_mul(7)).wrapping_add(1)
-                % (NETWORK_JITTER_MAX_MS / 2);
+            let pre_jitter =
+                ((w as u64).wrapping_mul(7)).wrapping_add(1) % (NETWORK_JITTER_MAX_MS / 2);
             tokio::time::sleep(Duration::from_millis(pre_jitter)).await;
 
             let (seal_seq, seal) = {
@@ -625,8 +628,7 @@ async fn scenario_d_revocation_seal_sla_under_jitter() {
             };
 
             // Simulate network jitter between seal-take and validate.
-            let post_jitter =
-                ((w as u64).wrapping_mul(11)).wrapping_add(3) % NETWORK_JITTER_MAX_MS;
+            let post_jitter = ((w as u64).wrapping_mul(11)).wrapping_add(3) % NETWORK_JITTER_MAX_MS;
             tokio::time::sleep(Duration::from_millis(post_jitter)).await;
 
             let validate_t = Instant::now();

@@ -42,8 +42,8 @@ use chrono::{Duration as ChronoDuration, Utc};
 use fcp_audit::{AuditEntry, Severity, verify_chain};
 use fcp_core::{
     CapabilityConstraints, CapabilityId, CapabilityToken, CapabilityVerifier, InstanceId, ObjectId,
-    OperationId, PrincipalId, RevocationObject, RevocationRegistry, RevocationScope, UnboundVerified,
-    ZoneId,
+    OperationId, PrincipalId, RevocationObject, RevocationRegistry, RevocationScope,
+    UnboundVerified, ZoneId,
 };
 use fcp_crypto::{Ed25519SigningKey, cose::CapabilityTokenBuilder};
 use fcp_host::{
@@ -339,8 +339,7 @@ fn conformance_invoke_loop_d_audit_chain_hash_linkage() {
             i - 1,
         );
         assert_eq!(
-            entries[i].seq,
-            i as u64,
+            entries[i].seq, i as u64,
             "seq MUST be dense monotonic across all appends",
         );
     }

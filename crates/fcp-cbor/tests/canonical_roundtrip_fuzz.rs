@@ -147,9 +147,8 @@ fn fuzz_payload() -> impl Strategy<Value = FuzzPayload> {
     let metadata = prop::collection::btree_map(fuzz_string_key(), fuzz_scalar(), 0..6);
     let nested_items = prop::collection::vec(fuzz_scalar(), 0..4);
     let nested_metadata = prop::collection::btree_map(fuzz_string_key(), fuzz_scalar(), 0..3);
-    let nested = (nested_items, nested_metadata).prop_map(|(items, metadata)| {
-        Some(Box::new(FuzzNested { items, metadata }))
-    });
+    let nested = (nested_items, nested_metadata)
+        .prop_map(|(items, metadata)| Some(Box::new(FuzzNested { items, metadata })));
     let no_nested = Just(None);
     let nested_or_not = prop_oneof![nested, no_nested];
 
@@ -170,11 +169,7 @@ fn fuzz_payload() -> impl Strategy<Value = FuzzPayload> {
 }
 
 fn test_schema() -> SchemaId {
-    SchemaId::new(
-        "fcp.cbor.fuzz",
-        "FuzzPayload",
-        Version::new(1, 0, 0),
-    )
+    SchemaId::new("fcp.cbor.fuzz", "FuzzPayload", Version::new(1, 0, 0))
 }
 
 fn other_schema() -> SchemaId {
@@ -425,10 +420,8 @@ fn canonicalizer_rejects_input_past_depth_limit() {
 fn float_negative_zero_folds_to_positive_zero() {
     let positive_zero_payload = FuzzScalar::Float(0.0);
     let negative_zero_payload = FuzzScalar::Float(-0.0);
-    let bytes_pos = to_canonical_cbor(&positive_zero_payload)
-        .expect("encoding +0.0 must succeed");
-    let bytes_neg = to_canonical_cbor(&negative_zero_payload)
-        .expect("encoding -0.0 must succeed");
+    let bytes_pos = to_canonical_cbor(&positive_zero_payload).expect("encoding +0.0 must succeed");
+    let bytes_neg = to_canonical_cbor(&negative_zero_payload).expect("encoding -0.0 must succeed");
     assert_eq!(
         bytes_pos, bytes_neg,
         "canonical encoding of -0.0 must equal +0.0 (RFC 8949 §4.2.5)",

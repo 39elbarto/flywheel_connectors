@@ -230,11 +230,17 @@ fn negotiate_returns_none_for_empty_intersection() {
 fn negotiate_with_empty_inputs_returns_none() {
     assert_eq!(negotiate_suite(&[], &[]), None);
     assert_eq!(
-        negotiate_suite(&[], &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2]),
+        negotiate_suite(
+            &[],
+            &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2]
+        ),
         None
     );
     assert_eq!(
-        negotiate_suite(&[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2], &[]),
+        negotiate_suite(
+            &[SessionCryptoSuite::Suite1, SessionCryptoSuite::Suite2],
+            &[]
+        ),
         None
     );
 }

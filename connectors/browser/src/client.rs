@@ -629,7 +629,7 @@ impl BrowserClient {
         let url = format!("{}/health", self.browser_url);
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         match self
-            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || {
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, timeout, || {
                 self.http.get(&url).timeout(timeout)
             })
             .await
@@ -887,7 +887,7 @@ impl BrowserClient {
     ) -> BrowserResult<serde_json::Value> {
         let url = self.worker_endpoint(operation);
         let timeout = Duration::from_millis(operation.timeout_ms);
-        self.execute(operation.max_response_bytes, || {
+        self.execute(operation.max_response_bytes, timeout, || {
             self.http
                 .post(&url)
                 .timeout(timeout)
@@ -925,9 +925,10 @@ impl BrowserClient {
     async fn execute(
         &self,
         max_response_bytes: usize,
+        timeout: Duration,
         build_request: impl Fn() -> reqwest::RequestBuilder,
     ) -> BrowserResult<serde_json::Value> {
-        let ctx = self.runtime.request_context();
+        let ctx = self.request_context_for_timeout(timeout);
         let policy = self.retry_config.to_retry_policy();
 
         RetryLoop::execute(&ctx, &policy, |_attempt| {
@@ -1019,11 +1020,15 @@ impl BrowserClient {
         .await
     }
 
+    fn request_context_for_timeout(&self, timeout: Duration) -> fcp_async_core::ExecutionContext {
+        self.runtime.request_context_with_timeout(timeout)
+    }
+
     async fn raw_chrome_cdp_endpoint_detected(&self) -> bool {
         let url = format!("{}/json/version", self.browser_url);
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         match self
-            .execute(CONTROL_RESPONSE_BYTES_STANDARD, || {
+            .execute(CONTROL_RESPONSE_BYTES_STANDARD, timeout, || {
                 self.http.get(&url).timeout(timeout)
             })
             .await
@@ -2042,6 +2047,21 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, BrowserError::Http(err) if err.is_timeout()));
+    }
+
+    #[test]
+    fn test_worker_operation_timeout_budget_is_applied_to_runtime_context() {
+        let client = BrowserClient::new(None).unwrap();
+        let ctx =
+            client.request_context_for_timeout(Duration::from_millis(WORKER_SCREENSHOT.timeout_ms));
+
+        assert_eq!(ctx.scope(), fcp_async_core::ContextScope::Request);
+        let remaining = ctx.remaining_budget().unwrap();
+        assert!(
+            remaining > Duration::from_secs(30),
+            "capture operations must not inherit the default 30s runtime request budget"
+        );
+        assert!(remaining <= Duration::from_millis(WORKER_SCREENSHOT.timeout_ms));
     }
 
     #[fcp_async_core::runtime::test]

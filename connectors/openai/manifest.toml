@@ -45,6 +45,7 @@ optional = [
     "openai.images",
     "openai.videos",
     "openai.audio.transcribe",
+    "openai.realtime.transcribe",
     "openai.audio.tts",
     "openai.finetune.create",
     "openai.finetune.list",
@@ -764,6 +765,211 @@ examples = [
     '{"audio_b64": "<base64-data>", "language": "en"}',
 ]
 related = ["openai.audio.tts"]
+
+# -----------------------------------------------------------------------------
+
+[provides.operations.realtime_transcribe]
+description = "Transcribe streaming audio over an OpenAI Realtime WebSocket session"
+capability = "openai.realtime.transcribe"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations.realtime_transcribe.rate_limit]
+max = 50
+per_ms = 60000
+
+[provides.operations.realtime_transcribe.input_schema]
+type = "object"
+
+[provides.operations.realtime_transcribe.input_schema.properties.audio_b64]
+description = "Base64-encoded audio chunk to append to the realtime input buffer"
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.audio_chunks_b64]
+description = "Ordered base64-encoded audio chunks to stream before commit"
+type = "array"
+
+[provides.operations.realtime_transcribe.input_schema.properties.audio_chunks_b64.items]
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.session_id]
+description = "Optional caller session identifier for event correlation"
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.model]
+description = "Realtime transcription model"
+default = "gpt-4o-transcribe"
+enum = [
+    "whisper-1",
+    "gpt-4o-transcribe",
+    "gpt-4o-mini-transcribe",
+    "gpt-4o-transcribe-latest",
+]
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.audio_format]
+description = "Input audio encoding for appended buffers"
+default = "pcm16"
+enum = ["pcm16", "g711_ulaw", "g711_alaw"]
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.language]
+description = "Optional ISO-639-1 language code"
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.prompt]
+description = "Optional transcription prompt or keyword list"
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.include_logprobs]
+description = "Include transcription logprobs in server events"
+default = false
+type = "boolean"
+
+[provides.operations.realtime_transcribe.input_schema.properties.server_vad]
+description = "Use OpenAI server VAD for speech turn detection"
+default = true
+type = "boolean"
+
+[provides.operations.realtime_transcribe.input_schema.properties.vad_threshold]
+description = "Server VAD threshold"
+default = 0.5
+minimum = 0
+maximum = 1
+type = "number"
+
+[provides.operations.realtime_transcribe.input_schema.properties.prefix_padding_ms]
+description = "Server VAD prefix padding"
+default = 300
+minimum = 0
+maximum = 10000
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.silence_duration_ms]
+description = "Server VAD silence duration"
+default = 500
+minimum = 0
+maximum = 30000
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.noise_reduction]
+description = "Input audio noise reduction mode"
+default = "near_field"
+enum = ["near_field", "far_field", "none"]
+type = "string"
+
+[provides.operations.realtime_transcribe.input_schema.properties.commit_audio_buffer]
+description = "Send input_audio_buffer.commit after appending chunks"
+default = true
+type = "boolean"
+
+[provides.operations.realtime_transcribe.input_schema.properties.connect_timeout_ms]
+description = "WebSocket connect timeout"
+default = 10000
+minimum = 100
+maximum = 120000
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.timeout_ms]
+description = "Overall session timeout"
+default = 30000
+minimum = 100
+maximum = 300000
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.max_events]
+description = "Maximum server events to process before failing closed"
+default = 64
+minimum = 1
+maximum = 1024
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.max_reconnect_attempts]
+description = "Maximum supervised reconnect attempts before giving up"
+default = 0
+minimum = 0
+maximum = 5
+type = "integer"
+
+[provides.operations.realtime_transcribe.input_schema.properties.reconnect_delay_ms]
+description = "Delay between supervised reconnect attempts"
+default = 1000
+minimum = 100
+maximum = 30000
+type = "integer"
+
+[provides.operations.realtime_transcribe.output_schema]
+required = ["session_id", "model", "audio_format", "text"]
+type = "object"
+
+[provides.operations.realtime_transcribe.output_schema.properties.session_id]
+description = "Caller-visible session identifier"
+type = "string"
+
+[provides.operations.realtime_transcribe.output_schema.properties.provider_session_id]
+description = "Provider session identifier, if observed"
+type = "string"
+
+[provides.operations.realtime_transcribe.output_schema.properties.model]
+description = "Transcription model"
+type = "string"
+
+[provides.operations.realtime_transcribe.output_schema.properties.audio_format]
+description = "Input audio format"
+type = "string"
+
+[provides.operations.realtime_transcribe.output_schema.properties.text]
+description = "Completed transcript text"
+type = "string"
+
+[provides.operations.realtime_transcribe.output_schema.properties.transcripts]
+description = "Completed transcript events"
+type = "array"
+
+[provides.operations.realtime_transcribe.output_schema.properties.partials]
+description = "Partial transcript delta events"
+type = "array"
+
+[provides.operations.realtime_transcribe.output_schema.properties.audio_commits]
+description = "Input audio commit events observed from the server"
+type = "array"
+
+[provides.operations.realtime_transcribe.output_schema.properties.stats]
+description = "Session event and reconnect statistics"
+type = "object"
+
+[provides.operations.realtime_transcribe.network_constraints]
+host_allow = ["api.openai.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations.realtime_transcribe.ai_hints]
+when_to_use = "Stream microphone or chunked audio through OpenAI Realtime transcription and collect completed transcript events."
+common_mistakes = [
+    "Sending audio in a format different from audio_format.",
+    "Expecting transcription mode to generate model responses.",
+    "Treating delta events as final text instead of waiting for completed transcript events.",
+]
+examples = [
+    '{"audio_b64": "<base64-pcm16-audio>", "model": "gpt-4o-transcribe", "language": "en"}',
+]
+related = ["openai.audio.transcribe"]
 
 # -----------------------------------------------------------------------------
 
@@ -2128,6 +2334,7 @@ scope = "instance"
 "openai.images.generate" = ["openai.images"]
 "openai.videos.generate" = ["openai.videos"]
 "openai.audio.transcribe" = ["openai.audio"]
+"openai.realtime.transcribe" = ["openai.audio"]
 "openai.audio.tts" = ["openai.audio"]
 "openai.finetune.create" = ["openai.finetune"]
 "openai.finetune.list" = ["openai.finetune"]

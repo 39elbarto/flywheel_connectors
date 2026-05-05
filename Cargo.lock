@@ -5008,6 +5008,7 @@ name = "fcp-openai"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asupersync",
  "async-stream",
  "async-trait",
  "base64 0.22.1",
@@ -5019,6 +5020,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-streaming",
  "fcp-testkit",
  "futures-util",
  "reqwest 0.13.2",

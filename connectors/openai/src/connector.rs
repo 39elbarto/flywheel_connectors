@@ -2,8 +2,10 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use base64::Engine;
+use fcp_async_core::time;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken,
     CapabilityVerifier, ConnectorId, CredentialId, EventCaps, FcpError, FcpResult,
@@ -11,6 +13,7 @@ use fcp_prelude::{
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse,
 };
+use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
@@ -44,6 +47,21 @@ struct DeploymentProfile {
 
 const ALLOWED_BASE_URL_HOSTS: &[&str] = &["api.openai.com", "api.deepseek.com"];
 const OPENAI_CODEX_RESPONSES_BASE_URL: &str = "https://chatgpt.com/backend-api/codex";
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MODEL: &str = "gpt-4o-transcribe";
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_AUDIO_FORMAT: &str = "pcm16";
+const OPENAI_REALTIME_TRANSCRIPTION_WS_PATH: &str = "/v1/realtime";
+const OPENAI_REALTIME_TRANSCRIPTION_MAX_AUDIO_BYTES: usize = 15 * 1024 * 1024;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_TIMEOUT_MS: u64 = 30_000;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MAX_EVENTS: usize = 64;
+const OPENAI_REALTIME_TRANSCRIPTION_MAX_EVENTS: usize = 1024;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_RECONNECT_DELAY_MS: u64 = 1_000;
+const OPENAI_REALTIME_TRANSCRIPTION_MIN_RECONNECT_DELAY_MS: u64 = 100;
+const OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_DELAY_MS: u64 = 30_000;
+const OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_ATTEMPTS: u32 = 5;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_VAD_THRESHOLD: f64 = 0.5;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_PREFIX_PADDING_MS: u64 = 300;
+const OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_SILENCE_DURATION_MS: u64 = 500;
 const CODEX_CONNECTOR_LOCAL_SECRET_FIELDS: &[&str] = &[
     "access_token",
     "refresh_token",
@@ -70,6 +88,110 @@ struct DeploymentProfileObject {
     default_model: Option<Model>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RealtimeTranscriptionInvokeInput {
+    audio_b64: Option<String>,
+    audio_chunks_b64: Option<Vec<String>>,
+    session_id: Option<String>,
+    model: Option<String>,
+    audio_format: Option<String>,
+    language: Option<String>,
+    prompt: Option<String>,
+    include_logprobs: Option<bool>,
+    server_vad: Option<bool>,
+    vad_threshold: Option<f64>,
+    prefix_padding_ms: Option<u64>,
+    silence_duration_ms: Option<u64>,
+    noise_reduction: Option<String>,
+    commit_audio_buffer: Option<bool>,
+    connect_timeout_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    max_events: Option<usize>,
+    max_reconnect_attempts: Option<u32>,
+    reconnect_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RealtimeTranscriptionOptions {
+    audio_chunks: Vec<Vec<u8>>,
+    session_id: String,
+    model: String,
+    audio_format: &'static str,
+    language: Option<String>,
+    prompt: Option<String>,
+    include_logprobs: bool,
+    server_vad: bool,
+    vad_threshold: f64,
+    prefix_padding_ms: u64,
+    silence_duration_ms: u64,
+    noise_reduction: RealtimeNoiseReduction,
+    commit_audio_buffer: bool,
+    connect_timeout_ms: u64,
+    timeout_ms: u64,
+    max_events: usize,
+    max_reconnect_attempts: u32,
+    reconnect_delay_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RealtimeNoiseReduction {
+    NearField,
+    FarField,
+    Disabled,
+}
+
+#[derive(Debug, Deserialize)]
+struct RealtimeServerEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    event_id: Option<String>,
+    item_id: Option<String>,
+    previous_item_id: Option<String>,
+    content_index: Option<u64>,
+    delta: Option<String>,
+    transcript: Option<String>,
+    error: Option<serde_json::Value>,
+    session: Option<RealtimeSessionObject>,
+    id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RealtimeSessionObject {
+    id: Option<String>,
+    #[serde(rename = "type")]
+    session_type: Option<String>,
+}
+
+#[derive(Debug)]
+struct RealtimeTranscriptionSessionState {
+    session_id: String,
+    provider_session_id: Option<String>,
+    ready: bool,
+    pending_transcript: String,
+    partials: Vec<serde_json::Value>,
+    transcripts: Vec<serde_json::Value>,
+    audio_commits: Vec<serde_json::Value>,
+    speech_started: u64,
+    speech_stopped: u64,
+    rate_limits: Option<serde_json::Value>,
+    events_seen: usize,
+}
+
+#[derive(Debug)]
+struct RealtimeTranscriptionResult {
+    provider_session_id: Option<String>,
+    text: String,
+    partials: Vec<serde_json::Value>,
+    transcripts: Vec<serde_json::Value>,
+    audio_commits: Vec<serde_json::Value>,
+    speech_started: u64,
+    speech_stopped: u64,
+    rate_limits: Option<serde_json::Value>,
+    events_seen: usize,
+    reconnect_attempts: u32,
+}
+
 impl From<DeploymentProfileObject> for DeploymentProfile {
     fn from(obj: DeploymentProfileObject) -> Self {
         Self {
@@ -79,6 +201,672 @@ impl From<DeploymentProfileObject> for DeploymentProfile {
             default_model: obj.default_model,
         }
     }
+}
+
+impl RealtimeNoiseReduction {
+    fn from_input(value: Option<String>) -> FcpResult<Self> {
+        let Some(value) = trim_to_non_empty(value) else {
+            return Ok(Self::NearField);
+        };
+
+        match value.as_str() {
+            "near_field" => Ok(Self::NearField),
+            "far_field" => Ok(Self::FarField),
+            "none" | "disabled" | "off" => Ok(Self::Disabled),
+            _ => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "Unknown realtime transcription noise_reduction: {value}; expected near_field, far_field, or none"
+                ),
+            }),
+        }
+    }
+
+    fn as_payload(self) -> serde_json::Value {
+        match self {
+            Self::NearField => json!({ "type": "near_field" }),
+            Self::FarField => json!({ "type": "far_field" }),
+            Self::Disabled => serde_json::Value::Null,
+        }
+    }
+}
+
+impl RealtimeTranscriptionOptions {
+    fn from_input(value: serde_json::Value) -> FcpResult<Self> {
+        let input: RealtimeTranscriptionInvokeInput =
+            serde_json::from_value(value).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid realtime transcription request: {e}"),
+            })?;
+
+        let audio_chunks = decode_realtime_audio_chunks(
+            input.audio_b64.as_deref(),
+            input.audio_chunks_b64.as_deref(),
+        )?;
+        let model = trim_to_non_empty(input.model)
+            .unwrap_or_else(|| OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MODEL.to_string());
+        validate_realtime_transcription_model(&model)?;
+        let audio_format = normalize_realtime_audio_format(input.audio_format.as_deref())?;
+        let vad_threshold = bounded_f64(
+            "vad_threshold",
+            input.vad_threshold,
+            OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_VAD_THRESHOLD,
+            0.0,
+            1.0,
+        )?;
+
+        Ok(Self {
+            audio_chunks,
+            session_id: trim_to_non_empty(input.session_id)
+                .unwrap_or_else(|| format!("fcp-rt-{}", uuid::Uuid::new_v4())),
+            model,
+            audio_format,
+            language: trim_to_non_empty(input.language),
+            prompt: trim_to_non_empty(input.prompt),
+            include_logprobs: input.include_logprobs.unwrap_or(false),
+            server_vad: input.server_vad.unwrap_or(true),
+            vad_threshold,
+            prefix_padding_ms: bounded_u64(
+                "prefix_padding_ms",
+                input.prefix_padding_ms,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_PREFIX_PADDING_MS,
+                0,
+                10_000,
+            )?,
+            silence_duration_ms: bounded_u64(
+                "silence_duration_ms",
+                input.silence_duration_ms,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_SILENCE_DURATION_MS,
+                0,
+                30_000,
+            )?,
+            noise_reduction: RealtimeNoiseReduction::from_input(input.noise_reduction)?,
+            commit_audio_buffer: input.commit_audio_buffer.unwrap_or(true),
+            connect_timeout_ms: bounded_u64(
+                "connect_timeout_ms",
+                input.connect_timeout_ms,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_CONNECT_TIMEOUT_MS,
+                100,
+                120_000,
+            )?,
+            timeout_ms: bounded_u64(
+                "timeout_ms",
+                input.timeout_ms,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_TIMEOUT_MS,
+                100,
+                300_000,
+            )?,
+            max_events: bounded_usize(
+                "max_events",
+                input.max_events,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MAX_EVENTS,
+                1,
+                OPENAI_REALTIME_TRANSCRIPTION_MAX_EVENTS,
+            )?,
+            max_reconnect_attempts: bounded_u32(
+                "max_reconnect_attempts",
+                input.max_reconnect_attempts,
+                0,
+                0,
+                OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_ATTEMPTS,
+            )?,
+            reconnect_delay_ms: bounded_u64(
+                "reconnect_delay_ms",
+                input.reconnect_delay_ms,
+                OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_RECONNECT_DELAY_MS,
+                OPENAI_REALTIME_TRANSCRIPTION_MIN_RECONNECT_DELAY_MS,
+                OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_DELAY_MS,
+            )?,
+        })
+    }
+}
+
+impl RealtimeTranscriptionSessionState {
+    const fn new(session_id: String) -> Self {
+        Self {
+            session_id,
+            provider_session_id: None,
+            ready: false,
+            pending_transcript: String::new(),
+            partials: Vec::new(),
+            transcripts: Vec::new(),
+            audio_commits: Vec::new(),
+            speech_started: 0,
+            speech_stopped: 0,
+            rate_limits: None,
+            events_seen: 0,
+        }
+    }
+
+    fn apply_event(&mut self, value: serde_json::Value) -> FcpResult<()> {
+        let event: RealtimeServerEvent =
+            serde_json::from_value(value.clone()).map_err(|e| FcpError::External {
+                service: "openai.realtime".into(),
+                message: format!("Malformed realtime event: {e}"),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            })?;
+
+        self.events_seen = self.events_seen.saturating_add(1);
+        match event.event_type.as_str() {
+            "session.updated" | "transcription_session.updated" => {
+                self.ready = true;
+                self.record_provider_session_id(&event);
+            }
+            "session.created" | "transcription_session.created" => {
+                self.record_provider_session_id(&event);
+            }
+            "input_audio_buffer.committed" => {
+                self.audio_commits.push(json!({
+                    "event_id": event.event_id,
+                    "item_id": event.item_id,
+                    "previous_item_id": event.previous_item_id
+                }));
+            }
+            "input_audio_buffer.speech_started" => {
+                self.pending_transcript.clear();
+                self.speech_started = self.speech_started.saturating_add(1);
+            }
+            "input_audio_buffer.speech_stopped" => {
+                self.speech_stopped = self.speech_stopped.saturating_add(1);
+            }
+            "conversation.item.input_audio_transcription.delta" => {
+                if let Some(delta) = event.delta {
+                    self.pending_transcript.push_str(&delta);
+                    self.partials.push(json!({
+                        "event_id": event.event_id,
+                        "item_id": event.item_id,
+                        "content_index": event.content_index,
+                        "delta": delta,
+                        "transcript_so_far": self.pending_transcript
+                    }));
+                }
+            }
+            "conversation.item.input_audio_transcription.completed" => {
+                let transcript = event.transcript.unwrap_or_default();
+                self.transcripts.push(json!({
+                    "event_id": event.event_id,
+                    "item_id": event.item_id,
+                    "content_index": event.content_index,
+                    "transcript": transcript
+                }));
+                self.pending_transcript.clear();
+            }
+            "rate_limits.updated" => {
+                self.rate_limits = Some(value);
+            }
+            "error" => {
+                return Err(FcpError::External {
+                    service: "openai.realtime".into(),
+                    message: realtime_error_detail(event.error.as_ref()),
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                });
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
+    fn record_provider_session_id(&mut self, event: &RealtimeServerEvent) {
+        if self.provider_session_id.is_none() {
+            self.provider_session_id = event
+                .session
+                .as_ref()
+                .and_then(|session| session.id.clone())
+                .or_else(|| event.id.clone());
+        }
+    }
+
+    fn into_result(self, reconnect_attempts: u32) -> FcpResult<RealtimeTranscriptionResult> {
+        if self.transcripts.is_empty() {
+            return Err(FcpError::External {
+                service: "openai.realtime".into(),
+                message: format!(
+                    "Realtime transcription session {} ended before a completed transcript event",
+                    self.session_id
+                ),
+                status_code: None,
+                retryable: true,
+                retry_after: None,
+            });
+        }
+
+        let text = self
+            .transcripts
+            .iter()
+            .filter_map(|entry| entry.get("transcript").and_then(|value| value.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        Ok(RealtimeTranscriptionResult {
+            provider_session_id: self.provider_session_id,
+            text,
+            partials: self.partials,
+            transcripts: self.transcripts,
+            audio_commits: self.audio_commits,
+            speech_started: self.speech_started,
+            speech_stopped: self.speech_stopped,
+            rate_limits: self.rate_limits,
+            events_seen: self.events_seen,
+            reconnect_attempts,
+        })
+    }
+}
+
+fn trim_to_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn bounded_u64(name: &str, value: Option<u64>, default: u64, min: u64, max: u64) -> FcpResult<u64> {
+    let value = value.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        });
+    }
+    Ok(value)
+}
+
+fn bounded_u32(name: &str, value: Option<u32>, default: u32, min: u32, max: u32) -> FcpResult<u32> {
+    let value = value.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        });
+    }
+    Ok(value)
+}
+
+fn bounded_usize(
+    name: &str,
+    value: Option<usize>,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> FcpResult<usize> {
+    let value = value.unwrap_or(default);
+    if !(min..=max).contains(&value) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        });
+    }
+    Ok(value)
+}
+
+fn bounded_f64(name: &str, value: Option<f64>, default: f64, min: f64, max: f64) -> FcpResult<f64> {
+    let value = value.unwrap_or(default);
+    if !value.is_finite() || !(min..=max).contains(&value) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be finite and between {min} and {max}"),
+        });
+    }
+    Ok(value)
+}
+
+fn validate_realtime_transcription_model(model: &str) -> FcpResult<()> {
+    match model {
+        "whisper-1"
+        | "gpt-4o-transcribe"
+        | "gpt-4o-mini-transcribe"
+        | "gpt-4o-transcribe-latest" => Ok(()),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Unknown realtime transcription model: {model}"),
+        }),
+    }
+}
+
+fn normalize_realtime_audio_format(value: Option<&str>) -> FcpResult<&'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_AUDIO_FORMAT);
+
+    match value {
+        "pcm16" | "audio/pcm" => Ok("pcm16"),
+        "g711_ulaw" | "pcmu" | "audio/pcmu" => Ok("g711_ulaw"),
+        "g711_alaw" | "pcma" | "audio/pcma" => Ok("g711_alaw"),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "Unknown realtime transcription audio_format: {value}; expected pcm16, g711_ulaw, or g711_alaw"
+            ),
+        }),
+    }
+}
+
+fn decode_realtime_audio_chunks(
+    audio_b64: Option<&str>,
+    audio_chunks_b64: Option<&[String]>,
+) -> FcpResult<Vec<Vec<u8>>> {
+    if audio_b64.is_some() && audio_chunks_b64.is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Provide only one of audio_b64 or audio_chunks_b64".into(),
+        });
+    }
+
+    let chunks: Vec<&str> = if let Some(audio_b64) = audio_b64 {
+        vec![audio_b64]
+    } else if let Some(audio_chunks_b64) = audio_chunks_b64 {
+        if audio_chunks_b64.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "audio_chunks_b64 cannot be empty".into(),
+            });
+        }
+        audio_chunks_b64.iter().map(String::as_str).collect()
+    } else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Missing audio_b64 or audio_chunks_b64".into(),
+        });
+    };
+
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(idx, chunk)| {
+            if chunk.trim().is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("audio chunk {idx} cannot be empty"),
+                });
+            }
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(chunk)
+                .map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("Invalid base64 audio chunk {idx}: {e}"),
+                })?;
+            if decoded.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("audio chunk {idx} decoded to empty bytes"),
+                });
+            }
+            if decoded.len() > OPENAI_REALTIME_TRANSCRIPTION_MAX_AUDIO_BYTES {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "audio chunk {idx} exceeds 15MiB realtime event limit (got {} bytes)",
+                        decoded.len()
+                    ),
+                });
+            }
+            Ok(decoded)
+        })
+        .collect()
+}
+
+fn realtime_error_detail(error: Option<&serde_json::Value>) -> String {
+    let Some(error) = error else {
+        return "Unknown realtime error".into();
+    };
+    if let Some(message) = error.as_str().filter(|message| !message.is_empty()) {
+        return message.to_string();
+    }
+    if let Some(message) = error.get("message").and_then(|value| value.as_str()) {
+        let mut detail = message.to_string();
+        if let Some(code) = error.get("code").and_then(|value| value.as_str()) {
+            detail.push_str(" (code ");
+            detail.push_str(code);
+            detail.push(')');
+        }
+        return detail;
+    }
+    "Unknown realtime error".into()
+}
+
+fn realtime_transcription_ws_url(base_url: &str) -> FcpResult<String> {
+    let mut parsed = url::Url::parse(base_url).map_err(|e| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url for realtime transcription: {e}"),
+    })?;
+
+    let scheme = match parsed.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unsupported realtime transcription base_url scheme: {other}"),
+            });
+        }
+    };
+    parsed
+        .set_scheme(scheme)
+        .map_err(|()| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid realtime transcription WebSocket scheme".into(),
+        })?;
+
+    let path = parsed.path().trim_end_matches('/');
+    let realtime_path = if path.is_empty() || path == "/" {
+        OPENAI_REALTIME_TRANSCRIPTION_WS_PATH.to_string()
+    } else if path == "/v1" {
+        format!("{path}/realtime")
+    } else {
+        format!("{path}{OPENAI_REALTIME_TRANSCRIPTION_WS_PATH}")
+    };
+    parsed.set_path(&realtime_path);
+    parsed.set_query(Some("intent=transcription"));
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+fn realtime_ws_config(config: &OpenAIConfig, options: &RealtimeTranscriptionOptions) -> WsConfig {
+    let mut ws_config = WsConfig::new()
+        .with_connect_timeout(Duration::from_millis(options.timeout_ms))
+        .with_ping_interval(None)
+        .with_max_message_size(1024 * 1024);
+
+    ws_config.auto_reconnect = false;
+    ws_config.max_reconnect_attempts = Some(0);
+    ws_config.reconnect_delay = Duration::from_millis(options.reconnect_delay_ms);
+    ws_config = match &config.auth {
+        OpenAIAuth::ApiKey(key) => ws_config.with_header("Authorization", format!("Bearer {key}")),
+        OpenAIAuth::CredentialId(credential_id) => {
+            ws_config.with_header("X-FCP-Credential-ID", credential_id.to_string())
+        }
+    };
+    ws_config = ws_config.with_header("OpenAI-Beta", "realtime=v1");
+    if let Some(org) = &config.organization {
+        ws_config = ws_config.with_header("OpenAI-Organization", org);
+    }
+    ws_config
+}
+
+fn realtime_session_update(options: &RealtimeTranscriptionOptions) -> serde_json::Value {
+    let mut transcription = serde_json::Map::new();
+    transcription.insert("model".into(), json!(options.model));
+    if let Some(language) = &options.language {
+        transcription.insert("language".into(), json!(language));
+    }
+    if let Some(prompt) = &options.prompt {
+        transcription.insert("prompt".into(), json!(prompt));
+    }
+
+    let turn_detection = if options.server_vad {
+        json!({
+            "type": "server_vad",
+            "threshold": options.vad_threshold,
+            "prefix_padding_ms": options.prefix_padding_ms,
+            "silence_duration_ms": options.silence_duration_ms
+        })
+    } else {
+        serde_json::Value::Null
+    };
+
+    let mut update = serde_json::Map::new();
+    update.insert(
+        "event_id".into(),
+        json!(format!("{}:session-update", options.session_id)),
+    );
+    update.insert("type".into(), json!("transcription_session.update"));
+    update.insert("input_audio_format".into(), json!(options.audio_format));
+    update.insert(
+        "input_audio_transcription".into(),
+        serde_json::Value::Object(transcription),
+    );
+    update.insert("turn_detection".into(), turn_detection);
+    update.insert(
+        "input_audio_noise_reduction".into(),
+        options.noise_reduction.as_payload(),
+    );
+    if options.include_logprobs {
+        update.insert(
+            "include".into(),
+            json!(["item.input_audio_transcription.logprobs"]),
+        );
+    }
+    serde_json::Value::Object(update)
+}
+
+fn realtime_audio_append(session_id: &str, idx: usize, audio: &[u8]) -> serde_json::Value {
+    json!({
+        "event_id": format!("{session_id}:audio-append:{idx}"),
+        "type": "input_audio_buffer.append",
+        "audio": base64::engine::general_purpose::STANDARD.encode(audio)
+    })
+}
+
+fn realtime_audio_commit(session_id: &str) -> serde_json::Value {
+    json!({
+        "event_id": format!("{session_id}:audio-commit"),
+        "type": "input_audio_buffer.commit"
+    })
+}
+
+fn realtime_event_value(message: WsMessage) -> FcpResult<serde_json::Value> {
+    message
+        .json::<serde_json::Value>()
+        .map_err(|e| FcpError::External {
+            service: "openai.realtime".into(),
+            message: format!("Malformed realtime WebSocket JSON: {e}"),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        })
+}
+
+fn map_realtime_stream_error(error: StreamError) -> FcpError {
+    match error {
+        StreamError::Timeout(_) => FcpError::UpstreamTimeout {
+            service: "openai.realtime".into(),
+        },
+        StreamError::HttpError {
+            status,
+            message,
+            retry_after,
+        } => FcpError::External {
+            service: "openai.realtime".into(),
+            message,
+            status_code: Some(status),
+            retryable: status == 429 || status >= 500,
+            retry_after,
+        },
+        StreamError::HostBackpressure {
+            status,
+            message,
+            signal,
+        } => FcpError::External {
+            service: "openai.realtime".into(),
+            message,
+            status_code: Some(status),
+            retryable: signal.should_back_off(),
+            retry_after: signal.retry_after(),
+        },
+        StreamError::ConnectionFailed(message) => FcpError::External {
+            service: "openai.realtime".into(),
+            message,
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        StreamError::ConnectionClosed { reason, code } => FcpError::External {
+            service: "openai.realtime".into(),
+            message: format!("WebSocket closed before transcript completion: {reason}"),
+            status_code: code,
+            retryable: true,
+            retry_after: None,
+        },
+        StreamError::ReconnectLimitExceeded { attempts } => FcpError::External {
+            service: "openai.realtime".into(),
+            message: format!("Reconnect limit exceeded after {attempts} attempts"),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        },
+        StreamError::ParseError(message) | StreamError::InvalidState(message) => {
+            FcpError::External {
+                service: "openai.realtime".into(),
+                message,
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            }
+        }
+        StreamError::WebSocketError(message) | StreamError::SseError(message) => {
+            FcpError::External {
+                service: "openai.realtime".into(),
+                message,
+                status_code: None,
+                retryable: true,
+                retry_after: None,
+            }
+        }
+        StreamError::HttpClientError(error) => FcpError::External {
+            service: "openai.realtime".into(),
+            message: error.to_string(),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        StreamError::HttpProtocolError(error) => FcpError::External {
+            service: "openai.realtime".into(),
+            message: error.to_string(),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        StreamError::IoError(error) => FcpError::External {
+            service: "openai.realtime".into(),
+            message: error.to_string(),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+        StreamError::BufferOverflow { size, limit } => FcpError::External {
+            service: "openai.realtime".into(),
+            message: format!("WebSocket payload {size} bytes exceeds limit {limit}"),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        },
+    }
+}
+
+const fn should_retry_realtime_error(error: &FcpError) -> bool {
+    matches!(
+        error,
+        FcpError::UpstreamTimeout { .. }
+            | FcpError::DependencyUnavailable { .. }
+            | FcpError::External {
+                retryable: true,
+                ..
+            }
+    )
 }
 
 impl OpenAIConfig {
@@ -403,6 +1191,7 @@ fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         "openai.images.generate" => "openai.images",
         "openai.videos.generate" => "openai.videos",
         "openai.audio.transcribe" => "openai.audio.transcribe",
+        "openai.realtime.transcribe" => "openai.realtime.transcribe",
         "openai.audio.tts" => "openai.audio.tts",
         "openai.finetune.create" => "openai.finetune.create",
         "openai.finetune.list" => "openai.finetune.list",
@@ -675,6 +1464,13 @@ impl OpenAIConnector {
                 .and_then(|v| v.as_str())
                 .unwrap_or(WhisperModel::default().as_str());
             resource_uris.push(format!("openai:model:{model}"));
+        } else if operation == "openai.realtime.transcribe" {
+            let model = input
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or(OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MODEL);
+            resource_uris.push(format!("openai:model:{model}"));
+            resource_uris.push("openai:realtime".to_string());
         } else if operation == "openai.audio.tts" {
             let model = input
                 .get("model")
@@ -1360,6 +2156,156 @@ impl OpenAIConnector {
                             r#"{"audio_b64": "<base64-data>", "filename": "recording.mp3"}"#.into(),
                         ],
                         related: vec![],
+                    },
+                },
+                OperationInfo {
+                    id: OperationId::from_static("openai.realtime.transcribe"),
+                    summary: "Transcribe streaming audio over an OpenAI Realtime WebSocket session"
+                        .into(),
+                    input_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "audio_b64": {
+                                "type": "string",
+                                "description": "Base64-encoded audio chunk to append to the realtime input buffer"
+                            },
+                            "audio_chunks_b64": {
+                                "type": "array",
+                                "items": { "type": "string" },
+                                "description": "Ordered base64-encoded audio chunks to stream before commit"
+                            },
+                            "session_id": {
+                                "type": "string",
+                                "description": "Optional caller session identifier for event correlation"
+                            },
+                            "model": {
+                                "type": "string",
+                                "enum": [
+                                    "whisper-1",
+                                    "gpt-4o-transcribe",
+                                    "gpt-4o-mini-transcribe",
+                                    "gpt-4o-transcribe-latest"
+                                ],
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MODEL
+                            },
+                            "audio_format": {
+                                "type": "string",
+                                "enum": ["pcm16", "g711_ulaw", "g711_alaw"],
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_AUDIO_FORMAT
+                            },
+                            "language": {
+                                "type": "string",
+                                "description": "Optional ISO-639-1 language code"
+                            },
+                            "prompt": {
+                                "type": "string",
+                                "description": "Optional transcription prompt or keyword list"
+                            },
+                            "include_logprobs": {
+                                "type": "boolean",
+                                "default": false
+                            },
+                            "server_vad": {
+                                "type": "boolean",
+                                "default": true
+                            },
+                            "vad_threshold": {
+                                "type": "number",
+                                "minimum": 0,
+                                "maximum": 1,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_VAD_THRESHOLD
+                            },
+                            "prefix_padding_ms": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 10000,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_PREFIX_PADDING_MS
+                            },
+                            "silence_duration_ms": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": 30000,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_SILENCE_DURATION_MS
+                            },
+                            "noise_reduction": {
+                                "type": "string",
+                                "enum": ["near_field", "far_field", "none"],
+                                "default": "near_field"
+                            },
+                            "commit_audio_buffer": {
+                                "type": "boolean",
+                                "default": true
+                            },
+                            "connect_timeout_ms": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 120000,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_CONNECT_TIMEOUT_MS
+                            },
+                            "timeout_ms": {
+                                "type": "integer",
+                                "minimum": 100,
+                                "maximum": 300000,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_TIMEOUT_MS
+                            },
+                            "max_events": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": OPENAI_REALTIME_TRANSCRIPTION_MAX_EVENTS,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_MAX_EVENTS
+                            },
+                            "max_reconnect_attempts": {
+                                "type": "integer",
+                                "minimum": 0,
+                                "maximum": OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_ATTEMPTS,
+                                "default": 0
+                            },
+                            "reconnect_delay_ms": {
+                                "type": "integer",
+                                "minimum": OPENAI_REALTIME_TRANSCRIPTION_MIN_RECONNECT_DELAY_MS,
+                                "maximum": OPENAI_REALTIME_TRANSCRIPTION_MAX_RECONNECT_DELAY_MS,
+                                "default": OPENAI_REALTIME_TRANSCRIPTION_DEFAULT_RECONNECT_DELAY_MS
+                            }
+                        },
+                        "oneOf": [
+                            { "required": ["audio_b64"] },
+                            { "required": ["audio_chunks_b64"] }
+                        ]
+                    }),
+                    output_schema: json!({
+                        "type": "object",
+                        "properties": {
+                            "session_id": { "type": "string" },
+                            "provider_session_id": { "type": ["string", "null"] },
+                            "model": { "type": "string" },
+                            "audio_format": { "type": "string" },
+                            "text": { "type": "string" },
+                            "transcripts": { "type": "array" },
+                            "partials": { "type": "array" },
+                            "audio_commits": { "type": "array" },
+                            "events_seen": { "type": "integer" },
+                            "reconnect_attempts": { "type": "integer" }
+                        },
+                        "required": ["session_id", "model", "audio_format", "text"]
+                    }),
+                    capability: CapabilityId::from_static("openai.realtime.transcribe"),
+                    risk_level: RiskLevel::Medium,
+                    description: None,
+                    rate_limit: None,
+                    requires_approval: None,
+                    safety_tier: SafetyTier::Safe,
+                    idempotency: IdempotencyClass::None,
+                    ai_hints: AgentHint {
+                        when_to_use: "Stream microphone or chunked audio through OpenAI Realtime transcription and collect completed transcript events.".into(),
+                        common_mistakes: vec![
+                            "Sending audio in a format different from audio_format".into(),
+                            "Expecting the session to generate model responses; transcription mode only emits transcript events".into(),
+                            "Treating delta events as final text instead of waiting for completed transcript events".into(),
+                        ],
+                        examples: vec![
+                            r#"{"audio_b64": "<base64-pcm16-audio>", "model": "gpt-4o-transcribe", "language": "en"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("openai.audio.transcribe")],
                     },
                 },
                 OperationInfo {
@@ -2161,7 +3107,7 @@ impl OpenAIConnector {
     /// Returns an error if the operation is invalid, capability token verification fails,
     /// required parameters are missing, or the API call fails.
     pub async fn handle_invoke(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let result = self.handle_invoke_internal(params).await;
+        let result = Box::pin(self.handle_invoke_internal(params)).await;
         self.base.record_request(result.is_ok());
         result
     }
@@ -2217,6 +3163,7 @@ impl OpenAIConnector {
             "openai.images.generate" => self.invoke_generate_image(input).await,
             "openai.videos.generate" => self.invoke_generate_video(input).await,
             "openai.audio.transcribe" => self.invoke_transcribe(input).await,
+            "openai.realtime.transcribe" => Box::pin(self.invoke_realtime_transcribe(input)).await,
             "openai.audio.tts" => self.invoke_tts(input).await,
             "openai.finetune.create" => self.invoke_finetune_create(input).await,
             "openai.finetune.list" => self.invoke_finetune_list(input).await,
@@ -2794,6 +3741,176 @@ impl OpenAIConnector {
             },
             "taint": ["external_input"]
         }))
+    }
+
+    async fn invoke_realtime_transcribe(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let options = RealtimeTranscriptionOptions::from_input(input)?;
+        let result =
+            Box::pin(self.run_realtime_transcription_with_reconnect(config, &options)).await?;
+
+        Ok(json!({
+            "session_id": options.session_id,
+            "provider_session_id": result.provider_session_id,
+            "model": options.model,
+            "audio_format": options.audio_format,
+            "text": result.text,
+            "transcripts": result.transcripts,
+            "partials": result.partials,
+            "audio_commits": result.audio_commits,
+            "stats": {
+                "events_seen": result.events_seen,
+                "speech_started": result.speech_started,
+                "speech_stopped": result.speech_stopped,
+                "reconnect_attempts": result.reconnect_attempts,
+                "rate_limits": result.rate_limits
+            },
+            "provenance": {
+                "source": "openai.realtime.transcribe",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn run_realtime_transcription_with_reconnect(
+        &self,
+        config: &OpenAIConfig,
+        options: &RealtimeTranscriptionOptions,
+    ) -> FcpResult<RealtimeTranscriptionResult> {
+        let mut attempt = 0;
+        loop {
+            match Box::pin(self.run_realtime_transcription_once(config, options, attempt)).await {
+                Ok(result) => return Ok(result),
+                Err(error)
+                    if attempt < options.max_reconnect_attempts
+                        && should_retry_realtime_error(&error) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    time::sleep(Duration::from_millis(options.reconnect_delay_ms)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn run_realtime_transcription_once(
+        &self,
+        config: &OpenAIConfig,
+        options: &RealtimeTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<RealtimeTranscriptionResult> {
+        let timeout = Duration::from_millis(options.timeout_ms);
+        let session =
+            Box::pin(self.run_realtime_transcription_session(config, options, reconnect_attempts));
+        match Box::pin(time::timeout(timeout, session)).await {
+            Ok(result) => result,
+            Err(_) => Err(FcpError::UpstreamTimeout {
+                service: "openai.realtime".into(),
+            }),
+        }
+    }
+
+    async fn run_realtime_transcription_session(
+        &self,
+        config: &OpenAIConfig,
+        options: &RealtimeTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<RealtimeTranscriptionResult> {
+        let url = realtime_transcription_ws_url(&config.base_url)?;
+        let ws_config = realtime_ws_config(config, options);
+        let client = WsClient::with_config(url, ws_config);
+        let connect_timeout = Duration::from_millis(options.connect_timeout_ms);
+        let mut connection = match time::timeout(connect_timeout, client.connect()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => return Err(map_realtime_stream_error(error)),
+            Err(_) => {
+                return Err(FcpError::UpstreamTimeout {
+                    service: "openai.realtime".into(),
+                });
+            }
+        };
+
+        let result = self
+            .drive_realtime_transcription_connection(&mut connection, options, reconnect_attempts)
+            .await;
+        let _ = connection.close().await;
+        result
+    }
+
+    async fn drive_realtime_transcription_connection(
+        &self,
+        connection: &mut fcp_streaming::WsConnection,
+        options: &RealtimeTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<RealtimeTranscriptionResult> {
+        let mut state = RealtimeTranscriptionSessionState::new(options.session_id.clone());
+        connection
+            .send_json(&realtime_session_update(options))
+            .await
+            .map_err(map_realtime_stream_error)?;
+
+        while !state.ready {
+            if state.events_seen >= options.max_events {
+                return Err(FcpError::External {
+                    service: "openai.realtime".into(),
+                    message:
+                        "Realtime transcription session did not become ready before max_events"
+                            .into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: None,
+                });
+            }
+            let Some(message) = connection.recv().await.map_err(map_realtime_stream_error)? else {
+                return Err(FcpError::External {
+                    service: "openai.realtime".into(),
+                    message: "Realtime transcription connection closed before session readiness"
+                        .into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: None,
+                });
+            };
+            state.apply_event(realtime_event_value(message)?)?;
+        }
+
+        for (idx, audio) in options.audio_chunks.iter().enumerate() {
+            connection
+                .send_json(&realtime_audio_append(&options.session_id, idx, audio))
+                .await
+                .map_err(map_realtime_stream_error)?;
+        }
+        if options.commit_audio_buffer {
+            connection
+                .send_json(&realtime_audio_commit(&options.session_id))
+                .await
+                .map_err(map_realtime_stream_error)?;
+        }
+
+        while state.transcripts.is_empty() {
+            if state.events_seen >= options.max_events {
+                return Err(FcpError::External {
+                    service: "openai.realtime".into(),
+                    message:
+                        "Realtime transcription reached max_events before a completed transcript"
+                            .into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: None,
+                });
+            }
+            let Some(message) = connection.recv().await.map_err(map_realtime_stream_error)? else {
+                break;
+            };
+            state.apply_event(realtime_event_value(message)?)?;
+        }
+
+        state.into_result(reconnect_attempts)
     }
 
     async fn invoke_tts(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -3815,6 +4932,7 @@ mod tests {
             "openai.images.generate" => "openai.images",
             "openai.videos.generate" => "openai.videos",
             "openai.audio.transcribe" => "openai.audio.transcribe",
+            "openai.realtime.transcribe" => "openai.realtime.transcribe",
             "openai.audio.tts" => "openai.audio.tts",
             "openai.finetune.create" => "openai.finetune.create",
             "openai.finetune.list" => "openai.finetune.list",
@@ -4811,11 +5929,11 @@ mod tests {
     // ═══════════════════════════════════════════════════════════════════
 
     #[fcp_async_core::runtime::test]
-    async fn introspection_has_24_operations() {
+    async fn introspection_has_25_operations() {
         let connector = OpenAIConnector::new();
         let value = connector.handle_introspect().await.unwrap();
         let ops = value["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 24, "Expected 24 operations");
+        assert_eq!(ops.len(), 25, "Expected 25 operations");
     }
 
     #[fcp_async_core::runtime::test]
@@ -4878,6 +5996,7 @@ mod tests {
             "openai.images.generate",
             "openai.videos.generate",
             "openai.audio.transcribe",
+            "openai.realtime.transcribe",
             "openai.audio.tts",
             "openai.finetune.create",
             "openai.finetune.list",
@@ -4971,6 +6090,7 @@ mod tests {
             "openai.images.generate",
             "openai.videos.generate",
             "openai.audio.transcribe",
+            "openai.realtime.transcribe",
             "openai.audio.tts",
             "openai.assistants.create",
             "openai.threads.runs.create",

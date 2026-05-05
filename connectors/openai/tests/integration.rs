@@ -13,13 +13,23 @@
 
 #![allow(clippy::too_many_lines)]
 
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
 use chrono::{Duration, Utc};
+use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_testkit::{AsyncTestContext, MockApiServer};
 use futures_util::StreamExt;
 use serde_json::json;
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -119,6 +129,76 @@ async fn setup_configure(connector: &mut OpenAIConnector, base_url: &str) {
         }))
         .await
         .expect("configure should succeed");
+}
+
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
+
+async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0_u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        buf.extend_from_slice(&temp[..read]);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_openai_test_websocket(mut stream: TcpStream) -> (TestServerWebSocket, String) {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    let headers = String::from_utf8_lossy(&request).into_owned();
+    let ws = WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket");
+    (ws, headers)
+}
+
+async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Option<String> {
+    match ws.recv(&Cx::for_testing()).await {
+        Ok(Some(ServerWsMessage::Text(text))) => Some(text),
+        Ok(Some(other)) => panic!("expected text frame for {context}, got {other:?}"),
+        Ok(None) => None,
+        Err(err) => panic!("{context}: {err}"),
+    }
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
 }
 
 /// Standard `OpenAI` chat completion success response.
@@ -1120,6 +1200,10 @@ async fn lifecycle_introspect_operations() {
     assert!(
         op_ids.contains(&"openai.audio.transcribe"),
         "should include openai.audio.transcribe"
+    );
+    assert!(
+        op_ids.contains(&"openai.realtime.transcribe"),
+        "should include openai.realtime.transcribe"
     );
     assert!(
         op_ids.contains(&"openai.audio.tts"),
@@ -2184,6 +2268,292 @@ async fn transcribe_requires_correct_capability() {
         .await;
 
     assert!(result.is_err());
+}
+
+/// Realtime transcription uses a supervised WebSocket session and returns completed events.
+#[fcp_async_core::runtime::test]
+async fn realtime_transcribe_loopback_websocket_session() {
+    let _ctx = AsyncTestContext::for_scenario("openai.realtime.transcribe.loopback");
+
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+    let expected_audio = base64::engine::general_purpose::STANDARD.encode(b"pcm16-audio");
+
+    let ws_task = fcp_async_core::task::spawn({
+        let expected_audio = expected_audio.clone();
+        async move {
+            let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+            let (mut ws, headers) = accept_openai_test_websocket(tcp_stream).await;
+            assert!(
+                headers.starts_with("GET /v1/realtime?intent=transcription HTTP/1.1"),
+                "unexpected realtime websocket request: {headers}"
+            );
+            assert!(
+                headers.contains("Authorization: Bearer test-api-key-xyz"),
+                "missing authorization header: {headers}"
+            );
+            assert!(
+                headers.contains("OpenAI-Beta: realtime=v1"),
+                "missing realtime beta header: {headers}"
+            );
+
+            let update = recv_text_frame(&mut ws, "receive realtime session update")
+                .await
+                .expect("session update frame");
+            let update: serde_json::Value =
+                serde_json::from_str(&update).expect("session update json");
+            assert_eq!(update["type"], "transcription_session.update");
+            assert_eq!(update["input_audio_format"], "pcm16");
+            assert_eq!(
+                update["input_audio_transcription"]["model"],
+                "gpt-4o-transcribe"
+            );
+            assert_eq!(update["input_audio_transcription"]["language"], "en");
+            assert_eq!(
+                update["input_audio_transcription"]["prompt"],
+                "expect FCP names"
+            );
+            assert_eq!(update["turn_detection"]["type"], "server_vad");
+            assert_eq!(update["turn_detection"]["threshold"], 0.45);
+            assert_eq!(update["turn_detection"]["silence_duration_ms"], 900);
+            assert_eq!(
+                update["include"],
+                json!(["item.input_audio_transcription.logprobs"])
+            );
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "session.updated",
+                    "session": {
+                        "id": "sess_loopback",
+                        "type": "transcription"
+                    }
+                }),
+                "send session.updated",
+            )
+            .await;
+
+            let append = recv_text_frame(&mut ws, "receive audio append")
+                .await
+                .expect("audio append frame");
+            let append: serde_json::Value = serde_json::from_str(&append).expect("append json");
+            assert_eq!(append["type"], "input_audio_buffer.append");
+            assert_eq!(append["audio"], expected_audio);
+
+            let commit = recv_text_frame(&mut ws, "receive audio commit")
+                .await
+                .expect("audio commit frame");
+            let commit: serde_json::Value = serde_json::from_str(&commit).expect("commit json");
+            assert_eq!(commit["type"], "input_audio_buffer.commit");
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "input_audio_buffer.committed",
+                    "event_id": "event_commit",
+                    "item_id": "item_1",
+                    "previous_item_id": null
+                }),
+                "send audio committed",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "conversation.item.input_audio_transcription.delta",
+                    "event_id": "event_delta_1",
+                    "item_id": "item_1",
+                    "content_index": 0,
+                    "delta": "Hello"
+                }),
+                "send transcript delta",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "event_id": "event_done",
+                    "item_id": "item_1",
+                    "content_index": 0,
+                    "transcript": "Hello from realtime"
+                }),
+                "send transcript completed",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
+        }
+    });
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &base_url).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.transcribe"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.transcribe",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.transcribe",
+            "input": {
+                "audio_b64": expected_audio,
+                "language": "en",
+                "prompt": "expect FCP names",
+                "vad_threshold": 0.45,
+                "silence_duration_ms": 900,
+                "include_logprobs": true,
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert!(
+        result["session_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("fcp-rt-")
+    );
+    assert_eq!(result["provider_session_id"], "sess_loopback");
+    assert_eq!(result["model"], "gpt-4o-transcribe");
+    assert_eq!(result["audio_format"], "pcm16");
+    assert_eq!(result["text"], "Hello from realtime");
+    assert_eq!(result["transcripts"].as_array().unwrap().len(), 1);
+    assert_eq!(result["partials"].as_array().unwrap().len(), 1);
+    assert_eq!(result["audio_commits"].as_array().unwrap().len(), 1);
+    assert_eq!(result["stats"]["reconnect_attempts"], 0);
+    assert_eq!(result["provenance"]["source"], "openai.realtime.transcribe");
+
+    ws_task.await.expect("websocket task");
+}
+
+/// Realtime transcription validates audio format before opening a socket.
+#[fcp_async_core::runtime::test]
+async fn realtime_transcribe_rejects_invalid_audio_format() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.transcribe"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.transcribe",
+        connector.instance_id(),
+    );
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"audio");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.transcribe",
+            "input": {
+                "audio_b64": audio_b64,
+                "audio_format": "flac"
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("audio_format"),
+        "error should mention audio_format: {message}"
+    );
+}
+
+/// Realtime transcription requires its own streaming capability.
+#[fcp_async_core::runtime::test]
+async fn realtime_transcribe_requires_correct_capability() {
+    let mock = MockApiServer::start().await;
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &mock.base_url()).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.audio.transcribe"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.audio.transcribe",
+        connector.instance_id(),
+    );
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"audio");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.transcribe",
+            "input": { "audio_b64": audio_b64 },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+}
+
+/// Provider errors before readiness fail the supervised realtime session.
+#[fcp_async_core::runtime::test]
+async fn realtime_transcribe_provider_error_before_ready() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let ws_task = fcp_async_core::task::spawn(async move {
+        let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+        let (mut ws, _) = accept_openai_test_websocket(tcp_stream).await;
+        let _ = recv_text_frame(&mut ws, "receive session update").await;
+        send_json_frame(
+            &mut ws,
+            json!({
+                "type": "error",
+                "error": {
+                    "message": "invalid realtime key",
+                    "code": "invalid_api_key"
+                }
+            }),
+            "send provider error",
+        )
+        .await;
+        close_test_websocket(&mut ws).await;
+    });
+
+    let mut connector = OpenAIConnector::new();
+    setup_configure(&mut connector, &base_url).await;
+    let signing_key = setup_handshake(&mut connector, &["openai.realtime.transcribe"]).await;
+    let token = generate_valid_bound_token(
+        &signing_key,
+        "openai.realtime.transcribe",
+        connector.instance_id(),
+    );
+    let audio_b64 = base64::engine::general_purpose::STANDARD.encode(b"audio");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "openai.realtime.transcribe",
+            "input": {
+                "audio_b64": audio_b64,
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000
+            },
+            "capability_token": token
+        }))
+        .await;
+
+    assert!(result.is_err());
+    let message = format!("{:?}", result.unwrap_err());
+    assert!(
+        message.contains("invalid realtime key"),
+        "error should include provider detail: {message}"
+    );
+    ws_task.await.expect("websocket task");
 }
 
 // ============================================================================

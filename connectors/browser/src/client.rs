@@ -45,6 +45,7 @@ struct BrowserControlOperation {
     path: &'static str,
     max_response_bytes: usize,
     timeout_ms: u64,
+    target_policy: BrowserTargetPolicy,
     implementation: BrowserControlImplementation,
 }
 
@@ -56,10 +57,79 @@ impl BrowserControlOperation {
             "path": self.path,
             "max_response_bytes": self.max_response_bytes,
             "timeout_ms": self.timeout_ms,
+            "target_policy": self.target_policy.descriptor(),
             "implementation": self.implementation.descriptor(),
         })
     }
 }
+
+#[derive(Clone, Copy)]
+struct BrowserTargetPolicy {
+    scope: &'static str,
+    selection: &'static str,
+    stale_target_recovery: bool,
+    current_tab_guard: bool,
+    export_guard: bool,
+}
+
+impl BrowserTargetPolicy {
+    fn descriptor(self) -> serde_json::Value {
+        serde_json::json!({
+            "scope": self.scope,
+            "selection": self.selection,
+            "stale_target_recovery": self.stale_target_recovery,
+            "current_tab_guard": self.current_tab_guard,
+            "export_guard": self.export_guard,
+        })
+    }
+
+    fn summary(self) -> String {
+        format!(
+            "{}:{} stale_target_recovery={} current_tab_guard={} export_guard={}",
+            self.scope,
+            self.selection,
+            self.stale_target_recovery,
+            self.current_tab_guard,
+            self.export_guard
+        )
+    }
+}
+
+const TARGET_CREATE_OR_REUSE_PAGE: BrowserTargetPolicy = BrowserTargetPolicy {
+    scope: "page",
+    selection: "create_or_reuse_active_page",
+    stale_target_recovery: true,
+    current_tab_guard: false,
+    export_guard: false,
+};
+const TARGET_ACTIVE_PAGE_INTERACTION: BrowserTargetPolicy = BrowserTargetPolicy {
+    scope: "page",
+    selection: "active_page_required",
+    stale_target_recovery: true,
+    current_tab_guard: true,
+    export_guard: false,
+};
+const TARGET_ACTIVE_PAGE_EXPORT: BrowserTargetPolicy = BrowserTargetPolicy {
+    scope: "page",
+    selection: "active_page_required",
+    stale_target_recovery: true,
+    current_tab_guard: true,
+    export_guard: true,
+};
+const TARGET_BROWSER_CONTEXT: BrowserTargetPolicy = BrowserTargetPolicy {
+    scope: "browser_context",
+    selection: "active_context_required",
+    stale_target_recovery: true,
+    current_tab_guard: false,
+    export_guard: false,
+};
+const TARGET_CONNECTOR_POLICY: BrowserTargetPolicy = BrowserTargetPolicy {
+    scope: "connector_policy",
+    selection: "no_browser_target",
+    stale_target_recovery: false,
+    current_tab_guard: false,
+    export_guard: false,
+};
 
 #[derive(Clone, Copy)]
 enum BrowserControlImplementation {
@@ -114,6 +184,7 @@ const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
     path: "/navigate",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
+    target_policy: TARGET_CREATE_OR_REUSE_PAGE,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "Page.enable",
@@ -129,6 +200,7 @@ const WORKER_SCREENSHOT: BrowserControlOperation = BrowserControlOperation {
     path: "/screenshot",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
+    target_policy: TARGET_ACTIVE_PAGE_EXPORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -145,6 +217,7 @@ const WORKER_RENDER_PDF: BrowserControlOperation = BrowserControlOperation {
     path: "/pdf",
     max_response_bytes: CONTROL_RESPONSE_BYTES_CAPTURE,
     timeout_ms: CONTROL_TIMEOUT_MS_CAPTURE,
+    target_policy: TARGET_ACTIVE_PAGE_EXPORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Page.printToPDF"],
     },
@@ -155,6 +228,7 @@ const WORKER_EXTRACT_TEXT: BrowserControlOperation = BrowserControlOperation {
     path: "/extract_text",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_EXPORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -165,6 +239,7 @@ const WORKER_EXTRACT_LINKS: BrowserControlOperation = BrowserControlOperation {
     path: "/extract_links",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_EXPORT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -175,6 +250,7 @@ const WORKER_WAIT_FOR_SELECTOR: BrowserControlOperation = BrowserControlOperatio
     path: "/wait_for_selector",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -185,6 +261,7 @@ const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
     path: "/click",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -200,6 +277,7 @@ const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
     path: "/fill_form",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
             "DOM.getDocument",
@@ -216,6 +294,7 @@ const WORKER_EVALUATE_JS: BrowserControlOperation = BrowserControlOperation {
     path: "/evaluate",
     max_response_bytes: CONTROL_RESPONSE_BYTES_STANDARD,
     timeout_ms: CONTROL_TIMEOUT_MS_STANDARD,
+    target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Runtime.evaluate"],
     },
@@ -226,6 +305,7 @@ const WORKER_GET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     path: "/cookies",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
+    target_policy: TARGET_BROWSER_CONTEXT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.getCookies"],
     },
@@ -236,6 +316,7 @@ const WORKER_SET_COOKIES: BrowserControlOperation = BrowserControlOperation {
     path: "/set_cookies",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
+    target_policy: TARGET_BROWSER_CONTEXT,
     implementation: BrowserControlImplementation::Cdp {
         methods: &["Network.setCookies"],
     },
@@ -246,6 +327,7 @@ const WORKER_SET_PROXY: BrowserControlOperation = BrowserControlOperation {
     path: "/proxy/set",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
+    target_policy: TARGET_CONNECTOR_POLICY,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Apply connector-scoped proxy policy before browser target launch.",
     },
@@ -256,6 +338,7 @@ const WORKER_CLEAR_PROXY: BrowserControlOperation = BrowserControlOperation {
     path: "/proxy/clear",
     max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
     timeout_ms: CONTROL_TIMEOUT_MS_SHORT,
+    target_policy: TARGET_CONNECTOR_POLICY,
     implementation: BrowserControlImplementation::WorkerPolicy {
         description: "Clear connector-scoped proxy policy for future browser targets.",
     },
@@ -1069,17 +1152,21 @@ fn validate_browser_control_operation(
             .get("timeout_ms")
             .and_then(serde_json::Value::as_u64)
             .is_some_and(|timeout_ms| timeout_ms == required.timeout_ms)
+        && operation
+            .get("target_policy")
+            .is_some_and(|target_policy| target_policy == &required.target_policy.descriptor())
         && browser_control_implementation_matches(operation, required)
     {
         Ok(())
     } else {
         Err(format!(
-            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {}, timeout_ms {}, and implementation {}",
+            "operation `{}` is incompatible; expected {} `{}` with max_response_bytes {}, timeout_ms {}, target_policy {}, and implementation {}",
             required.id,
             required.method,
             required.path,
             required.max_response_bytes,
             required.timeout_ms,
+            required.target_policy.summary(),
             required.implementation.summary()
         ))
     }
@@ -1170,6 +1257,7 @@ mod tests {
                         && operation["max_response_bytes"]
                             == serde_json::json!(required.max_response_bytes)
                         && operation["timeout_ms"] == serde_json::json!(required.timeout_ms)
+                        && operation["target_policy"] == required.target_policy.descriptor()
                 }),
                 "missing {} {} {}",
                 required.method,
@@ -1194,6 +1282,14 @@ mod tests {
 
         let navigate = operation(operations, "browser.navigate");
         assert_eq!(navigate["implementation"]["kind"], "cdp");
+        assert_eq!(navigate["target_policy"]["scope"], "page");
+        assert_eq!(
+            navigate["target_policy"]["selection"],
+            "create_or_reuse_active_page"
+        );
+        assert_eq!(navigate["target_policy"]["stale_target_recovery"], true);
+        assert_eq!(navigate["target_policy"]["current_tab_guard"], false);
+        assert_eq!(navigate["target_policy"]["export_guard"], false);
         assert_eq!(
             navigate["implementation"]["methods"],
             serde_json::json!([
@@ -1206,6 +1302,14 @@ mod tests {
 
         let screenshot = operation(operations, "browser.screenshot");
         assert_eq!(screenshot["implementation"]["kind"], "cdp");
+        assert_eq!(screenshot["target_policy"]["scope"], "page");
+        assert_eq!(
+            screenshot["target_policy"]["selection"],
+            "active_page_required"
+        );
+        assert_eq!(screenshot["target_policy"]["stale_target_recovery"], true);
+        assert_eq!(screenshot["target_policy"]["current_tab_guard"], true);
+        assert_eq!(screenshot["target_policy"]["export_guard"], true);
         assert_eq!(
             screenshot["implementation"]["methods"],
             serde_json::json!([
@@ -1219,6 +1323,11 @@ mod tests {
 
         let click = operation(operations, "browser.click");
         assert_eq!(click["implementation"]["kind"], "cdp");
+        assert_eq!(click["target_policy"]["scope"], "page");
+        assert_eq!(click["target_policy"]["selection"], "active_page_required");
+        assert_eq!(click["target_policy"]["stale_target_recovery"], true);
+        assert_eq!(click["target_policy"]["current_tab_guard"], true);
+        assert_eq!(click["target_policy"]["export_guard"], false);
         assert_eq!(
             click["implementation"]["methods"],
             serde_json::json!([
@@ -1230,6 +1339,11 @@ mod tests {
         );
 
         let get_cookies = operation(operations, "browser.get_cookies");
+        assert_eq!(get_cookies["target_policy"]["scope"], "browser_context");
+        assert_eq!(
+            get_cookies["target_policy"]["selection"],
+            "active_context_required"
+        );
         assert_eq!(
             get_cookies["implementation"]["methods"],
             serde_json::json!(["Network.getCookies"])
@@ -1237,6 +1351,8 @@ mod tests {
 
         let set_proxy = operation(operations, "browser.set_proxy");
         assert_eq!(set_proxy["implementation"]["kind"], "worker_policy");
+        assert_eq!(set_proxy["target_policy"]["scope"], "connector_policy");
+        assert_eq!(set_proxy["target_policy"]["selection"], "no_browser_target");
         assert_eq!(
             set_proxy["implementation"]["methods"],
             serde_json::json!([])
@@ -1255,8 +1371,29 @@ mod tests {
             let methods = implementation["methods"].as_array().unwrap();
             let max_response_bytes = operation["max_response_bytes"].as_u64().unwrap();
             let timeout_ms = operation["timeout_ms"].as_u64().unwrap();
+            let target_policy = &operation["target_policy"];
             assert!(max_response_bytes > 0, "{id} must expose a response cap");
             assert!(timeout_ms > 0, "{id} must expose a timeout budget");
+            assert!(
+                target_policy["scope"].as_str().is_some(),
+                "{id} must expose a target scope"
+            );
+            assert!(
+                target_policy["selection"].as_str().is_some(),
+                "{id} must expose a target selection policy"
+            );
+            assert!(
+                target_policy["stale_target_recovery"].as_bool().is_some(),
+                "{id} must expose stale-target recovery policy"
+            );
+            assert!(
+                target_policy["current_tab_guard"].as_bool().is_some(),
+                "{id} must expose current-tab guard policy"
+            );
+            assert!(
+                target_policy["export_guard"].as_bool().is_some(),
+                "{id} must expose export guard policy"
+            );
 
             assert!(
                 matches!(kind, "cdp" | "worker_policy"),
@@ -1380,6 +1517,19 @@ mod tests {
         assert!(err.contains("browser.navigate"));
         assert!(err.contains("timeout_ms"));
         assert!(err.contains(&CONTROL_TIMEOUT_MS_CAPTURE.to_string()));
+    }
+
+    #[test]
+    fn test_health_contract_rejects_wrong_target_policy() {
+        let mut body = browser_control_contract_descriptor();
+        let operations = body["operations"].as_array_mut().unwrap();
+        operations[0]["target_policy"]["selection"] =
+            serde_json::Value::String("active_page_required".into());
+
+        let err = validate_fcp_browser_control_health(&body).unwrap_err();
+        assert!(err.contains("browser.navigate"));
+        assert!(err.contains("target_policy"));
+        assert!(err.contains("create_or_reuse_active_page"));
     }
 
     #[test]
@@ -1748,6 +1898,7 @@ mod tests {
             path: "/slow",
             max_response_bytes: CONTROL_RESPONSE_BYTES_SMALL,
             timeout_ms: 20,
+            target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
             implementation: BrowserControlImplementation::Cdp {
                 methods: &["Runtime.evaluate"],
             },

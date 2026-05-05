@@ -5632,13 +5632,12 @@ mod tests {
             LatencyBreakdown::new(1, 2, 3, 4, 5, 6),
         );
 
-        let err = match SwarmLatencyEvidenceBundle::from_samples(
+        let Err(err) = SwarmLatencyEvidenceBundle::from_samples(
             environment,
             standard_swarm_latency_scenarios(),
             vec![sample],
-        ) {
-            Ok(_) => return Err("unknown sample scenario must fail closed"),
-            Err(err) => err,
+        ) else {
+            return Err("unknown sample scenario must fail closed");
         };
 
         assert_eq!(
@@ -5762,16 +5761,15 @@ mod tests {
         let environment = swarm_test_environment();
         let mut missing_artifacts = required_swarm_artifacts();
         missing_artifacts.retain(|artifact| artifact.kind != SwarmEvidenceArtifactKind::ProofNotes);
-        let missing_err = match SwarmEvidenceArtifactManifest::from_environment(
+        let Err(missing_err) = SwarmEvidenceArtifactManifest::from_environment(
             "bundle-missing",
             SwarmEvidenceSourceKind::HostBacked,
             SwarmEvidenceExecutionMode::Smoke,
             &environment,
             missing_artifacts,
             SwarmEvidenceRedactionPolicy::conservative(),
-        ) {
-            Ok(_) => return Err("missing proof notes artifact must fail"),
-            Err(err) => err,
+        ) else {
+            return Err("missing proof notes artifact must fail");
         };
 
         assert_eq!(
@@ -5817,7 +5815,7 @@ mod tests {
             SwarmEvidenceBundleError::MissingSourceRevision
         );
 
-        let mut missing_manifest_revision = stale_manifest.clone();
+        let mut missing_manifest_revision = stale_manifest;
         missing_manifest_revision.source_revision = " ".to_string();
         let missing_manifest_err =
             match missing_manifest_revision.validate_against_environment(&environment) {
@@ -5957,8 +5955,7 @@ mod tests {
 
     #[test]
     fn swarm_statistical_gate_rejects_stale_baseline_as_indeterminate() {
-        let baseline = baseline_regression_snapshot();
-        let candidate = baseline.clone();
+        let candidate = baseline_regression_snapshot();
         let mut input = statistical_gate_input(candidate);
         input.baseline_manifest.expires_at = input.generated_at - chrono::Duration::seconds(1);
         let report = SwarmStatisticalGateReport::evaluate(input);
@@ -5974,8 +5971,7 @@ mod tests {
 
     #[test]
     fn swarm_statistical_gate_rejects_incompatible_baseline_as_indeterminate() {
-        let baseline = baseline_regression_snapshot();
-        let candidate = baseline.clone();
+        let candidate = baseline_regression_snapshot();
         let mut input = statistical_gate_input(candidate);
         input.baseline_manifest.scenario_id = "mesh_gossip_update_10000".to_string();
         let report = SwarmStatisticalGateReport::evaluate(input);

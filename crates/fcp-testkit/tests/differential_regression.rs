@@ -244,10 +244,10 @@ async fn watch_channel_value_propagates() {
 
 #[fcp_async_core::runtime::test]
 async fn cancellation_token_vs_manual_watch() {
-    let token = CancellationToken::new();
-    let mut listener = token.subscribe();
+    let cancel = CancellationToken::new();
+    let mut listener = cancel.subscribe();
     assert!(!listener.is_cancelled());
-    token.cancel();
+    cancel.cancel();
     assert!(listener.is_cancelled());
 
     let token_result = time::timeout(Duration::from_millis(100), listener.cancelled()).await;
@@ -269,9 +269,9 @@ async fn cancellation_token_vs_manual_watch() {
 
 #[fcp_async_core::runtime::test]
 async fn pre_cancelled_listener_resolves_immediately() {
-    let token = CancellationToken::new();
-    token.cancel();
-    let mut listener = token.subscribe();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let mut listener = cancel.subscribe();
 
     let token_start = Instant::now();
     let _ = listener.cancelled().await;
@@ -516,7 +516,7 @@ async fn retry_under_deadline_stops_on_timeout() {
     let ctx_err = loop {
         ctx_count += 1;
         match ctx.run(std::future::pending::<()>()).await {
-            Ok(()) => continue,
+            Ok(()) => {}
             Err(err) => break err,
         }
     };
@@ -530,7 +530,7 @@ async fn retry_under_deadline_stops_on_timeout() {
         }
         timeout_count += 1;
         match time::timeout(remaining, std::future::pending::<()>()).await {
-            Ok(()) => continue,
+            Ok(()) => {}
             Err(err) => break err,
         }
     };

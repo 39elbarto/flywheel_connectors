@@ -756,7 +756,7 @@ mod tests {
         // Provide only PositivePath — should flag NegativePath and Denial
         let actual = [CoverageCategory::PositivePath];
         let missing = validate_coverage(&policy, &actual);
-        assert!(!missing.is_empty(), "Should report missing categories",);
+        assert!(!missing.is_empty(), "Should report missing categories");
         let joined = missing.join("\n");
         assert!(
             joined.contains("NegativePath"),

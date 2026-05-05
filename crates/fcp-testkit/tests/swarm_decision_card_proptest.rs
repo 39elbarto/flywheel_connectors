@@ -245,7 +245,7 @@ proptest! {
                 let max_score = card
                     .loss_terms
                     .iter()
-                    .map(|t| t.weighted_score())
+                    .map(SwarmDecisionLossTerm::weighted_score)
                     .max()
                     .expect("non-empty loss_terms must have a max");
                 prop_assert_eq!(

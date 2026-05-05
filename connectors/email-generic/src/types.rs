@@ -173,17 +173,18 @@ fn split_sender_list(value: &str) -> Vec<String> {
 
 pub fn normalize_sender_address(address: &str) -> Option<String> {
     let trimmed = address.trim();
-    let candidate = if let Some(start) = trimmed.rfind('<') {
-        trimmed[start + 1..]
-            .find('>')
-            .map(|end| &trimmed[start + 1..start + 1 + end])
-            .unwrap_or(&trimmed[start + 1..])
-    } else {
-        trimmed
-    }
-    .trim()
-    .trim_matches('"')
-    .trim_matches('\'');
+    let candidate = trimmed
+        .rfind('<')
+        .map_or(trimmed, |start| {
+            trimmed[start + 1..]
+                .find('>')
+                .map_or(&trimmed[start + 1..], |end| {
+                    &trimmed[start + 1..start + 1 + end]
+                })
+        })
+        .trim()
+        .trim_matches('"')
+        .trim_matches('\'');
 
     if candidate.is_empty()
         || !candidate.contains('@')

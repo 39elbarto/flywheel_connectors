@@ -67,6 +67,11 @@ async fn mistral_provider_contract_is_advertised() {
                 ProviderModelCatalogContract::new("audio")
                     .with_model(ProviderModelContract::new("voxtral-mini-transcribe")),
             )
+            .with_model_catalog(
+                ProviderModelCatalogContract::new("realtime-audio").with_model(
+                    ProviderModelContract::new("voxtral-mini-transcribe-realtime-2602"),
+                ),
+            )
             .with_operation(
                 ProviderOperationContract::from_input_schema(
                     "mistral.chat.completions",
@@ -88,6 +93,14 @@ async fn mistral_provider_contract_is_advertised() {
                     "mistral.audio.transcriptions",
                     "audio",
                     input_schema(&introspection, "mistral.audio.transcriptions"),
+                )
+                .require_default_model(),
+            )
+            .with_operation(
+                ProviderOperationContract::from_input_schema(
+                    "mistral.audio.realtime.transcribe",
+                    "realtime-audio",
+                    input_schema(&introspection, "mistral.audio.realtime.transcribe"),
                 )
                 .require_default_model(),
             )

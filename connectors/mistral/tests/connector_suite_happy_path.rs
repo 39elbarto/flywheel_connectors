@@ -1,3 +1,10 @@
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
+use base64::Engine;
+use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_mistral::MistralConnector;
 use fcp_prelude::{
@@ -8,6 +15,10 @@ use fcp_prelude::{
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use serde_json::json;
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -15,6 +26,7 @@ use wiremock::{
 
 const OP_MODELS_LIST: &str = "mistral.models.list";
 const CAP_MODELS: &str = "mistral.models";
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
 
 struct MistralSuiteAdapter {
     connector: MistralConnector,
@@ -212,6 +224,80 @@ fn suite(server: &MockServer, test_name: &'static str, expect_error: bool) -> Co
     }
 }
 
+async fn read_http_headers<IO: AsyncRead + Unpin>(io: &mut IO) -> io::Result<Vec<u8>> {
+    const MAX_HEADERS: usize = 16 * 1024;
+
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0_u8; 256];
+
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *io).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        let filled = temp.get(..read).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake read exceeded buffer",
+            )
+        })?;
+        buf.extend_from_slice(filled);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_mistral_test_websocket(mut stream: TcpStream) -> (TestServerWebSocket, String) {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    let headers = String::from_utf8_lossy(&request).into_owned();
+    let ws = WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket");
+    (ws, headers)
+}
+
+async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<String, String> {
+    match ws.recv(&Cx::for_testing()).await {
+        Ok(Some(ServerWsMessage::Text(text))) => Ok(text),
+        Ok(Some(other)) => Err(format!("expected text frame for {context}, got {other:?}")),
+        Ok(None) => Err(format!("websocket closed before {context}")),
+        Err(err) => Err(format!("{context}: {err}")),
+    }
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_models_happy_path_uses_mock_server() {
     let server = MockServer::start().await;
@@ -239,6 +325,157 @@ async fn connector_suite_models_happy_path_uses_mock_server() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn realtime_transcription_loopback_websocket_session() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+    let expected_audio = base64::engine::general_purpose::STANDARD.encode(b"mulaw-audio");
+
+    let ws_task = fcp_async_core::task::spawn({
+        let expected_audio = expected_audio.clone();
+        async move {
+            let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+            let (mut ws, headers) = accept_mistral_test_websocket(tcp_stream).await;
+            assert!(
+                headers.starts_with(
+                    "GET /v1/audio/transcriptions/realtime?model=voxtral-mini-transcribe-realtime-2602&target_streaming_delay_ms=800 HTTP/1.1"
+                ),
+                "unexpected realtime websocket request: {headers}"
+            );
+            assert!(
+                headers.contains("Authorization: Bearer test-api-key-xyz"),
+                "missing authorization header: {headers}"
+            );
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "session.created",
+                    "session": {
+                        "request_id": "mistral-rt-loopback",
+                        "model": "voxtral-mini-transcribe-realtime-2602",
+                        "audio_format": {
+                            "encoding": "pcm_mulaw",
+                            "sample_rate": 8000
+                        },
+                        "target_streaming_delay_ms": 800
+                    }
+                }),
+                "send session.created",
+            )
+            .await;
+
+            let update = recv_text_frame(&mut ws, "receive session update").await?;
+            let update: serde_json::Value =
+                serde_json::from_str(&update).expect("session update json");
+            assert_eq!(update["type"], "session.update");
+            assert_eq!(update["session"]["audio_format"]["encoding"], "pcm_mulaw");
+            assert_eq!(update["session"]["audio_format"]["sample_rate"], 8000);
+            assert_eq!(update["session"]["target_streaming_delay_ms"], 800);
+
+            let append = recv_text_frame(&mut ws, "receive audio append").await?;
+            let append: serde_json::Value = serde_json::from_str(&append).expect("append json");
+            assert_eq!(append["type"], "input_audio.append");
+            assert_eq!(append["audio"], expected_audio);
+
+            let flush = recv_text_frame(&mut ws, "receive audio flush").await?;
+            let flush: serde_json::Value = serde_json::from_str(&flush).expect("flush json");
+            assert_eq!(flush["type"], "input_audio.flush");
+
+            let end = recv_text_frame(&mut ws, "receive audio end").await?;
+            let end: serde_json::Value = serde_json::from_str(&end).expect("end json");
+            assert_eq!(end["type"], "input_audio.end");
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "transcription.text.delta",
+                    "text": "Hello "
+                }),
+                "send text delta",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "transcription.segment",
+                    "text": "Hello from Voxtral",
+                    "start": 0.0,
+                    "end": 1.25
+                }),
+                "send segment",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "transcription.done"
+                }),
+                "send done",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
+            Ok::<(), String>(())
+        }
+    });
+
+    let mut connector = MistralConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "test-api-key-xyz",
+            "base_url": base_url
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({ "session_id": "mistral-loopback-session" }))
+        .await
+        .expect("handshake should succeed");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "mistral.audio.realtime.transcribe",
+            "input": {
+                "audio_base64": expected_audio,
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000,
+                "max_reconnect_attempts": 0
+            }
+        }))
+        .await
+        .expect("realtime invoke should succeed");
+
+    assert!(
+        result["session_id"]
+            .as_str()
+            .expect("session id string")
+            .starts_with("fcp-mistral-rt-")
+    );
+    assert_eq!(result["provider_session_id"], "mistral-rt-loopback");
+    assert_eq!(result["model"], "voxtral-mini-transcribe-realtime-2602");
+    assert_eq!(result["audio_format"]["encoding"], "pcm_mulaw");
+    assert_eq!(result["audio_format"]["sample_rate"], 8000);
+    assert_eq!(result["target_streaming_delay_ms"], 800);
+    assert_eq!(result["text"], "Hello from Voxtral");
+    assert_eq!(result["partials"].as_array().expect("partials").len(), 1);
+    assert_eq!(result["segments"].as_array().expect("segments").len(), 1);
+    assert_eq!(result["stats"]["reconnect_attempts"], 0);
+    assert_eq!(
+        result["provenance"]["source"],
+        "mistral.audio.realtime.transcribe"
+    );
+
+    ws_task
+        .await
+        .expect("websocket task")
+        .expect("websocket proof");
 }
 
 #[fcp_async_core::runtime::test]

@@ -5,20 +5,20 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:mistral-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:mistral-realtime-transcription"
 
 [connector]
 id = "fcp.mistral"
 name = "Mistral"
 version = "0.1.0"
-description = "Mistral request-response connector for chat, embeddings, transcription, and model discovery"
-archetypes = ["request-response"]
+description = "Mistral connector for chat, embeddings, file transcription, realtime transcription, and model discovery"
+archetypes = ["request-response", "streaming"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: chat completions, embeddings, audio transcription, and model discovery."
+migration_hint = "Covers chat completions, embeddings, file transcription, finite realtime transcription sessions, and model discovery."
 
 [zones]
 home = "z:work"
@@ -37,4 +37,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
-

@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.email-generic"
 name = "Generic Email"
 version = "0.1.0"
-description = "Generic email connector covering IMAP mailbox inventory/search and SMTP message sending"
+description = "Generic email connector covering IMAP mailbox inventory/search, SMTP sending, and redacted inbound monitor policy configuration"
 archetype = "operational"
 homepage = "https://datatracker.ietf.org/doc/html/rfc3501"
 
@@ -26,7 +26,7 @@ forbidden = ["system.exec", "system.privileged", "network.listen"]
 # runtime configuration.
 
 [provides.operations.health]
-summary = "Report connector configuration and IMAP reachability"
+summary = "Report connector configuration, IMAP reachability, and inbound monitor policy state"
 capability = "email_generic.read"
 risk = "low"
 safety_tier = "safe"
@@ -60,4 +60,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

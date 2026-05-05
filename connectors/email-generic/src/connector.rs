@@ -74,6 +74,14 @@ impl EmailGenericConnector {
         format!("sha256:{}", hex::encode(hasher.finalize()))
     }
 
+    fn inbound_monitor_state() -> serde_json::Value {
+        json!({
+            "status": "deferred",
+            "streaming": false,
+            "reason": "supervised inbound polling is tracked by flywheel_connectors-4kw5f.4.2",
+        })
+    }
+
     pub fn doctor(&self) -> DoctorResult {
         let mut checks = vec![DoctorCheck {
             name: "configured".into(),
@@ -98,6 +106,26 @@ impl EmailGenericConnector {
                 message: config.smtp.host.clone(),
                 critical: false,
             });
+            checks.push(DoctorCheck {
+                name: "inbound_monitor".into(),
+                passed: false,
+                message:
+                    "Inbound monitor is deferred; sender policy is parsed before event support"
+                        .into(),
+                critical: false,
+            });
+            checks.push(DoctorCheck {
+                name: "monitor_policy".into(),
+                passed: true,
+                message: format!(
+                    "allowed_senders_count={}, require_allowed_sender={}, drop_automated={}, allow_attachments={}",
+                    config.monitor_policy.allowed_senders.len(),
+                    config.monitor_policy.require_allowed_sender,
+                    config.monitor_policy.drop_automated,
+                    config.monitor_policy.allow_attachments
+                ),
+                critical: false,
+            });
         }
         DoctorResult::new(checks)
     }
@@ -108,7 +136,10 @@ impl EmailGenericConnector {
             OperationInfo {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report generic email connector health".into(),
-                description: Some("Check basic IMAP reachability and configuration.".into()),
+                description: Some(
+                    "Check basic IMAP reachability, configuration, and monitor-policy state."
+                        .into(),
+                ),
                 input_schema: json!({ "type": "object" }),
                 output_schema: json!({ "type": "object" }),
                 capability: CapabilityId::from_static(CAP_READ),
@@ -227,6 +258,8 @@ impl EmailGenericConnector {
                 "imap_host": config.imap.host,
                 "smtp_host": config.smtp.host,
                 "manifest_hash": Self::manifest_hash(),
+                "monitor_policy": config.monitor_policy.redacted_state(),
+                "inbound_monitor": Self::inbound_monitor_state(),
             }),
             OP_LIST_MAILBOXES => client
                 .list_mailboxes()
@@ -369,6 +402,11 @@ impl FcpConnector for EmailGenericConnector {
             "manifest_hash": Self::manifest_hash(),
             "imap_host": self.config.as_ref().map(|config| config.imap.host.clone()),
             "smtp_host": self.config.as_ref().map(|config| config.smtp.host.clone()),
+            "monitor_policy": self
+                .config
+                .as_ref()
+                .map(|config| config.monitor_policy.redacted_state()),
+            "inbound_monitor": Self::inbound_monitor_state(),
         }));
         snapshot
     }
@@ -530,6 +568,7 @@ mod tests {
 
     fn capability_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         capability: &'static str,
         operation: &'static str,
     ) -> CapabilityToken {
@@ -537,6 +576,7 @@ mod tests {
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:private")
+            .target_instance(instance_id)
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
@@ -786,6 +826,66 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn health_after_configure_reports_redacted_monitor_policy() {
+        let mut connector = EmailGenericConnector::new();
+        connector
+            .configure(json!({
+                "imap": { "host": "h", "username": "u", "password": "p" },
+                "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
+                "monitor_policy": {
+                    "allowed_senders": ["Allowed@Example.com"],
+                    "allow_attachments": true,
+                    "poll_interval_secs": 30,
+                    "max_body_chars": 4096,
+                    "seen_uid_cap": 64
+                }
+            }))
+            .await
+            .unwrap();
+        let snapshot = connector.health().await;
+        let details = snapshot.details.expect("details should be present");
+        assert_eq!(details["monitor_policy"]["allowed_senders_count"], 1);
+        assert_eq!(
+            details["monitor_policy"]["allowed_senders_configured"],
+            true
+        );
+        assert_eq!(details["monitor_policy"]["allow_attachments"], true);
+        assert_eq!(details["monitor_policy"]["poll_interval_secs"], 30);
+        assert_eq!(details["inbound_monitor"]["status"], "deferred");
+        assert!(!details.to_string().contains("Allowed@Example.com"));
+        assert!(!details.to_string().contains("allowed@example.com"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_after_configure_reports_noncritical_monitor_deferral() {
+        let mut connector = EmailGenericConnector::new();
+        connector
+            .configure(json!({
+                "imap": { "host": "h", "username": "u", "password": "p" },
+                "smtp": { "host": "h", "username": "u", "password": "p", "from_address": "a@b.com" },
+                "monitor_policy": { "allowed_senders": ["allowed@example.com"] }
+            }))
+            .await
+            .unwrap();
+        let result = connector.doctor();
+        assert!(result.passed);
+        let monitor = result
+            .checks
+            .iter()
+            .find(|check| check.name == "inbound_monitor")
+            .expect("inbound monitor check should be present");
+        assert!(!monitor.passed);
+        assert!(!monitor.critical);
+        let policy = result
+            .checks
+            .iter()
+            .find(|check| check.name == "monitor_policy")
+            .expect("monitor policy check should be present");
+        assert!(policy.message.contains("allowed_senders_count=1"));
+        assert!(!policy.message.contains("allowed@example.com"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn self_check_before_configure_returns_degraded() {
         let connector = EmailGenericConnector::new();
         let report = connector.self_check().await.unwrap();
@@ -868,7 +968,12 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::private(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                capability_token: capability_token(
+                    &signing_key,
+                    connector.base.instance_id.as_str(),
+                    CAP_READ,
+                    OP_HEALTH,
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

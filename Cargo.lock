@@ -5846,6 +5846,8 @@ dependencies = [
  "fcp-crypto",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-streaming",
+ "futures-util",
  "hex",
  "percent-encoding",
  "reqwest 0.13.2",

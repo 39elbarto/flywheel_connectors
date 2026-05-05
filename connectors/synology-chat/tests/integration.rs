@@ -1,10 +1,20 @@
 //! Integration tests for the Synology Chat connector.
 
+use std::{
+    fs::{self, OpenOptions},
+    io::{BufRead, BufReader, Read, Write},
+    net::TcpListener,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread::{self, JoinHandle},
+    time::{Duration as StdDuration, SystemTime, UNIX_EPOCH},
+};
+
 use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, FcpError, HandshakeRequest,
-    InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
+    InstanceId, InvokeRequest, OperationId, RequestId, SelfCheckStatus, ZoneId,
 };
 use fcp_synology_chat::SynologyChatConnector;
 use serde_json::{Value, json};
@@ -18,6 +28,7 @@ const CAP_WRITE: &str = "synology_chat.write";
 const CAP_WEBHOOK: &str = "synology_chat.webhook";
 
 const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
+const OP_SEND_FILE_URL: &str = "synology_chat.send_file_url";
 const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
 const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
 const OP_HEALTH: &str = "synology_chat.health";
@@ -43,6 +54,7 @@ fn capability_token(
     signing_key: &Ed25519SigningKey,
     capability: &str,
     operations: &[&str],
+    instance_id: &InstanceId,
 ) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
@@ -58,6 +70,7 @@ fn capability_token(
         .principal("user:test")
         .operations(operations)
         .issuer("node:test")
+        .target_instance(instance_id.as_str())
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
@@ -95,7 +108,7 @@ async fn setup_connector(
     incoming_url: &str,
     capabilities: &[&str],
 ) -> (SynologyChatConnector, Ed25519SigningKey) {
-    setup_connector_with_options(incoming_url, None, capabilities).await
+    setup_connector_with_config(incoming_url, None, capabilities, &[], 2_000).await
 }
 
 async fn setup_connector_with_options(
@@ -103,13 +116,26 @@ async fn setup_connector_with_options(
     outgoing_token: Option<&str>,
     capabilities: &[&str],
 ) -> (SynologyChatConnector, Ed25519SigningKey) {
+    setup_connector_with_config(incoming_url, outgoing_token, capabilities, &[], 2_000).await
+}
+
+async fn setup_connector_with_config(
+    incoming_url: &str,
+    outgoing_token: Option<&str>,
+    capabilities: &[&str],
+    allowed_file_url_hosts: &[&str],
+    request_timeout_ms: u64,
+) -> (SynologyChatConnector, Ed25519SigningKey) {
     let mut connector = SynologyChatConnector::new();
     let mut config = json!({
         "incoming_url": incoming_url,
-        "request_timeout_ms": 2_000
+        "request_timeout_ms": request_timeout_ms
     });
     if let Some(token) = outgoing_token {
         config["outgoing_token"] = json!(token);
+    }
+    if !allowed_file_url_hosts.is_empty() {
+        config["allowed_file_url_hosts"] = json!(allowed_file_url_hosts);
     }
     connector
         .configure(config)
@@ -126,6 +152,29 @@ async fn setup_connector_with_options(
     (connector, signing_key)
 }
 
+async fn invoke_err(
+    connector: &SynologyChatConnector,
+    operation: &'static str,
+    input: Value,
+    capability: &str,
+    signing_key: &Ed25519SigningKey,
+) -> FcpError {
+    connector
+        .invoke(invoke_request(
+            connector,
+            operation,
+            input,
+            capability_token(
+                signing_key,
+                capability,
+                &[operation],
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .expect_err("invoke should fail")
+}
+
 async fn invoke_ok(
     connector: &SynologyChatConnector,
     operation: &'static str,
@@ -138,12 +187,151 @@ async fn invoke_ok(
             connector,
             operation,
             input,
-            capability_token(signing_key, capability, &[operation]),
+            capability_token(
+                signing_key,
+                capability,
+                &[operation],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect("invoke should succeed")
         .result
         .expect("successful invoke should carry a result")
+}
+
+#[derive(Clone)]
+struct LoopbackResponse {
+    status: u16,
+    body: &'static str,
+    retry_after: Option<&'static str>,
+    delay: StdDuration,
+}
+
+impl LoopbackResponse {
+    const fn ok(body: &'static str) -> Self {
+        Self {
+            status: 200,
+            body,
+            retry_after: None,
+            delay: StdDuration::from_millis(0),
+        }
+    }
+
+    const fn rate_limited(body: &'static str) -> Self {
+        Self {
+            status: 429,
+            body,
+            retry_after: Some("3"),
+            delay: StdDuration::from_millis(0),
+        }
+    }
+
+    const fn delayed(body: &'static str, delay: StdDuration) -> Self {
+        Self {
+            status: 200,
+            body,
+            retry_after: None,
+            delay,
+        }
+    }
+}
+
+struct LoopbackWebhook {
+    url: String,
+    bodies: Arc<Mutex<Vec<String>>>,
+    join: JoinHandle<()>,
+}
+
+impl LoopbackWebhook {
+    fn start(responses: Vec<LoopbackResponse>) -> Self {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("loopback bind should work");
+        let local_addr = listener.local_addr().expect("local address should exist");
+        let url = format!("http://127.0.0.1:{}/webhook", local_addr.port());
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let thread_bodies = Arc::clone(&bodies);
+        let join = thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _peer)) = listener.accept() else {
+                    return;
+                };
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("stream clone should work"));
+                let mut content_length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).is_err() || line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(raw_length) = lower.strip_prefix("content-length:") {
+                        content_length = raw_length.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0u8; content_length];
+                if content_length > 0 {
+                    let _ = reader.read_exact(&mut body);
+                }
+                thread_bodies
+                    .lock()
+                    .expect("body lock")
+                    .push(String::from_utf8_lossy(&body).into_owned());
+                if !response.delay.is_zero() {
+                    thread::sleep(response.delay);
+                }
+                let retry_after = response
+                    .retry_after
+                    .map(|value| format!("Retry-After: {value}\r\n"))
+                    .unwrap_or_default();
+                let reason = match response.status {
+                    200 => "OK",
+                    429 => "Too Many Requests",
+                    500 => "Internal Server Error",
+                    _ => "Status",
+                };
+                let response_head = format!(
+                    "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    response.status,
+                    reason,
+                    retry_after,
+                    response.body.len(),
+                    response.body
+                );
+                let _ = stream.write_all(response_head.as_bytes());
+            }
+        });
+        Self { url, bodies, join }
+    }
+
+    fn finish(self) -> Vec<String> {
+        let _ = self.join.join();
+        self.bodies.lock().expect("body lock").clone()
+    }
+}
+
+fn evidence_path() -> PathBuf {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock")
+        .as_nanos();
+    std::env::temp_dir().join(format!(
+        "fcp-synology-chat-file-url-e2e-{now}-{}.jsonl",
+        std::process::id()
+    ))
+}
+
+fn append_evidence(path: &Path, value: &Value) {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .expect("evidence file should open");
+    writeln!(
+        file,
+        "{}",
+        serde_json::to_string(&value).expect("evidence should serialize")
+    )
+    .expect("evidence line should write");
 }
 
 #[fcp_async_core::runtime::test]
@@ -259,6 +447,224 @@ async fn send_message_posts_expected_payload_and_normalizes_empty_success() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn send_file_url_posts_checked_payload_and_policy_audit() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhook"))
+        .and(body_json(json!({
+            "file_url": "https://cdn.example.com/report.pdf",
+            "user_ids": ["4"],
+            "username": "Build Bot"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "success": true
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector_with_config(
+        &format!("{}/webhook", server.uri()),
+        None,
+        &[CAP_WRITE],
+        &["cdn.example.com"],
+        2_000,
+    )
+    .await;
+
+    let result = invoke_ok(
+        &connector,
+        OP_SEND_FILE_URL,
+        json!({
+            "file_url": "https://cdn.example.com/report.pdf",
+            "user_id": "4",
+            "bot_name": "Build Bot"
+        }),
+        CAP_WRITE,
+        &signing_key,
+    )
+    .await;
+
+    assert_eq!(result["status"], "ok");
+    assert_eq!(result["response_kind"], "json");
+    assert_eq!(result["file_url_policy"]["decision"], "allowed");
+    assert_eq!(
+        result["file_url_policy"]["classification"],
+        "allowlisted_host"
+    );
+    assert_eq!(result["file_url_policy"]["host"], "cdn.example.com");
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_file_url_loopback_e2e_logs_policy_errors_and_shutdown() {
+    let evidence = evidence_path();
+
+    let success_server = LoopbackWebhook::start(vec![LoopbackResponse::ok("{\"queued\":true}")]);
+    let (connector, signing_key) = setup_connector_with_config(
+        &success_server.url,
+        None,
+        &[CAP_WRITE],
+        &["127.0.0.1"],
+        1_000,
+    )
+    .await;
+    let success = invoke_ok(
+        &connector,
+        OP_SEND_FILE_URL,
+        json!({
+            "file_url": "http://127.0.0.1:9/report.pdf?trace_marker=redact",
+            "user_id": "4"
+        }),
+        CAP_WRITE,
+        &signing_key,
+    )
+    .await;
+    append_evidence(
+        &evidence,
+        &json!({
+            "operation": OP_SEND_FILE_URL,
+            "connector_id": connector.id().as_str(),
+            "scenario": "safe_file_url_success",
+            "url_classification": success["file_url_policy"],
+            "capability_decision": "allowed",
+            "dispatch_result": {
+                "status": success["status"],
+                "http_status": success["http_status"],
+                "response_kind": success["response_kind"]
+            },
+            "retry_rate_decision": "not_rate_limited",
+            "skip_reason": null
+        }),
+    );
+    let success_bodies = success_server.finish();
+    assert_eq!(success_bodies.len(), 1);
+    assert!(success_bodies[0].contains("\"file_url\""));
+    assert!(success_bodies[0].contains("\"user_ids\":[\"4\"]"));
+
+    let private_error = invoke_err(
+        &connector,
+        OP_SEND_FILE_URL,
+        json!({ "file_url": "http://10.0.0.5/report.pdf" }),
+        CAP_WRITE,
+        &signing_key,
+    )
+    .await;
+    append_evidence(
+        &evidence,
+        &json!({
+            "operation": OP_SEND_FILE_URL,
+            "connector_id": connector.id().as_str(),
+            "scenario": "blocked_private_url",
+            "url_classification": "private_or_internal",
+            "capability_decision": "allowed",
+            "dispatch_result": "blocked_before_webhook_dispatch",
+            "retry_rate_decision": "not_attempted",
+            "skip_reason": private_error.to_string()
+        }),
+    );
+    assert!(private_error.to_string().contains("private"));
+
+    let malformed_error = invoke_err(
+        &connector,
+        OP_SEND_FILE_URL,
+        json!({ "file_url": "javascript:alert(1)" }),
+        CAP_WRITE,
+        &signing_key,
+    )
+    .await;
+    append_evidence(
+        &evidence,
+        &json!({
+            "operation": OP_SEND_FILE_URL,
+            "connector_id": connector.id().as_str(),
+            "scenario": "malformed_url",
+            "url_classification": "invalid_scheme",
+            "capability_decision": "allowed",
+            "dispatch_result": "blocked_before_webhook_dispatch",
+            "retry_rate_decision": "not_attempted",
+            "skip_reason": malformed_error.to_string()
+        }),
+    );
+    assert!(malformed_error.to_string().contains("http or https"));
+
+    let rate_server = LoopbackWebhook::start(vec![LoopbackResponse::rate_limited("slow down")]);
+    let (rate_connector, rate_key) =
+        setup_connector_with_config(&rate_server.url, None, &[CAP_WRITE], &["127.0.0.1"], 1_000)
+            .await;
+    let rate_error = invoke_err(
+        &rate_connector,
+        OP_SEND_FILE_URL,
+        json!({ "file_url": "http://127.0.0.1:9/report.pdf" }),
+        CAP_WRITE,
+        &rate_key,
+    )
+    .await;
+    append_evidence(
+        &evidence,
+        &json!({
+            "operation": OP_SEND_FILE_URL,
+            "connector_id": rate_connector.id().as_str(),
+            "scenario": "rate_limit_response",
+            "url_classification": "allowlisted_host",
+            "capability_decision": "allowed",
+            "dispatch_result": rate_error.to_string(),
+            "retry_rate_decision": "retry_after_3000_ms",
+            "skip_reason": null
+        }),
+    );
+    let rate_bodies = rate_server.finish();
+    assert_eq!(rate_bodies.len(), 1);
+    assert!(matches!(rate_error, FcpError::RateLimited { .. }));
+
+    let timeout_server = LoopbackWebhook::start(vec![LoopbackResponse::delayed(
+        "{\"queued\":true}",
+        StdDuration::from_millis(250),
+    )]);
+    let (timeout_connector, timeout_key) =
+        setup_connector_with_config(&timeout_server.url, None, &[CAP_WRITE], &["127.0.0.1"], 50)
+            .await;
+    let timeout_error = invoke_err(
+        &timeout_connector,
+        OP_SEND_FILE_URL,
+        json!({ "file_url": "http://127.0.0.1:9/report.pdf" }),
+        CAP_WRITE,
+        &timeout_key,
+    )
+    .await;
+    append_evidence(
+        &evidence,
+        &json!({
+            "operation": OP_SEND_FILE_URL,
+            "connector_id": timeout_connector.id().as_str(),
+            "scenario": "timeout_and_clean_shutdown",
+            "url_classification": "allowlisted_host",
+            "capability_decision": "allowed",
+            "dispatch_result": timeout_error.to_string(),
+            "retry_rate_decision": "request_timeout",
+            "skip_reason": null
+        }),
+    );
+    let timeout_bodies = timeout_server.finish();
+    assert_eq!(timeout_bodies.len(), 1);
+    assert!(matches!(timeout_error, FcpError::UpstreamTimeout { .. }));
+
+    let evidence_body = fs::read_to_string(&evidence).expect("evidence should be readable");
+    for expected in [
+        "safe_file_url_success",
+        "blocked_private_url",
+        "malformed_url",
+        "rate_limit_response",
+        "timeout_and_clean_shutdown",
+    ] {
+        assert!(evidence_body.contains(expected), "missing {expected}");
+    }
+    assert!(!evidence_body.contains("trace_marker=redact"));
+    eprintln!(
+        "synology chat file URL e2e evidence path: {}",
+        evidence.display()
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn send_payload_wraps_plain_text_success_body() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -305,7 +711,12 @@ async fn send_payload_rejects_non_object_payloads() {
             &connector,
             OP_SEND_PAYLOAD,
             json!({ "payload": "not-an-object" }),
-            capability_token(&signing_key, CAP_WRITE, &[OP_SEND_PAYLOAD]),
+            capability_token(
+                &signing_key,
+                CAP_WRITE,
+                &[OP_SEND_PAYLOAD],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect_err("non-object payload should fail");
@@ -336,7 +747,12 @@ async fn send_message_surfaces_retryable_api_errors() {
             &connector,
             OP_SEND_MESSAGE,
             json!({ "text": "retry me" }),
-            capability_token(&signing_key, CAP_WRITE, &[OP_SEND_MESSAGE]),
+            capability_token(
+                &signing_key,
+                CAP_WRITE,
+                &[OP_SEND_MESSAGE],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect_err("503 should surface as an FCP external error");
@@ -460,7 +876,12 @@ async fn ingest_outgoing_webhook_rejects_token_mismatch() {
                     "text": "Tjena"
                 }
             }),
-            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+            capability_token(
+                &signing_key,
+                CAP_WEBHOOK,
+                &[OP_INGEST_OUTGOING_WEBHOOK],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect_err("token mismatch should fail");
@@ -501,7 +922,12 @@ async fn ingest_outgoing_webhook_rejects_non_string_token_values() {
                     "text": "Tjena"
                 }
             }),
-            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+            capability_token(
+                &signing_key,
+                CAP_WEBHOOK,
+                &[OP_INGEST_OUTGOING_WEBHOOK],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect_err("boolean token values must be rejected");
@@ -542,7 +968,12 @@ async fn ingest_outgoing_webhook_rejects_negative_timestamps() {
                     "text": "Tjena"
                 }
             }),
-            capability_token(&signing_key, CAP_WEBHOOK, &[OP_INGEST_OUTGOING_WEBHOOK]),
+            capability_token(
+                &signing_key,
+                CAP_WEBHOOK,
+                &[OP_INGEST_OUTGOING_WEBHOOK],
+                connector.instance_id(),
+            ),
         ))
         .await
         .expect_err("negative timestamps must be rejected");

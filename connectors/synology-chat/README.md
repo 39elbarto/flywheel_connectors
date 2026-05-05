@@ -18,26 +18,30 @@
 
 This document fixes the accepted first V3 slice for `fcp.synology-chat` and records the first inbound follow-on that now exists, so later work stays aligned with the connector that actually ships instead of assuming a full bidirectional bot runtime already exists.
 
-The current connector is still centered on outbound incoming-webhook delivery, but it now also supports explicit host-forwarded outgoing-webhook normalization. It can send plain text, forward a raw webhook payload, normalize one forwarded outgoing-webhook payload into stable channel or thread or sender metadata, and report configuration and health details. It is still not an outgoing-webhook receiver, slash-command handler, bot platform runtime, or background inbound bridge.
+The current connector is still centered on outbound incoming-webhook delivery, but it now also supports explicit host-forwarded outgoing-webhook normalization and a typed file URL send path with SSRF-oriented URL policy checks. It can send plain text, send one validated media/file URL, forward a raw webhook payload, normalize one forwarded outgoing-webhook payload into stable channel or thread or sender metadata, and report configuration and health details. It is still not an outgoing-webhook receiver, slash-command handler, bot platform runtime, or background inbound bridge.
 
 ## Current Runtime Snapshot
 
 The current crate exposes these operations:
 
 - `synology_chat.send_message`
+- `synology_chat.send_file_url`
 - `synology_chat.send_payload`
 - `synology_chat.ingest_outgoing_webhook`
 - `synology_chat.health`
 
 Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, and `manifest.toml`:
 
-- Configuration is `incoming_url`, optional `outgoing_token`, bounded `request_timeout_ms`, and `allow_insecure_ssl`.
+- Configuration is `incoming_url`, optional `outgoing_token`, optional `allowed_file_url_hosts`, bounded `request_timeout_ms`, and `allow_insecure_ssl`.
 - `incoming_url` must be a valid `http://` or `https://` URL and is normalized by trimming surrounding whitespace.
 - One connector instance is bound to one incoming webhook delivery target.
 - `send_message` requires `text` and optionally accepts `user_id`, `user_ids`, and `bot_name`.
 - `user_id` is normalized into a single-entry `user_ids` array; `user_ids` must be an array of non-empty strings.
 - `bot_name` is currently translated to the outbound payload field `username`.
+- `send_file_url` requires an HTTP or HTTPS `file_url`, rejects credentials, fragments, oversized URLs, localhost/private/link-local/internal destinations, unresolved hosts, and DNS pin mismatches, then posts `{ "file_url": ... }` with the same optional `user_id`, `user_ids`, and `bot_name` fields.
+- `allowed_file_url_hosts` is an exact-host override for private NAS or lab media hosts; it permits that exact host even when it resolves to private or loopback space.
 - `send_payload` requires a JSON object and forwards it directly to the webhook endpoint for advanced card or attachment shapes.
+- `send_payload` intentionally remains unchecked raw passthrough for provider-specific payloads; callers that want SSRF-checked media URL dispatch should use `send_file_url`.
 - Delivery is an outbound `POST` with JSON to the configured incoming webhook URL.
 - `ingest_outgoing_webhook` accepts a parsed outgoing-webhook payload forwarded by the host, verifies the configured `outgoing_token`, and emits stable channel, thread, sender, message, and attachment metadata without hosting the listener inside the connector.
 - Non-success HTTP status codes are surfaced as API errors with the provider body preserved.
@@ -53,6 +57,7 @@ Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, an
 The accepted first Synology Chat slice is intentionally narrow:
 
 - send one plain-text message through one configured incoming webhook
+- send one SSRF-checked file/media URL through the same incoming webhook
 - send one raw JSON webhook payload through the same incoming webhook
 - expose safe configuration and readiness metadata for operators
 
@@ -63,13 +68,14 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 | Surface | Current status | Notes |
 |---------|-----------------------|-------|
 | Plain-text outbound delivery | In scope | Implemented as `send_message` against a configured incoming webhook URL. |
+| Safe file URL outbound delivery | In scope | Implemented as `send_file_url` with connector-side URL validation and exact-host overrides for private deployments. |
 | Raw webhook payload passthrough | In scope | Implemented as `send_payload` for cards or attachment-shaped JSON. |
 | Forwarded outgoing-webhook normalization | In scope | Implemented as `ingest_outgoing_webhook` for host-forwarded payloads with token verification and stable channel or thread or attachment metadata. |
 | Configuration and health reporting | In scope | Implemented without a live webhook round-trip. |
 | Incoming webhook hosting | Out of scope | No HTTP listener or outgoing-webhook receive path exists. |
 | Inbound event normalization | Partially in scope | Host-forwarded outgoing-webhook payloads are normalized, but there is still no listener, replay buffer, or background ingress runtime. |
 | Slash commands, bots, or interactive replies | Out of scope | No command or callback runtime exists. |
-| Dedicated file upload flow | Out of scope | Raw payload passthrough exists, but there is no explicit upload or file lifecycle surface. |
+| Dedicated binary file upload flow | Out of scope | `send_file_url` can ask Synology Chat to fetch a validated URL, but the connector still does not upload, host, or lifecycle-manage file bytes. |
 | Persistent sync or subscription model | Out of scope | No background runtime or event stream exists. |
 
 ## Auth And Scope Boundary
@@ -85,6 +91,7 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 
 - Transport is outbound HTTP or HTTPS only.
 - The reqwest client uses the configured request timeout and may optionally disable certificate verification with `allow_insecure_ssl`.
+- Outbound media URL dispatch uses connector-local SSRF checks before the Synology NAS is asked to fetch the URL. Public DNS names must resolve to public IPs; exact `allowed_file_url_hosts` entries are the deliberate escape hatch for private self-hosted media.
 - The connector does not listen on a socket or expose any inbound service surface.
 - `health` and `self_check()` do not currently prove remote webhook reachability; they only prove that configuration was parsed and stored.
 - There is no replay buffer, retry queue, dedupe key, or persistent local state in the current runtime.
@@ -94,7 +101,7 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 
 | Capability | Purpose |
 |-----------|---------|
-| `synology_chat.write` | Send messages or raw webhook payloads through the configured incoming webhook |
+| `synology_chat.write` | Send messages, checked file URLs, or raw webhook payloads through the configured incoming webhook |
 | `synology_chat.read` | Inspect configuration and health metadata |
 | `synology_chat.webhook` | Validate and normalize a host-forwarded outgoing-webhook payload |
 
@@ -103,7 +110,8 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 | Operation | Protocol shape | Capability | SafetyTier | RiskLevel | Idempotency | Notes |
 |-----------|----------------|------------|------------|-----------|-------------|-------|
 | `synology_chat.send_message` | HTTP `POST` JSON webhook body with `text`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Outbound plain-text message delivery only. The connector does not model inbound reply semantics. |
-| `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Passes a raw webhook payload through directly for richer provider-specific payloads. |
+| `synology_chat.send_file_url` | HTTP `POST` JSON webhook body with checked `file_url`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Validates media URLs before dispatch; exact-host overrides are explicit runtime configuration for private deployments. |
+| `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Passes a raw webhook payload through directly for richer provider-specific payloads and intentionally does not inspect nested `file_url` values. |
 | `synology_chat.ingest_outgoing_webhook` | local payload normalization for one host-forwarded outgoing webhook request | `synology_chat.webhook` | `Safe` | `Low` | `Strict` | Verifies the configured `outgoing_token`, normalizes channel or thread or sender metadata, and exposes attachment hints without hosting a listener. |
 | `synology_chat.health` | local configuration report | `synology_chat.read` | `Safe` | `Low` | `Strict` | Returns configured URL and settings, but does not perform a live webhook probe. |
 

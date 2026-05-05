@@ -1,5 +1,7 @@
 //! Configuration types for the Synology Chat connector.
 
+use std::{collections::BTreeSet, net::IpAddr};
+
 use fcp_prelude::{FcpError, FcpResult};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -13,6 +15,8 @@ pub struct SynologyChatConfig {
     incoming_url: String,
     #[serde(default, rename = "outgoing_token")]
     outgoing_webhook_key: Option<String>,
+    #[serde(default)]
+    allowed_file_url_hosts: Vec<String>,
     #[serde(default = "default_request_timeout_ms")]
     request_timeout_ms: u64,
     #[serde(default)]
@@ -56,6 +60,7 @@ pub struct SynologyChatStateModel {
     pub request_timeout_ms: u64,
     pub allow_insecure_ssl: bool,
     pub outgoing_token_configured: bool,
+    pub allowed_file_url_hosts: Vec<String>,
     pub receive_path: SynologyChatReceivePath,
     pub reply_semantics: SynologyChatReplySemantics,
 }
@@ -68,6 +73,7 @@ impl std::fmt::Debug for SynologyChatConfig {
                 "outgoing_token",
                 &self.outgoing_webhook_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("allowed_file_url_hosts", &self.allowed_file_url_hosts)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("allow_insecure_ssl", &self.allow_insecure_ssl)
             .finish()
@@ -96,6 +102,13 @@ impl SynologyChatConfig {
         self.outgoing_webhook_key = webhook_auth_value
             .as_deref()
             .and_then(normalize_optional_secret);
+        self.allowed_file_url_hosts = self
+            .allowed_file_url_hosts
+            .iter()
+            .filter_map(|host| normalize_optional_host(host))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
     }
 
     pub fn validate(&self) -> FcpResult<()> {
@@ -132,6 +145,9 @@ impl SynologyChatConfig {
                 ),
             });
         }
+        for host in &self.allowed_file_url_hosts {
+            validate_allowed_file_url_host(host)?;
+        }
         Ok(())
     }
 
@@ -165,6 +181,11 @@ impl SynologyChatConfig {
     #[must_use]
     pub const fn allow_insecure_ssl(&self) -> bool {
         self.allow_insecure_ssl
+    }
+
+    #[must_use]
+    pub fn allowed_file_url_hosts(&self) -> &[String] {
+        &self.allowed_file_url_hosts
     }
 
     #[must_use]
@@ -210,6 +231,7 @@ impl SynologyChatConfig {
             request_timeout_ms: self.request_timeout_ms,
             allow_insecure_ssl: self.allow_insecure_ssl,
             outgoing_token_configured,
+            allowed_file_url_hosts: self.allowed_file_url_hosts.clone(),
             receive_path: if outgoing_token_configured {
                 SynologyChatReceivePath::ForwardedOutgoingWebhook
             } else {
@@ -231,6 +253,39 @@ fn normalize_optional_secret(value: &str) -> Option<String> {
     } else {
         Some(trimmed.to_string())
     }
+}
+
+fn normalize_optional_host(value: &str) -> Option<String> {
+    let trimmed = value.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let unbracketed = trimmed
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(trimmed);
+    Some(unbracketed.to_ascii_lowercase())
+}
+
+fn validate_allowed_file_url_host(host: &str) -> FcpResult<()> {
+    if host.contains("://")
+        || host.contains('/')
+        || host.contains('?')
+        || host.contains('#')
+        || host.contains('@')
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_file_url_hosts entries must be exact hosts, not URLs".into(),
+        });
+    }
+    if host.contains(':') && host.parse::<IpAddr>().is_err() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "allowed_file_url_hosts entries must not include ports".into(),
+        });
+    }
+    Ok(())
 }
 
 fn redact_path(path: &str) -> String {
@@ -404,6 +459,45 @@ mod tests {
         .expect("config should parse");
         assert_eq!(config.outgoing_token(), None);
         assert!(!config.outgoing_token_configured());
+    }
+
+    #[test]
+    fn config_normalizes_allowed_file_url_hosts() {
+        let config = SynologyChatConfig::from_value(serde_json::json!({
+            "incoming_url": "https://nas.example.com/webhook",
+            "allowed_file_url_hosts": [" LocalHost. ", "localhost", "[::1]"]
+        }))
+        .expect("config should parse");
+        assert_eq!(
+            config.allowed_file_url_hosts(),
+            &["::1".to_string(), "localhost".to_string()]
+        );
+        let state_model = config.state_model();
+        assert_eq!(
+            state_model.allowed_file_url_hosts,
+            vec!["::1".to_string(), "localhost".to_string()]
+        );
+    }
+
+    #[test]
+    fn config_rejects_allowed_file_url_host_with_port_or_path() {
+        for host in ["localhost:8080", "https://localhost", "localhost/path"] {
+            let error = SynologyChatConfig::from_value(serde_json::json!({
+                "incoming_url": "https://nas.example.com/webhook",
+                "allowed_file_url_hosts": [host]
+            }))
+            .expect_err("invalid exact-host override should fail");
+            match error {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1003);
+                    assert!(
+                        message.contains("exact hosts")
+                            || message.contains("must not include ports")
+                    );
+                }
+                other => assert!(matches!(other, FcpError::InvalidRequest { .. })),
+            }
+        }
     }
 
     #[test]

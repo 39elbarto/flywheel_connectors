@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
+    HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
     UnsubscribeRequest,
@@ -17,7 +17,8 @@ use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::{
-    SynologyChatClient, SynologyChatMessageRequest, SynologyChatPayload, normalize_inbound_event,
+    SynologyChatClient, SynologyChatFileUrlRequest, SynologyChatMessageRequest,
+    SynologyChatPayload, normalize_inbound_event,
 };
 use crate::types::{
     InboundWebhookPayload, SynologyChatConfig, SynologyChatStateModel, TokenVerification,
@@ -28,6 +29,7 @@ const CAP_READ: &str = "synology_chat.read";
 const CAP_WRITE: &str = "synology_chat.write";
 const CAP_WEBHOOK: &str = "synology_chat.webhook";
 const OP_SEND_MESSAGE: &str = "synology_chat.send_message";
+const OP_SEND_FILE_URL: &str = "synology_chat.send_file_url";
 const OP_SEND_PAYLOAD: &str = "synology_chat.send_payload";
 const OP_INGEST_OUTGOING_WEBHOOK: &str = "synology_chat.ingest_outgoing_webhook";
 const OP_WEBHOOK_NORMALIZE: &str = "synology_chat.webhook.normalize";
@@ -127,9 +129,22 @@ impl SynologyChatConnector {
                 },
                 critical: false,
             });
+            checks.push(DoctorCheck {
+                name: "raw_payload_file_url_policy".into(),
+                passed: true,
+                message:
+                    "send_payload remains raw passthrough; use send_file_url for SSRF-checked media URLs"
+                        .into(),
+                critical: false,
+            });
         }
 
         DoctorResult::new(checks)
+    }
+
+    #[must_use]
+    pub const fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     #[must_use]
@@ -169,9 +184,55 @@ impl SynologyChatConnector {
                 requires_approval: Some(ApprovalMode::None),
             },
             OperationInfo {
+                id: OperationId::from_static(OP_SEND_FILE_URL),
+                summary: "Send a Synology Chat file URL".into(),
+                description: Some("Validate a media or file URL with the connector SSRF policy, then deliver it through the configured Synology Chat incoming webhook.".into()),
+                input_schema: json!({
+                    "type": "object",
+                    "required": ["file_url"],
+                    "properties": {
+                        "file_url": {
+                            "type": "string",
+                            "maxLength": 2048,
+                            "description": "HTTP or HTTPS media URL for Synology Chat to fetch"
+                        },
+                        "user_id": { "type": "string" },
+                        "user_ids": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "bot_name": { "type": "string" }
+                    }
+                }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" },
+                        "http_status": { "type": "integer" },
+                        "response_kind": { "type": "string" },
+                        "file_url_policy": { "type": "object" }
+                    }
+                }),
+                capability: CapabilityId::from_static(CAP_WRITE),
+                risk_level: RiskLevel::Medium,
+                safety_tier: SafetyTier::Risky,
+                idempotency: IdempotencyClass::None,
+                ai_hints: AgentHint {
+                    when_to_use: "Use this for outbound Synology Chat media or file URL sends; it rejects credentials, fragments, private/internal destinations, and DNS pin bypasses unless the exact host is configured as an override.".into(),
+                    common_mistakes: vec![
+                        "Do not use send_payload for file_url unless you intentionally need unchecked provider-specific passthrough.".into(),
+                        "Private NAS or loopback media hosts must appear in allowed_file_url_hosts exactly.".into(),
+                    ],
+                    examples: vec!["{\"file_url\":\"https://cdn.example.com/report.pdf\",\"user_id\":\"4\"}".into()],
+                    related: vec![CapabilityId::from_static(CAP_WRITE)],
+                },
+                rate_limit: None,
+                requires_approval: Some(ApprovalMode::None),
+            },
+            OperationInfo {
                 id: OperationId::from_static(OP_SEND_PAYLOAD),
                 summary: "Send a raw Synology Chat webhook payload".into(),
-                description: Some("Forward an arbitrary JSON object to a Synology Chat incoming webhook for advanced card or attachment use cases.".into()),
+                description: Some("Forward an arbitrary JSON object to a Synology Chat incoming webhook for advanced card or attachment use cases. Raw passthrough is intentionally not inspected for nested file_url fields; use synology_chat.send_file_url when the connector should enforce media URL SSRF policy.".into()),
                 input_schema: json!({
                     "type": "object",
                     "required": ["payload"],
@@ -187,7 +248,8 @@ impl SynologyChatConnector {
                 ai_hints: AgentHint {
                     when_to_use: "Use this when the simple text operation is too limited and you need to pass a Synology Chat webhook payload through directly.".into(),
                     common_mistakes: vec![
-                        "payload must be a JSON object that the Synology Chat webhook endpoint understands.".into()
+                        "payload must be a JSON object that the Synology Chat webhook endpoint understands.".into(),
+                        "Nested file_url values are raw passthrough and are not SSRF-checked; use synology_chat.send_file_url for checked media sends.".into()
                     ],
                     examples: vec!["{\"payload\":{\"text\":\"Hello\",\"attachments\":[{\"text\":\"Details\"}]}}".into()],
                     related: vec![CapabilityId::from_static(CAP_WRITE)],
@@ -391,6 +453,33 @@ impl SynologyChatConnector {
                     .map_err(|error| error.to_fcp_error())?
                     .into_json()
             }
+            OP_SEND_FILE_URL => {
+                let file_url = req
+                    .input
+                    .get("file_url")
+                    .and_then(|value| value.as_str())
+                    .ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Missing file_url".into(),
+                    })?;
+                let user_ids = optional_user_ids(&req.input)?;
+                let bot_name = req.input.get("bot_name").and_then(|value| value.as_str());
+                let request = SynologyChatFileUrlRequest::new(file_url, &user_ids, bot_name)
+                    .map_err(|error| error.to_fcp_error())?;
+                let (dispatch, audit) = state
+                    .client
+                    .send_file_url(&request)
+                    .await
+                    .map_err(|error| error.to_fcp_error())?;
+                let mut output = dispatch.into_json();
+                let audit = serde_json::to_value(audit).map_err(|error| FcpError::Internal {
+                    message: format!("Failed to serialize file URL policy audit: {error}"),
+                })?;
+                if let Some(object) = output.as_object_mut() {
+                    object.insert("file_url_policy".into(), audit);
+                }
+                output
+            }
             OP_INGEST_OUTGOING_WEBHOOK => normalize_outgoing_webhook(&req.input, state)?,
             OP_WEBHOOK_NORMALIZE => invoke_webhook_normalize(&req.input, state)?,
             OP_HEALTH => json!({
@@ -399,6 +488,8 @@ impl SynologyChatConnector {
                 "request_timeout_ms": state.model.request_timeout_ms,
                 "allow_insecure_ssl": state.model.allow_insecure_ssl,
                 "outgoing_token_configured": state.model.outgoing_token_configured,
+                "allowed_file_url_hosts": &state.model.allowed_file_url_hosts,
+                "raw_payload_file_url_policy": "unchecked_passthrough",
                 "receive_path": &state.model.receive_path,
                 "reply_semantics": &state.model.reply_semantics,
                 "manifest_hash": Self::manifest_hash(),
@@ -840,6 +931,8 @@ impl FcpConnector for SynologyChatConnector {
             "request_timeout_ms": self.state.as_ref().map(|state| state.model.request_timeout_ms),
             "allow_insecure_ssl": self.state.as_ref().map(|state| state.model.allow_insecure_ssl),
             "outgoing_token_configured": self.state.as_ref().map(|state| state.model.outgoing_token_configured),
+            "allowed_file_url_hosts": self.state.as_ref().map(|state| &state.model.allowed_file_url_hosts),
+            "raw_payload_file_url_policy": self.state.as_ref().map(|_| "unchecked_passthrough"),
             "receive_path": self.state.as_ref().map(|state| &state.model.receive_path),
             "reply_semantics": self.state.as_ref().map(|state| &state.model.reply_semantics),
             "manifest_hash": Self::manifest_hash(),
@@ -861,6 +954,8 @@ impl FcpConnector for SynologyChatConnector {
                 "request_timeout_ms": state.model.request_timeout_ms,
                 "allow_insecure_ssl": state.model.allow_insecure_ssl,
                 "outgoing_token_configured": state.model.outgoing_token_configured,
+                "allowed_file_url_hosts": &state.model.allowed_file_url_hosts,
+                "raw_payload_file_url_policy": "unchecked_passthrough",
                 "receive_path": &state.model.receive_path,
                 "reply_semantics": &state.model.reply_semantics,
             })),
@@ -965,7 +1060,9 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
 
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
-        OP_SEND_MESSAGE | OP_SEND_PAYLOAD => Ok(CapabilityId::from_static(CAP_WRITE)),
+        OP_SEND_MESSAGE | OP_SEND_FILE_URL | OP_SEND_PAYLOAD => {
+            Ok(CapabilityId::from_static(CAP_WRITE))
+        }
         OP_INGEST_OUTGOING_WEBHOOK => Ok(CapabilityId::from_static(CAP_WEBHOOK)),
         OP_WEBHOOK_NORMALIZE | OP_HEALTH => Ok(CapabilityId::from_static(CAP_READ)),
         _ => Err(FcpError::InvalidRequest {
@@ -1005,6 +1102,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
@@ -1020,6 +1118,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id.as_str())
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -1050,7 +1149,12 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_HEALTH,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1094,7 +1198,12 @@ mod tests {
                 operation: OperationId::from_static(OP_SEND_MESSAGE),
                 zone_id: ZoneId::work(),
                 input: json!({ "text": "hello" }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_SEND_MESSAGE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_SEND_MESSAGE,
+                    connector.instance_id(),
+                ),
                 estimate_cost: false,
                 check_availability: false,
                 context: None,
@@ -1116,7 +1225,8 @@ mod tests {
                 "incoming_url": "https://nas.example.com/webapi/entry.cgi",
                 "request_timeout_ms": 25_000,
                 "allow_insecure_ssl": true,
-                "outgoing_token": "top-secret"
+                "outgoing_token": "top-secret",
+                "allowed_file_url_hosts": ["media.nas.local"]
             }))
             .await
             .expect("configure should succeed");
@@ -1133,6 +1243,11 @@ mod tests {
         assert_eq!(details["request_timeout_ms"], 25_000);
         assert_eq!(details["allow_insecure_ssl"], true);
         assert_eq!(details["outgoing_token_configured"], true);
+        assert_eq!(details["allowed_file_url_hosts"][0], "media.nas.local");
+        assert_eq!(
+            details["raw_payload_file_url_policy"],
+            "unchecked_passthrough"
+        );
         assert_eq!(details["receive_path"], "forwarded_outgoing_webhook");
         assert_eq!(details["reply_semantics"], "outgoing_webhook_response");
     }
@@ -1150,6 +1265,7 @@ mod tests {
             operation_ids,
             vec![
                 OP_SEND_MESSAGE.to_string(),
+                OP_SEND_FILE_URL.to_string(),
                 OP_SEND_PAYLOAD.to_string(),
                 OP_INGEST_OUTGOING_WEBHOOK.to_string(),
                 OP_WEBHOOK_NORMALIZE.to_string(),
@@ -1212,7 +1328,12 @@ mod tests {
                         "thread_id": "0"
                     }
                 }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1269,7 +1390,12 @@ mod tests {
                         "text": "Hello"
                     }
                 }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1317,7 +1443,12 @@ mod tests {
                         "text": "Hi there"
                     }
                 }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1364,7 +1495,12 @@ mod tests {
                 operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
                 zone_id: ZoneId::work(),
                 input: json!({ "payload": {} }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1411,7 +1547,12 @@ mod tests {
                 operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1466,7 +1607,12 @@ mod tests {
                         "file_url": "https://nas.local/file.pdf"
                     }
                 }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -1517,7 +1663,12 @@ mod tests {
                 operation: OperationId::from_static(OP_WEBHOOK_NORMALIZE),
                 zone_id: ZoneId::work(),
                 input: json!({ "payload": input_payload }),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_WEBHOOK_NORMALIZE),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_WEBHOOK_NORMALIZE,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

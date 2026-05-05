@@ -1,11 +1,19 @@
 //! HTTP client for Synology Chat webhook delivery.
 
+use std::{
+    collections::BTreeSet,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr, ToSocketAddrs},
+};
+
 use reqwest::header::RETRY_AFTER;
 use serde::Serialize;
 use serde_json::{Map, Value, json};
+use url::Url;
 
 use crate::error::{SynologyChatError, SynologyChatResult};
 use crate::types::{SynologyChatConfig, SynologyChatDeliveryTarget};
+
+const MAX_FILE_URL_LEN: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -34,6 +42,37 @@ pub struct SynologyChatMessageRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynologyChatFileUrlRequest {
+    file_url: String,
+    user_ids: Vec<String>,
+    bot_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SynologyChatFileUrlAudit {
+    pub decision: &'static str,
+    pub classification: &'static str,
+    pub scheme: String,
+    pub host: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    pub resolved_ip_count: usize,
+    pub allowlisted_host: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SynologyChatFileUrlPolicy {
+    allowed_hosts: BTreeSet<String>,
+    max_len: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SynologyChatValidatedFileUrl {
+    url: String,
+    audit: SynologyChatFileUrlAudit,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SynologyChatPayload {
     payload: Map<String, Value>,
 }
@@ -43,6 +82,7 @@ pub struct SynologyChatClient {
     client: reqwest::Client,
     target: SynologyChatDeliveryTarget,
     incoming_url: String,
+    file_url_policy: SynologyChatFileUrlPolicy,
 }
 
 impl std::fmt::Debug for SynologyChatClient {
@@ -76,29 +116,10 @@ impl SynologyChatMessageRequest {
             ));
         }
 
-        let mut normalized_user_ids = Vec::with_capacity(user_ids.len());
-        for user_id in user_ids {
-            let trimmed = user_id.trim();
-            if trimmed.is_empty() {
-                return Err(SynologyChatError::InvalidInput(
-                    "user_ids must not contain empty strings".into(),
-                ));
-            }
-            if !normalized_user_ids
-                .iter()
-                .any(|existing| existing == trimmed)
-            {
-                normalized_user_ids.push(trimmed.to_string());
-            }
-        }
-
         Ok(Self {
             text: text.to_string(),
-            user_ids: normalized_user_ids,
-            bot_name: bot_name
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToString::to_string),
+            user_ids: normalize_user_ids(user_ids)?,
+            bot_name: normalize_bot_name(bot_name),
         })
     }
 
@@ -112,6 +133,128 @@ impl SynologyChatMessageRequest {
             body["username"] = json!(bot_name);
         }
         body
+    }
+}
+
+impl SynologyChatFileUrlRequest {
+    pub fn new(
+        file_url: &str,
+        user_ids: &[String],
+        bot_name: Option<&str>,
+    ) -> SynologyChatResult<Self> {
+        let trimmed = file_url.trim();
+        if trimmed.is_empty() {
+            return Err(SynologyChatError::InvalidInput(
+                "file_url must not be empty".into(),
+            ));
+        }
+        Ok(Self {
+            file_url: trimmed.to_string(),
+            user_ids: normalize_user_ids(user_ids)?,
+            bot_name: normalize_bot_name(bot_name),
+        })
+    }
+
+    #[must_use]
+    pub fn as_payload(&self, validated_file_url: &str) -> Value {
+        let mut body = json!({ "file_url": validated_file_url });
+        if !self.user_ids.is_empty() {
+            body["user_ids"] = json!(self.user_ids);
+        }
+        if let Some(bot_name) = &self.bot_name {
+            body["username"] = json!(bot_name);
+        }
+        body
+    }
+}
+
+impl SynologyChatFileUrlPolicy {
+    #[must_use]
+    pub fn from_allowed_hosts(hosts: &[String]) -> Self {
+        Self {
+            allowed_hosts: hosts
+                .iter()
+                .map(|host| host.trim().trim_end_matches('.').to_ascii_lowercase())
+                .filter(|host| !host.is_empty())
+                .collect(),
+            max_len: MAX_FILE_URL_LEN,
+        }
+    }
+
+    fn validate(&self, raw_url: &str) -> SynologyChatResult<SynologyChatValidatedFileUrl> {
+        let parsed = parse_file_url(raw_url, self.max_len)?;
+        let host = normalized_host(&parsed)?;
+        if self.is_allowlisted_host(&host) {
+            return Ok(validated_file_url(
+                &parsed,
+                &host,
+                "allowlisted_host",
+                &[],
+                true,
+            ));
+        }
+        let resolved_ips = if let Ok(ip) = host.parse::<IpAddr>() {
+            vec![ip]
+        } else {
+            resolve_file_url_host(&host, parsed.port_or_known_default())?
+        };
+        self.validate_with_resolved_ips(raw_url, &resolved_ips)
+    }
+
+    fn validate_with_resolved_ips(
+        &self,
+        raw_url: &str,
+        resolved_ips: &[IpAddr],
+    ) -> SynologyChatResult<SynologyChatValidatedFileUrl> {
+        let parsed = parse_file_url(raw_url, self.max_len)?;
+        let host = normalized_host(&parsed)?;
+        if self.is_allowlisted_host(&host) {
+            return Ok(validated_file_url(
+                &parsed,
+                &host,
+                "allowlisted_host",
+                &[],
+                true,
+            ));
+        }
+        reject_internal_hostname(&host)?;
+        if resolved_ips.is_empty() {
+            return Err(SynologyChatError::InvalidInput(
+                "file_url host could not be resolved".into(),
+            ));
+        }
+        if let Ok(host_ip) = host.parse::<IpAddr>()
+            && !resolved_ips.contains(&host_ip)
+        {
+            return Err(SynologyChatError::InvalidInput(
+                "file_url DNS pin mismatch".into(),
+            ));
+        }
+        for ip in resolved_ips {
+            reject_internal_ip(*ip)?;
+        }
+        let classification = if host.parse::<IpAddr>().is_ok() {
+            "public_ip"
+        } else {
+            "public_dns"
+        };
+        Ok(validated_file_url(
+            &parsed,
+            &host,
+            classification,
+            resolved_ips,
+            false,
+        ))
+    }
+
+    fn is_allowlisted_host(&self, host: &str) -> bool {
+        self.allowed_hosts.contains(host)
+    }
+}
+
+impl Default for SynologyChatFileUrlPolicy {
+    fn default() -> Self {
+        Self::from_allowed_hosts(&[])
     }
 }
 
@@ -143,6 +286,9 @@ impl SynologyChatClient {
             client,
             target: config.delivery_target(),
             incoming_url: config.normalized_incoming_url(),
+            file_url_policy: SynologyChatFileUrlPolicy::from_allowed_hosts(
+                config.allowed_file_url_hosts(),
+            ),
         })
     }
 
@@ -170,6 +316,16 @@ impl SynologyChatClient {
             .send()
             .await?;
         self.normalize_response(response).await
+    }
+
+    pub async fn send_file_url(
+        &self,
+        request: &SynologyChatFileUrlRequest,
+    ) -> SynologyChatResult<(SynologyChatDispatchResult, SynologyChatFileUrlAudit)> {
+        let validated = self.file_url_policy.validate(&request.file_url)?;
+        let payload = SynologyChatPayload::from_value(&request.as_payload(&validated.url))?;
+        let result = self.send_payload(&payload).await?;
+        Ok((result, validated.audit))
     }
 
     async fn normalize_response(
@@ -219,6 +375,182 @@ impl SynologyChatClient {
                 })
             },
         )
+    }
+}
+
+fn normalize_user_ids(user_ids: &[String]) -> SynologyChatResult<Vec<String>> {
+    let mut normalized_user_ids = Vec::with_capacity(user_ids.len());
+    for user_id in user_ids {
+        let trimmed = user_id.trim();
+        if trimmed.is_empty() {
+            return Err(SynologyChatError::InvalidInput(
+                "user_ids must not contain empty strings".into(),
+            ));
+        }
+        if !normalized_user_ids
+            .iter()
+            .any(|existing| existing == trimmed)
+        {
+            normalized_user_ids.push(trimmed.to_string());
+        }
+    }
+    Ok(normalized_user_ids)
+}
+
+fn normalize_bot_name(bot_name: Option<&str>) -> Option<String> {
+    bot_name
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_file_url(raw_url: &str, max_len: usize) -> SynologyChatResult<Url> {
+    let trimmed = raw_url.trim();
+    if trimmed.is_empty() {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url must not be empty".into(),
+        ));
+    }
+    if trimmed.len() > max_len {
+        return Err(SynologyChatError::InvalidInput(format!(
+            "file_url must be at most {max_len} bytes"
+        )));
+    }
+    let parsed = Url::parse(trimmed)
+        .map_err(|_| SynologyChatError::InvalidInput("file_url must be a valid URL".into()))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url must use http or https".into(),
+        ));
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url must not include credentials".into(),
+        ));
+    }
+    if parsed.fragment().is_some() {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url must not include a fragment".into(),
+        ));
+    }
+    if parsed.host_str().is_none() {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url must include a host".into(),
+        ));
+    }
+    Ok(parsed)
+}
+
+fn normalized_host(parsed: &Url) -> SynologyChatResult<String> {
+    parsed
+        .host_str()
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| SynologyChatError::InvalidInput("file_url must include a host".into()))
+}
+
+fn resolve_file_url_host(host: &str, port: Option<u16>) -> SynologyChatResult<Vec<IpAddr>> {
+    let port = port.unwrap_or(443);
+    let mut ips = Vec::new();
+    for address in (host, port).to_socket_addrs().map_err(|_| {
+        SynologyChatError::InvalidInput("file_url host could not be resolved".into())
+    })? {
+        if !ips.contains(&address.ip()) {
+            ips.push(address.ip());
+        }
+    }
+    if ips.is_empty() {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url host could not be resolved".into(),
+        ));
+    }
+    Ok(ips)
+}
+
+fn reject_internal_hostname(host: &str) -> SynologyChatResult<()> {
+    if host == "localhost"
+        || terminal_label_is(host, "localhost")
+        || terminal_label_is(host, "local")
+        || terminal_label_is(host, "internal")
+        || terminal_label_is(host, "lan")
+        || terminal_labels_are(host, "home", "arpa")
+    {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url host is internal and must be explicitly allowlisted".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn terminal_label_is(host: &str, label: &str) -> bool {
+    host.len() > label.len() && host.rsplit('.').next() == Some(label)
+}
+
+fn terminal_labels_are(host: &str, penultimate: &str, terminal: &str) -> bool {
+    let mut labels = host.rsplit('.');
+    labels.next() == Some(terminal) && labels.next() == Some(penultimate)
+}
+
+fn reject_internal_ip(ip: IpAddr) -> SynologyChatResult<()> {
+    if ip_is_internal(ip) {
+        return Err(SynologyChatError::InvalidInput(
+            "file_url host resolves to a private or internal address".into(),
+        ));
+    }
+    Ok(())
+}
+
+const fn ip_is_internal(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => ipv4_is_internal(ip),
+        IpAddr::V6(ip) => ipv6_is_internal(ip),
+    }
+}
+
+const fn ipv4_is_internal(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    matches!(
+        octets,
+        [0 | 10 | 127 | 224..=255, _, _, _]
+            | [100, 64..=127, _, _]
+            | [169, 254, _, _]
+            | [172, 16..=31, _, _]
+            | [192, 0, 0 | 2, _]
+            | [192, 168, _, _]
+            | [198, 18..=19, _, _]
+            | [198, 51, 100, _]
+            | [203, 0, 113, _]
+    )
+}
+
+const fn ipv6_is_internal(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    ip.is_unspecified()
+        || ip.is_loopback()
+        || (segments[0] & 0xfe00) == 0xfc00
+        || (segments[0] & 0xffc0) == 0xfe80
+        || (segments[0] & 0xff00) == 0xff00
+        || (segments[0] == 0x2001 && segments[1] == 0x0db8)
+}
+
+fn validated_file_url(
+    parsed: &Url,
+    host: &str,
+    classification: &'static str,
+    resolved_ips: &[IpAddr],
+    allowlisted_host: bool,
+) -> SynologyChatValidatedFileUrl {
+    SynologyChatValidatedFileUrl {
+        url: parsed.to_string(),
+        audit: SynologyChatFileUrlAudit {
+            decision: "allowed",
+            classification,
+            scheme: parsed.scheme().to_string(),
+            host: host.to_string(),
+            port: parsed.port_or_known_default(),
+            resolved_ip_count: resolved_ips.len(),
+            allowlisted_host,
+        },
     }
 }
 
@@ -363,6 +695,128 @@ mod tests {
         );
     }
 
+    #[test]
+    fn file_url_request_preserves_user_targeting_payload_shape() {
+        let request = SynologyChatFileUrlRequest::new(
+            " https://cdn.example.com/report.pdf ",
+            &[String::from(" 4 "), String::from("4"), String::from("7")],
+            Some("  Build Bot "),
+        )
+        .expect("file URL request should parse");
+        assert_eq!(
+            request.as_payload("https://cdn.example.com/report.pdf"),
+            json!({
+                "file_url": "https://cdn.example.com/report.pdf",
+                "user_ids": ["4", "7"],
+                "username": "Build Bot"
+            })
+        );
+    }
+
+    #[test]
+    fn file_url_policy_accepts_public_http_and_https_with_resolved_ips() {
+        let policy = SynologyChatFileUrlPolicy::default();
+        for raw_url in [
+            "http://cdn.example.com/report.pdf",
+            "https://cdn.example.com/report.pdf?download=1",
+        ] {
+            let validated = policy
+                .validate_with_resolved_ips(raw_url, &["93.184.216.34".parse().unwrap()])
+                .expect("public resolved URL should pass");
+            assert_eq!(validated.audit.decision, "allowed");
+            assert_eq!(validated.audit.classification, "public_dns");
+            assert_eq!(validated.audit.host, "cdn.example.com");
+            assert_eq!(validated.audit.resolved_ip_count, 1);
+        }
+    }
+
+    #[test]
+    fn file_url_policy_rejects_disallowed_schemes() {
+        let policy = SynologyChatFileUrlPolicy::default();
+        for raw_url in [
+            "ftp://cdn.example.com/report.pdf",
+            "file:///etc/passwd",
+            "javascript:alert(1)",
+        ] {
+            let error = policy
+                .validate_with_resolved_ips(raw_url, &["93.184.216.34".parse().unwrap()])
+                .expect_err("scheme should be rejected");
+            assert!(error.to_string().contains("http or https"));
+        }
+    }
+
+    #[test]
+    fn file_url_policy_rejects_credentials_fragments_and_oversized_urls() {
+        let policy = SynologyChatFileUrlPolicy::default();
+        for raw_url in [
+            "https://user:secret@cdn.example.com/report.pdf",
+            "https://cdn.example.com/report.pdf#fragment",
+        ] {
+            let error = policy
+                .validate_with_resolved_ips(raw_url, &["93.184.216.34".parse().unwrap()])
+                .expect_err("unsafe URL decoration should fail");
+            let message = error.to_string();
+            assert!(message.contains("credentials") || message.contains("fragment"));
+        }
+
+        let oversized = format!("https://cdn.example.com/{}", "a".repeat(MAX_FILE_URL_LEN));
+        let error = policy
+            .validate_with_resolved_ips(&oversized, &["93.184.216.34".parse().unwrap()])
+            .expect_err("oversized URL should fail");
+        assert!(error.to_string().contains("at most"));
+    }
+
+    #[test]
+    fn file_url_policy_rejects_localhost_private_and_link_local_destinations() {
+        let policy = SynologyChatFileUrlPolicy::default();
+        for (raw_url, resolved_ip) in [
+            ("https://localhost/report.pdf", "127.0.0.1"),
+            ("https://nas.local/report.pdf", "192.168.1.20"),
+            ("https://cdn.example.com/report.pdf", "10.0.0.5"),
+            ("https://cdn.example.com/report.pdf", "169.254.1.10"),
+            ("https://[fd00::1]/report.pdf", "fd00::1"),
+            ("https://cdn.example.com/report.pdf", "fe80::1"),
+        ] {
+            let error = policy
+                .validate_with_resolved_ips(raw_url, &[resolved_ip.parse().unwrap()])
+                .expect_err("internal destination should fail");
+            let message = error.to_string();
+            assert!(
+                message.contains("internal")
+                    || message.contains("private")
+                    || message.contains("DNS pin mismatch")
+            );
+        }
+    }
+
+    #[test]
+    fn file_url_policy_rejects_unresolved_hosts_and_pin_mismatches() {
+        let policy = SynologyChatFileUrlPolicy::default();
+        let unresolved = policy
+            .validate_with_resolved_ips("https://cdn.example.com/report.pdf", &[])
+            .expect_err("unresolved host should fail");
+        assert!(unresolved.to_string().contains("could not be resolved"));
+
+        let mismatch = policy
+            .validate_with_resolved_ips(
+                "https://93.184.216.34/report.pdf",
+                &["1.1.1.1".parse().unwrap()],
+            )
+            .expect_err("IP host must match pinned resolution");
+        assert!(mismatch.to_string().contains("DNS pin mismatch"));
+    }
+
+    #[test]
+    fn file_url_policy_allows_exact_host_override() {
+        let policy = SynologyChatFileUrlPolicy::from_allowed_hosts(&["localhost".to_string()]);
+        let validated = policy
+            .validate_with_resolved_ips("http://localhost:12345/report.pdf", &[])
+            .expect("exact allowlist override should permit private lab host");
+        assert_eq!(validated.audit.classification, "allowlisted_host");
+        assert!(validated.audit.allowlisted_host);
+        assert_eq!(validated.audit.host, "localhost");
+    }
+
     #[fcp_async_core::runtime::test]
     async fn send_message_posts_expected_payload() {
         let server = MockServer::start().await;
@@ -392,6 +846,43 @@ mod tests {
             .expect("send should succeed");
         assert_eq!(result.response_kind, SynologyChatResponseKind::Json);
         assert_eq!(result.body.expect("json body")["success"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_file_url_posts_checked_payload() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(json!({
+                "file_url": "https://cdn.example.com/report.pdf",
+                "user_ids": ["4"],
+                "username": "Build Bot"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "success": true
+            })))
+            .mount(&server)
+            .await;
+
+        let config = SynologyChatConfig::from_value(json!({
+            "incoming_url": server.uri(),
+            "allowed_file_url_hosts": ["cdn.example.com"]
+        }))
+        .expect("config should parse");
+        let client = SynologyChatClient::from_config(&config).expect("client should build");
+        let request = SynologyChatFileUrlRequest::new(
+            "https://cdn.example.com/report.pdf",
+            &[String::from("4")],
+            Some("Build Bot"),
+        )
+        .expect("file URL request should build");
+        let (result, audit) = client
+            .send_file_url(&request)
+            .await
+            .expect("file URL send should succeed");
+        assert_eq!(result.response_kind, SynologyChatResponseKind::Json);
+        assert_eq!(result.body.expect("json body")["success"], true);
+        assert_eq!(audit.classification, "allowlisted_host");
+        assert_eq!(audit.host, "cdn.example.com");
     }
 
     #[fcp_async_core::runtime::test]

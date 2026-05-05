@@ -505,7 +505,7 @@ async fn run_live_browser_suite(
         correlation_id,
         &mut logger,
         "browser.render_pdf",
-        json!({ "format": "a4", "print_background": true }),
+        json!({ "format": "a4", "print_background": true, "max_pages": 100 }),
     )
     .await?;
     persist_base64_artifact(
@@ -519,7 +519,12 @@ async fn run_live_browser_suite(
         correlation_id,
         &mut logger,
         "browser.extract_text",
-        json!({ "selector": "body", "include_hidden": false }),
+        json!({
+            "selector": "body",
+            "include_hidden": false,
+            "output_mode": "markdown",
+            "max_chars": 2_000
+        }),
     )
     .await?;
     invoke_and_log(
@@ -653,6 +658,8 @@ async fn run_live_browser_suite(
         "loopback_site": redact_url_for_artifact(site.url("/").as_str()),
         "screenshot_artifact": "screenshot.png",
         "pdf_artifact": "page.pdf",
+        "readable_content_guardrail_evidence": "extract_text logs readability, guardrails, and external_content when live prerequisites are present",
+        "document_extraction_decision_evidence": "render_pdf logs document_extraction deferral metadata",
     });
     Ok(BrowserE2eReport::passed(
         correlation_id,
@@ -730,6 +737,10 @@ fn operation_details(
         "latency": { "measured_by": "harness", "unit": "ms" },
         "retry_backoff": { "attempt": 1, "next_delay_ms": null },
         "output": output_metrics(output),
+        "external_content": output.get("external_content").cloned().unwrap_or(Value::Null),
+        "readability": output.get("readability").cloned().unwrap_or(Value::Null),
+        "guardrails": output.get("guardrails").cloned().unwrap_or(Value::Null),
+        "document_extraction": output.get("document_extraction").cloned().unwrap_or(Value::Null),
         "cancellation_checkpoints": cancellation_checkpoints(operation),
         "timeout_budget_ms": timeout_budget_ms(operation),
         "no_orphan_task_shutdown_evidence": {
@@ -1455,6 +1466,42 @@ fn log_schema_contains_required_browser_evidence_fields() {
     assert!(value["details"]["navigation_policy_decision"].is_string());
     assert!(value["details"]["output"]["width"].is_u64());
     assert!(value["details"]["cancellation_checkpoints"].is_array());
+}
+
+#[test]
+fn log_schema_records_browser_extraction_guardrail_metadata() {
+    let details = operation_details(
+        "browser.extract_text",
+        HarnessStatus::Passed,
+        &json!({
+            "text": "Readable page",
+            "output_mode": "markdown",
+            "external_content": { "untrusted": true, "kind": "page_text" },
+            "readability": { "decision": "adopted_for_active_page_text" },
+            "guardrails": { "truncated": false, "requested_max_chars": 2000 }
+        }),
+        None,
+    );
+
+    assert_eq!(details["external_content"]["untrusted"], true);
+    assert_eq!(
+        details["readability"]["decision"],
+        "adopted_for_active_page_text"
+    );
+    assert_eq!(details["guardrails"]["requested_max_chars"], 2000);
+
+    let pdf_details = operation_details(
+        "browser.render_pdf",
+        HarnessStatus::Passed,
+        &json!({
+            "pdf_data": "JVBERg==",
+            "page_count": 1,
+            "document_extraction": { "decision": "deferred" }
+        }),
+        None,
+    );
+
+    assert_eq!(pdf_details["document_extraction"]["decision"], "deferred");
 }
 
 #[test]

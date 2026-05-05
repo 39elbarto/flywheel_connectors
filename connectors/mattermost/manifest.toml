@@ -11,14 +11,14 @@ interface_hash = "blake3-256:fcp.interface.v2:bc27ff97696c469eb98f6964560fe98555
 id = "fcp.mattermost"
 name = "Mattermost Connector"
 version = "0.1.0"
-description = "Self-hosted collaboration connector for Mattermost team/channel/post/file workflows; first slice excludes System Console, SCIM/LDAP, plugin, and workspace-admin APIs"
+description = "Self-hosted collaboration connector for Mattermost team/channel/post/file workflows with policy-gated WebSocket monitor events; first slice excludes System Console, SCIM/LDAP, plugin, and workspace-admin APIs"
 archetypes = ["operational", "bidirectional"]
 format = "native"
 
 [connector.state]
-model = "stateless"
+model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "init"
+migration_hint = "monitor policy defaults to bot-mention gating for public channel messages"
 
 [zones]
 home = "z:work"

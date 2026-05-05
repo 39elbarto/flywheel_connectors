@@ -1,6 +1,6 @@
 //! Mattermost connector implementation.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
@@ -40,6 +40,8 @@ const SOCKET_EVENT_BUFFER_CAPACITY_U32: u32 = 256;
 const SOCKET_RECONNECT_MIN_MS: u64 = 1_000;
 const SOCKET_RECONNECT_MAX_MS: u64 = 30_000;
 const SOCKET_PING_INTERVAL: Duration = Duration::from_secs(25);
+const MONITOR_POLICY_MAX_SET_ITEMS: usize = 256;
+const MONITOR_POLICY_ID_MAX_CHARS: usize = 128;
 const SOCKET_DEFAULT_TOPICS: &[&str] = &[
     "mattermost.posted",
     "mattermost.post_edited",
@@ -78,6 +80,7 @@ pub struct MattermostConnector {
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
+    monitor_policy: MattermostMonitorPolicy,
     started_at: Instant,
 }
 
@@ -102,6 +105,7 @@ impl MattermostConnector {
             event_tx,
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
+            monitor_policy: MattermostMonitorPolicy::default(),
             started_at: Instant::now(),
         }
     }
@@ -130,6 +134,7 @@ impl MattermostConnector {
     ///
     /// Returns an error if the configuration JSON is invalid or the client cannot be built.
     pub fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let monitor_policy = MattermostMonitorPolicy::from_config(config.get("monitor_policy"))?;
         let mut config: MattermostConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 5001,
@@ -206,6 +211,7 @@ impl MattermostConnector {
         ));
         self.client = Some(client);
         self.config = Some(config);
+        self.monitor_policy = monitor_policy;
         self.base.set_configured(true);
         Ok(())
     }
@@ -387,7 +393,10 @@ impl MattermostConnector {
         self.stop_socket_mode().await;
         self.configure(params)?;
         *self.subscribed_topics.write().await = Vec::new();
-        Ok(json!({"status": "configured"}))
+        Ok(json!({
+            "status": "configured",
+            "monitor_policy": self.monitor_policy.to_redacted_json(),
+        }))
     }
 
     /// Handle handshake method.
@@ -427,7 +436,8 @@ impl MattermostConnector {
                 "socket_connected": socket_connected,
                 "buffer_capacity": SOCKET_EVENT_BUFFER_CAPACITY,
                 "subscribed_topics": subscribed_topics,
-            }
+            },
+            "monitor_policy": self.monitor_policy.to_redacted_json(),
         }));
         serde_json::to_value(snapshot).map_err(|e| FcpError::Internal {
             message: format!("failed to serialize health snapshot: {e}"),
@@ -602,7 +612,8 @@ impl MattermostConnector {
                 "min_events": SOCKET_EVENT_BUFFER_CAPACITY,
                 "overflow": "stream.reset"
             },
-            "connection_status": if started { "started" } else { "already_running" }
+            "connection_status": if started { "started" } else { "already_running" },
+            "monitor_policy": self.monitor_policy.to_redacted_json(),
         }))
     }
 
@@ -650,6 +661,7 @@ impl MattermostConnector {
         let socket_connected = self.socket_connected.clone();
         let next_event_seq = self.next_event_seq.clone();
         let subscribed_topics = self.subscribed_topics.clone();
+        let monitor_policy = self.monitor_policy.clone();
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         self.socket_shutdown_tx = Some(shutdown_tx);
@@ -781,6 +793,21 @@ impl MattermostConnector {
                                                 topic_allowed(&topic, subscribed.as_slice())
                                             };
                                             if !allowed {
+                                                continue;
+                                            }
+
+                                            let policy_decision =
+                                                monitor_policy.evaluate_socket_message(&message);
+                                            if let MattermostMonitorPolicyDecision::Denied(reason) =
+                                                policy_decision
+                                            {
+                                                info!(
+                                                    %topic,
+                                                    reason,
+                                                    channel_id = ?mattermost_socket_channel_id(&message),
+                                                    user_id = ?mattermost_socket_user_id(&message),
+                                                    "Mattermost websocket event suppressed by monitor policy"
+                                                );
                                                 continue;
                                             }
 
@@ -2324,6 +2351,484 @@ fn event_info() -> Vec<EventInfo> {
     ]
 }
 
+// ── Monitor policy ─────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MattermostMonitorPolicy {
+    require_mention: bool,
+    allow_dms: bool,
+    allow_username_mentions: bool,
+    bot_user_id: Option<String>,
+    bot_username: Option<String>,
+    allowed_channels: BTreeSet<String>,
+    allowed_users: BTreeSet<String>,
+    free_response_channels: BTreeSet<String>,
+    thread_participation_roots: BTreeSet<String>,
+}
+
+impl Default for MattermostMonitorPolicy {
+    fn default() -> Self {
+        Self {
+            require_mention: true,
+            allow_dms: true,
+            allow_username_mentions: false,
+            bot_user_id: None,
+            bot_username: None,
+            allowed_channels: BTreeSet::new(),
+            allowed_users: BTreeSet::new(),
+            free_response_channels: BTreeSet::new(),
+            thread_participation_roots: BTreeSet::new(),
+        }
+    }
+}
+
+impl MattermostMonitorPolicy {
+    fn from_config(value: Option<&Value>) -> FcpResult<Self> {
+        let Some(value) = value else {
+            return Ok(Self::default());
+        };
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+
+        let Value::Object(object) = value else {
+            return Err(invalid_monitor_policy(
+                "monitor_policy must be an object when provided",
+            ));
+        };
+
+        let mut policy = Self::default();
+        if let Some(value) = object
+            .get("require_mention")
+            .or_else(|| object.get("require_mention_in_channels"))
+            .filter(|value| !value.is_null())
+        {
+            policy.require_mention =
+                parse_monitor_policy_bool("monitor_policy.require_mention", value)?;
+        }
+        if let Some(value) = object.get("allow_dms").filter(|value| !value.is_null()) {
+            policy.allow_dms = parse_monitor_policy_bool("monitor_policy.allow_dms", value)?;
+        }
+        if let Some(value) = object
+            .get("allow_username_mentions")
+            .filter(|value| !value.is_null())
+        {
+            policy.allow_username_mentions =
+                parse_monitor_policy_bool("monitor_policy.allow_username_mentions", value)?;
+        }
+        if let Some(value) = object.get("bot_user_id") {
+            policy.bot_user_id =
+                parse_monitor_policy_optional_id("monitor_policy.bot_user_id", value)?;
+        }
+        if let Some(value) = object.get("bot_username") {
+            policy.bot_username =
+                parse_monitor_policy_optional_id("monitor_policy.bot_username", value)?;
+        }
+        if let Some(value) = object.get("allowed_channels") {
+            policy.allowed_channels =
+                parse_monitor_policy_set("monitor_policy.allowed_channels", value)?;
+        }
+        if let Some(value) = object.get("allowed_users") {
+            policy.allowed_users = parse_monitor_policy_set("monitor_policy.allowed_users", value)?;
+        }
+        if let Some(value) = object.get("free_response_channels") {
+            policy.free_response_channels =
+                parse_monitor_policy_set("monitor_policy.free_response_channels", value)?;
+        }
+        if let Some(value) = object.get("thread_participation_roots") {
+            policy.thread_participation_roots =
+                parse_monitor_policy_set("monitor_policy.thread_participation_roots", value)?;
+        }
+
+        Ok(policy)
+    }
+
+    fn to_redacted_json(&self) -> Value {
+        json!({
+            "require_mention": self.require_mention,
+            "allow_dms": self.allow_dms,
+            "allow_username_mentions": self.allow_username_mentions,
+            "bot_user_id_configured": self.bot_user_id.is_some(),
+            "bot_username_configured": self.bot_username.is_some(),
+            "allowed_channels_configured": !self.allowed_channels.is_empty(),
+            "allowed_channels_count": self.allowed_channels.len(),
+            "allowed_users_configured": !self.allowed_users.is_empty(),
+            "allowed_users_count": self.allowed_users.len(),
+            "free_response_channels_configured": !self.free_response_channels.is_empty(),
+            "free_response_channels_count": self.free_response_channels.len(),
+            "thread_participation_roots_configured": !self.thread_participation_roots.is_empty(),
+            "thread_participation_roots_count": self.thread_participation_roots.len(),
+        })
+    }
+
+    fn evaluate_socket_message(
+        &self,
+        message: &MattermostWebSocketMessage,
+    ) -> MattermostMonitorPolicyDecision {
+        let context = MattermostSocketPolicyContext::from_message(message);
+        self.evaluate_context(&context)
+    }
+
+    fn evaluate_context(
+        &self,
+        context: &MattermostSocketPolicyContext,
+    ) -> MattermostMonitorPolicyDecision {
+        if !policy_set_allows(&self.allowed_channels, context.channel_id.as_deref()) {
+            return MattermostMonitorPolicyDecision::Denied("channel_not_allowed");
+        }
+        if !policy_set_allows(&self.allowed_users, context.user_id.as_deref()) {
+            return MattermostMonitorPolicyDecision::Denied("user_not_allowed");
+        }
+        if context.is_dm() {
+            return if self.allow_dms {
+                MattermostMonitorPolicyDecision::Allowed
+            } else {
+                MattermostMonitorPolicyDecision::Denied("dm_not_allowed")
+            };
+        }
+        if !context.requires_mention_gate() {
+            return MattermostMonitorPolicyDecision::Allowed;
+        }
+        if !self.require_mention {
+            return MattermostMonitorPolicyDecision::Allowed;
+        }
+        if policy_set_contains(&self.free_response_channels, context.channel_id.as_deref()) {
+            return MattermostMonitorPolicyDecision::Allowed;
+        }
+        if policy_set_contains(&self.thread_participation_roots, context.root_id.as_deref()) {
+            return MattermostMonitorPolicyDecision::Allowed;
+        }
+        if self.message_mentions_bot(context) {
+            return MattermostMonitorPolicyDecision::Allowed;
+        }
+
+        MattermostMonitorPolicyDecision::Denied("mention_required")
+    }
+
+    fn message_mentions_bot(&self, context: &MattermostSocketPolicyContext) -> bool {
+        if self
+            .bot_user_id
+            .as_deref()
+            .is_some_and(|bot_user_id| context.mention_user_ids.contains(bot_user_id))
+        {
+            return true;
+        }
+
+        self.allow_username_mentions
+            && self.bot_username.as_deref().is_some_and(|bot_username| {
+                context
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| mattermost_text_mentions_username(text, bot_username))
+            })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MattermostMonitorPolicyDecision {
+    Allowed,
+    Denied(&'static str),
+}
+
+#[derive(Debug, Default)]
+struct MattermostSocketPolicyContext {
+    event_name: Option<String>,
+    channel_id: Option<String>,
+    user_id: Option<String>,
+    channel_type: Option<String>,
+    text: Option<String>,
+    root_id: Option<String>,
+    mention_user_ids: BTreeSet<String>,
+}
+
+impl MattermostSocketPolicyContext {
+    fn from_message(message: &MattermostWebSocketMessage) -> Self {
+        let post = post_from_socket_message(message);
+        let reaction = reaction_from_socket_message(message);
+        let channel = channel_from_socket_message(message);
+        let thread = thread_from_socket_message(message);
+
+        let channel_id = first_non_empty_string([
+            post.as_ref().map(|post| post.channel_id.as_str()),
+            message.data.get("channel_id").and_then(Value::as_str),
+            channel.as_ref().map(|channel| channel.id.as_str()),
+            thread
+                .as_ref()
+                .and_then(|thread| thread.post.as_ref())
+                .map(|post| post.channel_id.as_str()),
+            (!message.broadcast.channel_id.is_empty())
+                .then_some(message.broadcast.channel_id.as_str()),
+        ]);
+        let user_id = first_non_empty_string([
+            post.as_ref().map(|post| post.user_id.as_str()),
+            reaction.as_ref().map(|reaction| reaction.user_id.as_str()),
+            message.data.get("user_id").and_then(Value::as_str),
+            (!message.broadcast.user_id.is_empty()).then_some(message.broadcast.user_id.as_str()),
+        ]);
+        let channel_type = first_non_empty_string([
+            message.data.get("channel_type").and_then(Value::as_str),
+            channel
+                .as_ref()
+                .map(|channel| channel.channel_type.as_str()),
+        ]);
+        let text = first_non_empty_string([
+            post.as_ref().map(|post| post.message.as_str()),
+            message.data.get("message").and_then(Value::as_str),
+            message.data.get("text").and_then(Value::as_str),
+        ]);
+        let root_id = first_non_empty_string([
+            post.as_ref().map(|post| post.root_id.as_str()),
+            message.data.get("root_id").and_then(Value::as_str),
+            message.data.get("parent_id").and_then(Value::as_str),
+            thread.as_ref().map(|thread| thread.id.as_str()),
+        ]);
+        let mention_user_ids = mention_user_ids_from_socket_message(message, post.as_ref());
+
+        Self {
+            event_name: message.event.clone(),
+            channel_id,
+            user_id,
+            channel_type,
+            text,
+            root_id,
+            mention_user_ids,
+        }
+    }
+
+    fn is_dm(&self) -> bool {
+        self.channel_type
+            .as_deref()
+            .is_some_and(|channel_type| channel_type.eq_ignore_ascii_case("D"))
+    }
+
+    fn requires_mention_gate(&self) -> bool {
+        matches!(self.event_name.as_deref(), Some("posted" | "post_edited"))
+    }
+}
+
+fn invalid_monitor_policy(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
+}
+
+fn parse_monitor_policy_bool(field: &str, value: &Value) -> FcpResult<bool> {
+    match value {
+        Value::Bool(value) => Ok(*value),
+        Value::String(value) => match value.trim().to_ascii_lowercase().as_str() {
+            "true" | "yes" | "on" | "1" => Ok(true),
+            "false" | "no" | "off" | "0" => Ok(false),
+            _ => Err(invalid_monitor_policy(format!(
+                "{field} must be a boolean or boolean-like string"
+            ))),
+        },
+        _ => Err(invalid_monitor_policy(format!(
+            "{field} must be a boolean or boolean-like string"
+        ))),
+    }
+}
+
+fn parse_monitor_policy_optional_id(field: &str, value: &Value) -> FcpResult<Option<String>> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let Some(value) = value.as_str() else {
+        return Err(invalid_monitor_policy(format!("{field} must be a string")));
+    };
+    normalize_monitor_policy_id(field, value)
+}
+
+fn parse_monitor_policy_set(field: &str, value: &Value) -> FcpResult<BTreeSet<String>> {
+    let mut parsed = BTreeSet::new();
+    match value {
+        Value::Null => {}
+        Value::Array(values) => {
+            for value in values {
+                let Some(raw) = value.as_str() else {
+                    return Err(invalid_monitor_policy(
+                        "monitor_policy set entries must be strings",
+                    ));
+                };
+                insert_monitor_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        Value::String(value) => {
+            for raw in value.split(',') {
+                insert_monitor_policy_set_value(field, raw, &mut parsed)?;
+            }
+        }
+        _ => {
+            return Err(invalid_monitor_policy(format!(
+                "{field} must be a comma-separated string or array of strings"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn insert_monitor_policy_set_value(
+    field: &str,
+    raw: &str,
+    parsed: &mut BTreeSet<String>,
+) -> FcpResult<()> {
+    if let Some(value) = normalize_monitor_policy_id(field, raw)? {
+        parsed.insert(value);
+    }
+    if parsed.len() > MONITOR_POLICY_MAX_SET_ITEMS {
+        return Err(invalid_monitor_policy(format!(
+            "{field} must contain at most {MONITOR_POLICY_MAX_SET_ITEMS} entries"
+        )));
+    }
+    Ok(())
+}
+
+fn normalize_monitor_policy_id(field: &str, value: &str) -> FcpResult<Option<String>> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let value = normalize_mattermost_policy_identifier(field, value);
+    if value.len() > MONITOR_POLICY_ID_MAX_CHARS {
+        return Err(invalid_monitor_policy(format!(
+            "{field} entries must be at most {MONITOR_POLICY_ID_MAX_CHARS} characters"
+        )));
+    }
+    if value != "*"
+        && (!value.is_ascii()
+            || value
+                .chars()
+                .any(|character| character.is_ascii_whitespace()))
+    {
+        return Err(invalid_monitor_policy(format!(
+            "{field} entries must be ASCII identifiers without whitespace"
+        )));
+    }
+
+    Ok(Some(value))
+}
+
+fn normalize_mattermost_policy_identifier(field: &str, value: &str) -> String {
+    if field.ends_with(".allowed_users") || field.ends_with(".bot_user_id") {
+        return normalize_mattermost_user_policy_id(value);
+    }
+    if field.ends_with(".allowed_channels") || field.ends_with(".free_response_channels") {
+        return normalize_mattermost_channel_policy_id(value);
+    }
+    if field.ends_with(".thread_participation_roots") {
+        return normalize_mattermost_post_policy_id(value);
+    }
+    value.to_string()
+}
+
+fn normalize_mattermost_user_policy_id(value: &str) -> String {
+    value
+        .strip_prefix("mattermost:user:")
+        .or_else(|| value.strip_prefix("mattermost:"))
+        .or_else(|| value.strip_prefix("user:"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn normalize_mattermost_channel_policy_id(value: &str) -> String {
+    value
+        .strip_prefix("mattermost:channel:")
+        .or_else(|| value.strip_prefix("channel:"))
+        .or_else(|| value.strip_prefix("mattermost:"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn normalize_mattermost_post_policy_id(value: &str) -> String {
+    value
+        .strip_prefix("mattermost:post:")
+        .or_else(|| value.strip_prefix("post:"))
+        .or_else(|| value.strip_prefix("thread:"))
+        .or_else(|| value.strip_prefix("mattermost:"))
+        .unwrap_or(value)
+        .to_string()
+}
+
+fn policy_set_allows(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
+    policy_set.is_empty()
+        || policy_set.contains("*")
+        || candidate.is_some_and(|candidate| policy_set.contains(candidate))
+}
+
+fn policy_set_contains(policy_set: &BTreeSet<String>, candidate: Option<&str>) -> bool {
+    policy_set.contains("*") || candidate.is_some_and(|candidate| policy_set.contains(candidate))
+}
+
+fn first_non_empty_string<const N: usize>(values: [Option<&str>; N]) -> Option<String> {
+    values
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .find(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn mattermost_socket_channel_id(message: &MattermostWebSocketMessage) -> Option<String> {
+    MattermostSocketPolicyContext::from_message(message).channel_id
+}
+
+fn mattermost_socket_user_id(message: &MattermostWebSocketMessage) -> Option<String> {
+    MattermostSocketPolicyContext::from_message(message).user_id
+}
+
+fn mention_user_ids_from_socket_message(
+    message: &MattermostWebSocketMessage,
+    post: Option<&Post>,
+) -> BTreeSet<String> {
+    let mut values = BTreeSet::new();
+    for field in ["mentions", "mention_ids", "mentioned_user_ids"] {
+        collect_string_values(message.data.get(field), &mut values);
+    }
+    if let Some(post) = post {
+        for source in [&post.props, &post.metadata] {
+            for field in ["mentions", "mention_ids", "mentioned_user_ids"] {
+                collect_string_values(source.get(field), &mut values);
+            }
+        }
+    }
+    values
+}
+
+fn collect_string_values(value: Option<&Value>, values: &mut BTreeSet<String>) {
+    match value {
+        Some(Value::Array(items)) => {
+            values.extend(
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned),
+            );
+        }
+        Some(Value::String(value)) if !value.trim().is_empty() => {
+            values.insert(value.trim().to_string());
+        }
+        _ => {}
+    }
+}
+
+fn mattermost_text_mentions_username(text: &str, username: &str) -> bool {
+    let username = username.trim().trim_start_matches('@');
+    if username.is_empty() {
+        return false;
+    }
+    let expected = format!("@{username}");
+    text.split(|character: char| {
+        !(character == '@'
+            || character == '_'
+            || character == '-'
+            || character == '.'
+            || character.is_ascii_alphanumeric())
+    })
+    .any(|token| token == expected)
+}
+
 // ── Websocket helpers ───────────────────────────────────────────────────
 
 fn parse_subscribe_topics(params: &serde_json::Value) -> Vec<String> {
@@ -3225,6 +3730,329 @@ mod tests {
             "mattermost.thread_updated",
             &["mattermost.posted".into()]
         ));
+    }
+
+    #[test]
+    fn monitor_policy_parses_redacted_config() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "require_mention": "off",
+            "allow_dms": "false",
+            "allow_username_mentions": true,
+            "bot_user_id": "mattermost:user:u_bot",
+            "bot_username": "buildbot",
+            "allowed_channels": "mattermost:channel:c_allowed, channel:c_other",
+            "allowed_users": ["mattermost:user:u_allowed"],
+            "free_response_channels": ["channel:c_free"],
+            "thread_participation_roots": ["thread:p_root"]
+        })))
+        .unwrap();
+
+        assert!(!policy.require_mention);
+        assert!(!policy.allow_dms);
+        assert!(policy.allow_username_mentions);
+        assert_eq!(policy.bot_user_id.as_deref(), Some("u_bot"));
+        assert_eq!(policy.bot_username.as_deref(), Some("buildbot"));
+        assert!(policy.allowed_channels.contains("c_allowed"));
+        assert!(policy.allowed_channels.contains("c_other"));
+        assert!(policy.allowed_users.contains("u_allowed"));
+        assert!(policy.free_response_channels.contains("c_free"));
+        assert!(policy.thread_participation_roots.contains("p_root"));
+
+        let redacted = policy.to_redacted_json().to_string();
+        assert!(redacted.contains("allowed_channels_count"));
+        assert!(!redacted.contains("u_allowed"));
+        assert!(!redacted.contains("c_allowed"));
+        assert!(!redacted.contains("p_root"));
+    }
+
+    #[test]
+    fn monitor_policy_rejects_invalid_values() {
+        let invalid_bool = MattermostMonitorPolicy::from_config(Some(&json!({
+            "require_mention": "maybe"
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_bool, FcpError::InvalidRequest { .. }));
+
+        let invalid_set = MattermostMonitorPolicy::from_config(Some(&json!({
+            "allowed_channels": ["c_ok", 42]
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_set, FcpError::InvalidRequest { .. }));
+
+        let invalid_id = MattermostMonitorPolicy::from_config(Some(&json!({
+            "allowed_users": ["user with spaces"]
+        })))
+        .unwrap_err();
+        assert!(matches!(invalid_id, FcpError::InvalidRequest { .. }));
+    }
+
+    #[test]
+    fn monitor_policy_defaults_require_mentions_for_channel_messages() {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"c1\",\"user_id\":\"u1\",\"message\":\"hello\"}"
+            },
+            "broadcast": {"channel_id": "c1", "user_id": "u1"}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            MattermostMonitorPolicy::default().evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Denied("mention_required")
+        );
+    }
+
+    #[test]
+    fn monitor_policy_allows_dm_without_mention_when_enabled() {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "D",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"d1\",\"user_id\":\"u1\",\"message\":\"hello\"}"
+            },
+            "broadcast": {"channel_id": "d1", "user_id": "u1"}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            MattermostMonitorPolicy::default().evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn monitor_policy_can_disable_dm_events() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "allow_dms": false
+        })))
+        .unwrap();
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "D",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"d1\",\"user_id\":\"u1\",\"message\":\"hello\"}"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Denied("dm_not_allowed")
+        );
+    }
+
+    #[test]
+    fn monitor_policy_allows_user_id_mentions() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "bot_user_id": "u_bot"
+        })))
+        .unwrap();
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "mentions": ["u_bot"],
+                "post": "{\"id\":\"p1\",\"channel_id\":\"c1\",\"user_id\":\"u1\",\"message\":\"hello\"}"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn monitor_policy_username_mentions_require_opt_in() {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"c1\",\"user_id\":\"u1\",\"message\":\"hello @buildbot\"}"
+            }
+        }))
+        .unwrap();
+        let strict_policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "bot_username": "buildbot"
+        })))
+        .unwrap();
+        let opt_in_policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "bot_username": "buildbot",
+            "allow_username_mentions": true
+        })))
+        .unwrap();
+
+        assert_eq!(
+            strict_policy.evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Denied("mention_required")
+        );
+        assert_eq!(
+            opt_in_policy.evaluate_socket_message(&message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn monitor_policy_free_response_and_thread_participation_bypass_mention() {
+        let free_response_policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "free_response_channels": ["c_free"]
+        })))
+        .unwrap();
+        let thread_policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "thread_participation_roots": ["root1"]
+        })))
+        .unwrap();
+        let free_message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"c_free\",\"user_id\":\"u1\",\"message\":\"hello\"}"
+            }
+        }))
+        .unwrap();
+        let thread_message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p2\",\"channel_id\":\"c1\",\"user_id\":\"u1\",\"message\":\"reply\",\"root_id\":\"root1\"}"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            free_response_policy.evaluate_socket_message(&free_message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+        assert_eq!(
+            thread_policy.evaluate_socket_message(&thread_message),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+    }
+
+    #[test]
+    fn monitor_policy_allowed_channel_and_user_filters() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "require_mention": false,
+            "allowed_channels": ["c_allowed"],
+            "allowed_users": ["u_allowed"]
+        })))
+        .unwrap();
+        let allowed: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p1\",\"channel_id\":\"c_allowed\",\"user_id\":\"u_allowed\",\"message\":\"ok\"}"
+            }
+        }))
+        .unwrap();
+        let wrong_channel: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p2\",\"channel_id\":\"c_denied\",\"user_id\":\"u_allowed\",\"message\":\"wrong channel\"}"
+            }
+        }))
+        .unwrap();
+        let wrong_user: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p3\",\"channel_id\":\"c_allowed\",\"user_id\":\"u_denied\",\"message\":\"wrong user\"}"
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate_socket_message(&allowed),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+        assert_eq!(
+            policy.evaluate_socket_message(&wrong_channel),
+            MattermostMonitorPolicyDecision::Denied("channel_not_allowed")
+        );
+        assert_eq!(
+            policy.evaluate_socket_message(&wrong_user),
+            MattermostMonitorPolicyDecision::Denied("user_not_allowed")
+        );
+    }
+
+    #[test]
+    fn monitor_policy_non_message_events_skip_mention_but_honor_allowlists() {
+        let policy = MattermostMonitorPolicy::from_config(Some(&json!({
+            "bot_user_id": "u_bot",
+            "allowed_channels": ["c_allowed"]
+        })))
+        .unwrap();
+        let allowed_reaction: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "reaction_added",
+            "data": {
+                "reaction": "{\"user_id\":\"u1\",\"post_id\":\"p1\",\"emoji_name\":\"eyes\"}"
+            },
+            "broadcast": {"channel_id": "c_allowed", "user_id": "u1"}
+        }))
+        .unwrap();
+        let denied_reaction: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "reaction_added",
+            "data": {
+                "reaction": "{\"user_id\":\"u1\",\"post_id\":\"p1\",\"emoji_name\":\"eyes\"}"
+            },
+            "broadcast": {"channel_id": "c_denied", "user_id": "u1"}
+        }))
+        .unwrap();
+
+        assert_eq!(
+            policy.evaluate_socket_message(&allowed_reaction),
+            MattermostMonitorPolicyDecision::Allowed
+        );
+        assert_eq!(
+            policy.evaluate_socket_message(&denied_reaction),
+            MattermostMonitorPolicyDecision::Denied("channel_not_allowed")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn health_after_configure_reports_redacted_monitor_policy() {
+        let mut connector = MattermostConnector::new();
+        connector
+            .configure(json!({
+                "base_url": "https://mattermost.example.com",
+                "token": "tok_123",
+                "monitor_policy": {
+                    "allowed_channels": ["c_allowed"],
+                    "allowed_users": ["u_allowed"],
+                    "bot_user_id": "u_bot"
+                }
+            }))
+            .unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        let details = health
+            .get("details")
+            .and_then(Value::as_object)
+            .expect("health details should be an object");
+        let policy = details
+            .get("monitor_policy")
+            .expect("monitor policy should be reported");
+        assert_eq!(
+            policy.get("allowed_channels_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            policy.get("allowed_users_count").and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            policy
+                .get("bot_user_id_configured")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(!health.to_string().contains("u_allowed"));
+        assert!(!health.to_string().contains("c_allowed"));
+        assert!(!health.to_string().contains("u_bot"));
     }
 
     #[test]

@@ -81,6 +81,7 @@ pub struct MattermostConnector {
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
     monitor_policy: MattermostMonitorPolicy,
+    monitor_policy_audit: Arc<MattermostMonitorPolicyAudit>,
     started_at: Instant,
 }
 
@@ -106,6 +107,7 @@ impl MattermostConnector {
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
             monitor_policy: MattermostMonitorPolicy::default(),
+            monitor_policy_audit: Arc::new(MattermostMonitorPolicyAudit::default()),
             started_at: Instant::now(),
         }
     }
@@ -212,6 +214,7 @@ impl MattermostConnector {
         self.client = Some(client);
         self.config = Some(config);
         self.monitor_policy = monitor_policy;
+        self.monitor_policy_audit.reset();
         self.base.set_configured(true);
         Ok(())
     }
@@ -438,6 +441,7 @@ impl MattermostConnector {
                 "subscribed_topics": subscribed_topics,
             },
             "monitor_policy": self.monitor_policy.to_redacted_json(),
+            "monitor_policy_audit": self.monitor_policy_audit.to_redacted_json(),
         }));
         serde_json::to_value(snapshot).map_err(|e| FcpError::Internal {
             message: format!("failed to serialize health snapshot: {e}"),
@@ -662,6 +666,7 @@ impl MattermostConnector {
         let next_event_seq = self.next_event_seq.clone();
         let subscribed_topics = self.subscribed_topics.clone();
         let monitor_policy = self.monitor_policy.clone();
+        let monitor_policy_audit = self.monitor_policy_audit.clone();
 
         let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
         self.socket_shutdown_tx = Some(shutdown_tx);
@@ -801,9 +806,15 @@ impl MattermostConnector {
                                             if let MattermostMonitorPolicyDecision::Denied(reason) =
                                                 policy_decision
                                             {
+                                                monitor_policy_audit.record_denial(reason);
+                                                let audit_receipt =
+                                                    mattermost_monitor_policy_denial_receipt(
+                                                        &topic, reason, &message,
+                                                    );
                                                 info!(
                                                     %topic,
                                                     reason,
+                                                    audit_receipt = %audit_receipt,
                                                     channel_id = ?mattermost_socket_channel_id(&message),
                                                     user_id = ?mattermost_socket_user_id(&message),
                                                     "Mattermost websocket event suppressed by monitor policy"
@@ -2531,6 +2542,72 @@ enum MattermostMonitorPolicyDecision {
 }
 
 #[derive(Debug, Default)]
+struct MattermostMonitorPolicyAudit {
+    denied_total: AtomicU64,
+    mention_required: AtomicU64,
+    dm_not_allowed: AtomicU64,
+    channel_not_allowed: AtomicU64,
+    user_not_allowed: AtomicU64,
+    other: AtomicU64,
+}
+
+impl MattermostMonitorPolicyAudit {
+    fn reset(&self) {
+        self.denied_total.store(0, Ordering::Relaxed);
+        self.mention_required.store(0, Ordering::Relaxed);
+        self.dm_not_allowed.store(0, Ordering::Relaxed);
+        self.channel_not_allowed.store(0, Ordering::Relaxed);
+        self.user_not_allowed.store(0, Ordering::Relaxed);
+        self.other.store(0, Ordering::Relaxed);
+    }
+
+    fn record_denial(&self, reason: &str) {
+        self.denied_total.fetch_add(1, Ordering::Relaxed);
+        match reason {
+            "mention_required" => &self.mention_required,
+            "dm_not_allowed" => &self.dm_not_allowed,
+            "channel_not_allowed" => &self.channel_not_allowed,
+            "user_not_allowed" => &self.user_not_allowed,
+            _ => &self.other,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn to_redacted_json(&self) -> Value {
+        json!({
+            "receipt_schema": "mattermost.monitor_policy.denial.v1",
+            "denied_total": self.denied_total.load(Ordering::Relaxed),
+            "denied_by_reason": {
+                "mention_required": self.mention_required.load(Ordering::Relaxed),
+                "dm_not_allowed": self.dm_not_allowed.load(Ordering::Relaxed),
+                "channel_not_allowed": self.channel_not_allowed.load(Ordering::Relaxed),
+                "user_not_allowed": self.user_not_allowed.load(Ordering::Relaxed),
+                "other": self.other.load(Ordering::Relaxed),
+            }
+        })
+    }
+}
+
+fn mattermost_monitor_policy_denial_receipt(
+    topic: &str,
+    reason: &'static str,
+    message: &MattermostWebSocketMessage,
+) -> Value {
+    json!({
+        "schema": "mattermost.monitor_policy.denial.v1",
+        "decision": "deny",
+        "reason": reason,
+        "topic": topic,
+        "event": message.event.as_deref(),
+        "seq": message.seq,
+        "has_channel_id": mattermost_socket_channel_id(message).is_some(),
+        "has_user_id": mattermost_socket_user_id(message).is_some(),
+        "message_text_redacted": true,
+        "stable_ids_redacted": true,
+    })
+}
+
+#[derive(Debug, Default)]
 struct MattermostSocketPolicyContext {
     event_name: Option<String>,
     channel_id: Option<String>,
@@ -4185,6 +4262,49 @@ mod tests {
         );
     }
 
+    #[test]
+    fn monitor_policy_denial_receipt_redacts_message_text_and_ids()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let message: MattermostWebSocketMessage = serde_json::from_value(json!({
+            "event": "posted",
+            "seq": 7,
+            "data": {
+                "channel_type": "O",
+                "post": "{\"id\":\"p_secret\",\"channel_id\":\"c_secret\",\"user_id\":\"u_secret\",\"message\":\"secret text @bot\"}"
+            },
+            "broadcast": {"channel_id": "c_secret", "user_id": "u_secret"}
+        }))?;
+
+        let receipt = mattermost_monitor_policy_denial_receipt(
+            "mattermost.posted",
+            "mention_required",
+            &message,
+        );
+        assert_eq!(
+            receipt.get("decision").and_then(Value::as_str),
+            Some("deny")
+        );
+        assert_eq!(
+            receipt.get("reason").and_then(Value::as_str),
+            Some("mention_required")
+        );
+        assert_eq!(receipt.get("seq").and_then(Value::as_u64), Some(7));
+        assert_eq!(
+            receipt.get("has_channel_id").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            receipt.get("has_user_id").and_then(Value::as_bool),
+            Some(true)
+        );
+        let rendered = receipt.to_string();
+        assert!(!rendered.contains("secret text"));
+        assert!(!rendered.contains("c_secret"));
+        assert!(!rendered.contains("u_secret"));
+        assert!(!rendered.contains("p_secret"));
+        Ok(())
+    }
+
     #[fcp_async_core::runtime::test]
     async fn health_after_configure_reports_redacted_monitor_policy() {
         let mut connector = MattermostConnector::new();
@@ -4225,6 +4345,13 @@ mod tests {
         assert!(!health.to_string().contains("u_allowed"));
         assert!(!health.to_string().contains("c_allowed"));
         assert!(!health.to_string().contains("u_bot"));
+        assert_eq!(
+            details
+                .get("monitor_policy_audit")
+                .and_then(|audit| audit.get("denied_total"))
+                .and_then(Value::as_u64),
+            Some(0)
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -4356,6 +4483,26 @@ mod tests {
             extra.is_err(),
             "unauthorized loopback websocket frame must not be broadcast"
         );
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(
+            health
+                .get("details")
+                .and_then(|details| details.get("monitor_policy_audit"))
+                .and_then(|audit| audit.get("denied_total"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert_eq!(
+            health
+                .get("details")
+                .and_then(|details| details.get("monitor_policy_audit"))
+                .and_then(|audit| audit.get("denied_by_reason"))
+                .and_then(|reasons| reasons.get("mention_required"))
+                .and_then(Value::as_u64),
+            Some(1)
+        );
+        assert!(!health.to_string().contains("p_denied"));
+        assert!(!health.to_string().contains("unmentioned channel message"));
 
         connector.handle_shutdown(json!({})).await.unwrap();
         server

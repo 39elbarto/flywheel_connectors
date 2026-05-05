@@ -1061,10 +1061,15 @@ async fn configure_rejects_litellm_unsafe_operator_base_urls() {
                 }]
             }))
             .await;
+        let err = result
+            .expect_err("expected unsafe LiteLLM base_url to be rejected")
+            .to_string();
         assert!(
-            result.is_err(),
-            "expected unsafe LiteLLM base_url to be rejected: {base_url}"
+            err.contains("self-hosted OpenAI-compatible")
+                || err.contains("path must be empty or /v1"),
+            "expected operator policy guidance for {base_url}: {err}"
         );
+        assert!(!err.contains("provider-key"));
     }
 }
 

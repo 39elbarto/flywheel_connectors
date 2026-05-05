@@ -426,7 +426,7 @@ impl LlmRouterConnector {
             } else {
                 let violators: Vec<_> = config.providers.iter()
                     .filter(|p| !Self::provider_host_allowed(p))
-                    .map(|p| format!("{}={}", p.name, p.base_url))
+                    .map(|p| format!("{}={}", p.name, Self::diagnostic_base_url(&p.base_url)))
                     .collect();
                 format!("NetworkConstraints violated: {}", violators.join(", "))
             },
@@ -1417,7 +1417,7 @@ impl LlmRouterConnector {
             return Err(Self::provider_config_error(
                 idx,
                 name,
-                "operator-configured gateway base_url must be an HTTPS public DNS URL on port 443 with no userinfo, IP literal, query, or fragment",
+                Self::self_hosted_network_policy_guidance(),
             ));
         }
 
@@ -1481,6 +1481,10 @@ impl LlmRouterConnector {
             })
     }
 
+    fn self_hosted_network_policy_guidance() -> &'static str {
+        "operator-configured gateway base_url must be an HTTPS public DNS URL on port 443 with no userinfo, IP literal, query, or fragment; self-hosted OpenAI-compatible runtimes such as Ollama, vLLM, SGLang, and custom local endpoints require an explicit FCP network policy/capability grant and are rejected by default when they use localhost, private CIDR, single-label, .local, or IP-literal hosts"
+    }
+
     fn parse_budget(params: &serde_json::Value) -> BudgetConfig {
         let budget_obj = params.get("budget");
         match budget_obj {
@@ -1527,13 +1531,6 @@ impl LlmRouterConnector {
         else {
             return false;
         };
-        let is_localhost = matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1" | "[::1]");
-
-        // Allow localhost for test infrastructure.
-        if (cfg!(test) || cfg!(feature = "testing")) && is_localhost {
-            return matches!(parsed.scheme(), "http" | "https");
-        }
-
         parsed.scheme() == "https"
             && parsed.port_or_known_default() == Some(443)
             && llm_router_host_is_allowed(host.as_str())
@@ -1554,6 +1551,65 @@ impl LlmRouterConnector {
         }
 
         Self::host_allowed(&provider.base_url)
+    }
+
+    fn provider_looks_self_hosted(provider: &ProviderConfig) -> bool {
+        let provider_name = provider.name.to_ascii_lowercase();
+        matches!(
+            provider_name.as_str(),
+            "ollama" | "vllm" | "sglang" | "litellm" | "openai-compatible" | "custom"
+        ) || gateway_provider_descriptor(&provider.name).is_some_and(|descriptor| {
+            matches!(
+                descriptor.endpoint,
+                GatewayEndpoint::OperatorConfiguredOpenAiCompatible
+            )
+        }) || Self::base_url_looks_self_hosted(&provider.base_url)
+    }
+
+    fn base_url_looks_self_hosted(base_url: &str) -> bool {
+        let Ok(parsed) = Url::parse(base_url.trim()) else {
+            return true;
+        };
+        match parsed.host() {
+            Some(Host::Domain(host)) => {
+                let host = host.trim_end_matches('.').to_ascii_lowercase();
+                host == "localhost"
+                    || host.ends_with(".localhost")
+                    || host == "local"
+                    || host.ends_with(".local")
+                    || !host.contains('.')
+            }
+            Some(Host::Ipv4(_)) | Some(Host::Ipv6(_)) => true,
+            None => true,
+        }
+    }
+
+    fn diagnostic_base_url(base_url: &str) -> String {
+        let Ok(mut parsed) = Url::parse(base_url.trim()) else {
+            return "<invalid base_url>".into();
+        };
+        let _ = parsed.set_username("");
+        let _ = parsed.set_password(None);
+        parsed.set_query(None);
+        parsed.set_fragment(None);
+        parsed.to_string().trim_end_matches('/').to_string()
+    }
+
+    fn network_constraint_violation_message(provider: &ProviderConfig) -> String {
+        let base_url = Self::diagnostic_base_url(&provider.base_url);
+        if Self::provider_looks_self_hosted(provider) {
+            format!(
+                "Provider '{}' base_url '{}' violates NetworkConstraints; {}",
+                provider.name,
+                base_url,
+                Self::self_hosted_network_policy_guidance()
+            )
+        } else {
+            format!(
+                "Provider '{}' base_url '{}' violates NetworkConstraints",
+                provider.name, base_url
+            )
+        }
     }
 
     fn reserved_gateway_host_owners(base_url: &str) -> Vec<&'static str> {
@@ -1610,10 +1666,7 @@ impl LlmRouterConnector {
             if !Self::provider_host_allowed(p) {
                 return Err(FcpError::InvalidRequest {
                     code: 1004,
-                    message: format!(
-                        "Provider '{}' base_url '{}' violates NetworkConstraints",
-                        p.name, p.base_url
-                    ),
+                    message: Self::network_constraint_violation_message(p),
                 });
             }
             let owners = Self::reserved_gateway_host_owners(&p.base_url);
@@ -1623,7 +1676,7 @@ impl LlmRouterConnector {
                     message: format!(
                         "Provider '{}' base_url '{}' uses gateway host reserved for descriptor(s) '{}'",
                         p.name,
-                        p.base_url,
+                        Self::diagnostic_base_url(&p.base_url),
                         owners.join(", ")
                     ),
                 });
@@ -2298,11 +2351,10 @@ mod tests {
     }
 
     #[test]
-    fn host_allowed_accepts_localhost_in_test() {
-        // In #[cfg(test)], localhost should be allowed
-        assert!(LlmRouterConnector::host_allowed("http://localhost:8080"));
-        assert!(LlmRouterConnector::host_allowed("http://127.0.0.1:3000"));
-        assert!(LlmRouterConnector::host_allowed("http://[::1]:3000"));
+    fn host_allowed_rejects_localhost_even_in_test() {
+        assert!(!LlmRouterConnector::host_allowed("http://localhost:8080"));
+        assert!(!LlmRouterConnector::host_allowed("http://127.0.0.1:3000"));
+        assert!(!LlmRouterConnector::host_allowed("http://[::1]:3000"));
     }
 
     fn litellm_provider_for_url(base_url: &str) -> ProviderConfig {
@@ -2378,6 +2430,68 @@ mod tests {
             }))
             .await;
         assert!(result.is_err());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_implicit_self_hosted_provider_network_access() {
+        for (name, base_url) in [
+            ("ollama", "http://127.0.0.1:11434"),
+            ("vllm", "https://10.0.0.42/v1"),
+            ("sglang", "https://llm"),
+            ("openai-compatible", "https://model-gateway.local/v1"),
+        ] {
+            let mut connector = LlmRouterConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "providers": [{
+                        "name": name,
+                        "base_url": base_url,
+                        "api_key": "secret-key-that-must-not-leak",
+                        "models": []
+                    }]
+                }))
+                .await;
+            let error = result.unwrap_err().to_string();
+            assert!(
+                error.contains("self-hosted OpenAI-compatible"),
+                "missing self-hosted guidance for {name}: {error}"
+            );
+            assert!(
+                error.contains("explicit FCP network policy/capability grant"),
+                "missing policy guidance for {name}: {error}"
+            );
+            assert!(!error.contains("secret-key-that-must-not-leak"));
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn network_constraint_error_redacts_base_url_credentials() {
+        let mut connector = LlmRouterConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "providers": [{
+                    "name": "custom",
+                    "base_url": "https://secret-user:secret-pass@evil.example.com/v1?token=secret-token#secret-fragment",
+                    "api_key": "secret-key-that-must-not-leak",
+                    "models": []
+                }]
+            }))
+            .await;
+
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("https://evil.example.com/v1"));
+        for secret in [
+            "secret-user",
+            "secret-pass",
+            "secret-token",
+            "secret-fragment",
+            "secret-key-that-must-not-leak",
+        ] {
+            assert!(
+                !error.contains(secret),
+                "network diagnostic leaked {secret}: {error}"
+            );
+        }
     }
 
     // ---- Simulate handler ----

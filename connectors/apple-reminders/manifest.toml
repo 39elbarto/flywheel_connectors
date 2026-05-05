@@ -1,60 +1,133 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:c941db7b0bcc0b329546507851846f43d39610144894cf16997abc595dad0e2f"
 
 [connector]
 id = "fcp.apple-reminders"
 name = "Apple Reminders"
 version = "0.1.0"
 description = "macOS-local Apple Reminders connector for list inventory, reminder inventory, reminder creation, and completion"
-archetype = "local"
-homepage = "https://support.apple.com/guide/reminders/welcome/mac"
+archetypes = ["knowledge", "operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Apple Reminders state remains inside the macOS Reminders app; the connector keeps no durable local state."
 
 [zones]
 home = "z:owner"
 allowed_sources = ["z:owner", "z:private"]
 allowed_targets = ["z:owner", "z:private"]
-tailscale_tag = "tag:fcp-owner"
+forbidden = ["z:public", "z:community", "z:work"]
 
 [capabilities]
-required = []
+required = ["apple_reminders.read", "apple_reminders.write"]
 optional = []
-forbidden = ["network.listen", "network.outbound", "system.privileged"]
+# Raw ambient exec remains forbidden; the connector runtime only launches a
+# validated absolute osascript binary with static AppleScript and argv payloads.
+forbidden = ["network.listen", "network.outbound", "system.exec", "system.privileged"]
 
-[provides.operations.health]
-summary = "Report Apple Reminders connector health and platform support"
+[provides.operations."apple_reminders.health"]
+description = "Report Apple Reminders connector health and platform support"
 capability = "apple_reminders.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.list_lists]
-summary = "List reminder lists"
+[provides.operations."apple_reminders.health".input_schema]
+type = "object"
+
+[provides.operations."apple_reminders.health".output_schema]
+type = "object"
+
+[provides.operations."apple_reminders.list_lists"]
+description = "List reminder lists"
 capability = "apple_reminders.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.list_reminders]
-summary = "List reminders in a list or across all lists"
+[provides.operations."apple_reminders.list_lists".input_schema]
+type = "object"
+
+[provides.operations."apple_reminders.list_lists".output_schema]
+type = "object"
+
+[provides.operations."apple_reminders.list_lists".output_schema.properties.lists]
+type = "array"
+
+[provides.operations."apple_reminders.list_reminders"]
+description = "List reminders in a list or across all lists"
 capability = "apple_reminders.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.create_reminder]
-summary = "Create a reminder"
+[provides.operations."apple_reminders.list_reminders".input_schema]
+type = "object"
+
+[provides.operations."apple_reminders.list_reminders".input_schema.properties.list_name]
+type = "string"
+
+[provides.operations."apple_reminders.list_reminders".output_schema]
+type = "object"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders]
+type = "array"
+
+[provides.operations."apple_reminders.create_reminder"]
+description = "Create a reminder"
 capability = "apple_reminders.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "policy"
 idempotency = "none"
 
-[provides.operations.complete_reminder]
-summary = "Mark a reminder complete"
+[provides.operations."apple_reminders.create_reminder".input_schema]
+required = ["title"]
+type = "object"
+
+[provides.operations."apple_reminders.create_reminder".input_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_reminders.create_reminder".input_schema.properties.list_name]
+type = "string"
+
+[provides.operations."apple_reminders.create_reminder".output_schema]
+type = "object"
+
+[provides.operations."apple_reminders.create_reminder".output_schema.properties.reminder]
+type = "object"
+
+[provides.operations."apple_reminders.complete_reminder"]
+description = "Mark a reminder complete"
 capability = "apple_reminders.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "policy"
 idempotency = "best_effort"
+
+[provides.operations."apple_reminders.complete_reminder".input_schema]
+required = ["reminder_id"]
+type = "object"
+
+[provides.operations."apple_reminders.complete_reminder".input_schema.properties.reminder_id]
+type = "string"
+
+[provides.operations."apple_reminders.complete_reminder".output_schema]
+type = "object"
+
+[provides.operations."apple_reminders.complete_reminder".output_schema.properties.reminder]
+type = "object"
 
 [sandbox]
 profile = "strict"
@@ -63,4 +136,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = false
 deny_ptrace = true
-

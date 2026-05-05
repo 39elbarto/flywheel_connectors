@@ -1,60 +1,140 @@
-[format]
-type = "fcp-connector-manifest"
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:34429cb074351c9ad5dc5cb14f06c40dc08f03614dc2101e4ac09756b0066a5a"
 
 [connector]
 id = "fcp.apple-notes"
 name = "Apple Notes"
 version = "0.1.0"
 description = "macOS-local Apple Notes connector for note inventory, note search, note retrieval, and note creation"
-archetype = "local"
-homepage = "https://support.apple.com/guide/notes/welcome/mac"
+archetypes = ["knowledge", "operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Apple Notes state remains inside the macOS Notes app; the connector keeps no durable local state."
 
 [zones]
 home = "z:owner"
 allowed_sources = ["z:owner", "z:private"]
 allowed_targets = ["z:owner", "z:private"]
-tailscale_tag = "tag:fcp-owner"
+forbidden = ["z:public", "z:community", "z:work"]
 
 [capabilities]
-required = []
+required = ["apple_notes.read", "apple_notes.write"]
 optional = []
-forbidden = ["network.listen", "network.outbound", "system.privileged"]
+# Raw ambient exec remains forbidden; the connector runtime only launches a
+# validated absolute osascript binary with static AppleScript and argv payloads.
+forbidden = ["network.listen", "network.outbound", "system.exec", "system.privileged"]
 
-[provides.operations.health]
-summary = "Report Apple Notes connector health and platform support"
+[provides.operations."apple_notes.health"]
+description = "Report Apple Notes connector health and platform support"
 capability = "apple_notes.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.list_notes]
-summary = "List Apple Notes note summaries"
+[provides.operations."apple_notes.health".input_schema]
+type = "object"
+
+[provides.operations."apple_notes.health".output_schema]
+type = "object"
+
+[provides.operations."apple_notes.list_notes"]
+description = "List Apple Notes note summaries"
 capability = "apple_notes.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.search_notes]
-summary = "Search Apple Notes by title/body substring"
+[provides.operations."apple_notes.list_notes".input_schema]
+type = "object"
+
+[provides.operations."apple_notes.list_notes".input_schema.properties.folder]
+type = "string"
+
+[provides.operations."apple_notes.list_notes".output_schema]
+type = "object"
+
+[provides.operations."apple_notes.list_notes".output_schema.properties.notes]
+type = "array"
+
+[provides.operations."apple_notes.search_notes"]
+description = "Search Apple Notes by title/body substring"
 capability = "apple_notes.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.get_note]
-summary = "Get one Apple Note by note identifier"
+[provides.operations."apple_notes.search_notes".input_schema]
+required = ["query"]
+type = "object"
+
+[provides.operations."apple_notes.search_notes".input_schema.properties.query]
+type = "string"
+
+[provides.operations."apple_notes.search_notes".output_schema]
+type = "object"
+
+[provides.operations."apple_notes.search_notes".output_schema.properties.notes]
+type = "array"
+
+[provides.operations."apple_notes.get_note"]
+description = "Get one Apple Note by note identifier"
 capability = "apple_notes.read"
-risk = "low"
+risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 
-[provides.operations.create_note]
-summary = "Create a new Apple Note"
+[provides.operations."apple_notes.get_note".input_schema]
+required = ["note_id"]
+type = "object"
+
+[provides.operations."apple_notes.get_note".input_schema.properties.note_id]
+type = "string"
+
+[provides.operations."apple_notes.get_note".output_schema]
+type = "object"
+
+[provides.operations."apple_notes.get_note".output_schema.properties.note]
+type = "object"
+
+[provides.operations."apple_notes.create_note"]
+description = "Create a new Apple Note"
 capability = "apple_notes.write"
-risk = "medium"
+risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "policy"
 idempotency = "none"
+
+[provides.operations."apple_notes.create_note".input_schema]
+required = ["title", "body"]
+type = "object"
+
+[provides.operations."apple_notes.create_note".input_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_notes.create_note".input_schema.properties.body]
+type = "string"
+
+[provides.operations."apple_notes.create_note".input_schema.properties.folder]
+type = "string"
+
+[provides.operations."apple_notes.create_note".output_schema]
+type = "object"
+
+[provides.operations."apple_notes.create_note".output_schema.properties.note]
+type = "object"
 
 [sandbox]
 profile = "strict"
@@ -63,4 +143,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = false
 deny_ptrace = true
-

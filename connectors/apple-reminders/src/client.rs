@@ -15,6 +15,15 @@ use crate::bounded_subprocess::{self, BoundedOutput, run_with_timeout};
 use crate::error::{AppleRemindersError, AppleRemindersResult};
 use crate::types::AppleRemindersConfig;
 
+#[cfg(test)]
+const TEST_FAKE_SUCCESS_OSASCRIPT: &str = "__fcp_apple_reminders_fake_success_osascript__";
+#[cfg(test)]
+const TEST_FAKE_SUCCESS_OSASCRIPT_PATH: &str = "/tmp/fcp-apple-reminders-osascript-e2e-success";
+#[cfg(test)]
+const TEST_FAKE_ERRORS_OSASCRIPT: &str = "__fcp_apple_reminders_fake_errors_osascript__";
+#[cfg(test)]
+const TEST_FAKE_ERRORS_OSASCRIPT_PATH: &str = "/tmp/fcp-apple-reminders-osascript-e2e-errors";
+
 const LIST_LISTS_SCRIPT: &str = r#"
 tell application "Reminders"
   set outputLines to {}
@@ -130,6 +139,9 @@ fn parse_reminder_output(raw: &str) -> Vec<Value> {
 
 impl AppleRemindersClient {
     pub fn from_config(config: &AppleRemindersConfig) -> AppleRemindersResult<Self> {
+        config
+            .validate()
+            .map_err(|error| AppleRemindersError::Config(error.to_string()))?;
         Ok(Self {
             osascript_path: config.osascript_path.clone(),
             default_list: config.default_list.clone(),
@@ -195,14 +207,11 @@ impl AppleRemindersClient {
 
     fn run_invocation(&self, invocation: ScriptInvocation) -> AppleRemindersResult<String> {
         Self::ensure_supported()?;
-        let mut command = Command::new(&self.osascript_path);
-        command.arg("-e").arg(invocation.script);
-        if !invocation.args.is_empty() {
-            command.arg("--");
-            for arg in invocation.args {
-                command.arg(arg);
-            }
-        }
+        self.run_checked_invocation(invocation)
+    }
+
+    fn run_checked_invocation(&self, invocation: ScriptInvocation) -> AppleRemindersResult<String> {
+        let command = self.build_command(invocation);
         let output: BoundedOutput =
             run_with_timeout(command, self.subprocess_timeout).map_err(map_subprocess_error)?;
         if !output.status.success() {
@@ -212,6 +221,33 @@ impl AppleRemindersClient {
         }
         let stdout = String::from_utf8_lossy(&output.stdout);
         Ok(normalize_script_output(stdout.as_ref()).trim().to_string())
+    }
+
+    fn build_command(&self, invocation: ScriptInvocation) -> Command {
+        debug_assert!(
+            self.osascript_path == crate::types::DEFAULT_OSASCRIPT_PATH || cfg!(test),
+            "production Apple Reminders clients only use the canonical osascript path"
+        );
+        #[cfg(test)]
+        let mut command = match self.osascript_path.as_str() {
+            TEST_FAKE_SUCCESS_OSASCRIPT => {
+                Command::new("/tmp/fcp-apple-reminders-osascript-e2e-success")
+            }
+            TEST_FAKE_ERRORS_OSASCRIPT => {
+                Command::new("/tmp/fcp-apple-reminders-osascript-e2e-errors")
+            }
+            _ => Command::new(crate::types::DEFAULT_OSASCRIPT_PATH),
+        };
+        #[cfg(not(test))]
+        let mut command = Command::new(crate::types::DEFAULT_OSASCRIPT_PATH);
+        command.arg("-e").arg(invocation.script);
+        if !invocation.args.is_empty() {
+            command.arg("--");
+            for arg in invocation.args {
+                command.arg(arg);
+            }
+        }
+        command
     }
 
     pub fn list_lists(&self) -> AppleRemindersResult<Value> {
@@ -278,6 +314,16 @@ fn map_subprocess_error(err: bounded_subprocess::SubprocessError) -> AppleRemind
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    #[cfg(unix)]
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::{Path, PathBuf},
+        time::{Duration, Instant},
+    };
 
     fn client_with_list() -> AppleRemindersClient {
         AppleRemindersClient::from_config(&AppleRemindersConfig {
@@ -295,6 +341,88 @@ mod tests {
             subprocess_timeout_secs: 30,
         })
         .unwrap()
+    }
+
+    #[cfg(unix)]
+    fn client_with_osascript_path(
+        path: impl Into<String>,
+        timeout_secs: u64,
+    ) -> AppleRemindersClient {
+        AppleRemindersClient {
+            osascript_path: path.into(),
+            default_list: Some("Personal".into()),
+            subprocess_timeout: Duration::from_secs(timeout_secs),
+        }
+    }
+
+    fn command_args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn emit_e2e_log(
+        scenario: &str,
+        correlation_id: &str,
+        phase: &str,
+        result: &str,
+        details: Value,
+    ) -> Value {
+        let payload = json!({
+            "test_name": "apple_reminders_osascript_e2e",
+            "module": "fcp-apple-reminders",
+            "scenario": scenario,
+            "phase": phase,
+            "result": result,
+            "correlation_id": correlation_id,
+            "details": details,
+            "replay": {
+                "command": "rch exec -- cargo test -p fcp-apple-reminders osascript_e2e -- --nocapture"
+            }
+        });
+        println!("{payload}");
+        payload
+    }
+
+    #[cfg(unix)]
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+    }
+
+    #[cfg(unix)]
+    fn write_fake_osascript(executable: &Path) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "fcp-apple-reminders-osascript-e2e-{}",
+            Uuid::new_v4()
+        ));
+        fs::create_dir_all(&dir).expect("create fake osascript e2e dir");
+        let argv_log = dir.join("argv.log");
+        let script = format!(
+            r#"#!/bin/sh
+log={}
+printf 'scenario=fake-osascript\n' >> "$log"
+index=0
+for arg in "$@"; do
+  printf 'argv[%s]=%s\n' "$index" "$arg" >> "$log"
+  index=$((index + 1))
+done
+case "$*" in
+  *FCP_FAKE_NONZERO*) printf 'bounded stderr redacted\n' >&2; exit 7 ;;
+  *FCP_FAKE_TIMEOUT*) exec /bin/sleep 30 ;;
+  *FCP_FAKE_LARGE_STDERR*) dd if=/dev/zero bs=1024 count=1030 2>/dev/null | tr '\000' x >&2; exit 9 ;;
+  *) printf 'rem-1\tFake Reminder\tPersonal\n'; exit 0 ;;
+esac
+"#,
+            shell_quote(&argv_log)
+        );
+        fs::write(executable, script).expect("write fake osascript");
+        let mut permissions = fs::metadata(executable)
+            .expect("fake osascript metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(executable, permissions).expect("chmod fake osascript");
+        argv_log
     }
 
     #[test]
@@ -344,6 +472,243 @@ mod tests {
     fn complete_invocation_passes_id() {
         let invocation = client_with_list().complete_reminder_invocation("rem-123");
         assert_eq!(invocation.args, vec!["rem-123"]);
+    }
+
+    #[test]
+    fn command_builder_keeps_user_values_after_separator() {
+        let client = client_with_list();
+        let title = "Buy milk; exec source $(osascript)";
+        let list = "Shopping `not evaluated`\nwith newline";
+        let command = client.build_command(client.create_reminder_invocation(title, Some(list)));
+        let args = command_args(&command);
+        let separator = args
+            .iter()
+            .position(|arg| arg == "--")
+            .expect("separator must be present");
+
+        let user_args: Vec<&str> = args
+            .get((separator + 1)..)
+            .expect("user args must be present")
+            .iter()
+            .map(String::as_str)
+            .collect();
+        assert_eq!(args.first().map(String::as_str), Some("-e"));
+        assert_eq!(user_args, [title, list]);
+    }
+
+    #[test]
+    fn from_config_revalidates_manually_constructed_config() {
+        let err = AppleRemindersClient::from_config(&AppleRemindersConfig {
+            default_list: None,
+            osascript_path: "/usr/bin/env".into(),
+            subprocess_timeout_secs: 30,
+        })
+        .expect_err("carrier path must be rejected");
+
+        assert!(
+            matches!(err, AppleRemindersError::Config(message) if message.contains("canonical"))
+        );
+    }
+
+    #[test]
+    fn osascript_e2e_rejects_wrapper_carrier_config_with_log() {
+        let correlation_id = Uuid::new_v4().to_string();
+        let mut rejected = Vec::new();
+        for path in [
+            "/usr/bin/env",
+            "/usr/bin/sudo",
+            "/usr/bin/doas",
+            "/usr/bin/command",
+            "/usr/bin/builtin",
+            "/usr/bin/exec",
+            "/usr/bin/source",
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "osascript",
+            "/usr/bin/osascript --",
+        ] {
+            let result = AppleRemindersConfig::from_value(json!({ "osascript_path": path }));
+            assert!(result.is_err(), "{path} should be rejected");
+            rejected.push(path);
+        }
+
+        let log = emit_e2e_log(
+            "reject-wrapper-carrier-config",
+            &correlation_id,
+            "configure",
+            "pass",
+            json!({ "rejected_paths": rejected }),
+        );
+        assert_eq!(log["correlation_id"], correlation_id);
+        assert!(
+            log["replay"]["command"]
+                .as_str()
+                .unwrap()
+                .contains("fcp-apple-reminders")
+        );
+    }
+
+    #[test]
+    fn osascript_e2e_non_macos_reports_unsupported_skip_metadata() {
+        let correlation_id = Uuid::new_v4().to_string();
+        if std::env::consts::OS == "macos" {
+            emit_e2e_log(
+                "platform-support",
+                &correlation_id,
+                "health",
+                "skip",
+                json!({ "reason": "live Apple Reminders access requires explicit live flag" }),
+            );
+            return;
+        }
+
+        let err = client_no_list()
+            .list_lists()
+            .expect_err("non-macOS must not launch osascript");
+        assert!(matches!(err, AppleRemindersError::UnsupportedPlatform(_)));
+        emit_e2e_log(
+            "platform-support",
+            &correlation_id,
+            "health",
+            "skip",
+            json!({ "reason": "unsupported platform", "os": std::env::consts::OS }),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn osascript_e2e_fake_success_logs_argv_stdout_and_replay() {
+        let fake_osascript = Path::new(TEST_FAKE_SUCCESS_OSASCRIPT_PATH);
+        let argv_log = write_fake_osascript(fake_osascript);
+        let client = client_with_osascript_path(TEST_FAKE_SUCCESS_OSASCRIPT, 5);
+        let correlation_id = Uuid::new_v4().to_string();
+        let config = AppleRemindersConfig::from_value(json!({})).expect("default config");
+        emit_e2e_log(
+            "fake-success",
+            &correlation_id,
+            "configure",
+            "pass",
+            json!({ "osascript_path": config.osascript_path }),
+        );
+
+        let title = "Buy milk; exec -a alias python3 -c 'oops'";
+        let list = "Shopping $(command source) && `not evaluated`\nenv -S exec";
+        let stdout = client
+            .run_checked_invocation(client.create_reminder_invocation(title, Some(list)))
+            .expect("fake osascript should succeed");
+        assert!(stdout.contains("Fake Reminder"));
+
+        let argv = fs::read_to_string(&argv_log).expect("read fake argv log");
+        assert!(argv.contains("argv[0]=-e"));
+        assert!(argv.contains("argv[2]=--"));
+        assert!(argv.contains(title));
+        assert!(argv.contains("not evaluated"));
+        assert!(argv.contains("env -S exec"));
+
+        emit_e2e_log(
+            "fake-success",
+            &correlation_id,
+            "invoke",
+            "pass",
+            json!({
+                "argv_log": argv_log.display().to_string(),
+                "stdout": stdout,
+                "malicious_payload_inert": true,
+            }),
+        );
+        emit_e2e_log(
+            "fake-success",
+            &correlation_id,
+            "simulate",
+            "skip",
+            json!({ "reason": "client-level fake osascript harness exercises subprocess argv directly" }),
+        );
+        emit_e2e_log(
+            "fake-success",
+            &correlation_id,
+            "shutdown",
+            "pass",
+            json!({ "fake_osascript": fake_osascript.display().to_string() }),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn osascript_e2e_fake_error_timeout_and_truncation_are_logged() {
+        let fake_osascript = Path::new(TEST_FAKE_ERRORS_OSASCRIPT_PATH);
+        let _argv_log = write_fake_osascript(fake_osascript);
+        let client = client_with_osascript_path(TEST_FAKE_ERRORS_OSASCRIPT, 1);
+        let correlation_id = Uuid::new_v4().to_string();
+
+        let nonzero = client
+            .run_checked_invocation(ScriptInvocation {
+                script: "return \"fake\"",
+                args: vec!["FCP_FAKE_NONZERO".into()],
+            })
+            .expect_err("nonzero fake should fail");
+        assert!(
+            matches!(&nonzero, AppleRemindersError::Process(message) if message.contains("bounded stderr redacted"))
+        );
+        emit_e2e_log(
+            "fake-errors",
+            &correlation_id,
+            "stderr",
+            "pass",
+            json!({ "nonzero_error": nonzero.to_string() }),
+        );
+
+        let large_stderr = client
+            .run_checked_invocation(ScriptInvocation {
+                script: "return \"fake\"",
+                args: vec!["FCP_FAKE_LARGE_STDERR".into()],
+            })
+            .expect_err("large stderr fake should fail");
+        match large_stderr {
+            AppleRemindersError::Process(message) => {
+                assert!(message.len() <= crate::bounded_subprocess::MAX_OUTPUT_BYTES);
+                emit_e2e_log(
+                    "fake-errors",
+                    &correlation_id,
+                    "stderr_truncation",
+                    "pass",
+                    json!({ "stderr_len": message.len(), "cap": crate::bounded_subprocess::MAX_OUTPUT_BYTES }),
+                );
+            }
+            other => {
+                assert!(
+                    matches!(other, AppleRemindersError::Process(_)),
+                    "large stderr should map to process error"
+                );
+            }
+        }
+
+        let started = Instant::now();
+        let timeout = client
+            .run_checked_invocation(ScriptInvocation {
+                script: "return \"fake\"",
+                args: vec!["FCP_FAKE_TIMEOUT".into()],
+            })
+            .expect_err("timeout fake should fail");
+        assert!(matches!(
+            timeout,
+            AppleRemindersError::Timeout { timeout_secs: 1 }
+        ));
+        assert!(started.elapsed() < Duration::from_secs(3));
+        emit_e2e_log(
+            "fake-errors",
+            &correlation_id,
+            "timeout",
+            "pass",
+            json!({ "timeout_secs": 1, "elapsed_ms": started.elapsed().as_millis() }),
+        );
+        emit_e2e_log(
+            "fake-errors",
+            &correlation_id,
+            "shutdown",
+            "pass",
+            json!({ "fake_osascript": fake_osascript.display().to_string() }),
+        );
     }
 
     #[test]

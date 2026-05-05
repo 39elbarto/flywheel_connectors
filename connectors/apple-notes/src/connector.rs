@@ -546,6 +546,7 @@ mod tests {
 
     fn capability_token(
         signing_key: &Ed25519SigningKey,
+        instance_id: &str,
         capability: &'static str,
         operation: &'static str,
     ) -> CapabilityToken {
@@ -553,6 +554,7 @@ mod tests {
         let raw = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:private")
+            .target_instance(instance_id)
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
@@ -587,6 +589,7 @@ mod tests {
             .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
             .await
             .expect("handshake should succeed");
+        let instance_id = connector.base.instance_id.clone();
         let response = connector
             .invoke(InvokeRequest {
                 r#type: "invoke".into(),
@@ -595,7 +598,12 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::private(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                capability_token: capability_token(
+                    &signing_key,
+                    instance_id.as_str(),
+                    CAP_READ,
+                    OP_HEALTH,
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

@@ -1,8 +1,8 @@
 use fcp_deepgram::DeepgramConnector;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
-    ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderOperationContract,
-    ProviderRedactionPayload, assert_provider_contract,
+    ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
+    ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::json;
 
@@ -42,17 +42,19 @@ async fn deepgram_provider_contract_is_advertised() {
             )
             .with_model_picker_method("api_key")
             .with_model_catalog(
-                ProviderModelCatalogContract::new("transcription").allow_dynamic_empty_catalog(),
+                ProviderModelCatalogContract::new("transcription")
+                    .with_model(ProviderModelContract::new("nova-3").with_label("Nova 3")),
             )
             .with_operation(
                 ProviderOperationContract::new("deepgram.listen.transcribe")
                     .with_catalog_id("transcription")
-                    .with_default_model_deferral(
-                        "Deepgram applies provider-side transcription defaults when model is omitted in this first connector slice",
-                    )
+                    .with_default_model("nova-3")
                     .require_default_model(),
             )
-            .with_base_url(ProviderBaseUrlContract::new("api", "https://api.deepgram.com"))
+            .with_base_url(ProviderBaseUrlContract::new(
+                "api",
+                "https://api.deepgram.com",
+            ))
             .with_base_url(
                 ProviderBaseUrlContract::new("loopback-test", "http://127.0.0.1:1")
                     .allow_loopback_http(),
@@ -60,7 +62,10 @@ async fn deepgram_provider_contract_is_advertised() {
             .with_secret_marker(redaction_marker)
             .with_redaction_payload(ProviderRedactionPayload::new("configure", configure))
             .with_redaction_payload(ProviderRedactionPayload::new("doctor", doctor))
-            .with_redaction_payload(ProviderRedactionPayload::new("introspection", introspection))
+            .with_redaction_payload(ProviderRedactionPayload::new(
+                "introspection",
+                introspection,
+            ))
             .with_import_side_effect(ProviderImportSideEffectContract::new(
                 "fcp_deepgram",
                 "provider registry",

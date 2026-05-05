@@ -1,8 +1,8 @@
 use fcp_elevenlabs::ElevenlabsConnector;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
-    ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderOperationContract,
-    ProviderRedactionPayload, assert_provider_contract,
+    ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
+    ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::json;
 
@@ -42,14 +42,25 @@ async fn elevenlabs_provider_contract_is_advertised() {
             )
             .with_model_picker_method("api_key")
             .with_model_catalog(
-                ProviderModelCatalogContract::new("tts_models").allow_dynamic_empty_catalog(),
+                ProviderModelCatalogContract::new("tts_models")
+                    .with_model(ProviderModelContract::new("eleven_v3").with_label("Eleven v3"))
+                    .with_model(
+                        ProviderModelContract::new("eleven_multilingual_v2")
+                            .with_label("Eleven Multilingual v2"),
+                    )
+                    .with_model(
+                        ProviderModelContract::new("eleven_turbo_v2_5")
+                            .with_label("Eleven Turbo v2.5"),
+                    )
+                    .with_model(
+                        ProviderModelContract::new("eleven_monolingual_v1")
+                            .with_label("Eleven Monolingual v1"),
+                    ),
             )
             .with_operation(
                 ProviderOperationContract::new("elevenlabs.tts.generate")
                     .with_catalog_id("tts_models")
-                    .with_default_model_deferral(
-                        "ElevenLabs model_id is caller/provider selected in this first connector slice",
-                    )
+                    .with_default_model("eleven_multilingual_v2")
                     .require_default_model(),
             )
             .with_base_url(ProviderBaseUrlContract::new(
@@ -63,7 +74,10 @@ async fn elevenlabs_provider_contract_is_advertised() {
             .with_secret_marker(redaction_marker)
             .with_redaction_payload(ProviderRedactionPayload::new("configure", configure))
             .with_redaction_payload(ProviderRedactionPayload::new("doctor", doctor))
-            .with_redaction_payload(ProviderRedactionPayload::new("introspection", introspection))
+            .with_redaction_payload(ProviderRedactionPayload::new(
+                "introspection",
+                introspection,
+            ))
             .with_import_side_effect(ProviderImportSideEffectContract::new(
                 "fcp_elevenlabs",
                 "provider registry",

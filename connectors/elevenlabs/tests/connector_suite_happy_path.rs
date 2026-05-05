@@ -102,7 +102,7 @@ impl FcpConnector for ElevenlabsSuiteAdapter {
                 ai_hints: AgentHint {
                     when_to_use: "Use for read-only voice catalog discovery.".into(),
                     common_mistakes: Vec::new(),
-                    examples: vec![r#"{}"#.into()],
+                    examples: vec![r"{}".into()],
                     related: Vec::new(),
                 },
                 rate_limit: None,

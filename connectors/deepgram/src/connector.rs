@@ -12,6 +12,7 @@ const CONNECTOR_VERSION: &str = "0.1.0";
 const BOUNDARY: &str =
     "This first slice focuses on prerecorded transcription through the Listen API.";
 const DEFAULT_BASE_URL: &str = "https://api.deepgram.com";
+const DEFAULT_TRANSCRIPTION_MODEL: &str = "nova-3";
 
 #[derive(Clone)]
 enum Auth {
@@ -176,9 +177,14 @@ impl DeepgramClient {
                 message: "audio_url must be a non-empty string".into(),
             })?;
 
-        let mut params: Vec<(&str, String)> = Vec::new();
+        let model = input
+            .get("model")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TRANSCRIPTION_MODEL);
+        let mut params: Vec<(&str, String)> = vec![("model", model.to_owned())];
         for key in [
-            "model",
             "language",
             "detect_language",
             "smart_format",
@@ -360,7 +366,33 @@ impl DeepgramConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "deepgram.listen.transcribe", "summary": "Create a Deepgram prerecorded transcription", "capability": "deepgram.listen", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" }
+                {
+                    "id": "deepgram.listen.transcribe",
+                    "summary": "Create a Deepgram prerecorded transcription",
+                    "capability": "deepgram.listen",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "strict",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["audio_url"],
+                        "properties": {
+                            "audio_url": { "type": "string" },
+                            "model": { "type": "string", "default": DEFAULT_TRANSCRIPTION_MODEL },
+                            "language": { "type": "string" },
+                            "detect_language": { "type": "boolean" },
+                            "smart_format": { "type": "boolean" },
+                            "punctuate": { "type": "boolean" },
+                            "diarize": { "type": "boolean" },
+                            "utterances": { "type": "boolean" },
+                            "paragraphs": { "type": "boolean" },
+                            "summarize": { "type": "boolean" },
+                            "topics": { "type": "boolean" },
+                            "intents": { "type": "boolean" }
+                        }
+                    },
+                    "output_schema": { "type": "object" }
+                }
             ],
             "events": [],
             "resource_types": []
@@ -541,7 +573,7 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -643,19 +675,55 @@ mod tests {
             .await
             .expect_err("expected rate-limited error");
 
-        match error {
-            FcpError::External {
-                status_code,
-                retry_after,
-                retryable,
-                ..
-            } => {
-                assert_eq!(status_code, Some(429));
-                assert_eq!(retry_after, Some(Duration::from_secs(7)));
-                assert!(retryable);
-            }
-            other => panic!("expected external error, got {other:?}"),
+        assert!(
+            matches!(error, FcpError::External { .. }),
+            "expected external error, got {error:?}"
+        );
+        if let FcpError::External {
+            status_code,
+            retry_after,
+            retryable,
+            ..
+        } = error
+        {
+            assert_eq!(status_code, Some(429));
+            assert_eq!(retry_after, Some(Duration::from_secs(7)));
+            assert!(retryable);
         }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn transcribe_uses_openclaw_aligned_default_model_when_omitted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/listen"))
+            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
+            .and(header("authorization", "Token test-key"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": {
+                    "channels": [{
+                        "alternatives": [{
+                            "transcript": "hello with default model"
+                        }]
+                    }]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = DeepgramConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .expect("expected valid config");
+        let client = DeepgramClient::new(&config).expect("expected client");
+        client
+            .transcribe(&json!({
+                "audio_url": "https://example.test/audio.wav"
+            }))
+            .await
+            .expect("default model transcription should succeed");
     }
 
     #[fcp_async_core::runtime::test]

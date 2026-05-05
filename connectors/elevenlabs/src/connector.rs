@@ -13,6 +13,13 @@ const CONNECTOR_ID: &str = "fcp.elevenlabs";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
 const BOUNDARY: &str = "This first slice exposes voice discovery plus request-response text-to-speech. Streaming synthesis and voice cloning stay out of scope.";
+const DEFAULT_TTS_MODEL_ID: &str = "eleven_multilingual_v2";
+const TTS_MODEL_IDS: &[&str] = &[
+    "eleven_v3",
+    "eleven_multilingual_v2",
+    "eleven_turbo_v2_5",
+    "eleven_monolingual_v1",
+];
 
 #[derive(Clone)]
 enum Auth {
@@ -542,11 +549,26 @@ impl ElevenlabsConnector {
                 message: "text is required".into(),
             })?;
 
-        let mut body = json!({ "text": text });
-        copy_if_present(&mut body, input, "model_id");
+        let model_id = input
+            .get("model_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TTS_MODEL_ID);
+        let mut body = json!({
+            "text": text,
+            "model_id": model_id,
+        });
         copy_if_present(&mut body, input, "language_code");
-        copy_if_present(&mut body, input, "voice_settings");
         copy_if_present(&mut body, input, "pronunciation_dictionary_locators");
+        copy_if_present(&mut body, input, "seed");
+        copy_if_present(&mut body, input, "apply_text_normalization");
+        if let Some(voice_settings) = input.get("voice_settings") {
+            validate_voice_settings(voice_settings)?;
+            if let Some(body_object) = body.as_object_mut() {
+                body_object.insert("voice_settings".to_owned(), voice_settings.clone());
+            }
+        }
 
         let output_format = input
             .get("output_format")
@@ -596,10 +618,25 @@ fn operations_info() -> Vec<Value> {
                 "properties": {
                     "voice_id": {"type": "string"},
                     "text": {"type": "string"},
-                    "model_id": {"type": "string"},
+                    "model_id": {
+                        "type": "string",
+                        "default": DEFAULT_TTS_MODEL_ID,
+                        "enum": TTS_MODEL_IDS
+                    },
                     "language_code": {"type": "string"},
-                    "voice_settings": {"type": "object"},
+                    "voice_settings": {
+                        "type": "object",
+                        "properties": {
+                            "stability": {"type": "number", "minimum": 0, "maximum": 1},
+                            "similarity_boost": {"type": "number", "minimum": 0, "maximum": 1},
+                            "style": {"type": "number", "minimum": 0, "maximum": 1},
+                            "use_speaker_boost": {"type": "boolean"},
+                            "speed": {"type": "number", "minimum": 0.5, "maximum": 2}
+                        }
+                    },
                     "pronunciation_dictionary_locators": {"type": "array"},
+                    "seed": {"type": "integer"},
+                    "apply_text_normalization": {"type": "string", "enum": ["auto", "on", "off"]},
                     "output_format": {"type": "string"},
                     "optimize_streaming_latency": {"type": "integer"}
                 }
@@ -625,8 +662,49 @@ const fn health_status(
 
 fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
     if let Some(value) = source.get(field) {
-        target[field] = value.clone();
+        if let Some(target_object) = target.as_object_mut() {
+            target_object.insert(field.to_owned(), value.clone());
+        }
     }
+}
+
+fn validate_voice_settings(value: &Value) -> FcpResult<()> {
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "voice_settings must be an object".into(),
+    })?;
+    for (field, minimum, maximum) in [
+        ("stability", 0.0, 1.0),
+        ("similarity_boost", 0.0, 1.0),
+        ("style", 0.0, 1.0),
+        ("speed", 0.5, 2.0),
+    ] {
+        if let Some(number) = object.get(field) {
+            let Some(number) = number.as_f64() else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("voice_settings.{field} must be a number"),
+                });
+            };
+            if !(minimum..=maximum).contains(&number) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "voice_settings.{field} must be between {minimum} and {maximum}"
+                    ),
+                });
+            }
+        }
+    }
+    if let Some(use_speaker_boost) = object.get("use_speaker_boost")
+        && !use_speaker_boost.is_boolean()
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "voice_settings.use_speaker_boost must be a boolean".into(),
+        });
+    }
+    Ok(())
 }
 
 fn parse_base_url(base_url: &str) -> FcpResult<Url> {
@@ -737,6 +815,8 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn config_requires_exactly_one_auth_source() {
@@ -819,6 +899,83 @@ mod tests {
             url.as_str(),
             "https://api.elevenlabs.io/v1/text-to-speech/voice-id?output_format=mp3_44100_128&optimize_streaming_latency=1"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_uses_openclaw_aligned_default_model_when_omitted() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/text-to-speech/voice-default"))
+            .and(header("xi-api-key", "test-key"))
+            .and(body_json(json!({
+                "text": "hello",
+                "model_id": DEFAULT_TTS_MODEL_ID
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("Content-Type", "audio/mpeg")
+                    .set_body_bytes([1, 2, 3]),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key",
+                "base_url": server.uri()
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "default-model-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let response = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello"
+                }
+            }))
+            .await
+            .expect("default model TTS should succeed");
+
+        assert_eq!(response["audio_size_bytes"], 3);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_rejects_out_of_range_voice_settings() {
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key"
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "voice-settings-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello",
+                    "voice_settings": {
+                        "speed": 2.5
+                    }
+                }
+            }))
+            .await
+            .expect_err("out-of-range voice settings should fail before network I/O");
+
+        assert!(error.to_string().contains("voice_settings.speed"));
     }
 
     #[fcp_async_core::runtime::test]

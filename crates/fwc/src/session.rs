@@ -107,6 +107,19 @@ pub struct SessionResourceBinding {
     pub bound_at: DateTime<Utc>,
 }
 
+/// Root Telegram DM command handling before a topic-specific session is selected.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TelegramRootLobbyPolicy {
+    /// The message belongs to a Telegram topic, so root-lobby policy does not apply.
+    NotRootLobby,
+    /// `/new` in the root DM is intentionally ignored; topic lanes own new sessions.
+    IgnoreNew,
+    /// `/topic` should select or restore a topic-bound session.
+    TopicSelector,
+    /// A root-lobby message that is neither `/new` nor `/topic`.
+    LobbyMessage,
+}
+
 impl Session {
     /// Create a new active session.
     pub fn new(
@@ -305,6 +318,32 @@ impl SessionStore {
         Ok(sessions.into_iter().next())
     }
 
+    /// Find the active session bound to the first matching resource URI.
+    ///
+    /// `resource_uris` is intentionally resource-ordered rather than session-ordered.
+    /// Telegram events emit topic-specific resources before root-chat resources, so
+    /// a topic lane wins even if the root lobby session was updated more recently.
+    pub fn active_session_for_resources(
+        &self,
+        connector_id: &str,
+        resource_uris: &[String],
+    ) -> anyhow::Result<Option<(Session, String)>> {
+        let mut sessions = self.list(Some(SessionStatus::Active))?;
+        let matched = resource_uris.iter().find_map(|resource_uri| {
+            sessions
+                .iter()
+                .position(|session| session.binding_for(connector_id, resource_uri).is_some())
+                .map(|session_index| (session_index, resource_uri))
+        });
+        if let Some((session_index, resource_uri)) = matched {
+            return Ok(Some((
+                sessions.swap_remove(session_index),
+                resource_uri.to_owned(),
+            )));
+        }
+        Ok(None)
+    }
+
     /// Delete a session file.
     pub fn delete(&self, id: &SessionId) -> anyhow::Result<bool> {
         let path = self.session_path(id);
@@ -341,6 +380,35 @@ pub fn resolve_session_id(input: &str) -> Option<SessionId> {
 /// Compute session file path from base directory.
 pub fn session_dir(base: &Path) -> PathBuf {
     base.join("sessions")
+}
+
+/// Classify Telegram root-lobby command behavior for session routing.
+///
+/// Telegram topic messages carry `message_thread_id` and must bypass root-lobby
+/// policy so `/new` can remain meaningful inside a topic lane. The root DM acts
+/// as a system lobby: `/topic` selects/restores a bound topic, while `/new` does
+/// not start an agent session from the root lobby.
+#[must_use]
+pub fn telegram_root_lobby_policy(
+    message_thread_id: Option<i64>,
+    text: Option<&str>,
+) -> TelegramRootLobbyPolicy {
+    if message_thread_id.is_some() {
+        return TelegramRootLobbyPolicy::NotRootLobby;
+    }
+
+    match telegram_command_name(text) {
+        Some("new") => TelegramRootLobbyPolicy::IgnoreNew,
+        Some("topic") => TelegramRootLobbyPolicy::TopicSelector,
+        _ => TelegramRootLobbyPolicy::LobbyMessage,
+    }
+}
+
+fn telegram_command_name(text: Option<&str>) -> Option<&str> {
+    let word = text?.split_whitespace().next()?;
+    let command = word.strip_prefix('/')?;
+    let command = command.split_once('@').map_or(command, |(name, _)| name);
+    (!command.is_empty()).then_some(command)
 }
 
 #[cfg(test)]
@@ -483,6 +551,54 @@ mod tests {
     }
 
     #[test]
+    fn telegram_root_lobby_policy_ignores_new_in_root_dm() {
+        assert_eq!(
+            telegram_root_lobby_policy(None, Some("/new")),
+            TelegramRootLobbyPolicy::IgnoreNew
+        );
+        assert_eq!(
+            telegram_root_lobby_policy(None, Some("  /new@FcpBot please")),
+            TelegramRootLobbyPolicy::IgnoreNew
+        );
+    }
+
+    #[test]
+    fn telegram_root_lobby_policy_selects_topic_in_root_dm() {
+        assert_eq!(
+            telegram_root_lobby_policy(None, Some("/topic")),
+            TelegramRootLobbyPolicy::TopicSelector
+        );
+        assert_eq!(
+            telegram_root_lobby_policy(None, Some("/topic@FcpBot 17585")),
+            TelegramRootLobbyPolicy::TopicSelector
+        );
+    }
+
+    #[test]
+    fn telegram_root_lobby_policy_bypasses_topic_messages() {
+        assert_eq!(
+            telegram_root_lobby_policy(Some(17_585), Some("/new")),
+            TelegramRootLobbyPolicy::NotRootLobby
+        );
+        assert_eq!(
+            telegram_root_lobby_policy(Some(17_585), Some("/topic")),
+            TelegramRootLobbyPolicy::NotRootLobby
+        );
+    }
+
+    #[test]
+    fn telegram_root_lobby_policy_keeps_non_commands_as_lobby_messages() {
+        assert_eq!(
+            telegram_root_lobby_policy(None, Some("hello")),
+            TelegramRootLobbyPolicy::LobbyMessage
+        );
+        assert_eq!(
+            telegram_root_lobby_policy(None, None),
+            TelegramRootLobbyPolicy::LobbyMessage
+        );
+    }
+
+    #[test]
     fn session_operations_counter() {
         let mut session = Session::new("Agent", "goal", None);
         session.record_operation();
@@ -557,6 +673,74 @@ mod tests {
         let ended = store.list(Some(SessionStatus::Ended)).unwrap();
         assert_eq!(ended.len(), 1);
         assert_eq!(ended[0].agent_name, "B");
+    }
+
+    #[test]
+    fn store_active_session_for_resources_prefers_topic_before_root_lobby() {
+        let store = temp_store();
+        let mut topic_session = Session::new("TopicAgent", "topic lane", None);
+        topic_session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+
+        let mut root_session = Session::new("RootAgent", "root lobby", None);
+        root_session.bind_resource("telegram", "telegram:chat:208214988");
+        root_session.updated_at = topic_session.updated_at + chrono::Duration::seconds(5);
+
+        store.save(&topic_session).unwrap();
+        store.save(&root_session).unwrap();
+
+        let (session, resource_uri) = store
+            .active_session_for_resources(
+                "telegram",
+                &[
+                    "telegram:chat:208214988:topic:17585".to_owned(),
+                    "telegram:chat:208214988".to_owned(),
+                ],
+            )
+            .unwrap()
+            .expect("topic session should match");
+
+        assert_eq!(session.id, topic_session.id);
+        assert_eq!(resource_uri, "telegram:chat:208214988:topic:17585");
+    }
+
+    #[test]
+    fn store_active_session_for_resources_falls_back_to_root_lobby() {
+        let store = temp_store();
+        let mut root_session = Session::new("RootAgent", "root lobby", None);
+        root_session.bind_resource("telegram", "telegram:chat:208214988");
+        store.save(&root_session).unwrap();
+
+        let (session, resource_uri) = store
+            .active_session_for_resources(
+                "telegram",
+                &[
+                    "telegram:chat:208214988:topic:17585".to_owned(),
+                    "telegram:chat:208214988".to_owned(),
+                ],
+            )
+            .unwrap()
+            .expect("root session should match");
+
+        assert_eq!(session.id, root_session.id);
+        assert_eq!(resource_uri, "telegram:chat:208214988");
+    }
+
+    #[test]
+    fn store_active_session_for_resources_ignores_paused_sessions() {
+        let store = temp_store();
+        let mut session = Session::new("PausedAgent", "topic lane", None);
+        session.bind_resource("telegram", "telegram:chat:208214988:topic:17585");
+        session.pause();
+        store.save(&session).unwrap();
+
+        let matched = store
+            .active_session_for_resources(
+                "telegram",
+                &["telegram:chat:208214988:topic:17585".to_owned()],
+            )
+            .unwrap();
+
+        assert!(matched.is_none());
     }
 
     #[test]

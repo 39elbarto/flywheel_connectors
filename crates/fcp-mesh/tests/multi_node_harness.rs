@@ -1430,6 +1430,84 @@ async fn collect_revocation_observations(
     })
 }
 
+async fn seed_bulk_symbol_announcements(
+    harness: &mut MultiNodeMeshHarness,
+    nodes: &[NodeId],
+    zone_id: &ZoneId,
+    object_count: usize,
+    symbols_per_object: u32,
+) -> Result<usize, HarnessError> {
+    if nodes.is_empty() {
+        return Err(HarnessError::UnknownNode(
+            "bulk-symbol-empty-harness".to_string(),
+        ));
+    }
+
+    let symbol_size = 64usize;
+    let symbol_size_u64 = u64::try_from(symbol_size).expect("symbol_size fits u64");
+    let source_symbols = symbols_per_object;
+    let mut announced_symbols = 0usize;
+
+    for object_index in 0..object_count {
+        let object_id = test_object_id(&format!("adaptive-bulk-symbol-{object_index}"));
+        let meta = ObjectSymbolMeta {
+            object_id,
+            zone_id: zone_id.clone(),
+            oti: fcp_store::ObjectTransmissionInfo::from(
+                fcp_raptorq::ObjectTransmissionInformation::new(
+                    u64::from(source_symbols) * symbol_size_u64,
+                    u16::try_from(symbol_size).expect("symbol_size fits in u16"),
+                    1,
+                    1,
+                    1,
+                ),
+            ),
+            source_symbols,
+            first_symbol_at: 0,
+        };
+
+        for node in nodes {
+            harness.store_object_meta(node, meta.clone()).await?;
+            harness
+                .announce_object(
+                    node,
+                    zone_id.clone(),
+                    object_id,
+                    ObjectAdmissionClass::Admitted,
+                )
+                .await?;
+        }
+
+        for esi in 0..symbols_per_object {
+            let node_index = (object_index
+                + usize::try_from(esi).expect("test ESI should fit usize"))
+                % nodes.len();
+            let node = nodes.get(node_index).ok_or_else(|| {
+                HarnessError::UnknownNode(format!("bulk-symbol-node-index-{node_index}"))
+            })?;
+            let source_node = 10_000 + u64::try_from(object_index).expect("test index fits u64");
+            harness
+                .store_symbol(
+                    node,
+                    test_symbol(object_id, zone_id.clone(), esi, source_node, symbol_size),
+                )
+                .await?;
+            harness
+                .announce_symbol(
+                    node,
+                    zone_id.clone(),
+                    object_id,
+                    esi,
+                    ObjectAdmissionClass::Admitted,
+                )
+                .await?;
+            announced_symbols += 1;
+        }
+    }
+
+    Ok(announced_symbols)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn swarm_evidence_entry(
     scenario_id: &'static str,
@@ -1793,6 +1871,32 @@ async fn adaptive_revocation_swarm_jsonl_evidence_compares_static_baseline() {
     );
     assert_eq!(adaptive_emergency.decision, FanoutDecision::EmergencyBurst);
     assert_eq!(adaptive_emergency.selected_peer_count, peers.len());
+    let bulk_object_count = 6usize;
+    let bulk_symbols_per_object = 8u32;
+    let bulk_symbol_announcements = seed_bulk_symbol_announcements(
+        &mut harness,
+        &node_ids,
+        &zone_id,
+        bulk_object_count,
+        bulk_symbols_per_object,
+    )
+    .await
+    .unwrap();
+    harness
+        .broadcast_summaries(
+            zone_id.clone(),
+            EpochId::new("adaptive-bulk-symbol-pressure"),
+        )
+        .await
+        .unwrap();
+    let bulk_pressure_snapshot = harness
+        .snapshot(&source, zone_id.clone(), bulk_object_count)
+        .await
+        .unwrap();
+    assert!(
+        bulk_pressure_snapshot.known_objects.len() >= bulk_object_count,
+        "bulk object gossip should be present before emergency revocation"
+    );
     let emergency_start_ms = harness.now_ms();
     let emergency_delivery = deliver_revocation_pushes(
         &mut harness,
@@ -1826,6 +1930,8 @@ async fn adaptive_revocation_swarm_jsonl_evidence_compares_static_baseline() {
         &serde_json::json!({
             "priority_policy": "emergency",
             "adaptive_bypass_expected": true,
+            "bulk_symbol_announcements": bulk_symbol_announcements,
+            "bulk_observed_messages_before_revocation": bulk_pressure_snapshot.observed_messages.len(),
         }),
     ));
 

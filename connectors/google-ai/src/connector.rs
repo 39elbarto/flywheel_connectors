@@ -18,7 +18,7 @@ use crate::client::{DEFAULT_BASE_URL, GoogleAiAuth, GoogleAiClient};
 use crate::error::GoogleAiError;
 use crate::types::{
     CancelTuningOperationRequest, CreateTunedModelRequest, GetTunedModelRequest,
-    GetTuningOperationRequest, ListTunedModelsRequest,
+    GetTuningOperationRequest, GoogleLiveBrowserSessionRequest, ListTunedModelsRequest,
 };
 
 const GOOGLE_AI_ALLOWED_HOST: &str = "generativelanguage.googleapis.com";
@@ -200,6 +200,12 @@ impl GoogleAiConnector {
             verifier: None,
             session_id: None,
         }
+    }
+
+    /// Return the connector instance ID used for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     /// Handle configure method.
@@ -529,6 +535,97 @@ impl GoogleAiConnector {
                         ],
                         related: vec![
                             CapabilityId::from_static("google-ai.generate_content"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "google-ai.live.create_browser_session",
+                    "Create a constrained Google Live browser session token",
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "model": {
+                                "type": "string",
+                                "default": crate::types::GOOGLE_LIVE_DEFAULT_MODEL
+                            },
+                            "voice": {
+                                "type": "string",
+                                "default": crate::types::GOOGLE_LIVE_DEFAULT_VOICE
+                            },
+                            "instructions": { "type": "string" },
+                            "tools": { "type": "array" },
+                            "temperature": { "type": "number" },
+                            "prefix_padding_ms": { "type": "integer" },
+                            "silence_duration_ms": { "type": "integer" },
+                            "start_sensitivity": { "type": "string", "enum": ["low", "high"] },
+                            "end_sensitivity": { "type": "string", "enum": ["low", "high"] },
+                            "activity_handling": {
+                                "type": "string",
+                                "enum": ["start-of-activity-interrupts", "no-interruption"]
+                            },
+                            "turn_coverage": {
+                                "type": "string",
+                                "enum": ["only-activity", "all-input", "audio-activity-and-all-video"]
+                            },
+                            "automatic_activity_detection_disabled": { "type": "boolean" },
+                            "enable_affective_dialog": { "type": "boolean" },
+                            "session_resumption": { "type": "boolean", "default": true },
+                            "context_window_compression": { "type": "boolean", "default": true },
+                            "thinking_level": {
+                                "type": "string",
+                                "enum": ["minimal", "low", "medium", "high"]
+                            },
+                            "thinking_budget": { "type": "integer" },
+                            "expire_time": { "type": "string" },
+                            "new_session_expire_time": { "type": "string" },
+                            "uses": { "type": "integer", "default": 1 }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": [
+                            "provider",
+                            "transport",
+                            "protocol",
+                            "clientSecret",
+                            "websocketUrl",
+                            "audio",
+                            "initialMessage",
+                            "model",
+                            "voice",
+                            "expiresAt"
+                        ],
+                        "properties": {
+                            "provider": { "type": "string" },
+                            "transport": { "type": "string" },
+                            "protocol": { "type": "string" },
+                            "clientSecret": { "type": "string" },
+                            "websocketUrl": { "type": "string" },
+                            "audio": { "type": "object" },
+                            "initialMessage": { "type": "object" },
+                            "model": { "type": "string" },
+                            "voice": { "type": "string" },
+                            "expiresAt": { "type": "integer" },
+                            "newSessionExpiresAt": { "type": "integer" },
+                            "provenance": { "type": "object" }
+                        }
+                    }),
+                    "google-ai.live_voice",
+                    RiskLevel::High,
+                    SafetyTier::Safe,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Mint a short-lived browser token for direct Google Live audio over BidiGenerateContentConstrained.".into(),
+                        common_mistakes: vec![
+                            "Using the generic generate_content_stream operation for realtime audio; Live is a separate bidirectional WebSocket protocol.".into(),
+                            "Changing api_version away from v1alpha; ephemeral Live tokens are constrained to v1alpha.".into(),
+                            "Logging clientSecret or treating it as a durable API key.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"voice": "Kore", "instructions": "Speak briefly.", "tools": [{"name": "lookup", "description": "Look something up", "parameters": {"type": "object"}}]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("google-ai.generate_content_stream"),
                         ],
                     },
                 ),
@@ -1056,6 +1153,9 @@ impl GoogleAiConnector {
         match operation {
             "google-ai.generate_content" => self.invoke_generate_content(input).await,
             "google-ai.generate_content_stream" => self.invoke_generate_content_stream(input).await,
+            "google-ai.live.create_browser_session" => {
+                self.invoke_live_create_browser_session(input).await
+            }
             "google-ai.embed_content" => self.invoke_embed_content(input).await,
             "google-ai.batch_embed_contents" => self.invoke_batch_embed_contents(input).await,
             "google-ai.count_tokens" => self.invoke_count_tokens(input).await,
@@ -1158,6 +1258,42 @@ impl GoogleAiConnector {
                 "chunk_count": chunk_count,
             },
         }))
+    }
+
+    async fn invoke_live_create_browser_session(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let request: GoogleLiveBrowserSessionRequest =
+            parse_request(input, "create Google Live browser session")?;
+        request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            })?;
+
+        let response = client
+            .create_live_browser_session(&request)
+            .await
+            .map_err(|e: GoogleAiError| e.to_fcp_error())?;
+        info!(
+            model = %response.model,
+            voice = %response.voice,
+            "created Google Live browser session token"
+        );
+        let mut result = serde_json::to_value(response).map_err(|e| FcpError::Internal {
+            message: format!("Failed to serialize response: {e}"),
+        })?;
+        result["provenance"] = json!({
+            "source": "google-ai",
+            "action": "live.create_browser_session",
+            "api_version": crate::types::GOOGLE_LIVE_BROWSER_API_VERSION,
+            "integrity": "untrusted",
+            "client_secret_redacted_in_logs": true,
+        });
+        Ok(result)
     }
 
     async fn invoke_embed_content(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
@@ -1493,11 +1629,16 @@ mod tests {
         matchers::{method, path},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        op: &str,
+        instance_id: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "google-ai.generate_content" | "google-ai.generate_content_stream" => {
                 "google-ai.generate"
             }
+            "google-ai.live.create_browser_session" => "google-ai.live_voice",
             "google-ai.embed_content" | "google-ai.batch_embed_contents" => "google-ai.embed",
             "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => {
                 "google-ai.models"
@@ -1511,13 +1652,23 @@ mod tests {
             _ => "google-ai.generate",
         };
         let now = Utc::now();
+        let constraints = fcp_prelude::CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("serialize test constraints");
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[op])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + Duration::hours(1))
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("constraints CBOR should validate")
             .sign(signing_key)
             .unwrap();
         CapabilityToken::from_raw(cose)
@@ -1942,7 +2093,11 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+        let token = generate_valid_token(
+            &signing_key,
+            "google-ai.generate_content",
+            connector.instance_id(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "google-ai.generate_content",
@@ -1971,7 +2126,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "google-ai.get_usage");
+        let token =
+            generate_valid_token(&signing_key, "google-ai.get_usage", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "google-ai.get_usage",
@@ -2008,7 +2164,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "google-ai.get_model");
+        let token =
+            generate_valid_token(&signing_key, "google-ai.get_model", connector.instance_id());
         let result = connector
             .handle_invoke(json!({
                 "operation": "google-ai.get_model",
@@ -2032,6 +2189,7 @@ mod tests {
 
         assert!(op_ids.contains(&"google-ai.generate_content"));
         assert!(op_ids.contains(&"google-ai.generate_content_stream"));
+        assert!(op_ids.contains(&"google-ai.live.create_browser_session"));
         assert!(op_ids.contains(&"google-ai.embed_content"));
         assert!(op_ids.contains(&"google-ai.batch_embed_contents"));
         assert!(op_ids.contains(&"google-ai.count_tokens"));
@@ -2043,7 +2201,7 @@ mod tests {
         assert!(op_ids.contains(&"google-ai.tuning.get_operation"));
         assert!(op_ids.contains(&"google-ai.tuning.cancel"));
         assert!(op_ids.contains(&"google-ai.get_usage"));
-        assert_eq!(ops.len(), 13);
+        assert_eq!(ops.len(), 14);
     }
 
     #[fcp_async_core::runtime::test]
@@ -2069,7 +2227,11 @@ mod tests {
             }))
             .await
             .unwrap();
-        let token = generate_valid_token(&signing_key, "google-ai.tuning.create");
+        let token = generate_valid_token(
+            &signing_key,
+            "google-ai.tuning.create",
+            connector.instance_id(),
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "google-ai.tuning.create",

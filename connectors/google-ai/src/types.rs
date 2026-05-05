@@ -1,6 +1,10 @@
 //! Google AI (Gemini) API types.
 
+use std::fmt;
+
+use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 /// A content message with role and parts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -434,10 +438,838 @@ pub struct UsageCounters {
     pub requests_error: u64,
 }
 
+/// Default Google Live model mirrored from OpenClaw's Google realtime provider.
+pub const GOOGLE_LIVE_DEFAULT_MODEL: &str = "gemini-2.5-flash-native-audio-preview-12-2025";
+/// Default prebuilt Google Live voice mirrored from OpenClaw.
+pub const GOOGLE_LIVE_DEFAULT_VOICE: &str = "Kore";
+/// Google ephemeral Live tokens are currently constrained to the v1alpha API.
+pub const GOOGLE_LIVE_BROWSER_API_VERSION: &str = "v1alpha";
+/// Browser WebSocket path for constrained Google Live sessions.
+pub const GOOGLE_LIVE_BROWSER_WEBSOCKET_URL: &str = "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained";
+/// Gemini Live expects realtime audio input as 16 kHz PCM.
+pub const GOOGLE_LIVE_INPUT_SAMPLE_RATE_HZ: u32 = 16_000;
+/// Gemini Live emits audio as 24 kHz PCM by default.
+pub const GOOGLE_LIVE_OUTPUT_SAMPLE_RATE_HZ: u32 = 24_000;
+/// Default token lifetime for established Live sessions.
+pub const GOOGLE_LIVE_BROWSER_SESSION_TTL_SECS: i64 = 30 * 60;
+/// Default time window for opening a new Live session from an ephemeral token.
+pub const GOOGLE_LIVE_BROWSER_NEW_SESSION_TTL_SECS: i64 = 60;
+/// Bound copied from OpenClaw's pending-audio queue.
+pub const GOOGLE_LIVE_MAX_PENDING_AUDIO_CHUNKS: usize = 320;
+/// Name of the non-blocking consult tool used by OpenClaw's voice bridge.
+pub const GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME: &str = "openclaw_agent_consult";
+
+/// Request to create a constrained browser-session token for Google Live.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleLiveBrowserSessionRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice: Option<String>,
+    #[serde(alias = "api_version", skip_serializing_if = "Option::is_none")]
+    pub api_version: Option<String>,
+    #[serde(alias = "system_instruction", skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+    #[serde(default)]
+    pub tools: Vec<GoogleLiveToolDeclaration>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(alias = "prefix_padding_ms", skip_serializing_if = "Option::is_none")]
+    pub prefix_padding_ms: Option<i64>,
+    #[serde(alias = "silence_duration_ms", skip_serializing_if = "Option::is_none")]
+    pub silence_duration_ms: Option<i64>,
+    #[serde(alias = "start_sensitivity", skip_serializing_if = "Option::is_none")]
+    pub start_sensitivity: Option<String>,
+    #[serde(alias = "end_sensitivity", skip_serializing_if = "Option::is_none")]
+    pub end_sensitivity: Option<String>,
+    #[serde(alias = "activity_handling", skip_serializing_if = "Option::is_none")]
+    pub activity_handling: Option<String>,
+    #[serde(alias = "turn_coverage", skip_serializing_if = "Option::is_none")]
+    pub turn_coverage: Option<String>,
+    #[serde(
+        alias = "automatic_activity_detection_disabled",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub automatic_activity_detection_disabled: Option<bool>,
+    #[serde(
+        alias = "enable_affective_dialog",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enable_affective_dialog: Option<bool>,
+    #[serde(alias = "session_resumption", skip_serializing_if = "Option::is_none")]
+    pub session_resumption: Option<bool>,
+    #[serde(
+        alias = "context_window_compression",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub context_window_compression: Option<bool>,
+    #[serde(alias = "thinking_level", skip_serializing_if = "Option::is_none")]
+    pub thinking_level: Option<String>,
+    #[serde(alias = "thinking_budget", skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<i64>,
+    #[serde(alias = "expire_time", skip_serializing_if = "Option::is_none")]
+    pub expire_time: Option<String>,
+    #[serde(
+        alias = "new_session_expire_time",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub new_session_expire_time: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uses: Option<u32>,
+}
+
+impl GoogleLiveBrowserSessionRequest {
+    /// Validate the Live browser-session request before network IO.
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(model) = trimmed_opt(self.model.as_deref()) {
+            if model.is_empty() {
+                return Err("model must not be empty".into());
+            }
+        }
+        if let Some(voice) = trimmed_opt(self.voice.as_deref()) {
+            if voice.is_empty() {
+                return Err("voice must not be empty".into());
+            }
+        }
+        if self.normalized_api_version() != GOOGLE_LIVE_BROWSER_API_VERSION {
+            return Err("Google Live browser sessions require api_version v1alpha".into());
+        }
+        if self.uses == Some(0) {
+            return Err("uses must be greater than zero".into());
+        }
+        if let Some(temperature) = self.temperature {
+            if !temperature.is_finite() {
+                return Err("temperature must be finite".into());
+            }
+        }
+        if let Some(expire_time) = &self.expire_time {
+            parse_rfc3339_epoch(expire_time)
+                .map_err(|_| "expire_time must be an RFC3339 timestamp".to_string())?;
+        }
+        if let Some(new_session_expire_time) = &self.new_session_expire_time {
+            parse_rfc3339_epoch(new_session_expire_time)
+                .map_err(|_| "new_session_expire_time must be an RFC3339 timestamp".to_string())?;
+        }
+        Ok(())
+    }
+
+    /// API version to use for ephemeral token creation.
+    #[must_use]
+    pub fn normalized_api_version(&self) -> String {
+        trimmed_opt(self.api_version.as_deref())
+            .unwrap_or(GOOGLE_LIVE_BROWSER_API_VERSION)
+            .to_string()
+    }
+
+    /// Model ID, without the `models/` resource prefix.
+    #[must_use]
+    pub fn normalized_model(&self) -> String {
+        trimmed_opt(self.model.as_deref())
+            .unwrap_or(GOOGLE_LIVE_DEFAULT_MODEL)
+            .trim_start_matches("models/")
+            .to_string()
+    }
+
+    /// Full Google model resource name.
+    #[must_use]
+    pub fn model_resource(&self) -> String {
+        format!("models/{}", self.normalized_model())
+    }
+
+    /// Voice name to lock into the browser token.
+    #[must_use]
+    pub fn normalized_voice(&self) -> String {
+        trimmed_opt(self.voice.as_deref())
+            .unwrap_or(GOOGLE_LIVE_DEFAULT_VOICE)
+            .to_string()
+    }
+
+    /// Build the body for `AuthTokenService.CreateToken`.
+    #[must_use]
+    pub fn auth_token_body(&self, now: DateTime<Utc>) -> serde_json::Value {
+        json!({
+            "uses": self.uses.unwrap_or(1),
+            "expireTime": self.expire_time.clone().unwrap_or_else(|| {
+                (now + Duration::seconds(GOOGLE_LIVE_BROWSER_SESSION_TTL_SECS)).to_rfc3339()
+            }),
+            "newSessionExpireTime": self.new_session_expire_time.clone().unwrap_or_else(|| {
+                (now + Duration::seconds(GOOGLE_LIVE_BROWSER_NEW_SESSION_TTL_SECS)).to_rfc3339()
+            }),
+            "bidiGenerateContentSetup": self.bidi_generate_content_setup(),
+        })
+    }
+
+    /// Setup locked into the ephemeral token.
+    #[must_use]
+    pub fn bidi_generate_content_setup(&self) -> serde_json::Value {
+        let mut generation_config = json!({
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {
+                    "prebuiltVoiceConfig": {
+                        "voiceName": self.normalized_voice(),
+                    },
+                },
+            },
+        });
+
+        if let Some(temperature) = self.temperature.filter(|value| *value > 0.0) {
+            generation_config["temperature"] = json!(temperature);
+        }
+        if let Some(enable_affective_dialog) = self.enable_affective_dialog {
+            generation_config["enableAffectiveDialog"] = json!(enable_affective_dialog);
+        }
+        if let Some(thinking_config) = self.thinking_config() {
+            generation_config["thinkingConfig"] = thinking_config;
+        }
+
+        let mut setup = json!({
+            "model": self.model_resource(),
+            "generationConfig": generation_config,
+            "inputAudioTranscription": {},
+            "outputAudioTranscription": {},
+        });
+
+        if let Some(instructions) = trimmed_opt(self.instructions.as_deref()) {
+            setup["systemInstruction"] = json!({
+                "parts": [{ "text": instructions }],
+            });
+        }
+        if !self.tools.is_empty() {
+            setup["tools"] = json!([{
+                "functionDeclarations": self.tools
+                    .iter()
+                    .map(GoogleLiveToolDeclaration::function_declaration)
+                    .collect::<Vec<_>>(),
+            }]);
+        }
+        if let Some(realtime_input_config) = self.realtime_input_config() {
+            setup["realtimeInputConfig"] = realtime_input_config;
+        }
+        if self.session_resumption.unwrap_or(true) {
+            setup["sessionResumption"] = json!({});
+        }
+        if self.context_window_compression.unwrap_or(true) {
+            setup["contextWindowCompression"] = json!({ "slidingWindow": {} });
+        }
+
+        setup
+    }
+
+    /// Initial browser message for the constrained `BidiGenerateContentConstrained` socket.
+    #[must_use]
+    pub fn browser_initial_message(&self) -> serde_json::Value {
+        json!({
+            "setup": {
+                "model": self.model_resource(),
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                },
+                "inputAudioTranscription": {},
+                "outputAudioTranscription": {},
+            },
+        })
+    }
+
+    /// Convert a Google token response into the FCP browser-session payload.
+    #[must_use]
+    pub fn browser_session_response(
+        &self,
+        client_secret: String,
+        now: DateTime<Utc>,
+    ) -> GoogleLiveBrowserSessionResponse {
+        let expires_at = self
+            .expire_time
+            .as_deref()
+            .and_then(|value| parse_rfc3339_epoch(value).ok())
+            .unwrap_or_else(|| {
+                (now + Duration::seconds(GOOGLE_LIVE_BROWSER_SESSION_TTL_SECS)).timestamp()
+            });
+        let new_session_expires_at = self
+            .new_session_expire_time
+            .as_deref()
+            .and_then(|value| parse_rfc3339_epoch(value).ok())
+            .unwrap_or_else(|| {
+                (now + Duration::seconds(GOOGLE_LIVE_BROWSER_NEW_SESSION_TTL_SECS)).timestamp()
+            });
+
+        GoogleLiveBrowserSessionResponse {
+            provider: "google".into(),
+            transport: "json-pcm-websocket".into(),
+            protocol: "google-live-bidi".into(),
+            client_secret,
+            websocket_url: GOOGLE_LIVE_BROWSER_WEBSOCKET_URL.into(),
+            audio: GoogleLiveBrowserSessionAudio {
+                input_encoding: "pcm16".into(),
+                input_sample_rate_hz: GOOGLE_LIVE_INPUT_SAMPLE_RATE_HZ,
+                output_encoding: "pcm16".into(),
+                output_sample_rate_hz: GOOGLE_LIVE_OUTPUT_SAMPLE_RATE_HZ,
+            },
+            initial_message: self.browser_initial_message(),
+            model: self.normalized_model(),
+            voice: self.normalized_voice(),
+            expires_at,
+            new_session_expires_at,
+        }
+    }
+
+    fn thinking_config(&self) -> Option<serde_json::Value> {
+        if let Some(level) = normalize_thinking_level(self.thinking_level.as_deref()) {
+            return Some(json!({ "thinkingLevel": level }));
+        }
+        self.thinking_budget
+            .map(|budget| json!({ "thinkingBudget": budget }))
+    }
+
+    fn realtime_input_config(&self) -> Option<serde_json::Value> {
+        let mut automatic_activity_detection = serde_json::Map::new();
+        if let Some(disabled) = self.automatic_activity_detection_disabled {
+            automatic_activity_detection.insert("disabled".into(), json!(disabled));
+        }
+        if let Some(start) = normalize_start_sensitivity(self.start_sensitivity.as_deref()) {
+            automatic_activity_detection.insert("startOfSpeechSensitivity".into(), json!(start));
+        }
+        if let Some(end) = normalize_end_sensitivity(self.end_sensitivity.as_deref()) {
+            automatic_activity_detection.insert("endOfSpeechSensitivity".into(), json!(end));
+        }
+        if let Some(prefix_padding_ms) = self.prefix_padding_ms {
+            automatic_activity_detection
+                .insert("prefixPaddingMs".into(), json!(prefix_padding_ms.max(0)));
+        }
+        if let Some(silence_duration_ms) = self.silence_duration_ms {
+            automatic_activity_detection.insert(
+                "silenceDurationMs".into(),
+                json!(silence_duration_ms.max(0)),
+            );
+        }
+
+        let mut config = serde_json::Map::new();
+        if !automatic_activity_detection.is_empty() {
+            config.insert(
+                "automaticActivityDetection".into(),
+                serde_json::Value::Object(automatic_activity_detection),
+            );
+        }
+        if let Some(activity_handling) =
+            normalize_activity_handling(self.activity_handling.as_deref())
+        {
+            config.insert("activityHandling".into(), json!(activity_handling));
+        }
+        if let Some(turn_coverage) = normalize_turn_coverage(self.turn_coverage.as_deref()) {
+            config.insert("turnCoverage".into(), json!(turn_coverage));
+        }
+
+        if config.is_empty() {
+            None
+        } else {
+            Some(serde_json::Value::Object(config))
+        }
+    }
+}
+
+/// Tool declaration accepted by the Google Live browser-session contract.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleLiveToolDeclaration {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(alias = "parameters", skip_serializing_if = "Option::is_none")]
+    pub parameters_json_schema: Option<serde_json::Value>,
+    #[serde(alias = "non_blocking", default)]
+    pub non_blocking: bool,
+}
+
+impl GoogleLiveToolDeclaration {
+    fn function_declaration(&self) -> serde_json::Value {
+        let mut declaration = serde_json::Map::new();
+        declaration.insert("name".into(), json!(self.name));
+        if let Some(description) = trimmed_opt(self.description.as_deref()) {
+            declaration.insert("description".into(), json!(description));
+        }
+        if let Some(parameters) = &self.parameters_json_schema {
+            declaration.insert("parametersJsonSchema".into(), parameters.clone());
+        }
+        if self.non_blocking || self.name == GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME {
+            declaration.insert("behavior".into(), json!("NON_BLOCKING"));
+        }
+        serde_json::Value::Object(declaration)
+    }
+}
+
+/// Response returned by `google-ai.live.create_browser_session`.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleLiveBrowserSessionResponse {
+    pub provider: String,
+    pub transport: String,
+    pub protocol: String,
+    pub client_secret: String,
+    pub websocket_url: String,
+    pub audio: GoogleLiveBrowserSessionAudio,
+    pub initial_message: serde_json::Value,
+    pub model: String,
+    pub voice: String,
+    pub expires_at: i64,
+    pub new_session_expires_at: i64,
+}
+
+impl fmt::Debug for GoogleLiveBrowserSessionResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("GoogleLiveBrowserSessionResponse")
+            .field("provider", &self.provider)
+            .field("transport", &self.transport)
+            .field("protocol", &self.protocol)
+            .field("client_secret", &"<redacted>")
+            .field("websocket_url", &self.websocket_url)
+            .field("audio", &self.audio)
+            .field("initial_message", &self.initial_message)
+            .field("model", &self.model)
+            .field("voice", &self.voice)
+            .field("expires_at", &self.expires_at)
+            .field("new_session_expires_at", &self.new_session_expires_at)
+            .finish()
+    }
+}
+
+/// Audio parameters for a Google Live browser session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleLiveBrowserSessionAudio {
+    pub input_encoding: String,
+    pub input_sample_rate_hz: u32,
+    pub output_encoding: String,
+    pub output_sample_rate_hz: u32,
+}
+
+/// Minimal token response from Google `AuthTokenService.CreateToken`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoogleLiveAuthTokenResponse {
+    pub name: String,
+}
+
+/// Convert a G.711 μ-law 8 kHz frame to 16 kHz little-endian PCM16.
+#[must_use]
+pub fn convert_google_live_mulaw8k_to_pcm16k(mu_law: &[u8]) -> Vec<u8> {
+    if mu_law.is_empty() {
+        return Vec::new();
+    }
+    let mut pcm = Vec::with_capacity(mu_law.len() * 4);
+    for (index, sample) in mu_law.iter().enumerate() {
+        let current = decode_mulaw_sample(*sample);
+        let next = mu_law
+            .get(index + 1)
+            .copied()
+            .map_or(current, decode_mulaw_sample);
+        pcm.extend_from_slice(&current.to_le_bytes());
+        pcm.extend_from_slice(
+            &i16::try_from((i32::from(current) + i32::from(next)) / 2)
+                .unwrap_or(if current.is_negative() {
+                    i16::MIN
+                } else {
+                    i16::MAX
+                })
+                .to_le_bytes(),
+        );
+    }
+    pcm
+}
+
+/// Whether a G.711 μ-law frame is silence.
+#[must_use]
+pub fn is_google_live_mulaw_silence(audio: &[u8]) -> bool {
+    !audio.is_empty() && audio.iter().all(|sample| *sample == 0xff)
+}
+
+/// Whether a little-endian PCM16 frame is silence.
+#[must_use]
+pub fn is_google_live_pcm16_silence(audio: &[u8]) -> bool {
+    if audio.len() < 2 {
+        return false;
+    }
+    audio
+        .chunks_exact(2)
+        .all(|sample| i16::from_le_bytes([sample[0], sample[1]]) == 0)
+}
+
+/// Whether the pending audio queue can accept one more chunk.
+#[must_use]
+pub const fn google_live_pending_audio_accepts(current_chunks: usize) -> bool {
+    current_chunks < GOOGLE_LIVE_MAX_PENDING_AUDIO_CHUNKS
+}
+
+/// Build a Google Live tool response while enforcing continuation policy.
+pub fn build_google_live_tool_response(
+    call_id: &str,
+    name: &str,
+    result: serde_json::Value,
+    will_continue: bool,
+) -> Result<serde_json::Value, String> {
+    let normalized_name = name.trim();
+    if normalized_name.is_empty() {
+        return Err("tool response name must not be empty".into());
+    }
+    if will_continue && normalized_name != GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME {
+        return Err(format!(
+            "Google Live continuation is only supported for {GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME}"
+        ));
+    }
+
+    let response = if result.is_object() && !result.is_array() {
+        result
+    } else {
+        json!({ "output": result })
+    };
+    let mut function_response = json!({
+        "id": call_id,
+        "name": normalized_name,
+        "response": response,
+    });
+    if normalized_name == GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME {
+        function_response["scheduling"] = json!("WHEN_IDLE");
+        if will_continue {
+            function_response["willContinue"] = json!(true);
+        }
+    }
+
+    Ok(json!({
+        "functionResponses": [function_response],
+    }))
+}
+
+fn trimmed_opt(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn normalize_choice<'a>(value: Option<&str>, aliases: &[(&[&str], &'a str)]) -> Option<&'a str> {
+    let normalized = value?.trim().to_ascii_lowercase().replace('_', "-");
+    aliases
+        .iter()
+        .find_map(|(keys, output)| keys.contains(&normalized.as_str()).then_some(*output))
+}
+
+fn normalize_start_sensitivity(value: Option<&str>) -> Option<&'static str> {
+    normalize_choice(
+        value,
+        &[
+            (&["high"], "START_SENSITIVITY_HIGH"),
+            (&["low"], "START_SENSITIVITY_LOW"),
+        ],
+    )
+}
+
+fn normalize_end_sensitivity(value: Option<&str>) -> Option<&'static str> {
+    normalize_choice(
+        value,
+        &[
+            (&["high"], "END_SENSITIVITY_HIGH"),
+            (&["low"], "END_SENSITIVITY_LOW"),
+        ],
+    )
+}
+
+fn normalize_activity_handling(value: Option<&str>) -> Option<&'static str> {
+    normalize_choice(
+        value,
+        &[
+            (
+                &[
+                    "start-of-activity-interrupts",
+                    "start-of-activity-interrupt",
+                    "interrupt",
+                    "interrupts",
+                ],
+                "START_OF_ACTIVITY_INTERRUPTS",
+            ),
+            (
+                &["no-interruption", "no-interruptions", "none"],
+                "NO_INTERRUPTION",
+            ),
+        ],
+    )
+}
+
+fn normalize_turn_coverage(value: Option<&str>) -> Option<&'static str> {
+    normalize_choice(
+        value,
+        &[
+            (
+                &["only-activity", "turn-includes-only-activity"],
+                "TURN_INCLUDES_ONLY_ACTIVITY",
+            ),
+            (
+                &["all-input", "turn-includes-all-input"],
+                "TURN_INCLUDES_ALL_INPUT",
+            ),
+            (
+                &[
+                    "audio-activity-and-all-video",
+                    "turn-includes-audio-activity-and-all-video",
+                ],
+                "TURN_INCLUDES_AUDIO_ACTIVITY_AND_ALL_VIDEO",
+            ),
+        ],
+    )
+}
+
+fn normalize_thinking_level(value: Option<&str>) -> Option<&'static str> {
+    normalize_choice(
+        value,
+        &[
+            (&["minimal"], "MINIMAL"),
+            (&["low"], "LOW"),
+            (&["medium"], "MEDIUM"),
+            (&["high"], "HIGH"),
+        ],
+    )
+}
+
+fn parse_rfc3339_epoch(value: &str) -> Result<i64, chrono::ParseError> {
+    DateTime::parse_from_rfc3339(value).map(|parsed| parsed.timestamp())
+}
+
+fn decode_mulaw_sample(value: u8) -> i16 {
+    let mu_law = !value;
+    let sign = mu_law & 0x80;
+    let exponent = (mu_law >> 4) & 0x07;
+    let mantissa = mu_law & 0x0f;
+    let mut sample = i32::from((mantissa << 3) + 132) << exponent;
+    sample -= 132;
+    let signed = if sign == 0 { sample } else { -sample };
+    i16::try_from(signed).unwrap_or(if signed.is_negative() {
+        i16::MIN
+    } else {
+        i16::MAX
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // ════════════════════════════════════════════════════════════════════
+    // Google Live browser-session contract
+    // ════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn live_browser_session_defaults_match_openclaw_google_provider() {
+        let request = GoogleLiveBrowserSessionRequest::default();
+        assert_eq!(request.normalized_model(), GOOGLE_LIVE_DEFAULT_MODEL);
+        assert_eq!(request.normalized_voice(), GOOGLE_LIVE_DEFAULT_VOICE);
+        assert_eq!(
+            request.normalized_api_version(),
+            GOOGLE_LIVE_BROWSER_API_VERSION
+        );
+
+        let setup = request.bidi_generate_content_setup();
+        assert_eq!(
+            setup["model"],
+            format!("models/{GOOGLE_LIVE_DEFAULT_MODEL}")
+        );
+        assert_eq!(
+            setup["generationConfig"]["speechConfig"]["voiceConfig"]["prebuiltVoiceConfig"]["voiceName"],
+            GOOGLE_LIVE_DEFAULT_VOICE
+        );
+        assert_eq!(
+            setup["generationConfig"]["responseModalities"],
+            json!(["AUDIO"])
+        );
+        assert_eq!(setup["inputAudioTranscription"], json!({}));
+        assert_eq!(setup["outputAudioTranscription"], json!({}));
+        assert_eq!(setup["sessionResumption"], json!({}));
+        assert_eq!(
+            setup["contextWindowCompression"],
+            json!({"slidingWindow": {}})
+        );
+    }
+
+    #[test]
+    fn live_browser_session_normalizes_activity_turn_and_thinking_config() {
+        let request: GoogleLiveBrowserSessionRequest = serde_json::from_value(json!({
+            "model": "models/gemini-live-test",
+            "voice": "Puck",
+            "temperature": 0.4,
+            "start_sensitivity": "low",
+            "endSensitivity": "high",
+            "activity_handling": "no_interruption",
+            "turnCoverage": "turn_includes_only_activity",
+            "automatic_activity_detection_disabled": true,
+            "prefix_padding_ms": -4,
+            "silenceDurationMs": 700,
+            "thinkingLevel": "minimal",
+            "enableAffectiveDialog": true,
+            "instructions": "Speak briefly."
+        }))
+        .unwrap();
+
+        request.validate().unwrap();
+        let setup = request.bidi_generate_content_setup();
+        assert_eq!(setup["model"], "models/gemini-live-test");
+        assert_eq!(setup["generationConfig"]["temperature"], 0.4);
+        assert_eq!(
+            setup["generationConfig"]["thinkingConfig"],
+            json!({"thinkingLevel": "MINIMAL"})
+        );
+        assert_eq!(setup["generationConfig"]["enableAffectiveDialog"], true);
+        assert_eq!(
+            setup["systemInstruction"],
+            json!({"parts": [{"text": "Speak briefly."}]})
+        );
+        assert_eq!(
+            setup["realtimeInputConfig"],
+            json!({
+                "automaticActivityDetection": {
+                    "disabled": true,
+                    "startOfSpeechSensitivity": "START_SENSITIVITY_LOW",
+                    "endOfSpeechSensitivity": "END_SENSITIVITY_HIGH",
+                    "prefixPaddingMs": 0,
+                    "silenceDurationMs": 700,
+                },
+                "activityHandling": "NO_INTERRUPTION",
+                "turnCoverage": "TURN_INCLUDES_ONLY_ACTIVITY",
+            })
+        );
+    }
+
+    #[test]
+    fn live_browser_session_can_disable_resumption_and_compression() {
+        let request = GoogleLiveBrowserSessionRequest {
+            session_resumption: Some(false),
+            context_window_compression: Some(false),
+            thinking_budget: Some(128),
+            temperature: Some(0.0),
+            ..Default::default()
+        };
+
+        let setup = request.bidi_generate_content_setup();
+        assert!(setup.get("sessionResumption").is_none());
+        assert!(setup.get("contextWindowCompression").is_none());
+        assert!(setup["generationConfig"].get("temperature").is_none());
+        assert_eq!(
+            setup["generationConfig"]["thinkingConfig"],
+            json!({"thinkingBudget": 128})
+        );
+    }
+
+    #[test]
+    fn live_browser_session_rejects_non_v1alpha_api_version() {
+        let request = GoogleLiveBrowserSessionRequest {
+            api_version: Some("v1beta".into()),
+            ..Default::default()
+        };
+        let err = request.validate().unwrap_err();
+        assert!(err.contains("v1alpha"));
+    }
+
+    #[test]
+    fn live_browser_session_auth_token_body_uses_explicit_ttls_and_constraints() {
+        let now = DateTime::parse_from_rfc3339("2026-05-05T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let request = GoogleLiveBrowserSessionRequest {
+            expire_time: Some("2026-05-05T20:30:00Z".into()),
+            new_session_expire_time: Some("2026-05-05T20:01:00Z".into()),
+            uses: Some(1),
+            ..Default::default()
+        };
+
+        let body = request.auth_token_body(now);
+        assert_eq!(body["uses"], 1);
+        assert_eq!(body["expireTime"], "2026-05-05T20:30:00Z");
+        assert_eq!(body["newSessionExpireTime"], "2026-05-05T20:01:00Z");
+        assert_eq!(
+            body["bidiGenerateContentSetup"]["generationConfig"]["responseModalities"],
+            json!(["AUDIO"])
+        );
+    }
+
+    #[test]
+    fn live_browser_session_response_debug_redacts_client_secret() {
+        let request = GoogleLiveBrowserSessionRequest::default();
+        let now = DateTime::parse_from_rfc3339("2026-05-05T20:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let response = request.browser_session_response("auth_tokens/secret".into(), now);
+
+        assert_eq!(response.client_secret, "auth_tokens/secret");
+        assert_eq!(response.websocket_url, GOOGLE_LIVE_BROWSER_WEBSOCKET_URL);
+        assert_eq!(response.expires_at, 1_778_013_000);
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("auth_tokens/secret"));
+        assert!(debug.contains("redacted"));
+    }
+
+    #[test]
+    fn live_tool_declarations_apply_non_blocking_policy() {
+        let request = GoogleLiveBrowserSessionRequest {
+            tools: vec![
+                GoogleLiveToolDeclaration {
+                    name: "lookup".into(),
+                    description: Some("Look up a value".into()),
+                    parameters_json_schema: Some(json!({"type": "object"})),
+                    non_blocking: false,
+                },
+                GoogleLiveToolDeclaration {
+                    name: GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME.into(),
+                    description: None,
+                    parameters_json_schema: None,
+                    non_blocking: false,
+                },
+            ],
+            ..Default::default()
+        };
+
+        let tools = &request.bidi_generate_content_setup()["tools"][0]["functionDeclarations"];
+        assert_eq!(tools[0]["name"], "lookup");
+        assert!(tools[0].get("behavior").is_none());
+        assert_eq!(tools[1]["name"], GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME);
+        assert_eq!(tools[1]["behavior"], "NON_BLOCKING");
+    }
+
+    #[test]
+    fn live_audio_helpers_cover_silence_bounds_and_mulaw_conversion() {
+        assert!(is_google_live_mulaw_silence(&[0xff, 0xff]));
+        assert!(!is_google_live_mulaw_silence(&[]));
+        assert!(is_google_live_pcm16_silence(&[0, 0, 0, 0]));
+        assert!(!is_google_live_pcm16_silence(&[1, 0]));
+        assert!(google_live_pending_audio_accepts(
+            GOOGLE_LIVE_MAX_PENDING_AUDIO_CHUNKS - 1
+        ));
+        assert!(!google_live_pending_audio_accepts(
+            GOOGLE_LIVE_MAX_PENDING_AUDIO_CHUNKS
+        ));
+
+        let pcm = convert_google_live_mulaw8k_to_pcm16k(&[0xff, 0x00]);
+        let samples: Vec<i16> = pcm
+            .chunks_exact(2)
+            .map(|chunk| i16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        assert_eq!(samples, vec![0, -16_062, -32_124, -32_124]);
+    }
+
+    #[test]
+    fn live_tool_response_policy_rejects_invalid_continuation() {
+        let err =
+            build_google_live_tool_response("call-1", "lookup", json!("ok"), true).unwrap_err();
+        assert!(err.contains(GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME));
+
+        let response = build_google_live_tool_response(
+            "call-2",
+            GOOGLE_LIVE_AGENT_CONSULT_TOOL_NAME,
+            json!("continue"),
+            true,
+        )
+        .unwrap();
+        assert_eq!(response["functionResponses"][0]["scheduling"], "WHEN_IDLE");
+        assert_eq!(response["functionResponses"][0]["willContinue"], true);
+        assert_eq!(
+            response["functionResponses"][0]["response"],
+            json!({"output": "continue"})
+        );
+    }
 
     // ════════════════════════════════════════════════════════════════════
     // Content + Part

@@ -8,6 +8,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Utc;
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
@@ -21,8 +22,10 @@ use crate::{
         ApiErrorResponse, BatchEmbedContentsResponse, CancelTuningOperationRequest,
         CountTokensResponse, CreateTunedModelRequest, EmbedContentResponse,
         GenerateContentResponse, GetTunedModelRequest, GetTuningOperationRequest,
-        ListModelsResponse, ListTunedModelsRequest, ListTunedModelsResponse, ModelInfo, TunedModel,
-        TuningOperation, UsageCounters, UsageMetadata,
+        GoogleLiveAuthTokenResponse, GoogleLiveBrowserSessionRequest,
+        GoogleLiveBrowserSessionResponse, ListModelsResponse, ListTunedModelsRequest,
+        ListTunedModelsResponse, ModelInfo, TunedModel, TuningOperation, UsageCounters,
+        UsageMetadata,
     },
 };
 
@@ -130,9 +133,28 @@ impl GoogleAiClient {
 
     /// Build a URL with additional query pairs.
     fn url_with_query(&self, path: &str, query: &[(&str, String)]) -> String {
+        self.url_with_base_and_query(&self.base_url, path, query)
+    }
+
+    fn url_for_api_version(
+        &self,
+        api_version: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> String {
+        let base = self.base_url_for_api_version(api_version);
+        self.url_with_base_and_query(&base, path, query)
+    }
+
+    fn url_with_base_and_query(
+        &self,
+        base_url: &str,
+        path: &str,
+        query: &[(&str, String)],
+    ) -> String {
         let raw = format!(
             "{}/{}",
-            self.base_url.trim_end_matches('/'),
+            base_url.trim_end_matches('/'),
             path.trim_start_matches('/')
         );
         if let Ok(mut url) = Url::parse(&raw) {
@@ -156,6 +178,39 @@ impl GoogleAiClient {
             }
             url
         }
+    }
+
+    fn base_url_for_api_version(&self, api_version: &str) -> String {
+        if let Ok(mut url) = Url::parse(&self.base_url) {
+            let mut segments: Vec<String> = url
+                .path_segments()
+                .map(|segments| segments.map(str::to_string).collect())
+                .unwrap_or_default();
+            if segments
+                .last()
+                .is_some_and(|segment| is_google_api_version_segment(segment))
+            {
+                segments.pop();
+            }
+            segments.push(api_version.trim_matches('/').to_string());
+            let new_path = if segments.is_empty() {
+                "/".to_string()
+            } else {
+                format!("/{}", segments.join("/"))
+            };
+            url.set_path(&new_path);
+            url.set_query(None);
+            url.set_fragment(None);
+            return url.to_string().trim_end_matches('/').to_string();
+        }
+
+        let trimmed = self.base_url.trim_end_matches('/');
+        for version in ["v1", "v1alpha", "v1beta"] {
+            if let Some(prefix) = trimmed.strip_suffix(&format!("/{version}")) {
+                return format!("{prefix}/{}", api_version.trim_matches('/'));
+            }
+        }
+        format!("{trimmed}/{}", api_version.trim_matches('/'))
     }
 
     /// Record token usage from a response.
@@ -389,6 +444,30 @@ impl GoogleAiClient {
         Ok(())
     }
 
+    // ── Google Live browser sessions ────────────────────────────────
+
+    /// Create a constrained browser-session token for Google Live.
+    pub async fn create_live_browser_session(
+        &self,
+        request: &GoogleLiveBrowserSessionRequest,
+    ) -> GoogleAiResult<GoogleLiveBrowserSessionResponse> {
+        request.validate().map_err(GoogleAiError::InvalidConfig)?;
+        let now = Utc::now();
+        let api_version = request.normalized_api_version();
+        let url = self.url_for_api_version(&api_version, "auth_tokens", &[]);
+        let body = request.auth_token_body(now);
+        let data = self.post_json(&url, &body).await;
+        self.record_request(data.is_ok());
+        let data = data?;
+        let token: GoogleLiveAuthTokenResponse = serde_json::from_value(data)?;
+        if token.name.trim().is_empty() {
+            return Err(GoogleAiError::InvalidConfig(
+                "Google Live auth token response missing name".into(),
+            ));
+        }
+        Ok(request.browser_session_response(token.name, now))
+    }
+
     /// Perform a safe, read-only health check by listing models.
     ///
     /// Validates that the API key is valid and the API is reachable
@@ -579,12 +658,16 @@ fn normalize_tuning_operation_resource(name: &str) -> String {
     name.trim().trim_start_matches('/').to_string()
 }
 
+fn is_google_api_version_segment(segment: &str) -> bool {
+    matches!(segment, "v1" | "v1alpha" | "v1beta")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use wiremock::{
         Mock, MockServer, ResponseTemplate,
-        matchers::{method, path, query_param},
+        matchers::{body_partial_json, method, path, query_param},
     };
 
     #[fcp_async_core::runtime::test]
@@ -923,6 +1006,57 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_create_live_browser_session_uses_v1alpha_auth_tokens_endpoint() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1alpha/auth_tokens"))
+            .and(query_param("key", "test-key"))
+            .and(body_partial_json(serde_json::json!({
+                "uses": 1,
+                "bidiGenerateContentSetup": {
+                    "model": "models/gemini-live-test",
+                    "generationConfig": {
+                        "responseModalities": ["AUDIO"],
+                        "temperature": 0.4,
+                    },
+                },
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "name": "auth_tokens/browser-session"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let client = GoogleAiClient::new("test-key")
+            .unwrap()
+            .with_base_url(&format!("{}/v1beta", mock_server.uri()));
+        let session = client
+            .create_live_browser_session(&GoogleLiveBrowserSessionRequest {
+                model: Some("gemini-live-test".into()),
+                voice: Some("Puck".into()),
+                temperature: Some(0.4),
+                instructions: Some("Speak briefly.".into()),
+                expire_time: Some("2026-05-05T20:30:00Z".into()),
+                new_session_expire_time: Some("2026-05-05T20:01:00Z".into()),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(session.client_secret, "auth_tokens/browser-session");
+        assert_eq!(session.model, "gemini-live-test");
+        assert_eq!(session.voice, "Puck");
+        assert_eq!(
+            session.initial_message["setup"]["model"],
+            "models/gemini-live-test"
+        );
+        assert_eq!(session.audio.input_sample_rate_hz, 16_000);
+        assert_eq!(session.audio.output_sample_rate_hz, 24_000);
+        assert_eq!(session.expires_at, 1_778_013_000);
     }
 
     #[fcp_async_core::runtime::test]

@@ -17,7 +17,7 @@ use fcp_prelude::{CapabilityConstraints, CapabilityToken, FcpError};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
-    matchers::{method, path},
+    matchers::{body_partial_json, method, path, query_param},
 };
 
 use fcp_google_ai::{client::GoogleAiClient, connector::GoogleAiConnector, error::GoogleAiError};
@@ -26,8 +26,13 @@ use fcp_google_ai::{client::GoogleAiClient, connector::GoogleAiConnector, error:
 // Helpers
 // ============================================================================
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: &str,
+) -> CapabilityToken {
     let cap = match op {
+        "google-ai.live.create_browser_session" => "google-ai.live_voice",
         "google-ai.embed_content" | "google-ai.batch_embed_contents" => "google-ai.embed",
         "google-ai.count_tokens" | "google-ai.list_models" | "google-ai.get_model" => {
             "google-ai.models"
@@ -54,8 +59,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> Capability
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -522,7 +529,11 @@ async fn redaction_api_key_not_in_invoke_error() {
         .unwrap();
 
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -655,7 +666,11 @@ async fn usage_exposed_via_connector_operation() {
     .await;
 
     // Make a generate request to populate usage
-    let gen_token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let gen_token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
     connector
         .handle_invoke(json!({
             "operation": "google-ai.generate_content",
@@ -666,7 +681,8 @@ async fn usage_exposed_via_connector_operation() {
         .unwrap();
 
     // Get usage via operation
-    let usage_token = generate_valid_token(&signing_key, "google-ai.get_usage");
+    let usage_token =
+        generate_valid_token(&signing_key, "google-ai.get_usage", connector.instance_id());
     let usage_result = connector
         .handle_invoke(json!({
             "operation": "google-ai.get_usage",
@@ -782,7 +798,11 @@ async fn provenance_flags_tool_calls_in_generate() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -822,7 +842,11 @@ async fn provenance_no_tool_calls_for_text_only() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -879,7 +903,11 @@ async fn streaming_through_connector_has_provenance() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content_stream"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content_stream");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content_stream",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -943,7 +971,11 @@ async fn streaming_tool_call_detected_in_provenance() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content_stream"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content_stream");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content_stream",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -974,7 +1006,11 @@ async fn wrong_capability_rejects_generate() {
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
     // Use a token for list_models, not generate_content
-    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.list_models",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1007,7 +1043,11 @@ async fn invoke_embed_content_happy_path() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.embed_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.embed_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.embed_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1041,7 +1081,11 @@ async fn invoke_batch_embed_contents_happy_path() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.batch_embed_contents"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.batch_embed_contents");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.batch_embed_contents",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1077,7 +1121,11 @@ async fn invoke_count_tokens_happy_path() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.count_tokens"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.count_tokens");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.count_tokens",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1115,7 +1163,11 @@ async fn invoke_list_models_happy_path() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.list_models",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1151,7 +1203,7 @@ async fn invoke_get_model_happy_path() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.get_model"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.get_model");
+    let token = generate_valid_token(&signing_key, "google-ai.get_model", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -1332,7 +1384,7 @@ async fn invoke_get_model_missing_model_field() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.get_model"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.get_model");
+    let token = generate_valid_token(&signing_key, "google-ai.get_model", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -1368,7 +1420,11 @@ async fn invoke_missing_operation_field() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.list_models",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1631,7 +1687,11 @@ async fn shutdown_then_reinvoke() {
     // Re-configure and re-handshake
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key2 = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key2, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key2,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     // Should work after re-init
     let result = connector
@@ -1655,12 +1715,13 @@ async fn introspect_returns_complete_operation_catalog() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 13, "should have 13 operations");
+    assert_eq!(ops.len(), 14, "should have 14 operations");
 
     let op_ids: Vec<&str> = ops.iter().filter_map(|op| op["id"].as_str()).collect();
     for expected in [
         "google-ai.generate_content",
         "google-ai.generate_content_stream",
+        "google-ai.live.create_browser_session",
         "google-ai.embed_content",
         "google-ai.batch_embed_contents",
         "google-ai.count_tokens",
@@ -1700,7 +1761,11 @@ async fn simulate_known_operation_returns_allowed() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_simulate(json!({
@@ -1724,7 +1789,11 @@ async fn simulate_unknown_operation_returns_allowed() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, "http://localhost:9999/v1beta").await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.nonexistent_operation"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.nonexistent_operation");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.nonexistent_operation",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_simulate(json!({
@@ -1763,7 +1832,11 @@ async fn invoke_list_models_empty_result() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.list_models",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1875,7 +1948,11 @@ async fn invoke_without_handshake_returns_not_configured() {
 
     // Build a dummy token
     let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1910,7 +1987,11 @@ async fn invoke_unknown_operation_returns_not_granted() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.nonexistent_op"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.nonexistent_op");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.nonexistent_op",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1951,7 +2032,11 @@ async fn invoke_generate_content_custom_model() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.generate_content"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.generate_content");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.generate_content",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -1985,7 +2070,11 @@ async fn invoke_list_models_with_page_size() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.list_models"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.list_models");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.list_models",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -2019,7 +2108,11 @@ async fn invoke_tuning_create_returns_operation() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.tuning"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.tuning.create");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.tuning.create",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -2063,7 +2156,11 @@ async fn invoke_tuning_cancel_returns_acknowledgement() {
     let mut connector = GoogleAiConnector::new();
     setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
     let signing_key = setup_handshake(&mut connector, &["google-ai.tuning"]).await;
-    let token = generate_valid_token(&signing_key, "google-ai.tuning.cancel");
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.tuning.cancel",
+        connector.instance_id(),
+    );
 
     let result = connector
         .handle_invoke(json!({
@@ -2081,4 +2178,89 @@ async fn invoke_tuning_cancel_returns_acknowledgement() {
         result["operation"],
         "tunedModels/support-bot/operations/op-123"
     );
+}
+
+/// google-ai.live.create_browser_session mints a constrained v1alpha Live token.
+#[fcp_async_core::runtime::test]
+async fn invoke_live_create_browser_session_returns_redaction_safe_contract() {
+    let mock_server = MockServer::start().await;
+
+    Mock::given(method("POST"))
+        .and(path("/v1alpha/auth_tokens"))
+        .and(query_param("key", "test-key-xyz"))
+        .and(body_partial_json(json!({
+            "uses": 1,
+            "expireTime": "2026-05-05T20:30:00Z",
+            "newSessionExpireTime": "2026-05-05T20:01:00Z",
+            "bidiGenerateContentSetup": {
+                "model": "models/gemini-live-test",
+                "generationConfig": {
+                    "responseModalities": ["AUDIO"],
+                    "speechConfig": {
+                        "voiceConfig": {
+                            "prebuiltVoiceConfig": {
+                                "voiceName": "Kore"
+                            }
+                        }
+                    },
+                    "temperature": 0.3
+                },
+                "inputAudioTranscription": {},
+                "outputAudioTranscription": {},
+                "sessionResumption": {},
+                "contextWindowCompression": {
+                    "slidingWindow": {}
+                }
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "auth_tokens/browser-session"
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = GoogleAiConnector::new();
+    setup_configure(&mut connector, &format!("{}/v1beta", mock_server.uri())).await;
+    let signing_key = setup_handshake(&mut connector, &["google-ai.live_voice"]).await;
+    let token = generate_valid_token(
+        &signing_key,
+        "google-ai.live.create_browser_session",
+        connector.instance_id(),
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "google-ai.live.create_browser_session",
+            "input": {
+                "model": "gemini-live-test",
+                "voice": "Kore",
+                "temperature": 0.3,
+                "instructions": "Speak briefly.",
+                "expire_time": "2026-05-05T20:30:00Z",
+                "new_session_expire_time": "2026-05-05T20:01:00Z"
+            },
+            "capability_token": token
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(result["provider"], "google");
+    assert_eq!(result["protocol"], "google-live-bidi");
+    assert_eq!(result["clientSecret"], "auth_tokens/browser-session");
+    assert_eq!(
+        result["websocketUrl"],
+        "wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContentConstrained"
+    );
+    assert_eq!(result["audio"]["inputSampleRateHz"], 16_000);
+    assert_eq!(result["audio"]["outputSampleRateHz"], 24_000);
+    assert_eq!(
+        result["initialMessage"]["setup"]["model"],
+        "models/gemini-live-test"
+    );
+    assert_eq!(
+        result["provenance"]["action"],
+        "live.create_browser_session"
+    );
+    assert_eq!(result["provenance"]["client_secret_redacted_in_logs"], true);
+    assert_eq!(result["expiresAt"], 1_778_013_000);
 }

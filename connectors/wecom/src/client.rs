@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use aes::Aes256;
-use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::Pkcs7};
+use aes::cipher::{BlockDecryptMut, KeyIvInit, block_padding::NoPadding};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use cbc::Decryptor;
 use fcp_async_core::sync::Mutex;
@@ -29,6 +29,9 @@ use crate::types::{
 
 type Aes256CbcDec = Decryptor<Aes256>;
 const MAX_CALLBACK_BODY_BYTES: usize = 1024 * 1024;
+const CALLBACK_RANDOM_PREFIX_BYTES: usize = 16;
+const CALLBACK_LENGTH_PREFIX_BYTES: usize = 4;
+const CALLBACK_PKCS7_BLOCK_SIZE: usize = 32;
 
 #[derive(Clone)]
 struct CachedAccessToken {
@@ -151,12 +154,12 @@ impl WeComClient {
     }
 
     pub async fn upload_media(&self, request: &WeComMediaUploadRequest) -> WeComResult<Value> {
-        let token = self.access_token().await?;
+        let credential = self.access_token().await?;
         let bytes = request.decode_content().map_err(WeComError::InvalidInput)?;
         let mut url = self.url("/cgi-bin/media/upload")?;
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("access_token", &token);
+            query.append_pair("access_token", &credential);
             query.append_pair("type", request.media_type());
         }
         let part = multipart::Part::bytes(bytes)
@@ -192,11 +195,11 @@ impl WeComClient {
     }
 
     async fn get_json(&self, path: &str, params: &[(&str, String)]) -> WeComResult<Value> {
-        let token = self.access_token().await?;
+        let credential = self.access_token().await?;
         let mut url = self.url(path)?;
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("access_token", &token);
+            query.append_pair("access_token", &credential);
             for (key, value) in params {
                 query.append_pair(key, value);
             }
@@ -211,11 +214,11 @@ impl WeComClient {
         &self,
         request: &WeComMediaDownloadRequest,
     ) -> WeComResult<WeComMediaDownload> {
-        let token = self.access_token().await?;
+        let credential = self.access_token().await?;
         let mut url = self.url("/cgi-bin/media/get")?;
         {
             let mut query = url.query_pairs_mut();
-            query.append_pair("access_token", &token);
+            query.append_pair("access_token", &credential);
             query.append_pair("media_id", request.media_id());
         }
 
@@ -231,7 +234,13 @@ impl WeComClient {
             }
         }
         let bytes = response.bytes().await?;
-        if bytes.len() as u64 > max_bytes {
+        let downloaded_len = u64::try_from(bytes.len()).map_err(|_| {
+            WeComError::InvalidInput(format!(
+                "media download too large: {} bytes exceeds {max_bytes} byte limit",
+                bytes.len()
+            ))
+        })?;
+        if downloaded_len > max_bytes {
             return Err(WeComError::InvalidInput(format!(
                 "media download too large: {} bytes exceeds {max_bytes} byte limit",
                 bytes.len()
@@ -315,9 +324,10 @@ impl WeComClient {
     }
 
     async fn post_json(&self, path: &str, body: Value) -> WeComResult<Value> {
-        let token = self.access_token().await?;
+        let credential = self.access_token().await?;
         let mut url = self.url(path)?;
-        url.query_pairs_mut().append_pair("access_token", &token);
+        url.query_pairs_mut()
+            .append_pair("access_token", &credential);
         let response = self.client.post(url).json(&body).send().await?;
         ensure_wecom_success(response.json().await?)
     }
@@ -330,7 +340,7 @@ impl WeComClient {
     }
 
     fn callback_crypto(&self) -> WeComResult<CallbackCrypto> {
-        let token = self
+        let signature_material = self
             .config
             .callback_token()
             .ok_or_else(|| {
@@ -342,7 +352,7 @@ impl WeComClient {
         let aes_key = self.config.callback_aes_key().map_err(WeComError::Config)?;
 
         Ok(CallbackCrypto {
-            token,
+            token: signature_material,
             aes_key,
             receive_id: self.config.callback_receive_id().to_string(),
         })
@@ -380,39 +390,57 @@ impl WeComClient {
             ))
         })?;
 
-        let decryptor = Aes256CbcDec::new_from_slices(&crypto.aes_key, &crypto.aes_key[..16])
+        let iv = crypto
+            .aes_key
+            .get(..CALLBACK_RANDOM_PREFIX_BYTES)
+            .ok_or_else(|| WeComError::Config("invalid callback AES key length".into()))?;
+        let decryptor = Aes256CbcDec::new_from_slices(&crypto.aes_key, iv)
             .map_err(|_| WeComError::Config("invalid callback AES key length".into()))?;
         let mut buffer = ciphertext;
-        let plaintext = decryptor
-            .decrypt_padded_mut::<Pkcs7>(&mut buffer)
-            .map_err(|_| {
-                WeComError::Unauthorized(
-                    "WeCom callback payload could not be decrypted with the configured AES key"
-                        .into(),
-                )
-            })?;
+        let decrypted = decryptor
+            .decrypt_padded_mut::<NoPadding>(&mut buffer)
+            .map_err(|_| callback_decrypt_failed())?;
+        let plaintext = decode_wecom_callback_padding(decrypted)?;
 
-        if plaintext.len() < 20 {
+        if plaintext.len() < CALLBACK_RANDOM_PREFIX_BYTES + CALLBACK_LENGTH_PREFIX_BYTES {
             return Err(WeComError::InvalidInput(
                 "decrypted callback payload is too short".into(),
             ));
         }
 
-        let message_length =
-            u32::from_be_bytes(plaintext[16..20].try_into().map_err(|_| {
+        let length_start = CALLBACK_RANDOM_PREFIX_BYTES;
+        let length_end = CALLBACK_RANDOM_PREFIX_BYTES + CALLBACK_LENGTH_PREFIX_BYTES;
+        let length_bytes = plaintext
+            .get(length_start..length_end)
+            .ok_or_else(|| WeComError::InvalidInput("callback length prefix is invalid".into()))?;
+        let message_length_u32 =
+            u32::from_be_bytes(length_bytes.try_into().map_err(|_| {
                 WeComError::InvalidInput("callback length prefix is invalid".into())
-            })?) as usize;
-        let message_end = 20_usize.saturating_add(message_length);
+            })?);
+        let message_length = usize::try_from(message_length_u32).map_err(|_| {
+            WeComError::InvalidInput("callback length prefix cannot fit this platform".into())
+        })?;
+        let message_end = length_end.saturating_add(message_length);
         if message_end > plaintext.len() {
             return Err(WeComError::InvalidInput(
                 "decrypted callback payload length prefix exceeds plaintext size".into(),
             ));
         }
 
-        let message = std::str::from_utf8(&plaintext[20..message_end]).map_err(|error| {
+        let message_bytes = plaintext.get(length_end..message_end).ok_or_else(|| {
+            WeComError::InvalidInput(
+                "decrypted callback payload length prefix exceeds plaintext size".into(),
+            )
+        })?;
+        let receive_id_bytes = plaintext.get(message_end..).ok_or_else(|| {
+            WeComError::InvalidInput(
+                "decrypted callback payload length prefix exceeds plaintext size".into(),
+            )
+        })?;
+        let message = std::str::from_utf8(message_bytes).map_err(|error| {
             WeComError::InvalidInput(format!("callback plaintext is not valid UTF-8: {error}"))
         })?;
-        let receive_id = std::str::from_utf8(&plaintext[message_end..]).map_err(|error| {
+        let receive_id = std::str::from_utf8(receive_id_bytes).map_err(|error| {
             WeComError::InvalidInput(format!("callback receive_id is not valid UTF-8: {error}"))
         })?;
         if !bool::from(receive_id.as_bytes().ct_eq(crypto.receive_id.as_bytes())) {
@@ -424,6 +452,30 @@ impl WeComClient {
 
         Ok(message.to_string())
     }
+}
+
+fn callback_decrypt_failed() -> WeComError {
+    WeComError::Unauthorized(
+        "WeCom callback payload could not be decrypted with the configured AES key".into(),
+    )
+}
+
+fn decode_wecom_callback_padding(decrypted: &[u8]) -> WeComResult<&[u8]> {
+    let Some(&pad) = decrypted.last() else {
+        return Err(callback_decrypt_failed());
+    };
+    let pad_len = usize::from(pad);
+    if pad_len == 0 || pad_len > CALLBACK_PKCS7_BLOCK_SIZE || pad_len > decrypted.len() {
+        return Err(callback_decrypt_failed());
+    }
+
+    let plaintext_len = decrypted.len() - pad_len;
+    let (plaintext, padding) = decrypted.split_at(plaintext_len);
+    if padding.iter().any(|&byte| byte != pad) {
+        return Err(callback_decrypt_failed());
+    }
+
+    Ok(plaintext)
 }
 
 fn ensure_wecom_success(body: Value) -> WeComResult<Value> {
@@ -639,14 +691,16 @@ mod tests {
         plaintext.extend_from_slice(message.as_bytes());
         plaintext.extend_from_slice(receive_id.as_bytes());
 
-        let message_len = plaintext.len();
-        let block_size = 16;
-        let padded_len = ((message_len / block_size) + 1) * block_size;
-        let mut buffer = vec![0_u8; padded_len];
-        buffer[..message_len].copy_from_slice(&plaintext);
-        let ciphertext = Aes256CbcEnc::new_from_slices(&key, &key[..16])
+        let pad_len = CALLBACK_PKCS7_BLOCK_SIZE - (plaintext.len() % CALLBACK_PKCS7_BLOCK_SIZE);
+        let pad_byte = u8::try_from(pad_len).expect("WeCom callback pad length fits in u8");
+        plaintext.extend(std::iter::repeat_n(pad_byte, pad_len));
+        let padded_len = plaintext.len();
+        let iv = key
+            .get(..CALLBACK_RANDOM_PREFIX_BYTES)
+            .expect("test callback key must contain an IV prefix");
+        let ciphertext = Aes256CbcEnc::new_from_slices(&key, iv)
             .expect("valid key and IV")
-            .encrypt_padded_mut::<Pkcs7>(&mut buffer, message_len)
+            .encrypt_padded_mut::<NoPadding>(&mut plaintext, padded_len)
             .expect("padding should succeed");
 
         BASE64.encode(ciphertext)
@@ -660,6 +714,28 @@ mod tests {
             material.push_str(part);
         }
         hex::encode(Sha1::digest(material.as_bytes()))
+    }
+
+    #[test]
+    fn wecom_callback_padding_accepts_sdk_32_byte_block() {
+        let mut payload = b"payload".to_vec();
+        payload.extend(std::iter::repeat_n(25_u8, 25));
+
+        let unpadded = decode_wecom_callback_padding(&payload)
+            .expect("WeCom SDK-style 32-byte padding should decode");
+
+        assert_eq!(unpadded, b"payload");
+    }
+
+    #[test]
+    fn wecom_callback_padding_rejects_values_larger_than_sdk_block() {
+        let mut payload = b"payload".to_vec();
+        payload.extend(std::iter::repeat_n(33_u8, 33));
+
+        let error = decode_wecom_callback_padding(&payload)
+            .expect_err("padding larger than WeCom's 32-byte block must fail");
+
+        assert!(matches!(error, WeComError::Unauthorized(_)));
     }
 
     #[fcp_async_core::runtime::test]

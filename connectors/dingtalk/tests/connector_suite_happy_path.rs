@@ -15,7 +15,7 @@ use wiremock::{
 const OP_SEND_TEXT: &str = "dingtalk.messages.send_text";
 const CAP_MESSAGES_WRITE: &str = "dingtalk.messages.write";
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -25,11 +25,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -47,12 +47,17 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token");
     CapabilityToken::from_raw(raw)
 }
 
-fn send_text_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> InvokeRequest {
+fn send_text_invoke(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    id: &'static str,
+) -> InvokeRequest {
     InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new(id),
@@ -63,7 +68,7 @@ fn send_text_invoke(signing_key: &Ed25519SigningKey, id: &'static str) -> Invoke
             "to": "user:user-1",
             "content": "hello from connector suite"
         }),
-        capability_token: build_token(signing_key),
+        capability_token: build_token(signing_key, instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,
@@ -109,8 +114,9 @@ async fn connector_suite_happy_path_sends_text_message() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
-    let invoke = send_text_invoke(&signing_key, "dingtalk-connector-suite");
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), instance_id.clone());
+    let invoke = send_text_invoke(&signing_key, &instance_id, "dingtalk-connector-suite");
 
     let suite = ConnectorSuite {
         test_name: "dingtalk_send_text_happy_path".to_string(),
@@ -183,8 +189,13 @@ async fn connector_suite_error_path_reports_rate_limited_send_text() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
-    let invoke = send_text_invoke(&signing_key, "dingtalk-connector-suite-rate-limited");
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), instance_id.clone());
+    let invoke = send_text_invoke(
+        &signing_key,
+        &instance_id,
+        "dingtalk-connector-suite-rate-limited",
+    );
 
     let suite = ConnectorSuite {
         test_name: "dingtalk_send_text_rate_limited".to_string(),

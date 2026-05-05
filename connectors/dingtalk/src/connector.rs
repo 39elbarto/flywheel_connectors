@@ -435,6 +435,9 @@ impl FcpConnector for DingTalkConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -775,6 +778,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -792,6 +796,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&constraints_cbor)
             .expect("valid constraints cbor")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .expect("capability token");
         CapabilityToken::from_raw(raw)
@@ -1009,7 +1014,12 @@ mod tests {
             .simulate(simulate_request(
                 OP_SEND_TEXT,
                 json!({"to": "user:user-1"}),
-                signed_token(&signing_key, CAP_MESSAGES_WRITE, OP_SEND_TEXT),
+                signed_token(
+                    &signing_key,
+                    CAP_MESSAGES_WRITE,
+                    OP_SEND_TEXT,
+                    &connector.base.instance_id,
+                ),
             ))
             .await
             .expect("simulate should return denial response");
@@ -1040,7 +1050,12 @@ mod tests {
                     "file_name": "payload.bin",
                     "content_base64": BASE64.encode(b"payload"),
                 }),
-                signed_token(&signing_key, CAP_MEDIA_WRITE, OP_UPLOAD_MEDIA),
+                signed_token(
+                    &signing_key,
+                    CAP_MEDIA_WRITE,
+                    OP_UPLOAD_MEDIA,
+                    &connector.base.instance_id,
+                ),
             ))
             .await
             .expect("simulate should return denial response");

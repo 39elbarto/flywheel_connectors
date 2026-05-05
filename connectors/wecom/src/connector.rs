@@ -785,7 +785,7 @@ impl WeComConnector {
                 (output, resource_uris)
             }
             OP_HEALTH => {
-                let _token = state
+                state
                     .client
                     .access_token()
                     .await
@@ -837,6 +837,9 @@ impl FcpConnector for WeComConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1432,7 +1435,10 @@ mod tests {
     use super::*;
     use crate::types::DEFAULT_TIMEOUT_MS;
 
-    fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+    fn handshake_request(
+        host_public_key: [u8; 32],
+        requested_instance_id: Option<InstanceId>,
+    ) -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
             zone: ZoneId::work(),
@@ -1442,7 +1448,7 @@ mod tests {
             capabilities_requested: vec![CapabilityId::from_static(CAP_HEALTH_READ)],
             host: None,
             transport_caps: None,
-            requested_instance_id: None,
+            requested_instance_id,
         }
     }
 
@@ -1460,6 +1466,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let raw = CapabilityTokenBuilder::new()
@@ -1469,7 +1476,9 @@ mod tests {
             .operations(&[operation])
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
-            .constraints_cbor(&test_constraints_cbor())
+            .try_constraints_cbor(&test_constraints_cbor())
+            .expect("test constraints cbor should be valid")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
@@ -1617,8 +1626,12 @@ mod tests {
             .await
             .expect("configure should succeed");
         let signing_key = Ed25519SigningKey::generate();
+        let requested_instance_id = InstanceId::new();
         connector
-            .handshake(handshake_request(signing_key.verifying_key().to_bytes()))
+            .handshake(handshake_request(
+                signing_key.verifying_key().to_bytes(),
+                Some(requested_instance_id.clone()),
+            ))
             .await
             .expect("handshake should succeed");
 
@@ -1630,7 +1643,12 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_HEALTH_READ, OP_HEALTH),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_HEALTH_READ,
+                    OP_HEALTH,
+                    &requested_instance_id,
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,

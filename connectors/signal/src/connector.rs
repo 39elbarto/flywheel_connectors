@@ -941,8 +941,9 @@ mod tests {
     }
 
     fn signed_token_for(
-        capability: &'static str,
+        capability_id: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> (HandshakeRequest, CapabilityToken) {
         let signing_key = Ed25519SigningKey::generate();
         let host_public_key = signing_key.verifying_key().to_bytes();
@@ -955,24 +956,26 @@ mod tests {
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        let token = CapabilityToken::from_raw(
+        let capability = CapabilityToken::from_raw(
             CapabilityTokenBuilder::new()
-                .capability_id(capability)
+                .capability_id(capability_id)
                 .zone_id("z:work")
                 .principal("user:test")
                 .operations(&[operation])
                 .issuer("node:test")
                 .validity(now, expires)
-                .constraints_cbor(&cbor)
+                .target_instance(instance_id.as_str())
+                .try_constraints_cbor(&cbor)
+                .expect("constraints_cbor accepts test constraints")
                 .sign(&signing_key)
                 .expect("signed capability token"),
         );
 
         let mut handshake = base_handshake();
         handshake.host_public_key = host_public_key;
-        handshake.capabilities_requested = vec![CapabilityId::from_static(capability)];
+        handshake.capabilities_requested = vec![CapabilityId::from_static(capability_id)];
 
-        (handshake, token)
+        (handshake, capability)
     }
 
     fn base_invoke(connector_id: &ConnectorId, operation: &'static str) -> InvokeRequest {
@@ -1551,11 +1554,14 @@ mod tests {
             }))
             .await
             .unwrap();
-        let (handshake, token) = signed_token_for(CAP_READ, OP_RECEIVE_MESSAGES);
+        let (handshake, capability) =
+            signed_token_for(CAP_READ, OP_RECEIVE_MESSAGES, &connector.base.instance_id);
         connector.handshake(handshake).await.unwrap();
 
-        let mut req = base_invoke(connector.id(), OP_RECEIVE_MESSAGES);
-        req.capability_token = token;
+        let mut req = InvokeRequest {
+            capability_token: capability,
+            ..base_invoke(connector.id(), OP_RECEIVE_MESSAGES)
+        };
         req.input = json!({ "timeout_seconds": 1 });
 
         let response = connector.invoke(req).await.unwrap();
@@ -1580,12 +1586,15 @@ mod tests {
             }))
             .await
             .unwrap();
-        let (handshake, token) = signed_token_for(CAP_SEND, OP_SEND_MESSAGE);
+        let (handshake, capability) =
+            signed_token_for(CAP_SEND, OP_SEND_MESSAGE, &connector.base.instance_id);
         connector.handshake(handshake).await.unwrap();
 
         let attachment = base64::engine::general_purpose::STANDARD.encode(b"too-large");
-        let mut req = base_invoke(connector.id(), OP_SEND_MESSAGE);
-        req.capability_token = token;
+        let mut req = InvokeRequest {
+            capability_token: capability,
+            ..base_invoke(connector.id(), OP_SEND_MESSAGE)
+        };
         req.input = json!({
             "recipients": ["+15559876543"],
             "message": "hello",

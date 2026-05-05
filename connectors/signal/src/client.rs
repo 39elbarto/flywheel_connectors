@@ -7,7 +7,7 @@ use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop, classify_http_status,
 };
 use fcp_sdk::retry::RetryDecision;
-use reqwest::Client;
+use reqwest::{Client, Url};
 use std::time::Duration;
 use tracing::{debug, warn};
 
@@ -50,6 +50,20 @@ impl SignalClient {
             phone_number: config.normalized_phone_number(),
             retry_config: config.retry.clone(),
         })
+    }
+
+    /// Build the signal-cli SSE event stream URL for this configured account.
+    ///
+    /// # Errors
+    ///
+    /// Returns a configuration error when the daemon URL cannot be joined with
+    /// the event endpoint.
+    pub fn event_stream_url(&self) -> SignalResult<Url> {
+        let mut url = Url::parse(&format!("{}/api/v1/events", self.daemon_url))
+            .map_err(|error| SignalError::Config(format!("invalid event stream URL: {error}")))?;
+        url.query_pairs_mut()
+            .append_pair("account", &self.phone_number);
+        Ok(url)
     }
 
     /// Send a message to one or more recipients.
@@ -504,6 +518,16 @@ mod tests {
     fn phone_number_stored() {
         let client = SignalClient::new(&test_config("http://localhost:8080")).unwrap();
         assert_eq!(client.phone_number(), "+15551234567");
+    }
+
+    #[test]
+    fn event_stream_url_encodes_account_query() {
+        let client = SignalClient::new(&test_config("http://localhost:8080/")).unwrap();
+        let url = client.event_stream_url().unwrap();
+        assert_eq!(
+            url.as_str(),
+            "http://localhost:8080/api/v1/events?account=%2B15551234567"
+        );
     }
 
     #[fcp_async_core::runtime::test]

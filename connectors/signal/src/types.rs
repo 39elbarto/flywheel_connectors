@@ -7,6 +7,10 @@ use fcp_sdk::prelude::{FcpError, FcpResult};
 use reqwest::Url;
 use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 
+const SSE_FIELD_EVENT: &str = "event";
+const SSE_FIELD_ID: &str = "id";
+const SSE_FIELD_DATA: &str = "data";
+
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -332,7 +336,11 @@ pub struct SignalQuote {
     /// Timestamp of the quoted message.
     pub id: u64,
     /// Author of the quoted message.
+    #[serde(default)]
     pub author: String,
+    /// UUID author identifier, when the daemon supplies one instead of a number.
+    #[serde(default, rename = "authorUuid")]
+    pub author_uuid: Option<String>,
     /// Text of the quoted message.
     #[serde(default)]
     pub text: Option<String>,
@@ -346,7 +354,7 @@ pub struct SignalAttachment {
     pub id: Option<String>,
 
     /// MIME content type.
-    #[serde(default)]
+    #[serde(default, alias = "contentType")]
     pub content_type: Option<String>,
 
     /// Original filename.
@@ -622,10 +630,11 @@ pub struct SendMessageResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupInfo {
     /// Group identifier (base64-encoded).
+    #[serde(alias = "groupId")]
     pub id: String,
 
     /// Display name of the group.
-    #[serde(default)]
+    #[serde(default, alias = "groupName")]
     pub name: Option<String>,
 
     /// Phone numbers of group members.
@@ -675,8 +684,16 @@ pub struct ApiErrorResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SignalEnvelope {
     /// Sender number (E.164).
-    #[serde(default)]
+    #[serde(default, alias = "sourceNumber")]
     pub source: Option<String>,
+
+    /// Sender UUID, when signal-cli emits UUID identity instead of a number.
+    #[serde(default, rename = "sourceUuid")]
+    pub source_uuid: Option<String>,
+
+    /// Sender display name supplied by signal-cli.
+    #[serde(default, rename = "sourceName")]
+    pub source_name: Option<String>,
 
     /// Sender device ID.
     #[serde(default, rename = "sourceDevice")]
@@ -690,6 +707,14 @@ pub struct SignalEnvelope {
     #[serde(default, rename = "dataMessage")]
     pub data_message: Option<DataMessage>,
 
+    /// Edited data message content.
+    #[serde(default, rename = "editMessage")]
+    pub edit_message: Option<SignalEditMessage>,
+
+    /// Reaction-only message content.
+    #[serde(default, rename = "reactionMessage")]
+    pub reaction_message: Option<SignalReactionMessage>,
+
     /// Receipt message.
     #[serde(default, rename = "receiptMessage")]
     pub receipt_message: Option<serde_json::Value>,
@@ -697,6 +722,32 @@ pub struct SignalEnvelope {
     /// Sync message.
     #[serde(default, rename = "syncMessage")]
     pub sync_message: Option<serde_json::Value>,
+}
+
+impl SignalEnvelope {
+    /// Return the data message carried by this envelope, including edit events.
+    #[must_use]
+    pub fn primary_data_message(&self) -> Option<&DataMessage> {
+        self.data_message.as_ref().or_else(|| {
+            self.edit_message
+                .as_ref()
+                .and_then(|edit| edit.data_message.as_ref())
+        })
+    }
+
+    /// Return the best available sender identifier from the envelope.
+    #[must_use]
+    pub fn sender_identifier(&self) -> Option<&str> {
+        self.source.as_deref().or(self.source_uuid.as_deref())
+    }
+}
+
+/// Edited message wrapper from signal-cli receive events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalEditMessage {
+    /// Edited data message content.
+    #[serde(default, rename = "dataMessage")]
+    pub data_message: Option<DataMessage>,
 }
 
 /// Data message from signal-cli.
@@ -721,6 +772,169 @@ pub struct DataMessage {
     /// Quote (reply).
     #[serde(default)]
     pub quote: Option<SignalQuote>,
+
+    /// Signal mention metadata for object-replacement placeholders.
+    #[serde(default)]
+    pub mentions: Vec<SignalMention>,
+
+    /// Reaction payload nested in a data message.
+    #[serde(default)]
+    pub reaction: Option<SignalReactionMessage>,
+}
+
+/// Signal mention metadata.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalMention {
+    /// Display name for the mentioned sender.
+    #[serde(default)]
+    pub name: Option<String>,
+
+    /// E.164 phone number for the mentioned sender.
+    #[serde(default)]
+    pub number: Option<String>,
+
+    /// UUID for the mentioned sender.
+    #[serde(default)]
+    pub uuid: Option<String>,
+
+    /// Start offset in the message text.
+    #[serde(default)]
+    pub start: Option<u64>,
+
+    /// Length of the mention placeholder span.
+    #[serde(default)]
+    pub length: Option<u64>,
+}
+
+/// Signal reaction message payload.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalReactionMessage {
+    /// Reaction emoji.
+    #[serde(default)]
+    pub emoji: Option<String>,
+
+    /// Target author number.
+    #[serde(default, rename = "targetAuthor")]
+    pub target_author: Option<String>,
+
+    /// Target author UUID.
+    #[serde(default, rename = "targetAuthorUuid")]
+    pub target_author_uuid: Option<String>,
+
+    /// Target message timestamp.
+    #[serde(default, rename = "targetSentTimestamp")]
+    pub target_sent_timestamp: Option<u64>,
+
+    /// Whether this reaction removes a previous reaction.
+    #[serde(default, rename = "isRemove")]
+    pub is_remove: bool,
+
+    /// Group context for group reactions.
+    #[serde(default, rename = "groupInfo")]
+    pub group_info: Option<GroupInfo>,
+}
+
+/// Exception payload from signal-cli receive events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalReceiveException {
+    /// Daemon-provided exception message.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// Payload carried by signal-cli SSE `receive` events.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignalReceivePayload {
+    /// Signal envelope, if the event carried one.
+    #[serde(default)]
+    pub envelope: Option<SignalEnvelope>,
+
+    /// Receive exception, if the daemon emitted an error event.
+    #[serde(default)]
+    pub exception: Option<SignalReceiveException>,
+}
+
+/// Parsed signal-cli SSE event.
+#[derive(Debug, Clone)]
+pub struct SignalSseEvent {
+    /// SSE event type, for example `receive`.
+    pub event: Option<String>,
+
+    /// SSE event ID.
+    pub id: Option<String>,
+
+    /// Parsed receive payload.
+    pub payload: SignalReceivePayload,
+}
+
+/// Parse a complete signal-cli SSE event block.
+///
+/// Comments and empty keepalive blocks return `Ok(None)`. The parser accepts
+/// both the wrapped `{"envelope": ...}` shape used by current signal-cli event
+/// streams and raw envelope JSON used by older clients.
+///
+/// # Errors
+///
+/// Returns the underlying JSON parse error when the `data:` payload is present
+/// but malformed.
+pub fn parse_signal_sse_event(block: &str) -> serde_json::Result<Option<SignalSseEvent>> {
+    let mut event = None;
+    let mut id = None;
+    let mut data = None::<String>;
+
+    for raw_line in block.lines() {
+        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
+        if line.is_empty() || line.starts_with(':') {
+            continue;
+        }
+
+        let Some((raw_field, raw_value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = raw_value.strip_prefix(' ').unwrap_or(raw_value);
+
+        match raw_field.trim() {
+            SSE_FIELD_EVENT => event = Some(value.to_string()),
+            SSE_FIELD_ID => id = Some(value.to_string()),
+            SSE_FIELD_DATA => {
+                if value.is_empty() {
+                    continue;
+                }
+                match &mut data {
+                    Some(existing) => {
+                        existing.push('\n');
+                        existing.push_str(value);
+                    }
+                    None => data = Some(value.to_string()),
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let Some(data) = data else {
+        return Ok(None);
+    };
+    if data.trim().is_empty() {
+        return Ok(None);
+    }
+
+    let payload = parse_signal_receive_payload(&data)?;
+    Ok(Some(SignalSseEvent { event, id, payload }))
+}
+
+fn parse_signal_receive_payload(data: &str) -> serde_json::Result<SignalReceivePayload> {
+    let value = serde_json::from_str::<serde_json::Value>(data)?;
+    let wrapped = serde_json::from_value::<SignalReceivePayload>(value.clone())?;
+    if wrapped.envelope.is_some() || wrapped.exception.is_some() {
+        return Ok(wrapped);
+    }
+
+    let envelope = serde_json::from_value::<SignalEnvelope>(value)?;
+    Ok(SignalReceivePayload {
+        envelope: Some(envelope),
+        exception: None,
+    })
 }
 
 fn deserialize_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
@@ -1022,6 +1236,108 @@ mod tests {
         assert_eq!(env.source_device, Some(1));
         let dm = env.data_message.unwrap();
         assert_eq!(dm.message, Some("Hello from envelope".into()));
+    }
+
+    #[test]
+    fn deserialize_signal_envelope_accepts_sse_aliases() {
+        let json = serde_json::json!({
+            "sourceNumber": "+15551234567",
+            "sourceUuid": "6f1a0d8c-0000-4000-8000-000000000001",
+            "sourceName": "Alice",
+            "dataMessage": {
+                "timestamp": 1_700_000_000_000_u64,
+                "message": "Hello from group",
+                "mentions": [
+                    {
+                        "number": "+15559876543",
+                        "start": 0,
+                        "length": 1
+                    }
+                ],
+                "groupInfo": {
+                    "groupId": "Z3JvdXBfaWQ=",
+                    "groupName": "Engineers"
+                },
+                "attachments": [
+                    {
+                        "id": "att-1",
+                        "contentType": "image/png"
+                    }
+                ],
+                "reaction": {
+                    "emoji": "+1",
+                    "targetAuthor": "+15551234567",
+                    "targetSentTimestamp": 1_700_000_000_000_u64,
+                    "groupInfo": {
+                        "groupId": "Z3JvdXBfaWQ=",
+                        "groupName": "Engineers"
+                    }
+                }
+            }
+        });
+
+        let envelope: SignalEnvelope = serde_json::from_value(json).unwrap();
+        assert_eq!(envelope.source.as_deref(), Some("+15551234567"));
+        assert_eq!(envelope.source_name.as_deref(), Some("Alice"));
+        assert_eq!(envelope.sender_identifier(), Some("+15551234567"));
+
+        let data = envelope.primary_data_message().unwrap();
+        assert_eq!(data.mentions.len(), 1);
+        assert_eq!(
+            data.attachments[0].content_type.as_deref(),
+            Some("image/png")
+        );
+        assert_eq!(
+            data.group_info.as_ref().unwrap().name.as_deref(),
+            Some("Engineers")
+        );
+        let reaction = data.reaction.as_ref().unwrap();
+        assert_eq!(reaction.emoji.as_deref(), Some("+1"));
+        assert_eq!(reaction.group_info.as_ref().unwrap().id, "Z3JvdXBfaWQ=");
+    }
+
+    #[test]
+    fn parse_signal_sse_receive_event_payload() {
+        let block = r#"id: 42
+event: receive
+data: {"envelope":{"sourceNumber":"+15551234567","timestamp":1700000000000,"dataMessage":{"timestamp":1700000000000,"message":"hello"}}}
+"#;
+
+        let event = parse_signal_sse_event(block).unwrap().unwrap();
+        assert_eq!(event.id.as_deref(), Some("42"));
+        assert_eq!(event.event.as_deref(), Some("receive"));
+
+        let envelope = event.payload.envelope.unwrap();
+        assert_eq!(envelope.source.as_deref(), Some("+15551234567"));
+        assert_eq!(
+            envelope.primary_data_message().unwrap().message.as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn parse_signal_sse_keepalive_returns_none() {
+        assert!(parse_signal_sse_event(": keepalive\n\n").unwrap().is_none());
+    }
+
+    #[test]
+    fn parse_signal_sse_accepts_raw_envelope_payload() {
+        let block = r#"event: receive
+data: {"sourceNumber":"+15551234567","dataMessage":{"message":"legacy"}}
+"#;
+
+        let event = parse_signal_sse_event(block).unwrap().unwrap();
+        let envelope = event.payload.envelope.unwrap();
+        assert_eq!(
+            envelope.primary_data_message().unwrap().message.as_deref(),
+            Some("legacy")
+        );
+    }
+
+    #[test]
+    fn parse_signal_sse_rejects_malformed_data() {
+        let error = parse_signal_sse_event("event: receive\ndata: {bad json}\n").unwrap_err();
+        assert!(error.is_syntax());
     }
 
     #[test]

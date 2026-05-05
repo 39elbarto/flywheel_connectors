@@ -1,25 +1,36 @@
 //! `Nostr` relay connector.
 
-use std::time::Instant;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, AuthCaps, BaseConnector, CapabilityGrant, CapabilityId,
-    CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, RiskLevel,
-    SafetyTier, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
-    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
+    CapabilityVerifier, ConnectorId, ConnectorMetrics, EventCaps, EventData, EventEnvelope,
+    EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, HealthSnapshot,
+    HealthState, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, OrderingPolicy, Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
+    SubscribeResult, TrustLevel, UnsubscribeRequest, ZoneId,
 };
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use crate::client::NostrClient;
+use crate::client::{
+    InboundDmGuardSnapshot, InboundDmGuardState, InboundDmRateLimits, InboundDmSubscriptionOutcome,
+    NostrClient, NostrRelayClient, inbound_dm_subscription_event_payload,
+};
 use crate::types::{
-    CAP_EVENTS_READ, CAP_HEALTH_READ, CAP_NOTES_WRITE, CAP_RELAYS_READ, NostrConfig, OP_HEALTH,
-    OP_LIST_RELAYS, OP_PUBLISH_NOTE, OP_QUERY_EVENTS, OP_RELAYS_HEALTH, build_filter, note_kind,
-    note_tags, required_string,
+    CAP_DM_WRITE, CAP_EVENTS_READ, CAP_HEALTH_READ, CAP_NOTES_WRITE, CAP_PROFILE_READ,
+    CAP_PROFILE_WRITE, CAP_RELAYS_READ, EVENT_INBOUND_DM, NIP04_KIND_ENCRYPTED_DM, NostrConfig,
+    NostrProfile, OP_HEALTH, OP_LIST_RELAYS, OP_PROFILE_IMPORT, OP_PROFILE_PUBLISH,
+    OP_PROFILE_STATE, OP_PUBLISH_NOTE, OP_QUERY_EVENTS, OP_RELAYS_HEALTH, OP_SEND_DM, build_filter,
+    note_kind, note_tags, parse_dm_send_input, parse_profile_import_input,
+    parse_profile_publish_input, required_string,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -50,10 +61,394 @@ impl DoctorResult {
 // ─── Connector ───────────────────────────────────────────────────────────
 
 #[derive(Debug)]
+struct NostrSubscriptionTaskSet {
+    topics: BTreeSet<String>,
+    tasks: Vec<fcp_async_core::task::JoinHandle<()>>,
+}
+
+impl NostrSubscriptionTaskSet {
+    fn abort_all(self) {
+        for task in self.tasks {
+            task.abort();
+        }
+    }
+}
+
+const INBOUND_DM_STATE_FILE: &str = "nostr_inbound_dm_state.json";
+const INBOUND_DM_STATE_VERSION: u32 = 1;
+const PROFILE_STATE_FILE: &str = "nostr_profile_state.json";
+const PROFILE_STATE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct NostrInboundDmStateFile {
+    version: u32,
+    connector_public_key_hex: String,
+    guard: InboundDmGuardSnapshot,
+    updated_at_secs: u64,
+}
+
+#[derive(Debug)]
+struct NostrInboundDmStateStore {
+    path: Option<PathBuf>,
+    connector_public_key_hex: String,
+    guard: Mutex<InboundDmGuardState>,
+    load_result: String,
+}
+
+impl NostrInboundDmStateStore {
+    fn new(
+        zone_dir: Option<&str>,
+        connector_public_key_hex: &str,
+        seen_event_capacity: usize,
+        rate_limits: InboundDmRateLimits,
+    ) -> Self {
+        let path = zone_dir
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|path| path.join(INBOUND_DM_STATE_FILE));
+        let (guard, load_result) = path.as_deref().map_or_else(
+            || {
+                (
+                    InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                    "memory_only_no_zone_dir".to_string(),
+                )
+            },
+            |path| {
+                Self::load(
+                    path,
+                    connector_public_key_hex,
+                    seen_event_capacity,
+                    rate_limits,
+                )
+            },
+        );
+        Self {
+            path,
+            connector_public_key_hex: connector_public_key_hex.to_string(),
+            guard: Mutex::new(guard),
+            load_result,
+        }
+    }
+
+    fn load(
+        path: &Path,
+        connector_public_key_hex: &str,
+        seen_event_capacity: usize,
+        rate_limits: InboundDmRateLimits,
+    ) -> (InboundDmGuardState, String) {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (
+                    InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                    "state_missing_default".into(),
+                );
+            }
+            Err(error) => {
+                return (
+                    InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                    format!("state_read_failed: {error}"),
+                );
+            }
+        };
+        let state = match serde_json::from_slice::<NostrInboundDmStateFile>(&bytes) {
+            Ok(state) => state,
+            Err(error) => {
+                return (
+                    InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                    format!("state_parse_failed: {error}"),
+                );
+            }
+        };
+        if state.version != INBOUND_DM_STATE_VERSION {
+            return (
+                InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                format!("state_version_{}_reset", state.version),
+            );
+        }
+        if state.connector_public_key_hex != connector_public_key_hex {
+            return (
+                InboundDmGuardState::new(seen_event_capacity, rate_limits),
+                "state_identity_mismatch_reset".into(),
+            );
+        }
+        (
+            InboundDmGuardState::from_snapshot_with_config(
+                state.guard,
+                seen_event_capacity,
+                rate_limits,
+            ),
+            "state_loaded".into(),
+        )
+    }
+
+    fn lock_guard(&self) -> MutexGuard<'_, InboundDmGuardState> {
+        self.guard
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn prepare_subscription(&self) -> Value {
+        let persistence_result = {
+            let mut guard = self.lock_guard();
+            guard.mark_reconnect();
+            let persistence_result = self.persist_locked(&guard);
+            drop(guard);
+            persistence_result
+        };
+        let guard = self.lock_guard();
+        json!({
+            "load_result": self.load_result,
+            "persistence_result": persistence_result,
+            "cursor_before": guard.cursor(),
+            "cursor_after": guard.cursor(),
+            "reconnect_generation": guard.reconnect_generation(),
+            "restart_generation": guard.restart_generation(),
+            "seen_state": guard.last_transition()["seen_state"].clone(),
+        })
+    }
+
+    fn effective_since(&self, requested_since: Option<i64>) -> Option<i64> {
+        let cursor = self.lock_guard().cursor();
+        match (requested_since, cursor) {
+            (Some(requested), Some(cursor)) => Some(requested.max(cursor)),
+            (Some(requested), None) => Some(requested),
+            (None, Some(cursor)) => Some(cursor),
+            (None, None) => None,
+        }
+    }
+
+    fn persist(&self, guard: &InboundDmGuardState) -> String {
+        self.persist_locked(guard)
+    }
+
+    fn persist_locked(&self, guard: &InboundDmGuardState) -> String {
+        let Some(path) = &self.path else {
+            return "memory_only_no_zone_dir".into();
+        };
+        let state = NostrInboundDmStateFile {
+            version: INBOUND_DM_STATE_VERSION,
+            connector_public_key_hex: self.connector_public_key_hex.clone(),
+            guard: guard.snapshot(),
+            updated_at_secs: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_secs()),
+        };
+        let bytes = match serde_json::to_vec_pretty(&state) {
+            Ok(bytes) => bytes,
+            Err(error) => return format!("state_serialize_failed: {error}"),
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return format!("state_dir_create_failed: {error}");
+        }
+        let tmp_path = path.with_extension("json.tmp");
+        if let Err(error) = fs::write(&tmp_path, bytes) {
+            return format!("state_write_failed: {error}");
+        }
+        if let Err(error) = fs::rename(&tmp_path, path) {
+            return format!("state_commit_failed: {error}");
+        }
+        "state_persisted".into()
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct NostrProfileStateFile {
+    version: u32,
+    connector_public_key_hex: String,
+    last_published_at: Option<u64>,
+    last_published_event_id: Option<String>,
+    last_publish_results: BTreeMap<String, String>,
+    last_profile: Option<NostrProfile>,
+    updated_at_secs: u64,
+}
+
+#[derive(Debug)]
+struct NostrProfileStateStore {
+    path: Option<PathBuf>,
+    connector_public_key_hex: String,
+    state: Mutex<NostrProfileStateFile>,
+    load_result: String,
+}
+
+impl NostrProfileStateStore {
+    fn new(zone_dir: Option<&str>, connector_public_key_hex: &str) -> Self {
+        let path = zone_dir
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .map(|path| path.join(PROFILE_STATE_FILE));
+        let (state, load_result) = path.as_deref().map_or_else(
+            || {
+                (
+                    Self::empty_state(connector_public_key_hex),
+                    "memory_only_no_zone_dir".to_string(),
+                )
+            },
+            |path| Self::load(path, connector_public_key_hex),
+        );
+        Self {
+            path,
+            connector_public_key_hex: connector_public_key_hex.to_string(),
+            state: Mutex::new(state),
+            load_result,
+        }
+    }
+
+    fn empty_state(connector_public_key_hex: &str) -> NostrProfileStateFile {
+        NostrProfileStateFile {
+            version: PROFILE_STATE_VERSION,
+            connector_public_key_hex: connector_public_key_hex.to_string(),
+            last_published_at: None,
+            last_published_event_id: None,
+            last_publish_results: BTreeMap::new(),
+            last_profile: None,
+            updated_at_secs: 0,
+        }
+    }
+
+    fn load(path: &Path, connector_public_key_hex: &str) -> (NostrProfileStateFile, String) {
+        let bytes = match fs::read(path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return (
+                    Self::empty_state(connector_public_key_hex),
+                    "state_missing_default".into(),
+                );
+            }
+            Err(error) => {
+                return (
+                    Self::empty_state(connector_public_key_hex),
+                    format!("state_read_failed: {error}"),
+                );
+            }
+        };
+        let state = match serde_json::from_slice::<NostrProfileStateFile>(&bytes) {
+            Ok(state) => state,
+            Err(error) => {
+                return (
+                    Self::empty_state(connector_public_key_hex),
+                    format!("state_parse_failed: {error}"),
+                );
+            }
+        };
+        if state.version != PROFILE_STATE_VERSION {
+            return (
+                Self::empty_state(connector_public_key_hex),
+                format!("state_version_{}_reset", state.version),
+            );
+        }
+        if state.connector_public_key_hex != connector_public_key_hex {
+            return (
+                Self::empty_state(connector_public_key_hex),
+                "state_identity_mismatch_reset".into(),
+            );
+        }
+        (state, "state_loaded".into())
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, NostrProfileStateFile> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn last_published_at(&self) -> Option<u64> {
+        self.lock_state().last_published_at
+    }
+
+    fn snapshot(&self) -> Value {
+        let state = self.lock_state();
+        json!({
+            "load_result": self.load_result,
+            "persistence": if self.path.is_some() { "zone_dir" } else { "memory_only_no_zone_dir" },
+            "connector_public_key_hex": self.connector_public_key_hex.clone(),
+            "last_published_at": state.last_published_at,
+            "last_published_event_id": state.last_published_event_id.clone(),
+            "last_publish_results": state.last_publish_results.clone(),
+            "last_profile": state.last_profile.clone(),
+            "updated_at_secs": state.updated_at_secs,
+        })
+    }
+
+    fn persist_publish(&self, event: &Value, profile: NostrProfile, output: &Value) -> String {
+        let event_id = event.get("id").and_then(Value::as_str).map(str::to_string);
+        let created_at = event.get("created_at").and_then(Value::as_u64);
+        let mut results = BTreeMap::new();
+        if let Some(accepted) = output.get("accepted_relays").and_then(Value::as_array) {
+            for relay in accepted {
+                if let Some(relay_url) = relay.get("relay").and_then(Value::as_str) {
+                    results.insert(relay_url.to_string(), "ok".to_string());
+                }
+            }
+        }
+        if let Some(rejected) = output.get("rejected_relays").and_then(Value::as_array) {
+            for relay in rejected {
+                if let Some(relay_url) = relay.get("relay").and_then(Value::as_str) {
+                    results
+                        .entry(relay_url.to_string())
+                        .or_insert_with(|| "failed".to_string());
+                }
+            }
+        }
+        let updated_at_secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let state_to_persist = {
+            let mut state = self.lock_state();
+            state.last_published_at = created_at;
+            state.last_published_event_id = event_id;
+            state.last_publish_results = results;
+            state.last_profile = Some(profile);
+            state.updated_at_secs = updated_at_secs;
+            state.clone()
+        };
+        self.persist_state(&state_to_persist)
+    }
+
+    fn persist_state(&self, state: &NostrProfileStateFile) -> String {
+        let Some(path) = &self.path else {
+            return "memory_only_no_zone_dir".into();
+        };
+        let bytes = match serde_json::to_vec_pretty(state) {
+            Ok(bytes) => bytes,
+            Err(error) => return format!("state_serialize_failed: {error}"),
+        };
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            && let Err(error) = fs::create_dir_all(parent)
+        {
+            return format!("state_dir_create_failed: {error}");
+        }
+        let tmp_path = path.with_extension("json.tmp");
+        if let Err(error) = fs::write(&tmp_path, bytes) {
+            return format!("state_write_failed: {error}");
+        }
+        if let Err(error) = fs::rename(&tmp_path, path) {
+            return format!("state_commit_failed: {error}");
+        }
+        "state_persisted".into()
+    }
+}
+
+#[derive(Debug)]
 pub struct NostrConnector {
     base: BaseConnector,
     client: Option<NostrClient>,
     verifier: Option<CapabilityVerifier>,
+    zone_id: Option<ZoneId>,
+    inbound_state: Option<Arc<NostrInboundDmStateStore>>,
+    profile_state: Option<Arc<NostrProfileStateStore>>,
+    subscriptions: Mutex<BTreeMap<String, NostrSubscriptionTaskSet>>,
+    subscription_diagnostics: Arc<Mutex<Vec<Value>>>,
+    subscription_events: Arc<Mutex<Vec<EventEnvelope>>>,
     started_at: Instant,
 }
 
@@ -64,6 +459,12 @@ impl NostrConnector {
             base: BaseConnector::new(ConnectorId::from_static("fcp.nostr")),
             client: None,
             verifier: None,
+            zone_id: None,
+            inbound_state: None,
+            profile_state: None,
+            subscriptions: Mutex::new(BTreeMap::new()),
+            subscription_diagnostics: Arc::new(Mutex::new(Vec::new())),
+            subscription_events: Arc::new(Mutex::new(Vec::new())),
             started_at: Instant::now(),
         }
     }
@@ -72,6 +473,105 @@ impl NostrConnector {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
         format!("sha256:{}", hex::encode(hasher.finalize()))
+    }
+
+    const fn event_caps() -> EventCaps {
+        EventCaps {
+            streaming: true,
+            replay: false,
+            min_buffer_events: 0,
+            requires_ack: false,
+        }
+    }
+
+    fn event_info() -> Vec<EventInfo> {
+        vec![EventInfo {
+            topic: EVENT_INBOUND_DM.into(),
+            schema: json!({
+                "type": "object",
+                "required": [
+                    "stream_id",
+                    "relay",
+                    "event_id",
+                    "sender",
+                    "recipient",
+                    "event_kind",
+                    "created_at",
+                    "plaintext"
+                ],
+                "properties": {
+                    "stream_id": { "type": "string" },
+                    "relay": { "type": "string" },
+                    "event_id": { "type": "string" },
+                    "sender": { "type": "string", "minLength": 64, "maxLength": 64 },
+                    "recipient": { "type": "string", "minLength": 64, "maxLength": 64 },
+                    "event_kind": { "type": "integer", "enum": [4] },
+                    "created_at": { "type": "integer" },
+                    "plaintext": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            requires_ack: false,
+        }]
+    }
+
+    fn subscription_states(&self) -> MutexGuard<'_, BTreeMap<String, NostrSubscriptionTaskSet>> {
+        self.subscriptions
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn subscription_diagnostics_mut(&self) -> MutexGuard<'_, Vec<Value>> {
+        self.subscription_diagnostics
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn subscription_events_mut(&self) -> MutexGuard<'_, Vec<EventEnvelope>> {
+        self.subscription_events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    fn clear_subscriptions(&self, reason: &'static str) {
+        let mut states = self.subscription_states();
+        let drained = std::mem::take(&mut *states);
+        drop(states);
+        for (stream_id, state) in drained {
+            self.subscription_diagnostics_mut().push(json!({
+                "stream_id": stream_id,
+                "relay": null,
+                "stage": "cancellation",
+                "event_kind": null,
+                "event_id": null,
+                "filter_kinds": [4],
+                "filter_p_tag": [],
+                "subscribe_result": null,
+                "unsubscribe_result": "aborted",
+                "cancellation_reason": reason,
+                "core_decision": null,
+                "rejection_reason": null,
+                "decrypt_result": null,
+                "shutdown_result": "task_abort_requested",
+                "elapsed_ms": 0,
+            }));
+            state.abort_all();
+        }
+    }
+
+    #[must_use]
+    pub fn active_subscription_count(&self) -> usize {
+        self.subscription_states().len()
+    }
+
+    #[must_use]
+    pub fn subscription_diagnostics(&self) -> Vec<Value> {
+        self.subscription_diagnostics_mut().clone()
+    }
+
+    #[must_use]
+    pub fn subscription_events(&self) -> Vec<EventEnvelope> {
+        self.subscription_events_mut().clone()
     }
 
     /// Run connector diagnostics.
@@ -140,7 +640,7 @@ impl NostrConnector {
             operation(
                 OP_PUBLISH_NOTE,
                 "Publish a signed public Nostr note",
-                "Sign one public kind-1 Nostr note with the configured secp256k1 secret key and publish it to every configured relay. This first slice does not construct encrypted DMs, profile metadata events, or long-lived relay sessions.",
+                "Sign one public kind-1 Nostr note with the configured secp256k1 secret key and publish it to every configured relay. Encrypted DMs use the separate `nostr.dm.send` operation and `nostr.dm.write` capability.",
                 CAP_NOTES_WRITE,
                 RiskLevel::Medium,
                 SafetyTier::Risky,
@@ -156,12 +656,119 @@ impl NostrConnector {
                 }),
                 "Use when you need to publish one public note through the connector's bound keypair to every configured relay.",
                 &[
-                    "This first slice does not construct or decrypt encrypted DMs (NIP-04/NIP-17).",
-                    "`kind` is fixed to `1` for this first-slice note operation.",
-                    "`secret_key_hex` is raw hex, not bech32 `nsec` input.",
+                    "This operation remains kind-1 public-note only; encrypted DMs require `nostr.dm.send`.",
+                    "`kind` is fixed to `1` for this public-note operation.",
+                    "`secret_key_hex` accepts either raw 64-character hex or NIP-19 `nsec`; secrets are redacted in Debug and error paths.",
                     "Publishing fans out to every configured relay; there is no per-request relay override.",
                 ],
                 &[CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ],
+            ),
+            operation(
+                OP_SEND_DM,
+                "Send a NIP-04 encrypted Nostr direct message",
+                "Normalize a recipient pubkey from raw hex, NIP-19 `npub`, or `nostr:npub`; encrypt plaintext with the connector-bound secp256k1 secret key using NIP-04 AES-256-CBC; sign a kind-4 event with a `p` tag; and publish it to every configured relay.",
+                CAP_DM_WRITE,
+                RiskLevel::High,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                json!({
+                    "type": "object",
+                    "required": ["recipient", "plaintext"],
+                    "properties": {
+                        "recipient": { "type": "string" },
+                        "recipient_pubkey": { "type": "string" },
+                        "target": { "type": "string" },
+                        "plaintext": { "type": "string", "maxLength": 4096 },
+                        "content": { "type": "string", "maxLength": 4096 },
+                        "reply_to_event_id": { "type": "string" },
+                        "reply_to": { "type": "string" },
+                        "allow_self_send": { "type": "boolean" }
+                    }
+                }),
+                "Use for outbound encrypted direct messages when the caller has explicit `nostr.dm.write` authority.",
+                &[
+                    "`recipient`, `recipient_pubkey`, and `target` accept raw hex, NIP-19 `npub`, and `nostr:npub`; aliases must agree if multiple are provided.",
+                    "`plaintext` and `content` are accepted as input aliases, capped at 4096 bytes, and never returned in operation output.",
+                    "Self-send is rejected unless `allow_self_send` is explicitly true.",
+                    "The operation returns event id, kind, public sender/recipient metadata, and per-relay delivery diagnostics; it omits plaintext and encrypted content.",
+                ],
+                &[CAP_HEALTH_READ, CAP_RELAYS_READ],
+            ),
+            operation(
+                OP_PROFILE_PUBLISH,
+                "Publish NIP-01 profile metadata",
+                "Validate NIP-01 profile metadata, require safe https profile URLs, sign a kind-0 replaceable event with the connector-bound key, publish it to every configured relay, and persist publish state only after at least one relay accepts.",
+                CAP_PROFILE_WRITE,
+                RiskLevel::Medium,
+                SafetyTier::Risky,
+                IdempotencyClass::None,
+                json!({
+                    "type": "object",
+                    "required": ["profile"],
+                    "properties": {
+                        "profile": {
+                            "type": "object",
+                            "properties": {
+                                "name": { "type": "string", "maxLength": 256 },
+                                "display_name": { "type": "string", "maxLength": 256 },
+                                "about": { "type": "string", "maxLength": 2000 },
+                                "picture": { "type": "string", "format": "uri" },
+                                "banner": { "type": "string", "format": "uri" },
+                                "website": { "type": "string", "format": "uri" },
+                                "nip05": { "type": "string" },
+                                "lud16": { "type": "string" }
+                            }
+                        },
+                        "last_published_at": { "type": "integer" }
+                    }
+                }),
+                "Use when the connector's bound identity should publish or replace its public Nostr profile.",
+                &[
+                    "This is a separate kind-0 profile operation; `nostr.notes.publish` remains kind-1 only.",
+                    "Profile URLs must use https and must not target loopback, private, link-local, .local, or .internal hosts.",
+                    "State is persisted only after at least one configured relay accepts the event.",
+                    "`last_published_at` can provide host state, but connector-persisted state also enforces monotonic timestamps.",
+                ],
+                &[CAP_PROFILE_READ, CAP_RELAYS_READ, CAP_HEALTH_READ],
+            ),
+            operation(
+                OP_PROFILE_STATE,
+                "Read local Nostr profile publish state",
+                "Return connector-owned NIP-01 profile publish state from the handshake zone directory when available. This is local state only and never queries relays.",
+                CAP_PROFILE_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({ "type": "object" }),
+                "Use to inspect the last profile event id, timestamp, profile fields, and per-relay publish result persisted by this connector instance.",
+                &[
+                    "This operation does not import profile data from relays; use `nostr.profile.import` for bounded relay reads.",
+                    "No secret key material is persisted or returned.",
+                ],
+                &[CAP_PROFILE_WRITE, CAP_RELAYS_READ],
+            ),
+            operation(
+                OP_PROFILE_IMPORT,
+                "Import a verified NIP-01 profile from configured relays",
+                "Query configured relays for the newest verified kind-0 profile event for a public key, reject invalid signatures/shapes, drop unsafe imported URLs, and optionally merge imported fields into a caller-supplied local profile without overwriting local values.",
+                CAP_PROFILE_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "pubkey": { "type": "string" },
+                        "local_profile": { "type": "object" }
+                    }
+                }),
+                "Use before profile editing or display to read the latest public kind-0 profile state through the connector's relay set.",
+                &[
+                    "Import uses the configured relay list; there is no per-request relay override.",
+                    "Unsafe URL fields from imported content are omitted and reported rather than returned for display/fetch use.",
+                    "If `pubkey` is omitted, the connector imports its own bound public key profile.",
+                ],
+                &[CAP_EVENTS_READ, CAP_RELAYS_READ, CAP_PROFILE_WRITE],
             ),
             operation(
                 OP_QUERY_EVENTS,
@@ -186,6 +793,7 @@ impl NostrConnector {
                 &[
                     "This is a bounded public-event query surface, not DM sync.",
                     "If `limit` is omitted the connector uses `default_query_limit`.",
+                    "`authors` accepts raw hex, NIP-19 `npub`, and `nostr:npub`; filters sent to relays use canonical hex.",
                     "Results are returned per relay and may contain duplicates across relays.",
                 ],
                 &[CAP_RELAYS_READ, CAP_HEALTH_READ],
@@ -202,7 +810,7 @@ impl NostrConnector {
                 "Use to inspect which relays and public key this connector instance is bound to.",
                 &[
                     "This does not discover relays from NIP metadata or mutate relay policy.",
-                    "The relay list is static configuration for this first slice.",
+                    "The relay list is static configuration for this request-response slice.",
                 ],
                 &[CAP_HEALTH_READ, CAP_EVENTS_READ],
             ),
@@ -251,6 +859,36 @@ impl NostrConnector {
 
         let output = match req.operation.as_str() {
             OP_PUBLISH_NOTE => Box::pin(client.publish_note(&req.input)).await?,
+            OP_SEND_DM => Box::pin(client.send_dm(&req.input)).await?,
+            OP_PROFILE_PUBLISH => {
+                let profile_state = self.profile_state.as_ref().ok_or(FcpError::NotHandshaken)?;
+                let publish_input = parse_profile_publish_input(&req.input)?;
+                let mut output =
+                    Box::pin(client.publish_profile(&req.input, profile_state.last_published_at()))
+                        .await?;
+                let accepted_count = output
+                    .get("accepted_relays")
+                    .and_then(Value::as_array)
+                    .map_or(0, Vec::len);
+                let persistence_result = if accepted_count > 0 {
+                    let event = output.get("event").cloned().unwrap_or(Value::Null);
+                    profile_state.persist_publish(&event, publish_input.profile().clone(), &output)
+                } else {
+                    "not_persisted_no_relay_acceptance".to_string()
+                };
+                if let Some(object) = output.as_object_mut() {
+                    object.insert("persisted".into(), json!(accepted_count > 0));
+                    object.insert("persistence_result".into(), json!(persistence_result));
+                    object.insert("profile_state".into(), profile_state.snapshot());
+                }
+                output
+            }
+            OP_PROFILE_STATE => self
+                .profile_state
+                .as_ref()
+                .ok_or(FcpError::NotHandshaken)?
+                .snapshot(),
+            OP_PROFILE_IMPORT => Box::pin(client.import_profile(&req.input)).await?,
             OP_QUERY_EVENTS => Box::pin(client.query_events(&req.input)).await?,
             OP_LIST_RELAYS => json!({
                 "relays": client.relay_urls(),
@@ -268,6 +906,83 @@ impl NostrConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn validate_inbound_subscription_request(req: &SubscribeRequest) -> FcpResult<Option<i64>> {
+        if req.topics.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("subscribe requires explicit `{EVENT_INBOUND_DM}` topic"),
+            });
+        }
+        if let Some(topic) = req
+            .topics
+            .iter()
+            .find(|topic| topic.as_str() != EVENT_INBOUND_DM)
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "unsupported Nostr stream `{topic}`; only `{EVENT_INBOUND_DM}` is implemented"
+                ),
+            });
+        }
+        req.since
+            .as_deref()
+            .map(|since| {
+                since.parse::<i64>().map_err(|_| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "`since` for Nostr inbound DM subscriptions must be a unix timestamp"
+                        .into(),
+                })
+            })
+            .transpose()
+    }
+
+    fn validate_unsubscribe_request(req: &UnsubscribeRequest) -> FcpResult<()> {
+        if req.topics.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("unsubscribe requires explicit `{EVENT_INBOUND_DM}` topic"),
+            });
+        }
+        if let Some(topic) = req
+            .topics
+            .iter()
+            .find(|topic| topic.as_str() != EVENT_INBOUND_DM)
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "unsupported Nostr stream `{topic}`; only `{EVENT_INBOUND_DM}` is implemented"
+                ),
+            });
+        }
+        Ok(())
+    }
+
+    fn build_inbound_subscription_envelope(
+        connector_id: ConnectorId,
+        instance_id: fcp_prelude::InstanceId,
+        zone_id: ZoneId,
+        accepted: &crate::client::InboundDmAccepted,
+        relay: &str,
+        stream_id: &str,
+    ) -> EventEnvelope {
+        let payload = inbound_dm_subscription_event_payload(accepted, relay, stream_id);
+        let principal = Principal {
+            kind: "nostr".into(),
+            id: accepted.sender_pubkey_hex.clone(),
+            trust: TrustLevel::Paired,
+            display: None,
+        };
+        EventEnvelope::new(
+            EVENT_INBOUND_DM,
+            EventData::new(connector_id, instance_id, zone_id, principal, payload),
+        )
+        .with_stream_key(accepted.sender_pubkey_hex.clone())
+        .with_cursor(accepted.event_id.clone())
+        .with_ordering(OrderingPolicy::PerKey)
+    }
 }
 
 impl Default for NostrConnector {
@@ -278,6 +993,7 @@ impl Default for NostrConnector {
 
 fcp_core::impl_fcp_sealed!(NostrConnector);
 
+#[allow(clippy::too_many_lines)]
 #[async_trait]
 impl FcpConnector for NostrConnector {
     fn id(&self) -> &ConnectorId {
@@ -290,16 +1006,32 @@ impl FcpConnector for NostrConnector {
                 code: 1003,
                 message: format!("invalid Nostr configuration: {error}"),
             })?;
+        self.clear_subscriptions("reconfigured");
         let client = NostrClient::new(&config)?;
         self.client = Some(client);
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
+        self.zone_id = None;
+        self.inbound_state = None;
+        self.profile_state = None;
         Ok(())
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         self.base.set_handshaken(true);
+        self.zone_id = Some(req.zone.clone());
+        self.inbound_state = Some(Arc::new(NostrInboundDmStateStore::new(
+            req.zone_dir.as_deref(),
+            client.public_key_hex(),
+            client.inbound_dm_seen_event_capacity(),
+            client.inbound_dm_rate_limits(),
+        )));
+        self.profile_state = Some(Arc::new(NostrProfileStateStore::new(
+            req.zone_dir.as_deref(),
+            client.public_key_hex(),
+        )));
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
             req.zone.clone(),
@@ -311,12 +1043,7 @@ impl FcpConnector for NostrConnector {
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(Self::event_caps()),
             auth_caps: Some(nostr_auth_caps()),
             op_catalog_hash: None,
         })
@@ -359,11 +1086,15 @@ impl FcpConnector for NostrConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.clear_subscriptions("shutdown");
         if let Some(client) = &self.client {
             client.shutdown();
         }
         self.client = None;
         self.verifier = None;
+        self.zone_id = None;
+        self.inbound_state = None;
+        self.profile_state = None;
         self.base.set_handshaken(false);
         self.base.set_configured(false);
         Ok(())
@@ -372,15 +1103,10 @@ impl FcpConnector for NostrConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: Self::operations(),
-            events: Vec::new(),
+            events: Self::event_info(),
             resource_types: Vec::new(),
             auth_caps: Some(nostr_auth_caps()),
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(Self::event_caps()),
         }
     }
 
@@ -436,12 +1162,153 @@ impl FcpConnector for NostrConnector {
         Ok(SimulateResponse::allowed(req.id))
     }
 
-    async fn subscribe(&self, _req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
-        Err(FcpError::StreamingNotSupported)
+    async fn subscribe(&self, req: SubscribeRequest) -> FcpResult<SubscribeResponse> {
+        self.base.check_ready()?;
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let _verifier = self.verifier.as_ref().ok_or(FcpError::NotHandshaken)?;
+        let zone_id = self.zone_id.clone().ok_or(FcpError::NotHandshaken)?;
+        let requested_since = Self::validate_inbound_subscription_request(&req)?;
+        let inbound_state = self.inbound_state.clone().ok_or(FcpError::NotHandshaken)?;
+        let state_prepare = inbound_state.prepare_subscription();
+        let since = inbound_state.effective_since(requested_since);
+        let stream_id = req.id.0.clone();
+
+        let mut states = self.subscription_states();
+        if states.contains_key(&stream_id) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("subscription `{stream_id}` already exists"),
+            });
+        }
+
+        let diagnostics = Arc::clone(&self.subscription_diagnostics);
+        let events = Arc::clone(&self.subscription_events);
+        let connector_id = self.base.id.clone();
+        let instance_id = self.base.instance_id.clone();
+        let public_key_hex = client.public_key_hex().to_string();
+        let secret_key = *client.secret_key();
+        let request_timeout = client.request_timeout;
+        let inbound_policy = client.inbound_dm_policy().clone();
+        self.subscription_diagnostics_mut().push(json!({
+            "stream_id": stream_id,
+            "relay": null,
+            "stage": "state_prepare",
+            "event_kind": NIP04_KIND_ENCRYPTED_DM,
+            "event_id": null,
+            "filter_kinds": [NIP04_KIND_ENCRYPTED_DM],
+            "filter_p_tag": [public_key_hex],
+            "subscribe_result": "state_ready",
+            "unsubscribe_result": null,
+            "cancellation_reason": null,
+            "core_decision": null,
+            "rejection_reason": null,
+            "decrypt_result": null,
+            "shutdown_result": null,
+            "cursor_before": state_prepare["cursor_before"].clone(),
+            "cursor_after": state_prepare["cursor_after"].clone(),
+            "seen_state": state_prepare["seen_state"].clone(),
+            "reconnect_generation": state_prepare["reconnect_generation"].clone(),
+            "restart_generation": state_prepare["restart_generation"].clone(),
+            "persistence_result": state_prepare["persistence_result"].clone(),
+            "state_load_result": state_prepare["load_result"].clone(),
+            "requested_since": requested_since,
+            "effective_since": since,
+            "elapsed_ms": 0,
+        }));
+        let mut tasks = Vec::with_capacity(client.relays.len());
+        for relay in client.relays.clone() {
+            let diagnostics = Arc::clone(&diagnostics);
+            let events = Arc::clone(&events);
+            let inbound_state = Arc::clone(&inbound_state);
+            let stream_id_for_task = stream_id.clone();
+            let public_key_for_task = public_key_hex.clone();
+            let policy_for_task = inbound_policy.clone();
+            let connector_id = connector_id.clone();
+            let instance_id = instance_id.clone();
+            let zone_id = zone_id.clone();
+            let task = fcp_async_core::task::spawn(async move {
+                let relay_client = NostrRelayClient::new(&relay, request_timeout);
+                let outcome = relay_client
+                    .subscribe_inbound_dms_once(
+                        &stream_id_for_task,
+                        &public_key_for_task,
+                        since,
+                        &secret_key,
+                        &policy_for_task,
+                        &inbound_state.guard,
+                        |guard| inbound_state.persist(guard),
+                    )
+                    .await;
+                record_subscription_outcome(
+                    outcome,
+                    &diagnostics,
+                    &events,
+                    &connector_id,
+                    &instance_id,
+                    &zone_id,
+                );
+            });
+            tasks.push(task);
+        }
+
+        states.insert(
+            stream_id,
+            NostrSubscriptionTaskSet {
+                topics: req.topics.iter().cloned().collect(),
+                tasks,
+            },
+        );
+        drop(states);
+        Ok(SubscribeResponse {
+            r#type: "response".into(),
+            id: req.id,
+            result: SubscribeResult {
+                confirmed_topics: vec![EVENT_INBOUND_DM.into()],
+                cursors: HashMap::new(),
+                replay_supported: false,
+                buffer: None,
+            },
+        })
     }
 
-    async fn unsubscribe(&self, _req: UnsubscribeRequest) -> FcpResult<()> {
-        Err(FcpError::StreamingNotSupported)
+    async fn unsubscribe(&self, req: UnsubscribeRequest) -> FcpResult<()> {
+        self.base.check_ready()?;
+        Self::validate_unsubscribe_request(&req)?;
+        let requested_topics = req.topics.iter().cloned().collect::<BTreeSet<_>>();
+        let mut states = self.subscription_states();
+        let matching_streams = states
+            .iter()
+            .filter(|(_, state)| {
+                state
+                    .topics
+                    .iter()
+                    .any(|topic| requested_topics.contains(topic))
+            })
+            .map(|(stream_id, _)| stream_id.clone())
+            .collect::<Vec<_>>();
+        for stream_id in matching_streams {
+            if let Some(state) = states.remove(&stream_id) {
+                self.subscription_diagnostics_mut().push(json!({
+                    "stream_id": stream_id,
+                    "relay": null,
+                    "stage": "unsubscribe",
+                    "event_kind": null,
+                    "event_id": null,
+                    "filter_kinds": [4],
+                    "filter_p_tag": [self.client.as_ref().map_or("", NostrClient::public_key_hex)],
+                    "subscribe_result": null,
+                    "unsubscribe_result": "aborted",
+                    "cancellation_reason": "unsubscribe",
+                    "core_decision": null,
+                    "rejection_reason": null,
+                    "decrypt_result": null,
+                    "shutdown_result": "task_abort_requested",
+                    "elapsed_ms": 0,
+                }));
+                state.abort_all();
+            }
+        }
+        Ok(())
     }
 }
 
@@ -450,6 +1317,9 @@ impl FcpConnector for NostrConnector {
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         OP_PUBLISH_NOTE => CAP_NOTES_WRITE,
+        OP_SEND_DM => CAP_DM_WRITE,
+        OP_PROFILE_PUBLISH => CAP_PROFILE_WRITE,
+        OP_PROFILE_STATE | OP_PROFILE_IMPORT => CAP_PROFILE_READ,
         OP_QUERY_EVENTS => CAP_EVENTS_READ,
         OP_LIST_RELAYS => CAP_RELAYS_READ,
         OP_HEALTH | OP_RELAYS_HEALTH => CAP_HEALTH_READ,
@@ -475,11 +1345,23 @@ fn validate_simulation_input(
             let _ = note_tags(input)?;
             Ok(())
         }
+        OP_SEND_DM => {
+            let _ = parse_dm_send_input(input, client.public_key_hex())?;
+            Ok(())
+        }
+        OP_PROFILE_PUBLISH => {
+            let _ = parse_profile_publish_input(input)?;
+            Ok(())
+        }
+        OP_PROFILE_STATE | OP_LIST_RELAYS | OP_HEALTH | OP_RELAYS_HEALTH => Ok(()),
+        OP_PROFILE_IMPORT => {
+            let _ = parse_profile_import_input(input, client.public_key_hex())?;
+            Ok(())
+        }
         OP_QUERY_EVENTS => {
             let _ = build_filter(input, client.default_query_limit)?;
             Ok(())
         }
-        OP_LIST_RELAYS | OP_HEALTH | OP_RELAYS_HEALTH => Ok(()),
         _ => Err(FcpError::InvalidRequest {
             code: 1004,
             message: format!("unknown operation: {operation}"),
@@ -493,7 +1375,13 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
         .filter(|capability| {
             matches!(
                 capability.as_str(),
-                CAP_NOTES_WRITE | CAP_EVENTS_READ | CAP_RELAYS_READ | CAP_HEALTH_READ
+                CAP_NOTES_WRITE
+                    | CAP_DM_WRITE
+                    | CAP_PROFILE_WRITE
+                    | CAP_PROFILE_READ
+                    | CAP_EVENTS_READ
+                    | CAP_RELAYS_READ
+                    | CAP_HEALTH_READ
             )
         })
         .map(|capability| CapabilityGrant {
@@ -505,7 +1393,12 @@ fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
 
 fn nostr_auth_caps() -> AuthCaps {
     AuthCaps {
-        methods: vec!["secp256k1_secret_key_hex".to_string()],
+        methods: vec![
+            "secp256k1_secret_key_hex".to_string(),
+            "nip19_nsec".to_string(),
+            "nip19_npub".to_string(),
+            "nostr_uri_npub".to_string(),
+        ],
         oauth: None,
     }
 }
@@ -551,18 +1444,50 @@ fn operation(
     }
 }
 
+fn record_subscription_outcome(
+    outcome: InboundDmSubscriptionOutcome,
+    diagnostics: &Arc<Mutex<Vec<Value>>>,
+    events: &Arc<Mutex<Vec<EventEnvelope>>>,
+    connector_id: &ConnectorId,
+    instance_id: &fcp_prelude::InstanceId,
+    zone_id: &ZoneId,
+) {
+    let relay = outcome.relay.clone();
+    let stream_id = outcome.stream_id.clone();
+    diagnostics
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .extend(outcome.diagnostics);
+
+    let mut event_sink = events
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for accepted in outcome.accepted {
+        event_sink.push(NostrConnector::build_inbound_subscription_envelope(
+            connector_id.clone(),
+            instance_id.clone(),
+            zone_id.clone(),
+            &accepted,
+            &relay,
+            &stream_id,
+        ));
+    }
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::NIP01_KIND_PROFILE;
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
     use fcp_prelude::{
-        CapabilityConstraints, CapabilityToken, ConnectorId, SelfCheckStatus, ZoneId,
+        CapabilityConstraints, CapabilityToken, ConnectorId, RequestId, SelfCheckStatus, ZoneId,
     };
     use fcp_sdk::prelude::FcpConnector;
     use std::sync::atomic::Ordering;
+    use uuid::Uuid;
 
     fn test_config() -> Value {
         json!({
@@ -589,10 +1514,17 @@ mod tests {
         handshake_request_for([7u8; 32])
     }
 
+    fn unique_zone_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("fcp-nostr-{label}-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("test zone dir should be created");
+        dir
+    }
+
     fn capability_token(
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -610,6 +1542,7 @@ mod tests {
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
+            .target_instance(instance_id)
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
@@ -726,10 +1659,18 @@ mod tests {
     // ── Introspect tests ─────────────────────────────────────────────
 
     #[test]
-    fn introspection_reports_raw_key_auth_boundary() {
+    fn introspection_reports_key_and_address_formats() {
         let intro = NostrConnector::new().introspect();
         let auth = intro.auth_caps.expect("auth caps should be present");
-        assert_eq!(auth.methods, vec!["secp256k1_secret_key_hex"]);
+        assert_eq!(
+            auth.methods,
+            vec![
+                "secp256k1_secret_key_hex",
+                "nip19_nsec",
+                "nip19_npub",
+                "nostr_uri_npub"
+            ]
+        );
         let publish = intro
             .operations
             .iter()
@@ -740,7 +1681,22 @@ mod tests {
                 .description
                 .as_deref()
                 .unwrap_or_default()
-                .contains("does not construct encrypted DMs")
+                .contains("separate `nostr.dm.send` operation")
+        );
+        assert!(publish.ai_hints.common_mistakes.iter().any(|hint| {
+            hint.contains("raw 64-character hex") && hint.contains("NIP-19 `nsec`")
+        }));
+        let query = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_QUERY_EVENTS)
+            .expect("query operation should exist");
+        assert!(
+            query
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| { hint.contains("raw hex") && hint.contains("NIP-19 `npub`") })
         );
         let related: Vec<_> = publish
             .ai_hints
@@ -752,26 +1708,96 @@ mod tests {
             related,
             vec![CAP_HEALTH_READ, CAP_RELAYS_READ, CAP_EVENTS_READ]
         );
+        let dm = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_SEND_DM)
+            .expect("DM send operation should exist");
+        assert_eq!(dm.capability.as_str(), CAP_DM_WRITE);
+        assert!(matches!(dm.risk_level, RiskLevel::High));
+        assert!(matches!(dm.safety_tier, SafetyTier::Risky));
+        assert!(matches!(dm.idempotency, IdempotencyClass::None));
+        assert!(
+            dm.description
+                .as_deref()
+                .unwrap_or_default()
+                .contains("NIP-04 AES-256-CBC")
+        );
+        assert!(
+            dm.ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| hint.contains("never returned") && hint.contains("4096 bytes"))
+        );
     }
 
     #[test]
-    fn introspect_has_five_operations() {
+    fn introspect_has_profile_operations_separate_from_note_publish() {
         let intro = NostrConnector::new().introspect();
-        assert_eq!(intro.operations.len(), 5);
+        assert_eq!(intro.operations.len(), 9);
         let ids: Vec<_> = intro.operations.iter().map(|op| op.id.as_str()).collect();
         assert!(ids.contains(&OP_PUBLISH_NOTE));
+        assert!(ids.contains(&OP_SEND_DM));
+        assert!(ids.contains(&OP_PROFILE_PUBLISH));
+        assert!(ids.contains(&OP_PROFILE_STATE));
+        assert!(ids.contains(&OP_PROFILE_IMPORT));
         assert!(ids.contains(&OP_QUERY_EVENTS));
         assert!(ids.contains(&OP_LIST_RELAYS));
         assert!(ids.contains(&OP_HEALTH));
         assert!(ids.contains(&OP_RELAYS_HEALTH));
+
+        let note_publish = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_PUBLISH_NOTE)
+            .unwrap();
+        assert_eq!(note_publish.capability.as_str(), CAP_NOTES_WRITE);
+        let profile_publish = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_PROFILE_PUBLISH)
+            .unwrap();
+        assert_eq!(profile_publish.capability.as_str(), CAP_PROFILE_WRITE);
+        assert!(
+            profile_publish
+                .description
+                .as_deref()
+                .unwrap()
+                .contains("kind-0")
+        );
+        assert!(
+            profile_publish
+                .ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| { hint.contains("`nostr.notes.publish` remains kind-1 only") })
+        );
+        let profile_state = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_PROFILE_STATE)
+            .unwrap();
+        assert_eq!(profile_state.capability.as_str(), CAP_PROFILE_READ);
+        assert!(matches!(profile_state.safety_tier, SafetyTier::Safe));
+        let profile_import = intro
+            .operations
+            .iter()
+            .find(|op| op.id.as_str() == OP_PROFILE_IMPORT)
+            .unwrap();
+        assert_eq!(profile_import.capability.as_str(), CAP_PROFILE_READ);
+        assert!(matches!(
+            profile_import.idempotency,
+            IdempotencyClass::Strict
+        ));
     }
 
     #[test]
-    fn introspect_event_caps_no_streaming() {
+    fn introspect_event_caps_streams_inbound_dm_without_replay() {
         let intro = NostrConnector::new().introspect();
         let caps = intro.event_caps.unwrap();
-        assert!(!caps.streaming);
+        assert!(caps.streaming);
         assert!(!caps.replay);
+        assert_eq!(intro.events[0].topic, EVENT_INBOUND_DM);
     }
 
     // ── Simulate tests ───────────────────────────────────────────────
@@ -821,7 +1847,12 @@ mod tests {
                 OperationId::from_static(OP_PUBLISH_NOTE),
                 ZoneId::work(),
                 json!({ "content": "hello" }),
-                capability_token(&signing_key, CAP_EVENTS_READ, OP_PUBLISH_NOTE),
+                capability_token(
+                    &signing_key,
+                    CAP_EVENTS_READ,
+                    OP_PUBLISH_NOTE,
+                    connector.base.instance_id.as_str(),
+                ),
             ))
             .await
             .expect("simulate should return a policy result");
@@ -934,6 +1965,9 @@ mod tests {
                 capabilities_requested: vec![
                     CapabilityId::from_static(CAP_HEALTH_READ),
                     CapabilityId::from_static(CAP_NOTES_WRITE),
+                    CapabilityId::from_static(CAP_DM_WRITE),
+                    CapabilityId::from_static(CAP_PROFILE_WRITE),
+                    CapabilityId::from_static(CAP_PROFILE_READ),
                     CapabilityId::from_static("unknown.cap"),
                 ],
                 host: None,
@@ -949,7 +1983,188 @@ mod tests {
             .collect();
         assert!(granted.contains(&CAP_HEALTH_READ));
         assert!(granted.contains(&CAP_NOTES_WRITE));
+        assert!(granted.contains(&CAP_DM_WRITE));
+        assert!(granted.contains(&CAP_PROFILE_WRITE));
+        assert!(granted.contains(&CAP_PROFILE_READ));
         assert!(!granted.contains(&"unknown.cap"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn handshake_advertises_inbound_dm_streaming_without_replay() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        let resp = connector.handshake(handshake_request()).await.unwrap();
+        let caps = resp.event_caps.expect("Nostr should advertise event caps");
+        assert!(caps.streaming);
+        assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, 0);
+        assert!(!caps.requires_ack);
+    }
+
+    #[test]
+    fn inbound_state_store_reports_reload_failure_without_leaking_secrets() {
+        let zone_dir = unique_zone_dir("bad-state");
+        let state_path = zone_dir.join(INBOUND_DM_STATE_FILE);
+        std::fs::write(&state_path, "not valid json").expect("bad state fixture should write");
+        let public_key = "aa".repeat(32);
+        let store = NostrInboundDmStateStore::new(
+            zone_dir.to_str(),
+            &public_key,
+            4096,
+            InboundDmRateLimits::default(),
+        );
+        let prepared = store.prepare_subscription();
+        assert!(
+            prepared["load_result"]
+                .as_str()
+                .unwrap()
+                .starts_with("state_parse_failed"),
+            "parse failure should be visible in diagnostics"
+        );
+        assert_eq!(prepared["persistence_result"], "state_persisted");
+        let persisted = std::fs::read_to_string(state_path).expect("state should be rewritten");
+        assert!(persisted.contains(&public_key));
+        assert!(
+            !persisted.contains("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+        assert!(!persisted.contains("plaintext"));
+    }
+
+    #[test]
+    fn profile_state_persists_public_publish_metadata_without_secret_material() {
+        let zone_dir = unique_zone_dir("profile-state");
+        let public_key = "aa".repeat(32);
+        let store = NostrProfileStateStore::new(zone_dir.to_str(), &public_key);
+        let event = json!({
+            "id": "bb".repeat(32),
+            "created_at": 1_700_000_010_u64,
+            "kind": NIP01_KIND_PROFILE,
+        });
+        let output = json!({
+            "accepted_relays": [{"relay": "wss://relay.example.com/", "response": ["OK", "event", true, ""]}],
+            "rejected_relays": [{"relay": "wss://down.example.com/", "error": "timeout"}],
+        });
+        let profile = NostrProfile {
+            name: Some("alice".into()),
+            ..NostrProfile::default()
+        };
+
+        let persist = store.persist_publish(&event, profile, &output);
+        assert_eq!(persist, "state_persisted");
+        let snapshot = store.snapshot();
+        assert_eq!(snapshot["last_published_at"], 1_700_000_010_u64);
+        assert_eq!(
+            snapshot["last_publish_results"]["wss://relay.example.com/"],
+            "ok"
+        );
+        assert_eq!(
+            snapshot["last_publish_results"]["wss://down.example.com/"],
+            "failed"
+        );
+
+        let persisted =
+            std::fs::read_to_string(zone_dir.join(PROFILE_STATE_FILE)).expect("state should exist");
+        assert!(persisted.contains("alice"));
+        assert!(
+            !persisted.contains("1111111111111111111111111111111111111111111111111111111111111111")
+        );
+    }
+
+    #[test]
+    fn introspection_advertises_only_inbound_dm_stream_without_replay() {
+        let connector = NostrConnector::new();
+        let introspection = connector.introspect();
+        let caps = introspection
+            .event_caps
+            .expect("Nostr introspection should include event caps");
+        assert!(caps.streaming);
+        assert!(!caps.replay);
+        assert_eq!(caps.min_buffer_events, 0);
+        assert_eq!(introspection.events.len(), 1);
+        assert_eq!(introspection.events[0].topic, EVENT_INBOUND_DM);
+        assert!(!introspection.events[0].requires_ack);
+        assert!(
+            introspection
+                .operations
+                .iter()
+                .any(|operation| operation.id.as_str() == OP_QUERY_EVENTS),
+            "bounded public query remains a request-response operation"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn subscribe_rejects_empty_and_unsupported_streams_before_relay_tasks() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(handshake_request()).await.unwrap();
+
+        let empty = connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("empty-subscribe"),
+                topics: Vec::new(),
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(empty, FcpError::InvalidRequest { .. }));
+
+        let unsupported = connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("public-query-stream"),
+                topics: vec![OP_QUERY_EVENTS.into()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(unsupported, FcpError::InvalidRequest { .. }));
+        assert_eq!(connector.active_subscription_count(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn unsubscribe_is_idempotent_for_supported_topic_and_rejects_broadening() {
+        let mut connector = NostrConnector::new();
+        connector.configure(test_config()).await.unwrap();
+        connector.handshake(handshake_request()).await.unwrap();
+
+        connector
+            .unsubscribe(UnsubscribeRequest {
+                r#type: "unsubscribe".into(),
+                id: RequestId::new("unsubscribe-empty-state"),
+                topics: vec![EVENT_INBOUND_DM.into()],
+                capability_token: None,
+            })
+            .await
+            .unwrap();
+        connector
+            .unsubscribe(UnsubscribeRequest {
+                r#type: "unsubscribe".into(),
+                id: RequestId::new("unsubscribe-empty-state-again"),
+                topics: vec![EVENT_INBOUND_DM.into()],
+                capability_token: None,
+            })
+            .await
+            .unwrap();
+
+        let unsupported = connector
+            .unsubscribe(UnsubscribeRequest {
+                r#type: "unsubscribe".into(),
+                id: RequestId::new("unsubscribe-public-query"),
+                topics: vec![OP_QUERY_EVENTS.into()],
+                capability_token: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(unsupported, FcpError::InvalidRequest { .. }));
     }
 
     // ── Connector ID / default tests ─────────────────────────────────
@@ -981,6 +2196,22 @@ mod tests {
     fn required_capability_publish() {
         let cap = required_capability(OP_PUBLISH_NOTE).unwrap();
         assert_eq!(cap.as_str(), CAP_NOTES_WRITE);
+    }
+
+    #[test]
+    fn required_capability_dm_send() {
+        let cap = required_capability(OP_SEND_DM).unwrap();
+        assert_eq!(cap.as_str(), CAP_DM_WRITE);
+    }
+
+    #[test]
+    fn required_capability_profile_operations() {
+        let publish = required_capability(OP_PROFILE_PUBLISH).unwrap();
+        let state = required_capability(OP_PROFILE_STATE).unwrap();
+        let import = required_capability(OP_PROFILE_IMPORT).unwrap();
+        assert_eq!(publish.as_str(), CAP_PROFILE_WRITE);
+        assert_eq!(state.as_str(), CAP_PROFILE_READ);
+        assert_eq!(import.as_str(), CAP_PROFILE_READ);
     }
 
     #[test]

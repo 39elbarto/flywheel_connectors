@@ -4906,10 +4906,12 @@ dependencies = [
 name = "fcp-nostr"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
  "bech32",
+ "cbc",
  "chrono",
  "ciborium",
  "fcp-async-core",
@@ -4919,6 +4921,7 @@ dependencies = [
  "fcp-sdk",
  "fcp-streaming",
  "hex",
+ "rand 0.8.6",
  "reqwest 0.13.2",
  "secp256k1",
  "serde",

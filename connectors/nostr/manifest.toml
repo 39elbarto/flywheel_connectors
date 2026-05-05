@@ -6,20 +6,35 @@ schema_version = "2.1"
 id = "fcp.nostr"
 name = "Nostr Relay"
 version = "0.1.0"
-description = "Nostr relay connector for first-slice public-note publishing, bounded public-event queries, relay inspection, and health verification"
+description = "Nostr relay connector for public-note publishing, NIP-01 profile management, NIP-04 encrypted DM send, inbound DM streaming, bounded public-event queries, relay inspection, and health verification"
 archetype = "operational"
 homepage = "https://github.com/nostr-protocol/nips"
 
 # Auth and scope model:
-# - One connector instance is bound to one raw secp256k1 signing key and one static relay list.
+# - One connector instance is bound to one secp256k1 signing key and one static relay list.
 # - Authentication is not OAuth or delegated user auth; the connector signs locally with
-#   `secret_key_hex` and derives the matching x-only public key in-process.
-# - This first slice publishes public kind-1 notes and reads public relay history.
-# - Bech32 `nsec` input, encrypted DMs (NIP-04/NIP-17), profile metadata publication, long-lived
-#   subscriptions, relay scoring, relay discovery, and relay policy mutation are explicit
-#   non-goals for this initial connector.
+#   `secret_key_hex` (raw hex or NIP-19 `nsec`) and derives the matching x-only public key in-process.
+# - The connector publishes public kind-1 notes and outbound NIP-04 kind-4
+#   encrypted DMs and NIP-01 profile metadata as distinct operations with
+#   distinct write capabilities.
+# - The connector subscribes to inbound NIP-04 kind-4 DMs tagged to the bound
+#   public key through the `nostr.dm.inbound` event topic. Replay is not a host
+#   buffer promise; restart/reconnect suppression is connector-owned state under
+#   handshake `zone_dir` when provided.
+# - Inbound DM policy and bounds live in connector configuration under `inbound_dm`:
+#   policy_mode, allowed_senders, stale/future skew, content-size bound, recent-ID
+#   capacity, rate window, global rate limit, and per-sender rate limit. Sender
+#   keys may be raw hex, NIP-19 npub, or nostr:npub and normalize to canonical hex.
+# - Durable inbound state and diagnostics contain public event IDs, public sender
+#   keys, relay URLs, cursors, counters, and generation metadata only; plaintext,
+#   private keys, shared secrets, and ciphertext bodies are redacted or omitted.
+# - NIP-01 profile publication/import/state is an additive profile surface and
+#   does not widen `nostr.notes.publish` beyond kind=1 public notes. Profile URLs
+#   must use https and must not target loopback/private/link-local/.local/.internal hosts.
+# - NIP-17 private DMs, relay discovery, ranked routing, public-query dedupe,
+#   and relay policy mutation are explicit non-goals for this connector slice.
 # - Relay URLs must use `ws://` or `wss://`; the configured relay list is the effective network
-#   boundary for this first slice.
+#   boundary for this request-response slice.
 
 [zones]
 home = "z:community"
@@ -38,6 +53,34 @@ capability = "nostr.notes.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+
+[provides.operations.dm_send]
+summary = "Encrypt and publish a NIP-04 direct message to configured relays"
+capability = "nostr.dm.write"
+risk = "high"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.profile_publish]
+summary = "Validate, sign, publish, and persist NIP-01 profile metadata"
+capability = "nostr.profile.write"
+risk = "medium"
+safety_tier = "risky"
+idempotency = "none"
+
+[provides.operations.profile_state]
+summary = "Read local NIP-01 profile publish state"
+capability = "nostr.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.profile_import]
+summary = "Import newest verified NIP-01 profile metadata from configured relays"
+capability = "nostr.profile.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
 
 [provides.operations.events_query]
 summary = "Query bounded public Nostr events from configured relays"
@@ -66,6 +109,17 @@ capability = "nostr.health.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+# Top-level event_caps is intentionally omitted here because the current
+# manifest schema requires min_buffer_events > 0 whenever streaming = true.
+# Runtime handshake/introspection truthfully advertise streaming=true,
+# replay=false, min_buffer_events=0 for the connector-owned inbound DM stream.
+[provides.events.inbound_dm]
+description = "Inbound NIP-04 direct message accepted after signature, target, replay, rate-limit, decrypt, and configured sender-policy checks"
+streaming = true
+replay = false
+topic = "nostr.dm.inbound"
+requires_ack = false
 
 [sandbox]
 profile = "strict"

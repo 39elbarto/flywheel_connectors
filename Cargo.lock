@@ -3288,6 +3288,7 @@ dependencies = [
  "fcp-jira",
  "fcp-kernel",
  "fcp-kubernetes",
+ "fcp-line",
  "fcp-linear",
  "fcp-linkedin",
  "fcp-llm-router",

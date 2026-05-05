@@ -20,7 +20,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::LineClient;
-use crate::types::{Message, RichMenu};
+use crate::types::{Message, RichMenu, validate_messages};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
@@ -528,6 +528,215 @@ impl Default for LineConnector {
     }
 }
 
+fn message_array_schema() -> serde_json::Value {
+    json!({
+        "type": "array",
+        "description": "Array of LINE message objects (1-5)",
+        "minItems": 1,
+        "maxItems": 5,
+        "items": message_schema()
+    })
+}
+
+fn message_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {
+                "required": ["type", "text"],
+                "properties": {
+                    "type": { "const": "text" },
+                    "text": { "type": "string", "minLength": 1 }
+                }
+            },
+            {
+                "required": ["type", "originalContentUrl", "previewImageUrl"],
+                "properties": {
+                    "type": { "const": "image" },
+                    "originalContentUrl": { "type": "string", "format": "uri", "maxLength": 2000 },
+                    "previewImageUrl": { "type": "string", "format": "uri", "maxLength": 2000 }
+                }
+            },
+            {
+                "required": ["type", "packageId", "stickerId"],
+                "properties": {
+                    "type": { "const": "sticker" },
+                    "packageId": { "type": "string", "minLength": 1 },
+                    "stickerId": { "type": "string", "minLength": 1 }
+                }
+            },
+            {
+                "required": ["type", "altText", "template"],
+                "properties": {
+                    "type": { "const": "template" },
+                    "altText": { "type": "string", "minLength": 1, "maxLength": 1500 },
+                    "template": template_schema()
+                }
+            },
+            {
+                "required": ["type", "altText", "contents"],
+                "properties": {
+                    "type": { "const": "flex" },
+                    "altText": { "type": "string", "minLength": 1, "maxLength": 1500 },
+                    "contents": {
+                        "type": "object",
+                        "required": ["type"],
+                        "properties": {
+                            "type": { "enum": ["bubble", "carousel"] }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn template_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {
+                "required": ["type", "text", "actions"],
+                "properties": {
+                    "type": { "const": "confirm" },
+                    "text": { "type": "string", "minLength": 1, "maxLength": 240 },
+                    "actions": action_array_schema(2, 2)
+                }
+            },
+            {
+                "required": ["type", "text", "actions"],
+                "properties": {
+                    "type": { "const": "buttons" },
+                    "thumbnailImageUrl": { "type": "string", "format": "uri", "maxLength": 2000 },
+                    "imageAspectRatio": { "enum": ["rectangle", "square"] },
+                    "imageSize": { "enum": ["cover", "contain"] },
+                    "imageBackgroundColor": { "type": "string" },
+                    "title": { "type": "string", "minLength": 1, "maxLength": 40 },
+                    "text": { "type": "string", "minLength": 1, "maxLength": 160 },
+                    "defaultAction": action_schema(),
+                    "actions": action_array_schema(1, 4)
+                }
+            },
+            {
+                "required": ["type", "columns"],
+                "properties": {
+                    "type": { "const": "carousel" },
+                    "columns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "required": ["text", "actions"],
+                            "properties": {
+                                "thumbnailImageUrl": { "type": "string", "format": "uri", "maxLength": 2000 },
+                                "imageBackgroundColor": { "type": "string" },
+                                "title": { "type": "string", "minLength": 1, "maxLength": 40 },
+                                "text": { "type": "string", "minLength": 1, "maxLength": 120 },
+                                "defaultAction": action_schema(),
+                                "actions": action_array_schema(1, 3)
+                            }
+                        }
+                    },
+                    "imageAspectRatio": { "enum": ["rectangle", "square"] },
+                    "imageSize": { "enum": ["cover", "contain"] }
+                }
+            },
+            {
+                "required": ["type", "columns"],
+                "properties": {
+                    "type": { "const": "image_carousel" },
+                    "columns": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 10,
+                        "items": {
+                            "type": "object",
+                            "required": ["imageUrl", "action"],
+                            "properties": {
+                                "imageUrl": { "type": "string", "format": "uri", "maxLength": 2000 },
+                                "action": action_schema()
+                            }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn action_array_schema(min_items: usize, max_items: usize) -> serde_json::Value {
+    json!({
+        "type": "array",
+        "minItems": min_items,
+        "maxItems": max_items,
+        "items": action_schema()
+    })
+}
+
+fn action_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "oneOf": [
+            {
+                "required": ["type", "label", "text"],
+                "properties": {
+                    "type": { "const": "message" },
+                    "label": { "type": "string", "minLength": 1, "maxLength": 20 },
+                    "text": { "type": "string", "minLength": 1, "maxLength": 300 }
+                }
+            },
+            {
+                "required": ["type", "label", "data"],
+                "properties": {
+                    "type": { "const": "postback" },
+                    "label": { "type": "string", "minLength": 1, "maxLength": 20 },
+                    "data": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "displayText": { "type": "string", "minLength": 1, "maxLength": 300 },
+                    "inputOption": { "enum": ["closeRichMenu", "openRichMenu", "openKeyboard", "openVoice"] },
+                    "fillInText": { "type": "string", "minLength": 1, "maxLength": 300 }
+                }
+            },
+            {
+                "required": ["type", "label", "uri"],
+                "properties": {
+                    "type": { "const": "uri" },
+                    "label": { "type": "string", "minLength": 1, "maxLength": 20 },
+                    "uri": { "type": "string", "maxLength": 1000 },
+                    "altUri": {
+                        "type": "object",
+                        "properties": {
+                            "desktop": { "type": "string", "maxLength": 1000 }
+                        }
+                    }
+                }
+            }
+        ]
+    })
+}
+
+fn parse_messages(input: &serde_json::Value) -> FcpResult<Vec<Message>> {
+    let messages: Vec<Message> = input
+        .get("messages")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Invalid 'messages' field: {e}"),
+        })?
+        .ok_or(FcpError::InvalidRequest {
+            code: 1005,
+            message: "Missing 'messages' field".into(),
+        })?;
+
+    validate_messages(&messages).map_err(|err| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("Invalid 'messages' field: {err}"),
+    })?;
+
+    Ok(messages)
+}
+
 /// Build the typed operations catalog.
 pub fn operations_info() -> Vec<OperationInfo> {
     vec![
@@ -540,11 +749,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "required": ["to", "messages"],
                 "properties": {
                     "to": { "type": "string", "description": "User ID to send to" },
-                    "messages": {
-                        "type": "array",
-                        "description": "Array of message objects (max 5)",
-                        "items": { "type": "object" }
-                    }
+                    "messages": message_array_schema()
                 }
             }),
             output_schema: json!({
@@ -578,11 +783,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "required": ["reply_token", "messages"],
                 "properties": {
                     "reply_token": { "type": "string", "description": "Reply token from webhook" },
-                    "messages": {
-                        "type": "array",
-                        "description": "Array of message objects (max 5)",
-                        "items": { "type": "object" }
-                    }
+                    "messages": message_array_schema()
                 }
             }),
             output_schema: json!({
@@ -620,11 +821,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                         "description": "Array of user IDs (max 500)",
                         "items": { "type": "string" }
                     },
-                    "messages": {
-                        "type": "array",
-                        "description": "Array of message objects (max 5)",
-                        "items": { "type": "object" }
-                    }
+                    "messages": message_array_schema()
                 }
             }),
             output_schema: json!({
@@ -914,6 +1111,9 @@ impl FcpConnector for LineConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -1095,19 +1295,7 @@ impl LineConnector {
                         message: "Missing 'to' field".into(),
                     },
                 )?;
-                let messages: Vec<Message> = req
-                    .input
-                    .get("messages")
-                    .map(|v| serde_json::from_value(v.clone()))
-                    .transpose()
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: format!("Invalid 'messages' field: {e}"),
-                    })?
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'messages' field".into(),
-                    })?;
+                let messages = parse_messages(&req.input)?;
 
                 let resp = client
                     .push_message(runtime, to, messages)
@@ -1126,19 +1314,7 @@ impl LineConnector {
                         code: 1005,
                         message: "Missing 'reply_token' field".into(),
                     })?;
-                let messages: Vec<Message> = req
-                    .input
-                    .get("messages")
-                    .map(|v| serde_json::from_value(v.clone()))
-                    .transpose()
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: format!("Invalid 'messages' field: {e}"),
-                    })?
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'messages' field".into(),
-                    })?;
+                let messages = parse_messages(&req.input)?;
 
                 let resp = client
                     .reply_message(runtime, reply_token, messages)
@@ -1162,19 +1338,7 @@ impl LineConnector {
                         code: 1005,
                         message: "Missing 'to' field".into(),
                     })?;
-                let messages: Vec<Message> = req
-                    .input
-                    .get("messages")
-                    .map(|v| serde_json::from_value(v.clone()))
-                    .transpose()
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: format!("Invalid 'messages' field: {e}"),
-                    })?
-                    .ok_or(FcpError::InvalidRequest {
-                        code: 1005,
-                        message: "Missing 'messages' field".into(),
-                    })?;
+                let messages = parse_messages(&req.input)?;
 
                 let resp = client
                     .multicast(runtime, &to, messages)

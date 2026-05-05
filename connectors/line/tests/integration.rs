@@ -14,8 +14,8 @@ use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_line::connector::{LineConnector, operations_info};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    SafetyTier, ZoneId,
+    HandshakeRequest, IdempotencyClass, InstanceId, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, SafetyTier, ZoneId,
 };
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
@@ -24,13 +24,16 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+const OP_PUSH: &str = "line.messages.push";
+const OP_REPLY: &str = "line.messages.reply";
+const OP_MULTICAST: &str = "line.messages.multicast";
 const OP_GROUP_MEMBERS: &str = "line.group.members";
 const OP_RICH_MENU_DELETE: &str = "line.rich_menu.delete";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/line_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/line_connector/<timestamp>";
 const TOKEN: &str = "line_test_token";
 
-fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_req(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -45,16 +48,16 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
         ],
         host: None,
         transport_caps: None,
-        requested_instance_id: None,
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
-    let capability = match op {
-        OP_GROUP_MEMBERS => "line.profile.read",
-        OP_RICH_MENU_DELETE => "line.menu.write",
-        _ => panic!("unsupported LINE integration operation: {op}"),
-    };
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &InstanceId,
+    op: &'static str,
+) -> CapabilityToken {
+    let capability = capability_for_operation(op).expect("LINE integration operation supported");
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -70,10 +73,21 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints cbor accepted")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
+}
+
+fn capability_for_operation(op: &str) -> Option<&'static str> {
+    match op {
+        OP_PUSH | OP_REPLY | OP_MULTICAST => Some("line.messages.write"),
+        OP_GROUP_MEMBERS => Some("line.profile.read"),
+        OP_RICH_MENU_DELETE => Some("line.menu.write"),
+        _ => None,
+    }
 }
 
 fn invoke_req(
@@ -100,9 +114,10 @@ fn invoke_req(
     }
 }
 
-async fn setup_connector(base_url: &str) -> (LineConnector, Ed25519SigningKey) {
+async fn setup_connector(base_url: &str) -> (LineConnector, Ed25519SigningKey, InstanceId) {
     let mut connector = LineConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let instance_id = InstanceId::new();
     connector
         .configure(json!({
             "base_url": base_url,
@@ -118,10 +133,19 @@ async fn setup_connector(base_url: &str) -> (LineConnector, Ed25519SigningKey) {
         .await
         .unwrap();
     connector
-        .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
+        .handshake(handshake_req(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.clone(),
+        ))
         .await
         .unwrap();
-    (connector, signing_key)
+    (connector, signing_key, instance_id)
+}
+
+async fn recorded_json_body(server: &MockServer) -> serde_json::Value {
+    let requests = server.received_requests().await.expect("recorded requests");
+    assert_eq!(requests.len(), 1);
+    serde_json::from_slice(&requests[0].body).expect("request body should be JSON")
 }
 
 async fn mock_bot_info(server: &MockServer, status: u16) {
@@ -181,7 +205,7 @@ async fn self_check_ready_with_mock_line_api_and_evidence() {
     let server = MockServer::start().await;
     mock_bot_info(&server, 200).await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri()).await;
     let doctor = serde_json::to_value(connector.doctor()).unwrap();
     assert_doctor_response_valid(&doctor);
     assert_eq!(doctor["ready"], true);
@@ -218,13 +242,176 @@ async fn self_check_retryable_line_failure_reports_degraded() {
     let server = MockServer::start().await;
     mock_bot_info(&server, 429).await;
 
-    let (connector, _signing_key) = setup_connector(&server.uri()).await;
+    let (connector, _signing_key, _instance_id) = setup_connector(&server.uri()).await;
     let report = connector.self_check().await.unwrap();
     let value = serde_json::to_value(&report).unwrap();
     assert_self_check_not_ready(&value);
     assert_eq!(value["status"], "degraded");
     assert_eq!(value["reason_code"], "self_check_retryable");
     assert_eq!(value["details"]["live_probe"]["retryable"], true);
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_reply_sends_template_message_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/reply"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_REPLY,
+            json!({
+                "reply_token": "reply-token-1",
+                "messages": [{
+                    "type": "template",
+                    "altText": "Confirm deployment",
+                    "template": {
+                        "type": "confirm",
+                        "text": "Deploy now?",
+                        "actions": [
+                            { "type": "message", "label": "Yes", "text": "deploy yes" },
+                            { "type": "postback", "label": "No", "data": "deploy=no", "displayText": "No" }
+                        ]
+                    }
+                }]
+            }),
+            generate_valid_token(&signing_key, &instance_id, OP_REPLY),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let body = recorded_json_body(&server).await;
+    assert_eq!(body["replyToken"], "reply-token-1");
+    assert_eq!(body["messages"][0]["type"], "template");
+    assert_eq!(body["messages"][0]["template"]["type"], "confirm");
+    assert_eq!(
+        body["messages"][0]["template"]["actions"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_push_sends_flex_message_json() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/push"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_PUSH,
+            json!({
+                "to": "U123",
+                "messages": [{
+                    "type": "flex",
+                    "altText": "Status card",
+                    "contents": {
+                        "type": "bubble",
+                        "body": {
+                            "type": "box",
+                            "layout": "vertical",
+                            "contents": [
+                                { "type": "text", "text": "Ready" }
+                            ]
+                        }
+                    }
+                }]
+            }),
+            generate_valid_token(&signing_key, &instance_id, OP_PUSH),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let body = recorded_json_body(&server).await;
+    assert_eq!(body["to"], "U123");
+    assert_eq!(body["messages"][0]["type"], "flex");
+    assert_eq!(body["messages"][0]["altText"], "Status card");
+    assert_eq!(body["messages"][0]["contents"]["type"], "bubble");
+}
+
+#[fcp_async_core::runtime::test]
+async fn invoke_multicast_sends_carousel_and_rejects_oversized_carousel() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/v2/bot/message/multicast"))
+        .and(header("authorization", &format!("Bearer {TOKEN}")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+
+    let column = json!({
+        "text": "Column",
+        "actions": [{ "type": "message", "label": "Pick", "text": "pick" }]
+    });
+    let ten_columns = vec![column.clone(); 10];
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
+    let response = connector
+        .invoke(invoke_req(
+            OP_MULTICAST,
+            json!({
+                "to": ["U1", "U2"],
+                "messages": [{
+                    "type": "template",
+                    "altText": "Carousel",
+                    "template": {
+                        "type": "carousel",
+                        "columns": ten_columns
+                    }
+                }]
+            }),
+            generate_valid_token(&signing_key, &instance_id, OP_MULTICAST),
+        ))
+        .await
+        .unwrap();
+
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let body = recorded_json_body(&server).await;
+    assert_eq!(
+        body["messages"][0]["template"]["columns"]
+            .as_array()
+            .unwrap()
+            .len(),
+        10
+    );
+
+    let too_many_columns = vec![column; 11];
+    let err = connector
+        .invoke(invoke_req(
+            OP_MULTICAST,
+            json!({
+                "to": ["U1"],
+                "messages": [{
+                    "type": "template",
+                    "altText": "Too many",
+                    "template": {
+                        "type": "carousel",
+                        "columns": too_many_columns
+                    }
+                }]
+            }),
+            generate_valid_token(&signing_key, &instance_id, OP_MULTICAST),
+        ))
+        .await
+        .unwrap_err();
+
+    assert!(
+        err.to_string().contains("at most 10 columns"),
+        "unexpected error: {err}"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -241,7 +428,7 @@ async fn invoke_group_members_preserves_pagination_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
     let response = connector
         .invoke(invoke_req(
             OP_GROUP_MEMBERS,
@@ -249,7 +436,7 @@ async fn invoke_group_members_preserves_pagination_evidence() {
                 "group_id": "C123",
                 "start": "next-1"
             }),
-            generate_valid_token(&signing_key, OP_GROUP_MEMBERS),
+            generate_valid_token(&signing_key, &instance_id, OP_GROUP_MEMBERS),
         ))
         .await
         .unwrap();
@@ -274,14 +461,14 @@ async fn invoke_rich_menu_delete_emits_destructive_evidence() {
         .mount(&server)
         .await;
 
-    let (connector, signing_key) = setup_connector(&server.uri()).await;
+    let (connector, signing_key, instance_id) = setup_connector(&server.uri()).await;
     let response = connector
         .invoke(invoke_req(
             OP_RICH_MENU_DELETE,
             json!({
                 "rich_menu_id": "richmenu-abc123"
             }),
-            generate_valid_token(&signing_key, OP_RICH_MENU_DELETE),
+            generate_valid_token(&signing_key, &instance_id, OP_RICH_MENU_DELETE),
         ))
         .await
         .unwrap();
@@ -323,6 +510,26 @@ fn introspection_emits_v3_compliance_evidence() {
     assert_eq!(
         group_members["idempotency"],
         serde_json::to_value(IdempotencyClass::Strict).unwrap()
+    );
+
+    let push = operations
+        .iter()
+        .find(|operation| operation["id"] == OP_PUSH)
+        .expect("push operation");
+    let message_schema = &push["input_schema"]["properties"]["messages"]["items"]["oneOf"];
+    assert!(
+        message_schema
+            .as_array()
+            .expect("message schema oneOf")
+            .iter()
+            .any(|variant| variant["properties"]["type"]["const"] == "template")
+    );
+    assert!(
+        message_schema
+            .as_array()
+            .expect("message schema oneOf")
+            .iter()
+            .any(|variant| variant["properties"]["type"]["const"] == "flex")
     );
 
     println!(

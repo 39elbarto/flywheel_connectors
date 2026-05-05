@@ -95,6 +95,7 @@ e2e-full = [
     "redis",
     "postgresql",
     "whisper",
+    "line",
 ]
 openai = ["dep:fcp-openai"]
 anthropic = ["dep:fcp-anthropic"]
@@ -182,6 +183,7 @@ zapier = ["dep:fcp-zapier"]
 redis = ["dep:fcp-redis"]
 postgresql = ["dep:fcp-postgresql"]
 whisper = ["dep:fcp-whisper"]
+line = ["dep:fcp-line"]
 
 [dependencies]
 fcp-core = { workspace = true }
@@ -286,6 +288,7 @@ fcp-zapier = { path = "../../connectors/zapier", optional = true }
 fcp-redis = { path = "../../connectors/redis", optional = true }
 fcp-postgresql = { path = "../../connectors/postgresql", optional = true }
 fcp-whisper = { path = "../../connectors/whisper", optional = true }
+fcp-line = { path = "../../connectors/line", optional = true }
 
 [dev-dependencies]
 fcp-kernel = { workspace = true }

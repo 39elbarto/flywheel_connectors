@@ -23,7 +23,8 @@ use sha2::{Digest, Sha256};
 
 use crate::client::BlueBubblesClient;
 use crate::types::{
-    BlueBubblesConfig, Message, QueryParams, bluebubbles_webhook_source_dedupe_ids,
+    BlueBubblesConfig, BlueBubblesWebhookCoalescingConfig, Message,
+    NormalizedBlueBubblesWebhookMessage, QueryParams, bluebubbles_webhook_source_dedupe_ids,
     default_webhook_events, normalize_bluebubbles_webhook_payload,
 };
 
@@ -247,6 +248,405 @@ impl BlueBubblesInboundDedupeStore {
     }
 }
 
+#[derive(Debug, Clone)]
+struct BlueBubblesCoalescingBuffer {
+    entries: Vec<NormalizedBlueBubblesWebhookMessage>,
+    last_seen_ms: i64,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct BlueBubblesCoalescingSummary {
+    enabled: bool,
+    decision: &'static str,
+    key: Option<String>,
+    emitted_count: usize,
+    buffered_count: usize,
+    pending_buffer_count: usize,
+    truncated_fields: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct BlueBubblesCoalescingOutcome {
+    status: &'static str,
+    events: Vec<NormalizedBlueBubblesWebhookMessage>,
+    summary: BlueBubblesCoalescingSummary,
+}
+
+#[derive(Debug, Default)]
+struct BlueBubblesWebhookCoalescer {
+    buffers: Mutex<BTreeMap<String, BlueBubblesCoalescingBuffer>>,
+}
+
+impl BlueBubblesWebhookCoalescer {
+    fn ingest(
+        &self,
+        config: &BlueBubblesWebhookCoalescingConfig,
+        account_id: &str,
+        event: NormalizedBlueBubblesWebhookMessage,
+        observed_at_ms: i64,
+    ) -> FcpResult<BlueBubblesCoalescingOutcome> {
+        if !config.enabled {
+            return Ok(Self::immediate_outcome(
+                false,
+                "disabled",
+                None,
+                event,
+                0,
+                Vec::new(),
+            ));
+        }
+
+        let Some((key, key_reason)) = coalescing_key(config, account_id, &event) else {
+            return Ok(Self::immediate_outcome(
+                true,
+                "ineligible_immediate",
+                None,
+                event,
+                self.pending_count()?,
+                Vec::new(),
+            ));
+        };
+
+        let mut buffers = self.lock_buffers()?;
+        let mut emitted = Self::flush_expired_locked(config, &mut buffers, observed_at_ms);
+        let mut truncated_fields = collect_truncated_fields(&emitted);
+
+        let buffer_count = if let Some(buffer) = buffers.get_mut(&key) {
+            buffer.entries.push(event);
+            buffer.last_seen_ms = observed_at_ms;
+            buffer.entries.len()
+        } else {
+            if buffers.len() >= config.max_pending_buffers {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "BlueBubbles webhook coalescing pending buffer limit exceeded".into(),
+                });
+            }
+            buffers.insert(
+                key.clone(),
+                BlueBubblesCoalescingBuffer {
+                    entries: vec![event],
+                    last_seen_ms: observed_at_ms,
+                },
+            );
+            1
+        };
+
+        let decision = if buffer_count >= config.max_source_messages {
+            if let Some(buffer) = buffers.remove(&key) {
+                let combined = combine_coalesced_messages(config, buffer.entries);
+                truncated_fields.extend(combined.coalescing_truncated_fields.clone());
+                emitted.push(combined);
+            }
+            "max_source_messages_flushed"
+        } else if emitted.is_empty() {
+            key_reason
+        } else {
+            "expired_buffers_flushed"
+        };
+
+        let pending_buffer_count = buffers.len();
+        let current_buffered_count = buffers.get(&key).map_or(0, |buffer| buffer.entries.len());
+        drop(buffers);
+
+        truncated_fields.sort();
+        truncated_fields.dedup();
+        let status = if emitted.is_empty() {
+            "buffered"
+        } else {
+            "accepted"
+        };
+        let emitted_count = emitted.len();
+
+        Ok(BlueBubblesCoalescingOutcome {
+            status,
+            events: emitted,
+            summary: BlueBubblesCoalescingSummary {
+                enabled: true,
+                decision,
+                key: Some(key),
+                emitted_count,
+                buffered_count: current_buffered_count,
+                pending_buffer_count,
+                truncated_fields,
+            },
+        })
+    }
+
+    fn flush_all(
+        &self,
+        config: &BlueBubblesWebhookCoalescingConfig,
+    ) -> FcpResult<BlueBubblesCoalescingOutcome> {
+        let drained = {
+            let mut buffers = self.lock_buffers()?;
+            std::mem::take(&mut *buffers)
+        };
+        let events = drained
+            .into_values()
+            .map(|buffer| combine_coalesced_messages(config, buffer.entries))
+            .collect::<Vec<_>>();
+        let truncated_fields = collect_truncated_fields(&events);
+        Ok(BlueBubblesCoalescingOutcome {
+            status: "flushed",
+            summary: BlueBubblesCoalescingSummary {
+                enabled: config.enabled,
+                decision: "flush_requested",
+                key: None,
+                emitted_count: events.len(),
+                buffered_count: 0,
+                pending_buffer_count: 0,
+                truncated_fields,
+            },
+            events,
+        })
+    }
+
+    fn drain_for_shutdown(
+        &self,
+        config: &BlueBubblesWebhookCoalescingConfig,
+    ) -> FcpResult<Vec<NormalizedBlueBubblesWebhookMessage>> {
+        Ok(self.flush_all(config)?.events)
+    }
+
+    fn pending_count(&self) -> FcpResult<usize> {
+        Ok(self.lock_buffers()?.len())
+    }
+
+    fn lock_buffers(
+        &self,
+    ) -> FcpResult<std::sync::MutexGuard<'_, BTreeMap<String, BlueBubblesCoalescingBuffer>>> {
+        self.buffers.lock().map_err(|_| FcpError::Internal {
+            message: "BlueBubbles webhook coalescing state lock was poisoned".into(),
+        })
+    }
+
+    fn flush_expired_locked(
+        config: &BlueBubblesWebhookCoalescingConfig,
+        buffers: &mut BTreeMap<String, BlueBubblesCoalescingBuffer>,
+        observed_at_ms: i64,
+    ) -> Vec<NormalizedBlueBubblesWebhookMessage> {
+        let debounce_ms = i64::try_from(config.debounce_ms).unwrap_or(i64::MAX);
+        let drained = std::mem::take(buffers);
+        let mut retained = BTreeMap::new();
+        let mut expired = Vec::new();
+
+        for (key, buffer) in drained {
+            let elapsed_ms = observed_at_ms.saturating_sub(buffer.last_seen_ms);
+            if elapsed_ms >= debounce_ms {
+                expired.push(combine_coalesced_messages(config, buffer.entries));
+            } else {
+                retained.insert(key, buffer);
+            }
+        }
+
+        *buffers = retained;
+        expired
+    }
+
+    fn immediate_outcome(
+        enabled: bool,
+        decision: &'static str,
+        key: Option<String>,
+        event: NormalizedBlueBubblesWebhookMessage,
+        pending_buffer_count: usize,
+        truncated_fields: Vec<String>,
+    ) -> BlueBubblesCoalescingOutcome {
+        BlueBubblesCoalescingOutcome {
+            status: "accepted",
+            events: vec![event],
+            summary: BlueBubblesCoalescingSummary {
+                enabled,
+                decision,
+                key,
+                emitted_count: 1,
+                buffered_count: 0,
+                pending_buffer_count,
+                truncated_fields,
+            },
+        }
+    }
+}
+
+fn coalescing_key(
+    config: &BlueBubblesWebhookCoalescingConfig,
+    account_id: &str,
+    event: &NormalizedBlueBubblesWebhookMessage,
+) -> Option<(String, &'static str)> {
+    if event.is_group || event.is_from_me || event.is_tapback || event.event_type != "new-message" {
+        return None;
+    }
+
+    if starts_with_immediate_command(config, event.text.as_deref()) {
+        return None;
+    }
+
+    let account_id = account_id.trim();
+    let account_id = if account_id.is_empty() {
+        "default"
+    } else {
+        account_id
+    };
+
+    if let (Some(balloon_bundle_id), Some(associated_message_guid)) = (
+        event.balloon_bundle_id.as_deref(),
+        event.associated_message_guid.as_deref(),
+    ) {
+        if !balloon_bundle_id.trim().is_empty() && !associated_message_guid.trim().is_empty() {
+            return Some((
+                format!(
+                    "bluebubbles:{account_id}:msg:{}",
+                    associated_message_guid.trim()
+                ),
+                "message_balloon_buffered",
+            ));
+        }
+    }
+
+    let chat_key = event
+        .chat_guid
+        .as_deref()
+        .or(event.chat_identifier.as_deref())?
+        .trim();
+    let sender_id = event.sender_id.as_deref()?.trim();
+    if chat_key.is_empty() || sender_id.is_empty() {
+        return None;
+    }
+
+    Some((
+        format!("bluebubbles:{account_id}:dm:{chat_key}:{sender_id}"),
+        "dm_same_sender_buffered",
+    ))
+}
+
+fn starts_with_immediate_command(
+    config: &BlueBubblesWebhookCoalescingConfig,
+    text: Option<&str>,
+) -> bool {
+    let Some(text) = text.map(str::trim).filter(|text| !text.is_empty()) else {
+        return false;
+    };
+    config
+        .immediate_command_prefixes
+        .iter()
+        .any(|prefix| text.starts_with(prefix))
+}
+
+fn combine_coalesced_messages(
+    config: &BlueBubblesWebhookCoalescingConfig,
+    entries: Vec<NormalizedBlueBubblesWebhookMessage>,
+) -> NormalizedBlueBubblesWebhookMessage {
+    let mut entries = entries;
+    if entries.len() <= 1 {
+        return entries.pop().expect("coalescing buffer is never empty");
+    }
+
+    let mut truncated_fields = Vec::new();
+    let mut all_source_ids = Vec::new();
+    for entry in &entries {
+        push_unique_source_id(&mut all_source_ids, &entry.event_id);
+        for source_id in &entry.source_message_ids {
+            push_unique_source_id(&mut all_source_ids, source_id);
+        }
+    }
+
+    let bounded_entries = if entries.len() > config.max_source_messages {
+        truncated_fields.push("source_messages".to_string());
+        let mut bounded = entries
+            .iter()
+            .take(config.max_source_messages.saturating_sub(1))
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some(last) = entries.last().cloned() {
+            bounded.push(last);
+        }
+        bounded
+    } else {
+        entries.clone()
+    };
+
+    let mut first = entries.remove(0);
+    let mut seen_texts = Vec::<String>::new();
+    let mut text_parts = Vec::new();
+    for entry in &bounded_entries {
+        let Some(text) = entry
+            .text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+        else {
+            continue;
+        };
+        let normalized = text.to_ascii_lowercase();
+        if seen_texts.iter().any(|seen| seen == &normalized) {
+            continue;
+        }
+        seen_texts.push(normalized);
+        text_parts.push(text.to_string());
+    }
+    let mut combined_text = text_parts.join(" ");
+    if combined_text.chars().count() > config.max_text_chars {
+        truncated_fields.push("text".to_string());
+        combined_text = combined_text
+            .chars()
+            .take(config.max_text_chars)
+            .collect::<String>();
+        combined_text.push_str("...[truncated]");
+    }
+    first.text = (!combined_text.is_empty()).then_some(combined_text);
+
+    let mut attachments = bounded_entries
+        .iter()
+        .flat_map(|entry| entry.attachments.iter().cloned())
+        .collect::<Vec<_>>();
+    if attachments.len() > config.max_attachments {
+        truncated_fields.push("attachments".to_string());
+        attachments.truncate(config.max_attachments);
+    }
+    first.attachments = attachments;
+
+    first.date_created_ms = bounded_entries
+        .iter()
+        .filter_map(|entry| entry.date_created_ms)
+        .max()
+        .or(first.date_created_ms);
+    first.reply_to_message_guid = bounded_entries
+        .iter()
+        .find_map(|entry| entry.reply_to_message_guid.clone())
+        .or(first.reply_to_message_guid);
+    first.associated_message_guid = bounded_entries
+        .iter()
+        .find_map(|entry| entry.associated_message_guid.clone())
+        .or(first.associated_message_guid);
+    first.balloon_bundle_id = None;
+    first.coalesced_source_count = Some(all_source_ids.len());
+    first.source_message_ids = all_source_ids
+        .into_iter()
+        .filter(|source_id| source_id != &first.event_id)
+        .collect();
+    truncated_fields.sort();
+    truncated_fields.dedup();
+    first.coalescing_truncated_fields = truncated_fields;
+    first
+}
+
+fn push_unique_source_id(source_ids: &mut Vec<String>, raw_id: &str) {
+    let value = raw_id.trim();
+    if value.is_empty() || source_ids.iter().any(|existing| existing == value) {
+        return;
+    }
+    source_ids.push(value.to_string());
+}
+
+fn collect_truncated_fields(events: &[NormalizedBlueBubblesWebhookMessage]) -> Vec<String> {
+    let mut fields = events
+        .iter()
+        .flat_map(|event| event.coalescing_truncated_fields.iter().cloned())
+        .collect::<Vec<_>>();
+    fields.sort();
+    fields.dedup();
+    fields
+}
+
 // Doctor types
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorResult {
@@ -276,6 +676,7 @@ struct BlueBubblesState {
     client: BlueBubblesClient,
     runtime: ConnectorRuntime,
     webhook_dedupe: BlueBubblesInboundDedupeStore,
+    webhook_coalescer: BlueBubblesWebhookCoalescer,
 }
 
 impl BlueBubblesState {
@@ -289,12 +690,14 @@ impl BlueBubblesState {
                 message: format!("Failed to create BlueBubbles client: {error}"),
             })?;
         let webhook_dedupe = BlueBubblesInboundDedupeStore::from_config(&config)?;
+        let webhook_coalescer = BlueBubblesWebhookCoalescer::default();
 
         Ok(Self {
             config,
             client,
             runtime,
             webhook_dedupe,
+            webhook_coalescer,
         })
     }
 }
@@ -447,6 +850,7 @@ impl BlueBubblesConnector {
             });
 
             push_webhook_inbound_doctor_checks(&mut checks, config);
+            push_webhook_coalescing_doctor_checks(&mut checks, config);
         }
 
         DoctorResult::from_checks(checks)
@@ -482,6 +886,29 @@ fn push_webhook_inbound_doctor_checks(checks: &mut Vec<DoctorCheck>, config: &Bl
             } else {
                 "memory-only"
             }
+        )),
+        critical: false,
+    });
+}
+
+fn push_webhook_coalescing_doctor_checks(
+    checks: &mut Vec<DoctorCheck>,
+    config: &BlueBubblesConfig,
+) {
+    let coalescing = config.webhook_coalescing.summary();
+    checks.push(DoctorCheck {
+        name: "webhook_dm_coalescing".into(),
+        passed: true,
+        message: Some(format!(
+            "DM coalescing: enabled={}, debounce={}ms, max={}ms, text_cap={}, attachment_cap={}, source_cap={}, pending_cap={}, immediate_prefixes={}",
+            coalescing.enabled,
+            coalescing.debounce_ms,
+            coalescing.max_debounce_ms,
+            coalescing.max_text_chars,
+            coalescing.max_attachments,
+            coalescing.max_source_messages,
+            coalescing.max_pending_buffers,
+            coalescing.immediate_command_prefix_count
         )),
         critical: false,
     });
@@ -957,7 +1384,6 @@ pub fn operations_info() -> Vec<OperationInfo> {
             ),
             input_schema: json!({
                 "type": "object",
-                "required": ["payload"],
                 "properties": {
                     "payload": {
                         "type": "object",
@@ -970,19 +1396,33 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "account_id": {
                         "type": "string",
                         "description": "Optional account namespace for dedupe; defaults to connector webhook_account_id"
+                    },
+                    "observed_at_ms": {
+                        "type": "integer",
+                        "description": "Optional host-observed epoch-ms timestamp used for deterministic coalescing tests"
+                    },
+                    "flush_coalescing": {
+                        "type": "boolean",
+                        "description": "When true and payload is omitted, drains pending coalesced DM events"
                     }
-                }
+                },
+                "anyOf": [
+                    { "required": ["payload"] },
+                    { "required": ["flush_coalescing"] }
+                ]
             }),
             output_schema: json!({
                 "type": "object",
                 "properties": {
-                    "status": { "type": "string", "enum": ["accepted", "duplicate", "rejected"] },
+                    "status": { "type": "string", "enum": ["accepted", "duplicate", "rejected", "buffered", "flushed"] },
                     "dedupe_id": { "type": "string" },
                     "dedupe_ids": { "type": "array", "items": { "type": "string" } },
                     "duplicate_id": { "type": "string" },
                     "acceptance": { "type": "object" },
                     "policy": { "type": "object" },
-                    "event": { "type": "object" }
+                    "coalescing": { "type": "object" },
+                    "event": { "type": "object" },
+                    "events": { "type": "array", "items": { "type": "object" } }
                 }
             }),
             capability: CapabilityId::from_static(CAP_READ),
@@ -990,10 +1430,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Safe,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance plus duplicate replay suppression".into(),
+                when_to_use: "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, optional DM split-send coalescing, and duplicate replay suppression".into(),
                 common_mistakes: vec![
                     "Leaving webhook_inbound sender/chat policy empty and expecting external senders to be accepted".into(),
                     "Assuming memory-only dedupe survives connector restart; configure webhook_inbound.dedupe_state_path when restart replay suppression is required".into(),
+                    "Enabling webhook_coalescing without arranging a host-side flush after debounce_ms; buffered events are emitted on later ingest or explicit flush".into(),
                 ],
                 examples: vec![
                     r#"{"payload": {"type": "new-message", "data": {"guid": "msg-1", "text": "hello"}}}"#.into(),
@@ -1291,6 +1732,16 @@ impl FcpConnector for BlueBubblesConnector {
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
         if let Some(state) = &self.state {
+            let drained = state
+                .webhook_coalescer
+                .drain_for_shutdown(&state.config.webhook_coalescing)?;
+            if !drained.is_empty() {
+                tracing::info!(
+                    operation = "shutdown",
+                    drained_coalesced_events = drained.len(),
+                    "drained pending BlueBubbles coalescing buffers during shutdown"
+                );
+            }
             state.runtime.shutdown();
         }
         Ok(())
@@ -1632,6 +2083,32 @@ impl BlueBubblesConnector {
                 })
             }
             OP_INGEST_WEBHOOK_EVENT => {
+                let flush_coalescing = req
+                    .input
+                    .get("flush_coalescing")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if flush_coalescing && req.input.get("payload").is_none() {
+                    let outcome = state
+                        .webhook_coalescer
+                        .flush_all(&state.config.webhook_coalescing)?;
+                    let first_event = outcome.events.first().cloned();
+                    return Ok(InvokeResponse::ok(
+                        req.id,
+                        json!({
+                            "status": outcome.status,
+                            "dedupe_id": null,
+                            "dedupe_ids": [],
+                            "duplicate_id": null,
+                            "acceptance": null,
+                            "policy": state.config.webhook_inbound.summary(),
+                            "coalescing": outcome.summary,
+                            "event": first_event,
+                            "events": outcome.events,
+                        }),
+                    ));
+                }
+
                 let payload = req
                     .input
                     .get("payload")
@@ -1654,22 +2131,35 @@ impl BlueBubblesConnector {
                         })?;
                 let acceptance = state.config.webhook_inbound.evaluate(&event);
                 let policy = state.config.webhook_inbound.summary();
-                let (status, duplicate_id) = if acceptance.accepted {
+                let observed_at_ms = req
+                    .input
+                    .get("observed_at_ms")
+                    .and_then(Value::as_i64)
+                    .or(event.date_created_ms)
+                    .unwrap_or_else(|| Utc::now().timestamp_millis());
+                let (status, duplicate_id, coalescing, events) = if acceptance.accepted {
                     match state.webhook_dedupe.claim(&dedupe_ids)? {
                         BlueBubblesDedupeClaim::Claimed => {
                             if let Err(error) = state.webhook_dedupe.finalize(&dedupe_ids) {
                                 let _ = state.webhook_dedupe.release(&dedupe_ids);
                                 return Err(error);
                             }
-                            ("accepted", None)
+                            let outcome = state.webhook_coalescer.ingest(
+                                &state.config.webhook_coalescing,
+                                account_id,
+                                event.clone(),
+                                observed_at_ms,
+                            )?;
+                            (outcome.status, None, Some(outcome.summary), outcome.events)
                         }
                         BlueBubblesDedupeClaim::Duplicate { matched_id } => {
-                            ("duplicate", Some(matched_id))
+                            ("duplicate", Some(matched_id), None, Vec::new())
                         }
                     }
                 } else {
-                    ("rejected", None)
+                    ("rejected", None, None, Vec::new())
                 };
+                let emitted_event = events.first().cloned();
                 let correlation_id = req
                     .correlation_id
                     .as_ref()
@@ -1685,6 +2175,9 @@ impl BlueBubblesConnector {
                     dedupe_decision = %status,
                     duplicate_id = %duplicate_id.as_deref().unwrap_or("none"),
                     inbound_acceptance = %acceptance.reason,
+                    coalescing_decision = %coalescing.as_ref().map_or("none", |summary| summary.decision),
+                    coalescing_emitted_count = coalescing.as_ref().map_or(0, |summary| summary.emitted_count),
+                    coalescing_buffered_count = coalescing.as_ref().map_or(0, |summary| summary.buffered_count),
                     inbound_policy_allow_from_me = policy.allow_from_me,
                     inbound_policy_allowed_sender_count = policy.allowed_sender_count,
                     inbound_policy_allowed_chat_count = policy.allowed_chat_count,
@@ -1701,7 +2194,9 @@ impl BlueBubblesConnector {
                     "duplicate_id": duplicate_id,
                     "acceptance": acceptance,
                     "policy": policy,
-                    "event": event,
+                    "coalescing": coalescing,
+                    "event": emitted_event,
+                    "events": events,
                 })
             }
             OP_GET_SERVER_INFO => {
@@ -1802,6 +2297,25 @@ mod tests {
         config
     }
 
+    fn test_config_with_webhook_coalescing(extra: &serde_json::Value) -> serde_json::Value {
+        let mut config = test_config_with_webhook_inbound(None);
+        config["webhook_coalescing"] = json!({
+            "enabled": true,
+            "debounce_ms": 2500,
+            "max_debounce_ms": 2500,
+            "max_text_chars": 4000,
+            "max_attachments": 20,
+            "max_source_messages": 10,
+            "max_pending_buffers": 16
+        });
+        if let Some(extra) = extra.as_object() {
+            for (key, value) in extra {
+                config["webhook_coalescing"][key] = value.clone();
+            }
+        }
+        config
+    }
+
     fn unique_dedupe_state_path() -> String {
         std::env::temp_dir()
             .join(format!(
@@ -1810,6 +2324,27 @@ mod tests {
             ))
             .to_string_lossy()
             .into_owned()
+    }
+
+    async fn invoke_webhook_result(
+        connector: &BlueBubblesConnector,
+        signing_key: &Ed25519SigningKey,
+        input: serde_json::Value,
+    ) -> serde_json::Value {
+        connector
+            .invoke(InvokeRequest {
+                input,
+                capability_token: generate_valid_token(
+                    connector,
+                    signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap()
+            .result
+            .unwrap()
     }
 
     fn generate_valid_token(
@@ -3150,6 +3685,522 @@ mod tests {
             replay.result.as_ref().unwrap()["duplicate_id"],
             "acct-a:msg-secondary"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_coalesces_same_sender_dm_on_flush() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_coalescing(&json!({})))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 1_000_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-split-1",
+                        "text": "Dump",
+                        "dateCreated": 1_000_i64,
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first["status"], "buffered");
+        assert!(first["event"].is_null());
+        assert_eq!(first["coalescing"]["buffered_count"], 1);
+
+        let second = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 1_700_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-split-2",
+                        "text": "https://example.test/report",
+                        "dateCreated": 1_700_i64,
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "attachments": [{ "guid": "att-url", "mimeType": "image/png" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(second["status"], "buffered");
+        assert_eq!(second["coalescing"]["buffered_count"], 2);
+
+        let flushed = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({ "flush_coalescing": true }),
+        )
+        .await;
+        assert_eq!(flushed["status"], "flushed");
+        assert_eq!(flushed["coalescing"]["emitted_count"], 1);
+        assert_eq!(flushed["events"].as_array().unwrap().len(), 1);
+        let event = &flushed["event"];
+        assert_eq!(event["event_id"], "msg-split-1");
+        assert_eq!(event["text"], "Dump https://example.test/report");
+        assert_eq!(event["attachments"][0]["guid"], "att-url");
+        assert_eq!(event["source_message_ids"], json!(["msg-split-2"]));
+        assert_eq!(event["coalesced_source_count"], 2);
+
+        let replay = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-split-2",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(replay["status"], "duplicate");
+        assert_eq!(replay["duplicate_id"], "acct-a:msg-split-2");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_keeps_groups_and_commands_immediate() {
+        let mut config = test_config_with_webhook_coalescing(&json!({
+            "immediate_command_prefixes": ["/"]
+        }));
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567", "iMessage;+;group-chat"],
+            "allow_group_chats": true
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let group = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-group",
+                        "text": "group message",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;+;group-chat" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(group["status"], "accepted");
+        assert_eq!(group["event"]["event_id"], "msg-group");
+        assert_eq!(group["coalescing"]["decision"], "ineligible_immediate");
+
+        let command = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-command",
+                        "text": "/now",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(command["status"], "accepted");
+        assert_eq!(command["event"]["event_id"], "msg-command");
+
+        let flushed = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({ "flush_coalescing": true }),
+        )
+        .await;
+        assert_eq!(flushed["events"].as_array().unwrap().len(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_rejection_never_buffers() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(json!({
+                "password": "test-password-123",
+                "webhook_coalescing": {
+                    "enabled": true,
+                    "debounce_ms": 2500,
+                    "max_debounce_ms": 2500
+                }
+            }))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let rejected = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-rejected",
+                        "text": "do not buffer",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(rejected["status"], "rejected");
+        assert_eq!(rejected["acceptance"]["reason"], "conversation_not_bound");
+
+        let flushed = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({ "flush_coalescing": true }),
+        )
+        .await;
+        assert_eq!(flushed["events"].as_array().unwrap().len(), 0);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_separates_account_chat_and_sender() {
+        let mut config = test_config_with_webhook_coalescing(&json!({}));
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567", "+15557654321"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567", "iMessage;-;+15557654321"]
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let cases = [
+            (
+                "acct-a",
+                "msg-account-a",
+                "+15551234567",
+                "iMessage;-;+15551234567",
+            ),
+            (
+                "acct-b",
+                "msg-account-b",
+                "+15551234567",
+                "iMessage;-;+15551234567",
+            ),
+            (
+                "acct-a",
+                "msg-sender-b",
+                "+15557654321",
+                "iMessage;-;+15551234567",
+            ),
+            (
+                "acct-a",
+                "msg-chat-b",
+                "+15551234567",
+                "iMessage;-;+15557654321",
+            ),
+        ];
+
+        for (account_id, guid, sender, chat_guid) in cases {
+            let buffered = invoke_webhook_result(
+                &connector,
+                &signing_key,
+                json!({
+                    "account_id": account_id,
+                    "observed_at_ms": 1_000_i64,
+                    "payload": {
+                        "type": "new-message",
+                        "data": {
+                            "guid": guid,
+                            "text": guid,
+                            "handle": { "address": sender },
+                            "chats": [{ "guid": chat_guid }],
+                            "isFromMe": false
+                        }
+                    }
+                }),
+            )
+            .await;
+            assert_eq!(buffered["status"], "buffered");
+        }
+
+        let flushed = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({ "flush_coalescing": true }),
+        )
+        .await;
+        let mut event_ids = flushed["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|event| event["event_id"].as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        event_ids.sort();
+        assert_eq!(
+            event_ids,
+            vec![
+                "msg-account-a",
+                "msg-account-b",
+                "msg-chat-b",
+                "msg-sender-b"
+            ]
+        );
+        assert!(flushed["events"].as_array().unwrap().iter().all(|event| {
+            event["coalesced_source_count"].is_null() && event["source_message_ids"].is_null()
+        }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_rejects_over_limit_pending_buffers() {
+        let mut config = test_config_with_webhook_coalescing(&json!({
+            "max_pending_buffers": 1
+        }));
+        config["webhook_inbound"] = json!({
+            "allowed_sender_ids": ["+15551234567", "+15557654321"],
+            "allowed_chat_guids": ["iMessage;-;+15551234567", "iMessage;-;+15557654321"]
+        });
+
+        let mut connector = BlueBubblesConnector::new();
+        connector.configure(config).await.unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-buffer-1",
+                        "text": "first",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first["status"], "buffered");
+
+        let error = connector
+            .invoke(InvokeRequest {
+                input: json!({
+                    "account_id": "acct-a",
+                    "payload": {
+                        "type": "new-message",
+                        "data": {
+                            "guid": "msg-buffer-2",
+                            "text": "second",
+                            "handle": { "address": "+15557654321" },
+                            "chats": [{ "guid": "iMessage;-;+15557654321" }],
+                            "isFromMe": false
+                        }
+                    }
+                }),
+                capability_token: generate_valid_token(
+                    &connector,
+                    &signing_key,
+                    OP_INGEST_WEBHOOK_EVENT,
+                ),
+                ..base_invoke(connector.id(), OP_INGEST_WEBHOOK_EVENT)
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FcpError::InvalidRequest { ref message, .. }
+                if message.contains("pending buffer limit exceeded")
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_flushes_stale_buffer_before_new_dm() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_coalescing(&json!({})))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 1_000_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-stale-1",
+                        "text": "first",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first["status"], "buffered");
+
+        let second = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 4_000_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-stale-2",
+                        "text": "second",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(second["status"], "accepted");
+        assert_eq!(second["event"]["event_id"], "msg-stale-1");
+        assert_eq!(second["coalescing"]["pending_buffer_count"], 1);
+
+        let flushed = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({ "flush_coalescing": true }),
+        )
+        .await;
+        assert_eq!(flushed["event"]["event_id"], "msg-stale-2");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_invoke_ingest_webhook_event_flushes_on_source_cap_and_marks_truncation() {
+        let mut connector = BlueBubblesConnector::new();
+        connector
+            .configure(test_config_with_webhook_coalescing(&json!({
+                "max_text_chars": 8,
+                "max_attachments": 1,
+                "max_source_messages": 2
+            })))
+            .await
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        connector
+            .handshake(handshake_for_signing_key(&signing_key))
+            .await
+            .unwrap();
+
+        let first = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 1_000_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-cap-1",
+                        "text": "abcdefghij",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "attachments": [{ "guid": "att-1" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(first["status"], "buffered");
+
+        let second = invoke_webhook_result(
+            &connector,
+            &signing_key,
+            json!({
+                "account_id": "acct-a",
+                "observed_at_ms": 1_100_i64,
+                "payload": {
+                    "type": "new-message",
+                    "data": {
+                        "guid": "msg-cap-2",
+                        "text": "klmnop",
+                        "handle": { "address": "+15551234567" },
+                        "chats": [{ "guid": "iMessage;-;+15551234567" }],
+                        "attachments": [{ "guid": "att-2" }],
+                        "isFromMe": false
+                    }
+                }
+            }),
+        )
+        .await;
+        assert_eq!(second["status"], "accepted");
+        assert_eq!(second["event"]["text"], "abcdefgh...[truncated]");
+        assert_eq!(second["event"]["attachments"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            second["event"]["coalescing_truncated_fields"],
+            json!(["attachments", "text"])
+        );
+        assert_eq!(second["event"]["source_message_ids"], json!(["msg-cap-2"]));
     }
 
     #[test]

@@ -59,6 +59,10 @@ pub struct BlueBubblesConfig {
     /// Inbound webhook authorization and replay-dedupe posture.
     #[serde(default)]
     pub webhook_inbound: BlueBubblesWebhookInboundConfig,
+
+    /// Optional DM split-send coalescing posture for accepted inbound webhooks.
+    #[serde(default)]
+    pub webhook_coalescing: BlueBubblesWebhookCoalescingConfig,
 }
 
 /// Policy and persistence config for accepted inbound `BlueBubbles` webhook events.
@@ -200,6 +204,129 @@ pub struct BlueBubblesWebhookInboundSummary {
     pub dedupe_ttl_seconds: u64,
 }
 
+/// Policy and bounds for accepted DM split-send coalescing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BlueBubblesWebhookCoalescingConfig {
+    /// Whether accepted DM events may be buffered and merged before emission.
+    #[serde(default)]
+    pub enabled: bool,
+
+    /// Default debounce window for same-sender DM split sends.
+    #[serde(default = "default_webhook_coalescing_debounce_ms")]
+    pub debounce_ms: u64,
+
+    /// Maximum supported debounce window; protects against hidden long sleeps.
+    #[serde(default = "default_webhook_coalescing_max_debounce_ms")]
+    pub max_debounce_ms: u64,
+
+    /// Text prefixes that force immediate emission instead of buffering.
+    #[serde(default)]
+    pub immediate_command_prefixes: Vec<String>,
+
+    /// Maximum merged text characters before truncation metadata is emitted.
+    #[serde(default = "default_webhook_coalescing_max_text_chars")]
+    pub max_text_chars: usize,
+
+    /// Maximum attachments included in the merged event payload.
+    #[serde(default = "default_webhook_coalescing_max_attachments")]
+    pub max_attachments: usize,
+
+    /// Maximum source entries folded into text/attachment merge work.
+    #[serde(default = "default_webhook_coalescing_max_source_messages")]
+    pub max_source_messages: usize,
+
+    /// Maximum pending DM buffers retained before new buffers are rejected.
+    #[serde(default = "default_webhook_coalescing_max_pending_buffers")]
+    pub max_pending_buffers: usize,
+}
+
+impl Default for BlueBubblesWebhookCoalescingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            debounce_ms: default_webhook_coalescing_debounce_ms(),
+            max_debounce_ms: default_webhook_coalescing_max_debounce_ms(),
+            immediate_command_prefixes: Vec::new(),
+            max_text_chars: default_webhook_coalescing_max_text_chars(),
+            max_attachments: default_webhook_coalescing_max_attachments(),
+            max_source_messages: default_webhook_coalescing_max_source_messages(),
+            max_pending_buffers: default_webhook_coalescing_max_pending_buffers(),
+        }
+    }
+}
+
+impl BlueBubblesWebhookCoalescingConfig {
+    fn validate(mut self) -> Result<Self, FcpError> {
+        self.immediate_command_prefixes = normalize_policy_list(self.immediate_command_prefixes);
+
+        if self.debounce_ms == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.debounce_ms must be greater than zero",
+            ));
+        }
+        if self.max_debounce_ms == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.max_debounce_ms must be greater than zero",
+            ));
+        }
+        if self.debounce_ms > self.max_debounce_ms {
+            return Err(invalid_config(
+                "webhook_coalescing.debounce_ms must not exceed max_debounce_ms",
+            ));
+        }
+        if self.max_text_chars == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.max_text_chars must be greater than zero",
+            ));
+        }
+        if self.max_attachments == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.max_attachments must be greater than zero",
+            ));
+        }
+        if self.max_source_messages == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.max_source_messages must be greater than zero",
+            ));
+        }
+        if self.max_pending_buffers == 0 {
+            return Err(invalid_config(
+                "webhook_coalescing.max_pending_buffers must be greater than zero",
+            ));
+        }
+
+        Ok(self)
+    }
+
+    /// Return a PII-safe summary suitable for doctor/introspection surfaces.
+    #[must_use]
+    pub fn summary(&self) -> BlueBubblesWebhookCoalescingSummary {
+        BlueBubblesWebhookCoalescingSummary {
+            enabled: self.enabled,
+            debounce_ms: self.debounce_ms,
+            max_debounce_ms: self.max_debounce_ms,
+            immediate_command_prefix_count: self.immediate_command_prefixes.len(),
+            max_text_chars: self.max_text_chars,
+            max_attachments: self.max_attachments,
+            max_source_messages: self.max_source_messages,
+            max_pending_buffers: self.max_pending_buffers,
+        }
+    }
+}
+
+/// PII-safe coalescing summary.
+#[derive(Debug, Clone, Serialize)]
+pub struct BlueBubblesWebhookCoalescingSummary {
+    pub enabled: bool,
+    pub debounce_ms: u64,
+    pub max_debounce_ms: u64,
+    pub immediate_command_prefix_count: usize,
+    pub max_text_chars: usize,
+    pub max_attachments: usize,
+    pub max_source_messages: usize,
+    pub max_pending_buffers: usize,
+}
+
 /// Result of applying inbound sender/conversation policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BlueBubblesInboundDecision {
@@ -256,6 +383,7 @@ impl BlueBubblesConfig {
         self.webhook_path = normalize_webhook_path(&self.webhook_path);
         self.webhook_account_id = self.webhook_account_id.trim().to_string();
         self.webhook_inbound = self.webhook_inbound.validate()?;
+        self.webhook_coalescing = self.webhook_coalescing.validate()?;
 
         if self.server_passcode.is_empty() {
             return Err(invalid_config("password must not be empty"));
@@ -348,6 +476,7 @@ impl std::fmt::Debug for BlueBubblesConfig {
             .field("webhook_path", &self.webhook_path)
             .field("webhook_account_id", &self.webhook_account_id)
             .field("webhook_inbound", &self.webhook_inbound.summary())
+            .field("webhook_coalescing", &self.webhook_coalescing.summary())
             .finish()
     }
 }
@@ -390,6 +519,30 @@ const fn default_require_conversation_binding() -> bool {
 
 const fn default_webhook_dedupe_ttl_seconds() -> u64 {
     7 * 24 * 60 * 60
+}
+
+const fn default_webhook_coalescing_debounce_ms() -> u64 {
+    2_500
+}
+
+const fn default_webhook_coalescing_max_debounce_ms() -> u64 {
+    2_500
+}
+
+const fn default_webhook_coalescing_max_text_chars() -> usize {
+    4_000
+}
+
+const fn default_webhook_coalescing_max_attachments() -> usize {
+    20
+}
+
+const fn default_webhook_coalescing_max_source_messages() -> usize {
+    10
+}
+
+const fn default_webhook_coalescing_max_pending_buffers() -> usize {
+    256
 }
 
 fn normalize_webhook_path(path: &str) -> String {
@@ -803,6 +956,18 @@ pub struct NormalizedBlueBubblesWebhookMessage {
     /// Additional source `BlueBubbles` message IDs represented by this event.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_message_ids: Vec<String>,
+
+    /// Source message timestamp in epoch milliseconds, when available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub date_created_ms: Option<i64>,
+
+    /// Number of raw source webhook messages folded into this normalized event.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coalesced_source_count: Option<usize>,
+
+    /// Bounded fields truncated while constructing a coalesced event.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub coalescing_truncated_fields: Vec<String>,
 }
 
 impl NormalizedBlueBubblesWebhookMessage {
@@ -1083,6 +1248,16 @@ pub fn normalize_bluebubbles_webhook_payload(
             "coalesced_message_ids",
         ],
     );
+    let date_created_ms = read_i64(
+        Some(record),
+        &[
+            "dateCreated",
+            "date_created",
+            "dateCreatedMs",
+            "date_created_ms",
+            "timestamp",
+        ],
+    );
     let group_from_guid = chat_guid.as_deref().and_then(|guid| {
         if guid.contains(";+;") {
             Some(true)
@@ -1114,6 +1289,9 @@ pub fn normalize_bluebubbles_webhook_payload(
         balloon_bundle_id,
         is_tapback: is_tapback_type(associated_message_type),
         source_message_ids,
+        date_created_ms,
+        coalesced_source_count: None,
+        coalescing_truncated_fields: Vec::new(),
     })
 }
 
@@ -1200,6 +1378,19 @@ mod tests {
         assert!(config.webhook_inbound.require_conversation_binding);
         assert!(config.webhook_inbound.dedupe_state_path.is_none());
         assert_eq!(config.webhook_inbound.dedupe_ttl_seconds, 604_800);
+        assert!(!config.webhook_coalescing.enabled);
+        assert_eq!(config.webhook_coalescing.debounce_ms, 2_500);
+        assert_eq!(config.webhook_coalescing.max_debounce_ms, 2_500);
+        assert!(
+            config
+                .webhook_coalescing
+                .immediate_command_prefixes
+                .is_empty()
+        );
+        assert_eq!(config.webhook_coalescing.max_text_chars, 4_000);
+        assert_eq!(config.webhook_coalescing.max_attachments, 20);
+        assert_eq!(config.webhook_coalescing.max_source_messages, 10);
+        assert_eq!(config.webhook_coalescing.max_pending_buffers, 256);
         assert!(config.attachment_dir.is_none());
     }
 
@@ -1242,6 +1433,16 @@ mod tests {
                 "require_conversation_binding": false,
                 "dedupe_state_path": " /tmp/fcp-imessage-dedupe.json ",
                 "dedupe_ttl_seconds": 42
+            },
+            "webhook_coalescing": {
+                "enabled": true,
+                "debounce_ms": 500,
+                "max_debounce_ms": 2500,
+                "immediate_command_prefixes": [" / ", "", " / ", "!"],
+                "max_text_chars": 123,
+                "max_attachments": 4,
+                "max_source_messages": 3,
+                "max_pending_buffers": 8
             }
         }))
         .unwrap();
@@ -1261,6 +1462,17 @@ mod tests {
             Some("/tmp/fcp-imessage-dedupe.json")
         );
         assert_eq!(config.webhook_inbound.dedupe_ttl_seconds, 42);
+        assert!(config.webhook_coalescing.enabled);
+        assert_eq!(config.webhook_coalescing.debounce_ms, 500);
+        assert_eq!(config.webhook_coalescing.max_debounce_ms, 2500);
+        assert_eq!(
+            config.webhook_coalescing.immediate_command_prefixes,
+            vec!["!", "/"]
+        );
+        assert_eq!(config.webhook_coalescing.max_text_chars, 123);
+        assert_eq!(config.webhook_coalescing.max_attachments, 4);
+        assert_eq!(config.webhook_coalescing.max_source_messages, 3);
+        assert_eq!(config.webhook_coalescing.max_pending_buffers, 8);
     }
 
     #[test]
@@ -1320,6 +1532,30 @@ mod tests {
             serde_json::json!({
                 "password": "secret",
                 "webhook_inbound": { "dedupe_ttl_seconds": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "debounce_ms": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "debounce_ms": 2501, "max_debounce_ms": 2500 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "max_text_chars": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "max_attachments": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "max_source_messages": 0 }
+            }),
+            serde_json::json!({
+                "password": "secret",
+                "webhook_coalescing": { "max_pending_buffers": 0 }
             }),
         ];
 
@@ -1536,6 +1772,7 @@ mod tests {
                 "text": "hello",
                 "isFromMe": false,
                 "handle": { "address": "+15551234567", "displayName": "Alice" },
+                "dateCreated": 1_700_000_000_123_i64,
                 "chats": [{
                     "guid": "iMessage;+;chat123",
                     "chatIdentifier": "Family"
@@ -1564,6 +1801,7 @@ mod tests {
         assert_eq!(normalized.sender_id.as_deref(), Some("+15551234567"));
         assert_eq!(normalized.sender_name.as_deref(), Some("Alice"));
         assert_eq!(normalized.text.as_deref(), Some("hello"));
+        assert_eq!(normalized.date_created_ms, Some(1_700_000_000_123_i64));
         assert!(!normalized.is_from_me);
         assert!(normalized.is_group);
         assert_eq!(normalized.attachments.len(), 1);

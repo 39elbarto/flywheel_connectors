@@ -192,7 +192,7 @@ max_redirects = 0
 when_to_use = "When a BlueBubbles callback URL is no longer valid or duplicate webhook registrations need cleanup"
 
 [provides.operations.ingest_webhook_event]
-summary = "Accept and normalize a BlueBubbles webhook event"
+summary = "Accept, normalize, and optionally coalesce a BlueBubbles webhook event"
 capability = "imessage.read"
 risk = "low"
 safety_tier = "safe"
@@ -206,7 +206,7 @@ deny_private_ranges = false
 max_redirects = 0
 
 [provides.operations.ingest_webhook_event.ai_hints]
-when_to_use = "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance plus duplicate replay suppression"
+when_to_use = "When a trusted FCP webhook receiver has authenticated a BlueBubbles POST and needs connector-local sender/conversation acceptance, duplicate replay suppression, optional same-sender DM split-send coalescing, or an explicit coalescing flush"
 
 [provides.operations.get_server_info]
 summary = "Get BlueBubbles server info"

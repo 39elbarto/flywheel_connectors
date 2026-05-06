@@ -1,4 +1,4 @@
-use std::fs::{File, create_dir_all};
+use std::fs::{File, create_dir_all, read_to_string};
 use std::io::Write as _;
 use std::path::PathBuf;
 use std::process;
@@ -6,8 +6,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use fcp_matrix::crypto::{
     MATRIX_MEGOLM_ALGORITHM, MatrixEncryptedEventProjectionContext,
-    MatrixEncryptedEventRedactionState, MatrixProjectionVerificationStatus,
-    MatrixVerifiedDecryptedMessageEvent, project_trust_gated_decrypted_event,
+    MatrixEncryptedEventRedactionState, MatrixEncryptedMediaProjectionContext,
+    MatrixProjectionVerificationStatus, MatrixVerifiedDecryptedMessageEvent,
+    MatrixVerifiedEncryptedMediaResource, project_trust_gated_decrypted_event,
+    project_trust_gated_encrypted_media, recovery_guidance_snapshot,
+    room_key_backup_version_decision,
 };
 use fcp_matrix::types::{
     MatrixE2eeBackupConfig, MatrixE2eeConfig, MatrixE2eeDeviceListConfig,
@@ -115,6 +118,61 @@ fn verified_candidate() -> MatrixVerifiedDecryptedMessageEvent {
     }
 }
 
+fn encrypted_media_content() -> Value {
+    json!({
+        "msgtype": "m.image",
+        "file": {
+            "url": "mxc://matrix.example/media123",
+            "v": "v2",
+            "key": {
+                "alg": "A256CTR",
+                "kty": "oct",
+                "key_ops": ["decrypt"],
+                "k": "MEDIAKEY000000000000000000000000000000000000",
+            },
+            "iv": "MEDIAIV000000000000000000000000",
+            "hashes": {
+                "sha256": "sha256mediafixturehash000000000000000000000000",
+            },
+        },
+        "info": {
+            "mimetype": "image/png",
+            "size": 4096,
+        },
+    })
+}
+
+fn encrypted_media_input() -> MatrixEncryptedMediaProjectionContext {
+    MatrixEncryptedMediaProjectionContext::from_content(
+        encrypted_input(),
+        &encrypted_media_content(),
+        Some(8192),
+    )
+    .expect("encrypted media input")
+}
+
+fn verified_media_resource() -> MatrixVerifiedEncryptedMediaResource {
+    MatrixVerifiedEncryptedMediaResource {
+        room_id: "!room:matrix.example".into(),
+        event_id: "$encrypted".into(),
+        sender: "@alice:matrix.example".into(),
+        sender_device_id: "ALICEDEVICE".into(),
+        sender_device_trust: MatrixProjectionVerificationStatus::Verified,
+        cross_signing_trust: MatrixProjectionVerificationStatus::Verified,
+        session_id: "SESSION1".into(),
+        session_room_id: "!room:matrix.example".into(),
+        session_trust: MatrixProjectionVerificationStatus::Verified,
+        algorithm: MATRIX_MEGOLM_ALGORITHM.into(),
+        replay_key: "SESSION1:$encrypted:media".into(),
+        mxc_uri: "mxc://matrix.example/media123".into(),
+        resource_handle: "matrix-e2ee-media://fixture/media123".into(),
+        content_hash_sha256: "sha256mediafixturehash000000000000000000000000".into(),
+        content_type: Some("image/png".into()),
+        size_bytes: Some(4096),
+        redaction_state: MatrixEncryptedEventRedactionState::Clear,
+    }
+}
+
 fn body_hash(candidate: &MatrixVerifiedDecryptedMessageEvent) -> String {
     hex::encode(Sha256::digest(candidate.body.as_bytes()))
 }
@@ -166,7 +224,65 @@ fn projection_log_details(
     })
 }
 
-fn log_start(logs: &mut File) {
+fn media_projection_log_details(
+    projection: &fcp_matrix::crypto::MatrixTrustGatedEncryptedMediaProjection,
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: Option<&MatrixVerifiedEncryptedMediaResource>,
+    cleanup_result: &str,
+) -> Value {
+    let metadata = &projection.metadata_event;
+    json!({
+        "fixture_id": "verified_crypto_result_boundary",
+        "room_id_hash": hash_str(&input.event.room_id),
+        "event_id_hash": hash_opt(input.event.event_id.as_deref()),
+        "sender_id_hash": hash_opt(input.event.sender.as_deref()),
+        "media_id_hash": hash_opt(input.mxc_uri.as_deref()),
+        "sender_device_hash": candidate.map(|resource| hash_str(&resource.sender_device_id)),
+        "session_id_hash": hash_opt(input.event.session_id.as_deref()),
+        "candidate_session_id_hash": candidate.map(|resource| hash_str(&resource.session_id)),
+        "candidate_replay_key_hash": candidate.map(|resource| hash_str(&resource.replay_key)),
+        "resource_handle_hash": candidate.map(|resource| hash_str(&resource.resource_handle)),
+        "content_hash_hash": hash_opt(input.content_hash_sha256.as_deref()),
+        "media_byte_counts": {
+            "metadata_size_bytes": input.size_bytes,
+            "verified_size_bytes": candidate.and_then(|resource| resource.size_bytes),
+            "bytes_embedded": false,
+        },
+        "content_type_decision": {
+            "content_type": input.content_type,
+            "decision": metadata["media"]["content_type_decision"],
+        },
+        "redaction_state": input.event.redaction_state.label(),
+        "decryption_status": metadata["decryption_status"],
+        "decryption_reason": metadata["decryption_reason"],
+        "denial_reason_codes": metadata["denial_reason_codes"],
+        "fcp_error_mapping": metadata["fcp_error_mapping"],
+        "trust_decision_codes": {
+            "own_device": metadata["trust_state"]["own_device"],
+            "device_keys": metadata["trust_state"]["device_keys"],
+            "device_list": metadata["trust_state"]["device_list"],
+            "cross_signing": metadata["trust_state"]["cross_signing"],
+            "room_key_backup": metadata["trust_state"]["room_key_backup"],
+            "recovery": metadata["trust_state"]["recovery"],
+            "sender_device": candidate.map(|resource| resource.sender_device_trust.label()),
+            "sender_cross_signing": candidate.map(|resource| resource.cross_signing_trust.label()),
+            "session": candidate.map(|resource| resource.session_trust.label()),
+        },
+        "undecrypted_retry": metadata["undecrypted_retry"],
+        "resource_handle_lifecycle": {
+            "allocated": projection.authorized_resource.is_some(),
+            "cleanup_required": metadata["resource"]["cleanup"]["required"],
+            "cleanup_result": cleanup_result,
+            "handle_logged": false,
+            "handle_hash": candidate.map(|resource| hash_str(&resource.resource_handle)),
+        },
+        "media_bytes_embedded": false,
+        "ciphertext_redacted": metadata["ciphertext_redacted"],
+        "contains_secret_material": metadata["contains_secret_material"],
+    })
+}
+
+fn log_start(logs: &mut File, log_path: &PathBuf) {
     log_step(
         logs,
         "start",
@@ -177,6 +293,9 @@ fn log_start(logs: &mut File) {
             "matrix_sdk_crypto_backend": cfg!(feature = "matrix-sdk-crypto-backend"),
             "fixture": "verified_crypto_result_boundary",
             "external_crypto_material_available": false,
+            "artifact_paths": {
+                "jsonl_path": log_path,
+            },
         }),
     );
     if !cfg!(feature = "matrix-sdk-crypto-backend") {
@@ -213,6 +332,37 @@ fn log_verified_success(
     assert!(success.authorized_event.is_some());
 }
 
+fn log_verified_media_success(
+    logs: &mut File,
+    input: &MatrixEncryptedMediaProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+) {
+    let success = project_trust_gated_encrypted_media(input, Some(candidate), e2ee, state, &[]);
+    log_step(
+        logs,
+        "verified_encrypted_media_resource_success",
+        "ok",
+        &json!({
+            "projection": media_projection_log_details(&success, input, Some(candidate), "pending_release"),
+            "event_topics": ["matrix.message.decrypted", "matrix.encrypted"],
+        }),
+    );
+    let authorized = success
+        .authorized_resource
+        .as_ref()
+        .expect("verified media resource authorizes delivery");
+    assert_eq!(
+        authorized["media"]["resource_policy"]["bytes_embedded"].as_bool(),
+        Some(false)
+    );
+    assert_eq!(
+        authorized["media"]["resource_policy"]["cleanup_required"].as_bool(),
+        Some(true)
+    );
+}
+
 fn log_denial(
     logs: &mut File,
     step: &str,
@@ -226,6 +376,24 @@ fn log_denial(
         step,
         "ok",
         &projection_log_details(projection, input, candidate),
+    );
+    assert_eq!(projection.dropped_reason, Some(expected));
+}
+
+fn log_media_denial(
+    logs: &mut File,
+    step: &str,
+    projection: &fcp_matrix::crypto::MatrixTrustGatedEncryptedMediaProjection,
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: Option<&MatrixVerifiedEncryptedMediaResource>,
+    expected: &'static str,
+    status: &str,
+) {
+    log_step(
+        logs,
+        step,
+        status,
+        &media_projection_log_details(projection, input, candidate, "not_allocated"),
     );
     assert_eq!(projection.dropped_reason, Some(expected));
 }
@@ -394,6 +562,166 @@ fn log_retry_fallback_and_parity(
     );
 }
 
+fn log_media_denials_retry_and_parity(
+    logs: &mut File,
+    input: &MatrixEncryptedMediaProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+) {
+    let mut redacted_input = input.clone();
+    redacted_input.event.redaction_state = MatrixEncryptedEventRedactionState::Redacted;
+    let redacted_projection =
+        project_trust_gated_encrypted_media(&redacted_input, Some(candidate), e2ee, state, &[]);
+    log_media_denial(
+        logs,
+        "redacted_media_denial",
+        &redacted_projection,
+        &redacted_input,
+        Some(candidate),
+        "redacted_event_denied",
+        "ok",
+    );
+
+    let mut wrong_binding = candidate.clone();
+    wrong_binding.room_id = "!other:matrix.example".into();
+    wrong_binding.event_id = "$other".into();
+    let wrong_binding_projection =
+        project_trust_gated_encrypted_media(input, Some(&wrong_binding), e2ee, state, &[]);
+    log_media_denial(
+        logs,
+        "wrong_room_event_media_denial",
+        &wrong_binding_projection,
+        input,
+        Some(&wrong_binding),
+        "wrong_room",
+        "ok",
+    );
+
+    let mut hash_mismatch = candidate.clone();
+    hash_mismatch.content_hash_sha256 = "sha256otherhash0000000000000000000000000000".into();
+    let hash_projection =
+        project_trust_gated_encrypted_media(input, Some(&hash_mismatch), e2ee, state, &[]);
+    log_media_denial(
+        logs,
+        "hash_mismatch_media_denial",
+        &hash_projection,
+        input,
+        Some(&hash_mismatch),
+        "encrypted_media_content_hash_mismatch",
+        "ok",
+    );
+
+    let mut backup_recovery_mismatch = e2ee.clone();
+    backup_recovery_mismatch.room_key_backup.status = MatrixE2eeMaterialStatus::PresentUnverified;
+    backup_recovery_mismatch.recovery.status = MatrixE2eeMaterialStatus::PresentUnverified;
+    let backup_projection = project_trust_gated_encrypted_media(
+        input,
+        Some(candidate),
+        &backup_recovery_mismatch,
+        state,
+        &[],
+    );
+    log_media_denial(
+        logs,
+        "backup_recovery_mismatch_media_denial",
+        &backup_projection,
+        input,
+        Some(candidate),
+        "room_key_backup_unverified",
+        "ok",
+    );
+
+    let unavailable_projection = project_trust_gated_encrypted_media(input, None, e2ee, state, &[]);
+    log_media_denial(
+        logs,
+        "media_crypto_unavailable_structured_skip",
+        &unavailable_projection,
+        input,
+        None,
+        "matrix_e2ee_verified_media_unavailable",
+        "skipped",
+    );
+
+    let mut final_retry_input = input.clone();
+    final_retry_input.event.retry_attempts_used = 2;
+    let final_retry_projection =
+        project_trust_gated_encrypted_media(&final_retry_input, None, e2ee, state, &[]);
+    log_media_denial(
+        logs,
+        "encrypted_media_final_failure",
+        &final_retry_projection,
+        &final_retry_input,
+        None,
+        "undecrypted_retry_budget_exhausted",
+        "ok",
+    );
+
+    let manual_projection =
+        project_trust_gated_encrypted_media(input, Some(candidate), e2ee, state, &[]);
+    let supervised_projection =
+        project_trust_gated_encrypted_media(input, Some(candidate), e2ee, state, &[]);
+    log_step(
+        logs,
+        "encrypted_media_supervised_manual_sync_parity",
+        "ok",
+        &json!({
+            "manual": media_projection_log_details(&manual_projection, input, Some(candidate), "pending_release"),
+            "supervised": media_projection_log_details(&supervised_projection, input, Some(candidate), "pending_release"),
+            "topics": ["matrix.message.decrypted", "matrix.encrypted", "matrix.event.dropped"],
+        }),
+    );
+}
+
+fn log_operator_guidance(logs: &mut File, e2ee: &MatrixE2eeConfig, log_path: &PathBuf) {
+    log_step(
+        logs,
+        "operator_runbook_readiness_guidance",
+        "ok",
+        &json!({
+            "recovery_guidance": recovery_guidance_snapshot(e2ee),
+            "room_key_backup": room_key_backup_version_decision(
+                e2ee.trust.require_room_key_backup,
+                e2ee.room_key_backup.backup_version.as_deref(),
+                e2ee.room_key_backup.backup_version.as_deref(),
+            ).snapshot(),
+            "readiness": {
+                "manual_sync_supported": true,
+                "supervised_sync_supported": true,
+                "media_delivery_requires_verified_resource_handle": true,
+                "media_bytes_never_logged": true,
+            },
+            "artifact_paths": {
+                "jsonl_path": log_path,
+            },
+        }),
+    );
+}
+
+fn assert_log_is_redaction_safe(log_path: &PathBuf) {
+    let log_text = read_to_string(log_path).expect("read e2e jsonl log");
+    for forbidden in [
+        "trusted plaintext",
+        "!room:matrix.example",
+        "$encrypted",
+        "@alice:matrix.example",
+        "ALICEDEVICE",
+        "SESSION1",
+        "DEVICE123",
+        "@bot:matrix.example",
+        "mxc://matrix.example/media123",
+        "matrix-e2ee-media://fixture/media123",
+        "MEDIAKEY",
+        "MEDIAIV",
+        "sha256mediafixturehash",
+    ] {
+        assert!(
+            !log_text.contains(forbidden),
+            "e2e log leaked forbidden fixture string {forbidden}"
+        );
+    }
+}
+
 #[test]
 fn e2ee_decrypted_projection_logs_success_denials_parity_and_shutdown() {
     let log_path = unique_log_path();
@@ -411,12 +739,17 @@ fn e2ee_decrypted_projection_logs_success_denials_parity_and_shutdown() {
     let e2ee = ready_e2ee();
     let input = encrypted_input();
     let candidate = verified_candidate();
+    let media_input = encrypted_media_input();
+    let media_candidate = verified_media_resource();
 
-    log_start(&mut logs);
+    log_start(&mut logs, &log_path);
     log_verified_success(&mut logs, &input, &e2ee, &state, &candidate);
+    log_verified_media_success(&mut logs, &media_input, &e2ee, &state, &media_candidate);
     log_identity_and_trust_denials(&mut logs, &input, &e2ee, &state, &candidate);
     log_backup_redaction_algorithm_and_replay_denials(&mut logs, &input, &e2ee, &state, &candidate);
     log_retry_fallback_and_parity(&mut logs, &input, &e2ee, &state, &candidate);
+    log_media_denials_retry_and_parity(&mut logs, &media_input, &e2ee, &state, &media_candidate);
+    log_operator_guidance(&mut logs, &e2ee, &log_path);
 
     log_step(
         &mut logs,
@@ -425,7 +758,11 @@ fn e2ee_decrypted_projection_logs_success_denials_parity_and_shutdown() {
         &json!({
             "log_path": log_path,
             "ciphertext_emitted": false,
+            "media_bytes_emitted_to_log": false,
+            "resource_cleanup_result": "released",
             "secret_material_logged": false,
         }),
     );
+    logs.flush().expect("flush e2e jsonl log");
+    assert_log_is_redaction_safe(&log_path);
 }

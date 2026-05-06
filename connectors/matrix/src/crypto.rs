@@ -238,6 +238,211 @@ pub struct MatrixTrustGatedDecryptedProjection {
     pub dropped_reason: Option<&'static str>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixEncryptedMediaProjectionContext {
+    pub event: MatrixEncryptedEventProjectionContext,
+    pub msgtype: Option<String>,
+    pub mxc_uri: Option<String>,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub media_max_bytes: Option<u64>,
+    pub file_version: Option<String>,
+    pub key_algorithm: Option<String>,
+    pub key_type: Option<String>,
+    pub key_ops_count: Option<usize>,
+    pub iv_present: bool,
+    pub content_hash_sha256: Option<String>,
+    pub metadata_denial_reasons: Vec<&'static str>,
+}
+
+impl MatrixEncryptedMediaProjectionContext {
+    #[must_use]
+    pub fn from_content(
+        event: MatrixEncryptedEventProjectionContext,
+        content: &Value,
+        media_max_bytes: Option<u64>,
+    ) -> Option<Self> {
+        let file = content.get("file")?;
+        let msgtype = content
+            .get("msgtype")
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let mxc_uri = file.get("url").and_then(Value::as_str).map(str::to_string);
+        let info = content.get("info");
+        let content_type = info
+            .and_then(|info| info.get("mimetype"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let size_bytes = info
+            .and_then(|info| info.get("size"))
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                info.and_then(|info| info.get("size_bytes"))
+                    .and_then(Value::as_u64)
+            });
+        let file_version = file.get("v").and_then(Value::as_str).map(str::to_string);
+        let key = file.get("key");
+        let key_algorithm = key
+            .and_then(|key| key.get("alg"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let key_type = key
+            .and_then(|key| key.get("kty"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+        let key_ops = key
+            .and_then(|key| key.get("key_ops"))
+            .and_then(Value::as_array);
+        let key_ops_count = key_ops.map(Vec::len);
+        let key_material_valid = key
+            .and_then(|key| key.get("k"))
+            .and_then(Value::as_str)
+            .is_some_and(valid_matrix_base64ish);
+        let decrypt_allowed = key_ops.is_some_and(|ops| {
+            ops.iter()
+                .any(|op| op.as_str().is_some_and(|op| op == "decrypt"))
+        });
+        let iv_present = file
+            .get("iv")
+            .and_then(Value::as_str)
+            .is_some_and(valid_matrix_base64ish);
+        let content_hash_sha256 = file
+            .get("hashes")
+            .and_then(|hashes| hashes.get("sha256"))
+            .and_then(Value::as_str)
+            .map(str::to_string);
+
+        let metadata_denial_reasons =
+            encrypted_media_metadata_denial_reasons(EncryptedMediaMetadataValidation {
+                msgtype: msgtype.as_deref(),
+                mxc_uri: mxc_uri.as_deref(),
+                file_version: file_version.as_deref(),
+                key_algorithm: key_algorithm.as_deref(),
+                key_type: key_type.as_deref(),
+                key_material_valid,
+                decrypt_allowed,
+                iv_present,
+                content_hash_sha256: content_hash_sha256.as_deref(),
+                content_type: content_type.as_deref(),
+                media_max_bytes,
+                size_bytes,
+            });
+
+        Some(Self {
+            event,
+            msgtype,
+            mxc_uri,
+            content_type,
+            size_bytes,
+            media_max_bytes,
+            file_version,
+            key_algorithm,
+            key_type,
+            key_ops_count,
+            iv_present,
+            content_hash_sha256,
+            metadata_denial_reasons,
+        })
+    }
+
+    #[must_use]
+    pub fn within_size_limit(&self) -> Option<bool> {
+        self.media_max_bytes
+            .zip(self.size_bytes)
+            .map(|(max, size)| size <= max)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EncryptedMediaMetadataValidation<'a> {
+    msgtype: Option<&'a str>,
+    mxc_uri: Option<&'a str>,
+    file_version: Option<&'a str>,
+    key_algorithm: Option<&'a str>,
+    key_type: Option<&'a str>,
+    key_material_valid: bool,
+    decrypt_allowed: bool,
+    iv_present: bool,
+    content_hash_sha256: Option<&'a str>,
+    content_type: Option<&'a str>,
+    media_max_bytes: Option<u64>,
+    size_bytes: Option<u64>,
+}
+
+fn encrypted_media_metadata_denial_reasons(
+    validation: EncryptedMediaMetadataValidation<'_>,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if validation
+        .msgtype
+        .is_some_and(|msgtype| !matches!(msgtype, "m.image" | "m.file" | "m.audio" | "m.video"))
+    {
+        reasons.push("encrypted_media_msgtype_unsupported");
+    }
+    if !validation.mxc_uri.is_some_and(matrix_mxc_uri_shape_valid) {
+        reasons.push("encrypted_media_mxc_uri_invalid");
+    }
+    if validation.file_version != Some("v2") {
+        reasons.push("encrypted_media_version_invalid");
+    }
+    if validation.key_algorithm != Some("A256CTR")
+        || validation.key_type != Some("oct")
+        || !validation.key_material_valid
+        || !validation.decrypt_allowed
+    {
+        reasons.push("encrypted_media_key_shape_invalid");
+    }
+    if !validation.iv_present {
+        reasons.push("encrypted_media_iv_shape_invalid");
+    }
+    if !validation
+        .content_hash_sha256
+        .is_some_and(valid_matrix_base64ish)
+    {
+        reasons.push("encrypted_media_hash_shape_invalid");
+    }
+    if validation
+        .content_type
+        .is_some_and(|content_type| content_type.trim().is_empty())
+    {
+        reasons.push("encrypted_media_content_type_invalid");
+    }
+    if let Some((max, size)) = validation.media_max_bytes.zip(validation.size_bytes)
+        && size > max
+    {
+        reasons.push("encrypted_media_oversized");
+    }
+    reasons
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixVerifiedEncryptedMediaResource {
+    pub room_id: String,
+    pub event_id: String,
+    pub sender: String,
+    pub sender_device_id: String,
+    pub sender_device_trust: MatrixProjectionVerificationStatus,
+    pub cross_signing_trust: MatrixProjectionVerificationStatus,
+    pub session_id: String,
+    pub session_room_id: String,
+    pub session_trust: MatrixProjectionVerificationStatus,
+    pub algorithm: String,
+    pub replay_key: String,
+    pub mxc_uri: String,
+    pub resource_handle: String,
+    pub content_hash_sha256: String,
+    pub content_type: Option<String>,
+    pub size_bytes: Option<u64>,
+    pub redaction_state: MatrixEncryptedEventRedactionState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatrixTrustGatedEncryptedMediaProjection {
+    pub authorized_resource: Option<Value>,
+    pub metadata_event: Value,
+    pub dropped_reason: Option<&'static str>,
+}
+
 #[must_use]
 pub fn project_trust_gated_decrypted_event(
     input: &MatrixEncryptedEventProjectionContext,
@@ -361,6 +566,152 @@ fn authorized_decrypted_projection(
 
     MatrixTrustGatedDecryptedProjection {
         authorized_event: Some(authorized_event),
+        metadata_event,
+        dropped_reason: None,
+    }
+}
+
+#[must_use]
+pub fn project_trust_gated_encrypted_media(
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: Option<&MatrixVerifiedEncryptedMediaResource>,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    seen_replay_keys: &[String],
+) -> MatrixTrustGatedEncryptedMediaProjection {
+    if !e2ee.verified_decryption_requested {
+        return denied_encrypted_media_projection(
+            input,
+            e2ee,
+            state_persistence,
+            "not_attempted",
+            "verified_e2ee_decryption_not_requested",
+            &[],
+        );
+    }
+
+    if let Some(reason) = input.metadata_denial_reasons.first().copied() {
+        return denied_encrypted_media_projection(
+            input,
+            e2ee,
+            state_persistence,
+            "denied",
+            reason,
+            &input.metadata_denial_reasons,
+        );
+    }
+
+    let Some(candidate) = candidate else {
+        let retry = undecrypted_retry_decision_snapshot(
+            input.event.event_id.as_deref(),
+            &input.event.room_id,
+            input.event.retry_attempts_used,
+            &e2ee.undecrypted_retry,
+        );
+        let outcome = if input.event.retry_attempts_used >= e2ee.undecrypted_retry.max_attempts {
+            MatrixCryptoMaintenanceOutcome::FinalFailure.label()
+        } else {
+            MatrixCryptoMaintenanceOutcome::RetryScheduled.label()
+        };
+        let reason = if outcome == MatrixCryptoMaintenanceOutcome::FinalFailure.label() {
+            "undecrypted_retry_budget_exhausted"
+        } else {
+            "matrix_e2ee_verified_media_unavailable"
+        };
+        return denied_encrypted_media_projection_with_retry(
+            input,
+            e2ee,
+            state_persistence,
+            outcome,
+            reason,
+            &[reason],
+            &retry,
+        );
+    };
+
+    let denial_reasons =
+        encrypted_media_denial_reasons(input, candidate, e2ee, state_persistence, seen_replay_keys);
+    if let Some(reason) = denial_reasons.first().copied() {
+        return denied_encrypted_media_projection(
+            input,
+            e2ee,
+            state_persistence,
+            "denied",
+            reason,
+            &denial_reasons,
+        );
+    }
+
+    authorized_encrypted_media_projection(input, candidate, e2ee, state_persistence)
+}
+
+fn authorized_encrypted_media_projection(
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+) -> MatrixTrustGatedEncryptedMediaProjection {
+    let provenance = json!({
+        "source_event_type": "m.room.encrypted",
+        "algorithm": candidate.algorithm,
+        "session": redacted_identifier_snapshot(Some(&candidate.session_id)),
+        "sender_device": redacted_identifier_snapshot(Some(&candidate.sender_device_id)),
+        "sender_device_trust": candidate.sender_device_trust.label(),
+        "cross_signing_trust": candidate.cross_signing_trust.label(),
+        "session_trust": candidate.session_trust.label(),
+        "room_binding_verified": true,
+        "event_binding_verified": true,
+        "sender_binding_verified": true,
+        "media_hash_verified": true,
+        "replay_key": redacted_identifier_snapshot(Some(&candidate.replay_key)),
+        "ciphertext_redacted": true,
+        "encrypted_file_key_redacted": true,
+        "media_bytes_embedded": false,
+        "contains_secret_material": false,
+    });
+    let authorized_resource = json!({
+        "room_id": input.event.room_id,
+        "event_id": input.event.event_id,
+        "sender": input.event.sender,
+        "origin_server_ts": input.event.origin_server_ts,
+        "msgtype": input.msgtype,
+        "media": {
+            "mxc_uri": candidate.mxc_uri,
+            "resource_handle": candidate.resource_handle,
+            "content_type": candidate.content_type,
+            "size_bytes": candidate.size_bytes,
+            "content_hash_verified": true,
+            "resource_policy": {
+                "bytes_embedded": false,
+                "handle_only": true,
+                "cleanup_required": true,
+            },
+        },
+        "delivery_context": {
+            "verified_decryption": true,
+            "policy_source": "matrix_e2ee_media_trust_gate",
+            "e2ee_provenance": provenance,
+        },
+    });
+    let metadata_event = encrypted_media_projection_metadata(
+        input,
+        e2ee,
+        state_persistence,
+        EncryptedMediaProjectionMetadata {
+            outcome: "authorized_media_resource",
+            reason_code: "verified_media_resource",
+            denial_reasons: &[],
+            retry: &json!({
+                "classification": "not_needed",
+                "outcome": "authorized_media_resource",
+                "contains_secret_material": false,
+            }),
+            resource_handle_emitted: true,
+        },
+    );
+
+    MatrixTrustGatedEncryptedMediaProjection {
+        authorized_resource: Some(authorized_resource),
         metadata_event,
         dropped_reason: None,
     }
@@ -574,6 +925,371 @@ fn decrypted_projection_fcp_error_mapping(reason_code: &str) -> Value {
             _ => None,
         },
     })
+}
+
+fn encrypted_media_denial_reasons(
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    seen_replay_keys: &[String],
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    reasons.extend(encrypted_media_event_denial_reasons(input, candidate));
+    reasons.extend(encrypted_media_trust_denial_reasons(
+        candidate,
+        e2ee,
+        state_persistence,
+        seen_replay_keys,
+    ));
+    reasons.extend(encrypted_media_resource_denial_reasons(input, candidate));
+    reasons
+}
+
+fn encrypted_media_event_denial_reasons(
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if input.event.redaction_state == MatrixEncryptedEventRedactionState::Redacted
+        || candidate.redaction_state == MatrixEncryptedEventRedactionState::Redacted
+    {
+        reasons.push("redacted_event_denied");
+    }
+    if input.event.algorithm.as_deref() != Some(MATRIX_MEGOLM_ALGORITHM)
+        || candidate.algorithm != MATRIX_MEGOLM_ALGORITHM
+    {
+        reasons.push("unsupported_algorithm");
+    }
+    let event_room_matches = input.event.room_id == candidate.room_id;
+    let session_room_matches = input.event.room_id == candidate.session_room_id;
+    if !(event_room_matches && session_room_matches) {
+        reasons.push("wrong_room");
+    }
+    if input.event.event_id.as_deref() != Some(candidate.event_id.as_str()) {
+        reasons.push("wrong_event");
+    }
+    if input.event.sender.as_deref() != Some(candidate.sender.as_str()) {
+        reasons.push("wrong_sender_device");
+    }
+    if input.event.session_id.as_deref() != Some(candidate.session_id.as_str()) {
+        reasons.push("session_provenance_mismatch");
+    }
+    reasons
+}
+
+fn encrypted_media_trust_denial_reasons(
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    seen_replay_keys: &[String],
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if e2ee
+        .account_user_id
+        .as_deref()
+        .is_none_or(|user_id| !matrix_user_id_valid(user_id))
+    {
+        reasons.push("account_identity_unverified");
+    }
+    if e2ee
+        .device_id
+        .as_deref()
+        .is_none_or(|device_id| !matrix_device_id_valid(device_id))
+    {
+        reasons.push("device_identity_unverified");
+    }
+    if state_persistence.account_user_id.is_some()
+        && state_persistence.account_user_id.as_deref() != e2ee.account_user_id.as_deref()
+    {
+        reasons.push("state_account_scope_mismatch");
+    }
+    if state_persistence.device_id.is_some()
+        && state_persistence.device_id.as_deref() != e2ee.device_id.as_deref()
+    {
+        reasons.push("state_device_scope_mismatch");
+    }
+    if e2ee.trust_state.device_keys != MatrixE2eeMaterialStatus::Verified {
+        reasons.push("device_keys_unverified");
+    }
+    if e2ee.trust_state.device_list.status != MatrixE2eeDeviceListStatus::Fresh {
+        reasons.push("device_list_not_fresh");
+    }
+    if e2ee.trust.require_verified_device_trust
+        && e2ee.trust_state.own_device != MatrixE2eeMaterialStatus::Verified
+    {
+        reasons.push("own_device_unverified");
+    }
+    if e2ee.trust.require_cross_signing
+        && e2ee.trust_state.cross_signing != MatrixE2eeMaterialStatus::Verified
+    {
+        reasons.push("cross_signing_unverified");
+    }
+    if e2ee.trust.require_room_key_backup
+        && e2ee.room_key_backup.status != MatrixE2eeMaterialStatus::Verified
+    {
+        reasons.push("room_key_backup_unverified");
+    }
+    if e2ee.recovery.status != MatrixE2eeMaterialStatus::Verified {
+        reasons.push("recovery_material_unverified");
+    }
+    if !candidate.sender_device_trust.is_verified() {
+        reasons.push("sender_device_untrusted");
+    }
+    if e2ee.trust.require_cross_signing && !candidate.cross_signing_trust.is_verified() {
+        reasons.push("sender_cross_signing_unverified");
+    }
+    if !candidate.session_trust.is_verified() {
+        reasons.push("session_unverified");
+    }
+    if seen_replay_keys
+        .iter()
+        .any(|seen| seen == &candidate.replay_key)
+    {
+        reasons.push("replay_duplicate");
+    }
+    reasons
+}
+
+fn encrypted_media_resource_denial_reasons(
+    input: &MatrixEncryptedMediaProjectionContext,
+    candidate: &MatrixVerifiedEncryptedMediaResource,
+) -> Vec<&'static str> {
+    let mut reasons = Vec::new();
+    if input.mxc_uri.as_deref() != Some(candidate.mxc_uri.as_str()) {
+        reasons.push("encrypted_media_uri_mismatch");
+    }
+    if input.content_hash_sha256.as_deref() != Some(candidate.content_hash_sha256.as_str()) {
+        reasons.push("encrypted_media_content_hash_mismatch");
+    }
+    if let (Some(input_content_type), Some(candidate_content_type)) = (
+        input.content_type.as_deref(),
+        candidate.content_type.as_deref(),
+    ) && input_content_type != candidate_content_type
+    {
+        reasons.push("encrypted_media_content_type_mismatch");
+    }
+    if input
+        .size_bytes
+        .zip(candidate.size_bytes)
+        .is_some_and(|(input_size, candidate_size)| input_size != candidate_size)
+    {
+        reasons.push("encrypted_media_size_mismatch");
+    }
+    if !encrypted_media_resource_handle_shape_valid(&candidate.resource_handle) {
+        reasons.push("encrypted_media_resource_handle_invalid");
+    }
+    reasons
+}
+
+fn denied_encrypted_media_projection(
+    input: &MatrixEncryptedMediaProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    outcome: &'static str,
+    reason_code: &'static str,
+    denial_reasons: &[&'static str],
+) -> MatrixTrustGatedEncryptedMediaProjection {
+    let retry = undecrypted_retry_decision_snapshot(
+        input.event.event_id.as_deref(),
+        &input.event.room_id,
+        input.event.retry_attempts_used,
+        &e2ee.undecrypted_retry,
+    );
+    denied_encrypted_media_projection_with_retry(
+        input,
+        e2ee,
+        state_persistence,
+        outcome,
+        reason_code,
+        denial_reasons,
+        &retry,
+    )
+}
+
+fn denied_encrypted_media_projection_with_retry(
+    input: &MatrixEncryptedMediaProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    outcome: &'static str,
+    reason_code: &'static str,
+    denial_reasons: &[&'static str],
+    retry: &Value,
+) -> MatrixTrustGatedEncryptedMediaProjection {
+    MatrixTrustGatedEncryptedMediaProjection {
+        authorized_resource: None,
+        metadata_event: encrypted_media_projection_metadata(
+            input,
+            e2ee,
+            state_persistence,
+            EncryptedMediaProjectionMetadata {
+                outcome,
+                reason_code,
+                denial_reasons,
+                retry,
+                resource_handle_emitted: false,
+            },
+        ),
+        dropped_reason: Some(reason_code),
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct EncryptedMediaProjectionMetadata<'a> {
+    outcome: &'static str,
+    reason_code: &'static str,
+    denial_reasons: &'a [&'static str],
+    retry: &'a Value,
+    resource_handle_emitted: bool,
+}
+
+fn encrypted_media_projection_metadata(
+    input: &MatrixEncryptedMediaProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    metadata: EncryptedMediaProjectionMetadata<'_>,
+) -> Value {
+    json!({
+        "room_id": input.event.room_id,
+        "event_id": input.event.event_id,
+        "sender": input.event.sender,
+        "origin_server_ts": input.event.origin_server_ts,
+        "algorithm": input.event.algorithm,
+        "session": redacted_identifier_snapshot(input.event.session_id.as_deref()),
+        "redaction_state": input.event.redaction_state.label(),
+        "verified_decryption_requested": e2ee.verified_decryption_requested,
+        "decryption_status": metadata.outcome,
+        "decryption_reason": metadata.reason_code,
+        "denial_reason_codes": metadata.denial_reasons,
+        "ciphertext_redacted": true,
+        "media": {
+            "msgtype": input.msgtype,
+            "mxc_uri": redacted_identifier_snapshot(input.mxc_uri.as_deref()),
+            "content_type": input.content_type,
+            "size_bytes": input.size_bytes,
+            "media_max_bytes": input.media_max_bytes,
+            "within_size_limit": input.within_size_limit(),
+            "content_type_decision": if input.content_type.as_deref().is_some_and(|content_type| content_type.trim().is_empty()) {
+                "invalid_empty"
+            } else {
+                "accepted_metadata"
+            },
+            "encryption_metadata": {
+                "version": input.file_version,
+                "key_algorithm": input.key_algorithm,
+                "key_type": input.key_type,
+                "key_ops_count": input.key_ops_count,
+                "iv_present": input.iv_present,
+                "iv_redacted": true,
+                "content_hash": redacted_identifier_snapshot(input.content_hash_sha256.as_deref()),
+                "content_hash_present": input.content_hash_sha256.is_some(),
+                "key_material_redacted": true,
+            },
+            "bytes_embedded": false,
+        },
+        "resource": {
+            "handle_emitted": metadata.resource_handle_emitted,
+            "policy": {
+                "handle_only": true,
+                "bytes_embedded": false,
+                "cleanup_required": metadata.resource_handle_emitted,
+            },
+            "cleanup": {
+                "required": metadata.resource_handle_emitted,
+                "status": if metadata.resource_handle_emitted {
+                    "pending_release"
+                } else {
+                    "not_allocated"
+                },
+            },
+        },
+        "trust_state": MatrixCryptoTrustState::from_config(e2ee, state_persistence).snapshot(),
+        "undecrypted_retry": metadata.retry,
+        "fcp_error_mapping": encrypted_media_projection_fcp_error_mapping(metadata.reason_code),
+        "contains_secret_material": false,
+    })
+}
+
+fn encrypted_media_projection_fcp_error_mapping(reason_code: &str) -> Value {
+    let code = if matches!(
+        reason_code,
+        "verified_media_resource"
+            | "verified_e2ee_decryption_not_requested"
+            | "matrix_e2ee_verified_media_unavailable"
+            | "undecrypted_retry_budget_exhausted"
+    ) {
+        None
+    } else if matches!(
+        reason_code,
+        "wrong_room"
+            | "wrong_event"
+            | "redacted_event_denied"
+            | "unsupported_algorithm"
+            | "replay_duplicate"
+            | "encrypted_media_msgtype_unsupported"
+            | "encrypted_media_mxc_uri_invalid"
+            | "encrypted_media_version_invalid"
+            | "encrypted_media_key_shape_invalid"
+            | "encrypted_media_iv_shape_invalid"
+            | "encrypted_media_hash_shape_invalid"
+            | "encrypted_media_content_type_invalid"
+            | "encrypted_media_oversized"
+            | "encrypted_media_uri_mismatch"
+            | "encrypted_media_content_hash_mismatch"
+            | "encrypted_media_content_type_mismatch"
+            | "encrypted_media_size_mismatch"
+            | "encrypted_media_resource_handle_invalid"
+    ) {
+        Some("FCP-1006")
+    } else {
+        Some("FCP-2001")
+    };
+    json!({
+        "code": code,
+        "category": match code {
+            Some("FCP-1006") => Some("invalid_request"),
+            Some("FCP-2001") => Some("unauthorized"),
+            _ => None,
+        },
+    })
+}
+
+fn encrypted_media_resource_handle_shape_valid(handle: &str) -> bool {
+    const PREFIX: &str = "matrix-e2ee-media://";
+    handle
+        .strip_prefix(PREFIX)
+        .is_some_and(|rest| !rest.is_empty() && !rest.chars().any(char::is_whitespace))
+}
+
+fn matrix_mxc_uri_shape_valid(uri: &str) -> bool {
+    let Some(rest) = uri.strip_prefix("mxc://") else {
+        return false;
+    };
+    let Some((server, media_id)) = rest.split_once('/') else {
+        return false;
+    };
+    !server.is_empty()
+        && !media_id.is_empty()
+        && !server.chars().any(char::is_whitespace)
+        && !media_id.chars().any(char::is_whitespace)
+}
+
+fn valid_matrix_base64ish(value: &str) -> bool {
+    let value = value.trim();
+    value.len() >= 8
+        && value.bytes().all(|byte| {
+            matches!(
+                byte,
+                b'A'..=b'Z'
+                    | b'a'..=b'z'
+                    | b'0'..=b'9'
+                    | b'+'
+                    | b'/'
+                    | b'_'
+                    | b'-'
+                    | b'='
+            )
+        })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1698,6 +2414,70 @@ mod tests {
         }
     }
 
+    fn encrypted_media_content() -> Value {
+        json!({
+            "msgtype": "m.image",
+            "file": {
+                "url": "mxc://matrix.example/media123",
+                "v": "v2",
+                "key": {
+                    "alg": "A256CTR",
+                    "kty": "oct",
+                    "key_ops": ["decrypt"],
+                    "k": "MEDIAKEY000000000000000000000000000000000000",
+                },
+                "iv": "MEDIAIV000000000000000000000000",
+                "hashes": {
+                    "sha256": "sha256mediafixturehash000000000000000000000000",
+                },
+            },
+            "info": {
+                "mimetype": "image/png",
+                "size": 4096,
+            },
+        })
+    }
+
+    fn encrypted_media_input() -> MatrixEncryptedMediaProjectionContext {
+        MatrixEncryptedMediaProjectionContext::from_content(
+            encrypted_projection_input(),
+            &encrypted_media_content(),
+            Some(8192),
+        )
+        .expect("encrypted media projection input")
+    }
+
+    fn verified_media_candidate() -> MatrixVerifiedEncryptedMediaResource {
+        MatrixVerifiedEncryptedMediaResource {
+            room_id: "!room:matrix.example".into(),
+            event_id: "$encrypted".into(),
+            sender: "@alice:matrix.example".into(),
+            sender_device_id: "ALICEDEVICE".into(),
+            sender_device_trust: MatrixProjectionVerificationStatus::Verified,
+            cross_signing_trust: MatrixProjectionVerificationStatus::Verified,
+            session_id: "SESSION1".into(),
+            session_room_id: "!room:matrix.example".into(),
+            session_trust: MatrixProjectionVerificationStatus::Verified,
+            algorithm: MATRIX_MEGOLM_ALGORITHM.into(),
+            replay_key: "SESSION1:$encrypted:media".into(),
+            mxc_uri: "mxc://matrix.example/media123".into(),
+            resource_handle: "matrix-e2ee-media://fixture/media123".into(),
+            content_hash_sha256: "sha256mediafixturehash000000000000000000000000".into(),
+            content_type: Some("image/png".into()),
+            size_bytes: Some(4096),
+            redaction_state: MatrixEncryptedEventRedactionState::Clear,
+        }
+    }
+
+    fn denial_reason_strings(metadata: &Value) -> Vec<&str> {
+        metadata["denial_reason_codes"]
+            .as_array()
+            .expect("denial reasons")
+            .iter()
+            .map(|value| value.as_str().expect("reason string"))
+            .collect()
+    }
+
     #[test]
     fn trust_gated_decrypted_projection_authorizes_verified_message_and_redacts_provenance() {
         let state = MatrixStatePersistenceConfig {
@@ -1866,6 +2646,248 @@ mod tests {
             projection.metadata_event["plaintext_emitted"].as_bool(),
             Some(false)
         );
+    }
+
+    #[test]
+    fn trust_gated_encrypted_media_authorizes_verified_resource_without_media_bytes_or_key_material()
+     {
+        let state = MatrixStatePersistenceConfig {
+            enabled: true,
+            account_user_id: Some("@bot:matrix.example".into()),
+            device_id: Some("DEVICE123".into()),
+            ..MatrixStatePersistenceConfig::default()
+        };
+        let input = encrypted_media_input();
+        let candidate = verified_media_candidate();
+
+        let projection = project_trust_gated_encrypted_media(
+            &input,
+            Some(&candidate),
+            &ready_verified_e2ee(),
+            &state,
+            &[],
+        );
+
+        let authorized = projection
+            .authorized_resource
+            .as_ref()
+            .expect("verified media authorizes a resource handle");
+        assert_eq!(
+            authorized["media"]["resource_handle"].as_str(),
+            Some("matrix-e2ee-media://fixture/media123")
+        );
+        assert_eq!(
+            authorized["media"]["resource_policy"]["bytes_embedded"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            authorized["delivery_context"]["verified_decryption"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            projection.metadata_event["decryption_status"].as_str(),
+            Some("authorized_media_resource")
+        );
+        assert_eq!(
+            projection.metadata_event["resource"]["handle_emitted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            projection.metadata_event["resource"]["cleanup"]["status"].as_str(),
+            Some("pending_release")
+        );
+        let metadata = projection.metadata_event.to_string();
+        assert!(!metadata.contains("mxc://matrix.example/media123"));
+        assert!(!metadata.contains("matrix-e2ee-media://fixture/media123"));
+        assert!(!metadata.contains("MEDIAKEY"));
+        assert!(!metadata.contains("MEDIAIV"));
+        assert!(!metadata.contains("sha256mediafixturehash"));
+        assert_eq!(projection.dropped_reason, None);
+    }
+
+    #[test]
+    fn encrypted_media_metadata_validation_denies_invalid_shapes_and_oversize() {
+        let mut content = encrypted_media_content();
+        content["msgtype"] = json!("m.location");
+        content["file"]["url"] = json!("https://matrix.example/media123");
+        content["file"]["v"] = json!("v1");
+        content["file"]["key"]["k"] = json!("short");
+        content["file"]["iv"] = json!("bad iv");
+        content["file"]["hashes"]["sha256"] = json!("bad hash");
+        content["info"]["mimetype"] = json!("");
+        content["info"]["size"] = json!(999_999_u64);
+
+        let input = MatrixEncryptedMediaProjectionContext::from_content(
+            encrypted_projection_input(),
+            &content,
+            Some(8192),
+        )
+        .expect("encrypted media projection input");
+
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_msgtype_unsupported")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_mxc_uri_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_version_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_key_shape_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_iv_shape_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_hash_shape_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_content_type_invalid")
+        );
+        assert!(
+            input
+                .metadata_denial_reasons
+                .contains(&"encrypted_media_oversized")
+        );
+
+        let projection = project_trust_gated_encrypted_media(
+            &input,
+            Some(&verified_media_candidate()),
+            &ready_verified_e2ee(),
+            &MatrixStatePersistenceConfig::default(),
+            &[],
+        );
+
+        assert!(projection.authorized_resource.is_none());
+        assert_eq!(
+            projection.metadata_event["fcp_error_mapping"]["category"].as_str(),
+            Some("invalid_request")
+        );
+        assert_eq!(
+            projection.metadata_event["resource"]["cleanup"]["status"].as_str(),
+            Some("not_allocated")
+        );
+        assert!(!projection.metadata_event.to_string().contains("bad iv"));
+    }
+
+    #[test]
+    fn trust_gated_encrypted_media_denies_wrong_event_room_sender_session_and_hash() {
+        let mut candidate = verified_media_candidate();
+        candidate.room_id = "!other:matrix.example".into();
+        candidate.event_id = "$other".into();
+        candidate.sender = "@mallory:matrix.example".into();
+        candidate.session_id = "OTHERSESSION".into();
+        candidate.content_hash_sha256 = "sha256otherhash0000000000000000000000000000".into();
+        candidate.mxc_uri = "mxc://matrix.example/other".into();
+
+        let projection = project_trust_gated_encrypted_media(
+            &encrypted_media_input(),
+            Some(&candidate),
+            &ready_verified_e2ee(),
+            &MatrixStatePersistenceConfig::default(),
+            &[],
+        );
+        let reasons = denial_reason_strings(&projection.metadata_event);
+
+        assert!(projection.authorized_resource.is_none());
+        assert!(reasons.contains(&"wrong_room"));
+        assert!(reasons.contains(&"wrong_event"));
+        assert!(reasons.contains(&"wrong_sender_device"));
+        assert!(reasons.contains(&"session_provenance_mismatch"));
+        assert!(reasons.contains(&"encrypted_media_uri_mismatch"));
+        assert!(reasons.contains(&"encrypted_media_content_hash_mismatch"));
+        assert_eq!(
+            projection.metadata_event["fcp_error_mapping"]["category"].as_str(),
+            Some("invalid_request")
+        );
+    }
+
+    #[test]
+    fn trust_gated_encrypted_media_denies_redacted_untrusted_and_invalid_resource_handle() {
+        let mut input = encrypted_media_input();
+        input.event.redaction_state = MatrixEncryptedEventRedactionState::Redacted;
+        let mut candidate = verified_media_candidate();
+        candidate.redaction_state = MatrixEncryptedEventRedactionState::Redacted;
+        candidate.sender_device_trust = MatrixProjectionVerificationStatus::Unverified;
+        candidate.session_trust = MatrixProjectionVerificationStatus::Unverified;
+        candidate.resource_handle = "https://matrix.example/media123".into();
+
+        let projection = project_trust_gated_encrypted_media(
+            &input,
+            Some(&candidate),
+            &ready_verified_e2ee(),
+            &MatrixStatePersistenceConfig::default(),
+            &[candidate.replay_key.clone()],
+        );
+        let reasons = denial_reason_strings(&projection.metadata_event);
+
+        assert!(projection.authorized_resource.is_none());
+        assert!(reasons.contains(&"redacted_event_denied"));
+        assert!(reasons.contains(&"sender_device_untrusted"));
+        assert!(reasons.contains(&"session_unverified"));
+        assert!(reasons.contains(&"replay_duplicate"));
+        assert!(reasons.contains(&"encrypted_media_resource_handle_invalid"));
+        assert_eq!(
+            projection.metadata_event["resource"]["handle_emitted"].as_bool(),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn trust_gated_encrypted_media_records_retry_final_failure_and_no_secret_material() {
+        let retry = MatrixUndecryptedRetryConfig {
+            max_attempts: 2,
+            retry_after_ms: 500,
+        };
+        let e2ee = MatrixE2eeConfig {
+            verified_decryption_requested: true,
+            undecrypted_retry: retry,
+            ..ready_verified_e2ee()
+        };
+        let mut input = encrypted_media_input();
+        input.event.retry_attempts_used = 2;
+
+        let projection = project_trust_gated_encrypted_media(
+            &input,
+            None,
+            &e2ee,
+            &MatrixStatePersistenceConfig::default(),
+            &[],
+        );
+
+        assert!(projection.authorized_resource.is_none());
+        assert_eq!(
+            projection.metadata_event["decryption_status"].as_str(),
+            Some("final_failure")
+        );
+        assert_eq!(
+            projection.metadata_event["decryption_reason"].as_str(),
+            Some("undecrypted_retry_budget_exhausted")
+        );
+        assert_eq!(
+            projection.metadata_event["contains_secret_material"].as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            projection.metadata_event["resource"]["cleanup"]["status"].as_str(),
+            Some("not_allocated")
+        );
+        assert!(!projection.metadata_event.to_string().contains("MEDIAKEY"));
     }
 
     #[test]

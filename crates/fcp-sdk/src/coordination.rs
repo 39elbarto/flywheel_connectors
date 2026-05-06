@@ -23,6 +23,15 @@ pub const THREAD_OWNED_BY_PEER_ERROR_CODE: u16 = 4090;
 /// FCP error code used when fail-closed coordination cannot decide ownership.
 pub const THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE: u16 = 5090;
 
+/// Stable reason returned when Agent Mail cannot decide ownership.
+pub const AGENT_MAIL_UNAVAILABLE_REASON: &str = "agent_mail_unavailable";
+
+/// Prefix used for Agent Mail chat-thread reservation keys.
+pub const CHAT_THREAD_RESERVATION_PREFIX: &str = "chat-thread://";
+
+/// Default Agent Mail retry count after the first unavailable claim attempt.
+pub const AGENT_MAIL_CLAIM_RETRY_ATTEMPTS: usize = 1;
+
 /// Connector-level policy for chat messages without a native thread id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DmMode {
@@ -265,6 +274,223 @@ impl ChatCoordinationAuditRecord {
     #[must_use]
     pub const fn error_code(&self) -> Option<u16> {
         self.error_code
+    }
+}
+
+/// Agent Mail reservation request for a chat-thread ownership claim.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AgentMailThreadReservationRequest {
+    reservation_key: String,
+    claim_key: ClaimKey,
+    claimant_agent_id: AgentId,
+    ttl: Duration,
+}
+
+impl AgentMailThreadReservationRequest {
+    /// Build an Agent Mail reservation request for a claim key.
+    #[must_use]
+    pub fn new(claim_key: ClaimKey, claimant_agent_id: AgentId, ttl: Duration) -> Self {
+        let reservation_key = agent_mail_thread_reservation_key(&claim_key);
+        Self {
+            reservation_key,
+            claim_key,
+            claimant_agent_id,
+            ttl,
+        }
+    }
+
+    /// Reservation key passed to the Agent Mail file-reservation backend.
+    #[must_use]
+    pub fn reservation_key(&self) -> &str {
+        &self.reservation_key
+    }
+
+    /// Claim key represented by this reservation request.
+    #[must_use]
+    pub const fn claim_key(&self) -> &ClaimKey {
+        &self.claim_key
+    }
+
+    /// Agent attempting to claim the thread.
+    #[must_use]
+    pub const fn claimant_agent_id(&self) -> &AgentId {
+        &self.claimant_agent_id
+    }
+
+    /// Requested Agent Mail lease TTL.
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+}
+
+impl fmt::Debug for AgentMailThreadReservationRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let claim_key = self.claim_key.redacted();
+        let claimant_agent_id = self.claimant_agent_id.redacted();
+        f.debug_struct("AgentMailThreadReservationRequest")
+            .field("reservation_key", &self.reservation_key)
+            .field("claim_key", &claim_key)
+            .field("claimant_agent_id", &claimant_agent_id)
+            .field("ttl", &self.ttl)
+            .finish()
+    }
+}
+
+/// Outcome returned by an Agent Mail chat-thread reservation client.
+#[derive(Clone, PartialEq, Eq)]
+pub enum AgentMailThreadReservationOutcome {
+    /// Exclusive reservation was acquired.
+    Granted,
+    /// Another agent already owns the reservation.
+    Conflict {
+        /// Agent that currently owns the reservation.
+        owner_agent_id: AgentId,
+    },
+    /// Agent Mail was unreachable or could not make a decision.
+    Unavailable {
+        /// Redaction-safe reason code for diagnostics.
+        reason: String,
+    },
+}
+
+impl AgentMailThreadReservationOutcome {
+    /// Build a conflict outcome.
+    #[must_use]
+    pub const fn conflict(owner_agent_id: AgentId) -> Self {
+        Self::Conflict { owner_agent_id }
+    }
+
+    /// Build an unavailable outcome.
+    #[must_use]
+    pub fn unavailable(reason: impl Into<String>) -> Self {
+        Self::Unavailable {
+            reason: reason.into(),
+        }
+    }
+}
+
+impl fmt::Debug for AgentMailThreadReservationOutcome {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Granted => f.write_str("Granted"),
+            Self::Conflict { owner_agent_id } => f
+                .debug_struct("Conflict")
+                .field("owner_agent_id", &owner_agent_id.redacted())
+                .finish(),
+            Self::Unavailable { reason } => f
+                .debug_struct("Unavailable")
+                .field("reason", reason)
+                .finish(),
+        }
+    }
+}
+
+/// Minimal Agent Mail reservation client surface used by the SDK checker.
+#[async_trait]
+pub trait AgentMailThreadReservationClient: Send + Sync {
+    /// Attempt to acquire an exclusive Agent Mail reservation for the request.
+    async fn claim_thread_reservation(
+        &self,
+        cx: &fcp_async_core::Cx,
+        request: &AgentMailThreadReservationRequest,
+    ) -> AgentMailThreadReservationOutcome;
+}
+
+/// Thread ownership checker backed by Agent Mail exclusive reservations.
+pub struct AgentMailThreadOwnershipChecker<C> {
+    client: C,
+    ttl: Duration,
+    retry_attempts: usize,
+}
+
+impl<C> AgentMailThreadOwnershipChecker<C> {
+    /// Create a checker using the default chat ownership TTL.
+    #[must_use]
+    pub const fn new(client: C) -> Self {
+        Self::with_ttl(client, DEFAULT_THREAD_OWNERSHIP_TTL)
+    }
+
+    /// Create a checker with a custom Agent Mail reservation TTL.
+    #[must_use]
+    pub const fn with_ttl(client: C, ttl: Duration) -> Self {
+        Self {
+            client,
+            ttl,
+            retry_attempts: AGENT_MAIL_CLAIM_RETRY_ATTEMPTS,
+        }
+    }
+
+    /// Configure retry attempts after the first unavailable Agent Mail response.
+    #[must_use]
+    pub const fn with_retry_attempts(mut self, retry_attempts: usize) -> Self {
+        self.retry_attempts = retry_attempts;
+        self
+    }
+
+    /// Agent Mail reservation TTL.
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Retry attempts after the first unavailable response.
+    #[must_use]
+    pub const fn retry_attempts(&self) -> usize {
+        self.retry_attempts
+    }
+
+    /// Borrow the underlying reservation client.
+    #[must_use]
+    pub const fn client(&self) -> &C {
+        &self.client
+    }
+
+    /// Build the Agent Mail reservation request for a claim.
+    #[must_use]
+    pub fn request_for(
+        &self,
+        key: ClaimKey,
+        agent_id: AgentId,
+    ) -> AgentMailThreadReservationRequest {
+        AgentMailThreadReservationRequest::new(key, agent_id, self.ttl)
+    }
+}
+
+impl<C> fmt::Debug for AgentMailThreadOwnershipChecker<C> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AgentMailThreadOwnershipChecker")
+            .field("client", &"<agent-mail-thread-reservation-client>")
+            .field("ttl", &self.ttl)
+            .field("retry_attempts", &self.retry_attempts)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<C> ThreadOwnershipChecker for AgentMailThreadOwnershipChecker<C>
+where
+    C: AgentMailThreadReservationClient,
+{
+    async fn claim(
+        &self,
+        cx: &fcp_async_core::Cx,
+        key: ClaimKey,
+        agent_id: AgentId,
+    ) -> ClaimOutcome {
+        let request = self.request_for(key, agent_id);
+        for _ in 0..=self.retry_attempts {
+            match self.client.claim_thread_reservation(cx, &request).await {
+                AgentMailThreadReservationOutcome::Granted => {
+                    return ClaimOutcome::Granted(request.claimant_agent_id().clone());
+                }
+                AgentMailThreadReservationOutcome::Conflict { owner_agent_id } => {
+                    return ClaimOutcome::AlreadyOwned(owner_agent_id);
+                }
+                AgentMailThreadReservationOutcome::Unavailable { .. } => {}
+            }
+        }
+        ClaimOutcome::Indeterminate(AGENT_MAIL_UNAVAILABLE_REASON.to_owned())
     }
 }
 
@@ -1287,6 +1513,16 @@ fn prune_claims(claims: &mut HashMap<ClaimKey, OwnershipRecord>, now: Instant) {
     claims.retain(|_, record| !record.is_expired(now));
 }
 
+fn agent_mail_thread_reservation_key(key: &ClaimKey) -> String {
+    format!(
+        "{CHAT_THREAD_RESERVATION_PREFIX}{}/{}/{}/{}",
+        key.zone_id().as_str(),
+        key.connector_id().as_str(),
+        key.channel_id().redacted(),
+        key.thread_id().redacted()
+    )
+}
+
 fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     value
         .get(..prefix.len())
@@ -1365,6 +1601,7 @@ fn fnv1a64(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::VecDeque;
     use std::time::{Duration, Instant};
 
     use super::*;
@@ -1385,6 +1622,61 @@ mod tests {
 
     fn agent(id: &str) -> AgentId {
         AgentId::new(id)
+    }
+
+    struct ScriptedAgentMailReservationClient {
+        outcomes: Mutex<VecDeque<AgentMailThreadReservationOutcome>>,
+        requests: Mutex<Vec<AgentMailThreadReservationRequest>>,
+    }
+
+    impl ScriptedAgentMailReservationClient {
+        fn new(outcomes: impl IntoIterator<Item = AgentMailThreadReservationOutcome>) -> Self {
+            Self {
+                outcomes: Mutex::new(outcomes.into_iter().collect()),
+                requests: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn requests(&self) -> Vec<AgentMailThreadReservationRequest> {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+    }
+
+    #[async_trait]
+    impl AgentMailThreadReservationClient for ScriptedAgentMailReservationClient {
+        async fn claim_thread_reservation(
+            &self,
+            _cx: &fcp_async_core::Cx,
+            request: &AgentMailThreadReservationRequest,
+        ) -> AgentMailThreadReservationOutcome {
+            self.requests
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(request.clone());
+            self.outcomes
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .pop_front()
+                .unwrap_or_else(|| {
+                    AgentMailThreadReservationOutcome::unavailable(AGENT_MAIL_UNAVAILABLE_REASON)
+                })
+        }
+    }
+
+    fn run_agent_mail_claim<C>(
+        checker: &AgentMailThreadOwnershipChecker<C>,
+        key: ClaimKey,
+        agent_id: AgentId,
+    ) -> ClaimOutcome
+    where
+        C: AgentMailThreadReservationClient,
+    {
+        let cx = fcp_async_core::Cx::for_testing();
+        fcp_async_core::runtime::block_on_sync(checker.claim(&cx, key, agent_id))
+            .expect("test runtime starts")
     }
 
     #[test]
@@ -1654,6 +1946,81 @@ mod tests {
         assert!(!json.contains("alice"));
         assert!(!json.contains("bob"));
         assert!(!json.contains("C123"));
+    }
+
+    #[test]
+    fn agent_mail_reservation_request_uses_redacted_chat_thread_key() {
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let claimant = agent("alice");
+        let request = AgentMailThreadReservationRequest::new(
+            key.clone(),
+            claimant.clone(),
+            Duration::from_secs(120),
+        );
+        let expected_key = format!(
+            "{CHAT_THREAD_RESERVATION_PREFIX}z:work/slack:chat:1.0.0/{}/{}",
+            key.channel_id().redacted(),
+            key.thread_id().redacted()
+        );
+
+        assert_eq!(request.reservation_key(), expected_key);
+        assert_eq!(request.claim_key(), &key);
+        assert_eq!(request.claimant_agent_id(), &claimant);
+        assert_eq!(request.ttl(), Duration::from_secs(120));
+        assert!(!request.reservation_key().contains("C123"));
+        assert!(!request.reservation_key().contains("1700000000.000100"));
+
+        let debug = format!("{request:?}");
+        assert!(debug.contains("agent:"));
+        assert!(debug.contains("channel:"));
+        assert!(debug.contains("thread:"));
+        assert!(!debug.contains("alice"));
+        assert!(!debug.contains("C123"));
+        assert!(!debug.contains("1700000000.000100"));
+    }
+
+    #[test]
+    fn agent_mail_checker_maps_granted_and_conflict_responses() {
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let claimant = agent("alice");
+        let granted_checker = AgentMailThreadOwnershipChecker::with_ttl(
+            ScriptedAgentMailReservationClient::new([AgentMailThreadReservationOutcome::Granted]),
+            Duration::from_secs(90),
+        );
+
+        let granted = run_agent_mail_claim(&granted_checker, key.clone(), claimant.clone());
+        assert_eq!(granted, ClaimOutcome::Granted(claimant.clone()));
+        let requests = granted_checker.client().requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].ttl(), Duration::from_secs(90));
+        assert_eq!(requests[0].claimant_agent_id(), &claimant);
+
+        let owner = agent("bob");
+        let conflict_checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::conflict(owner.clone()),
+            ]));
+        let conflict = run_agent_mail_claim(&conflict_checker, key, claimant);
+        assert_eq!(conflict, ClaimOutcome::AlreadyOwned(owner));
+        assert_eq!(conflict_checker.client().requests().len(), 1);
+    }
+
+    #[test]
+    fn agent_mail_checker_retries_once_then_returns_unavailable() {
+        let checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::unavailable("socket_closed"),
+                AgentMailThreadReservationOutcome::unavailable("still_down"),
+            ]));
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let outcome = run_agent_mail_claim(&checker, key, agent("alice"));
+
+        assert_eq!(
+            outcome,
+            ClaimOutcome::Indeterminate(AGENT_MAIL_UNAVAILABLE_REASON.to_owned())
+        );
+        assert_eq!(checker.retry_attempts(), AGENT_MAIL_CLAIM_RETRY_ATTEMPTS);
+        assert_eq!(checker.client().requests().len(), 2);
     }
 
     #[test]

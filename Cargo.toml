@@ -44,6 +44,7 @@ members = [
     "connectors/deepseek",
     "connectors/discord",
     "connectors/duckduckgo",
+    "connectors/comfyui",
     "connectors/fal",
     "connectors/fireworks",
     "connectors/glm",
@@ -51,7 +52,11 @@ members = [
     "connectors/moonshot",
     "connectors/openai",
     "connectors/openrouter",
+    "connectors/nvidia-nim",
+    "connectors/qwen",
     "connectors/searxng",
+    "connectors/lm-studio",
+    "connectors/moonshot",
     "connectors/ollama",
     "connectors/together",
     "connectors/telegram",
@@ -333,6 +338,7 @@ fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-cerebras = { path = "connectors/cerebras" }
+fcp-comfyui = { path = "connectors/comfyui" }
 fcp-deepseek = { path = "connectors/deepseek" }
 fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-fireworks = { path = "connectors/fireworks" }
@@ -340,7 +346,11 @@ fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
 fcp-moonshot = { path = "connectors/moonshot" }
 fcp-host = { path = "crates/fcp-host" }
+fcp-nvidia-nim = { path = "connectors/nvidia-nim" }
+fcp-qwen = { path = "connectors/qwen" }
 fcp-searxng = { path = "connectors/searxng" }
+fcp-lm-studio = { path = "connectors/lm-studio" }
+fcp-moonshot = { path = "connectors/moonshot" }
 fcp-ollama = { path = "connectors/ollama" }
 fcp-together = { path = "connectors/together" }
 fcp-voyage = { path = "connectors/voyage" }

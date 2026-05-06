@@ -1,0 +1,148 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:4dd9602867dd19214ebb4dbccc6385b65357296861d305f1f8a5db329aed2ddf"
+
+[connector]
+id = "fcp.nvidia_nim"
+name = "NVIDIA NIM"
+version = "0.1.0"
+description = "NVIDIA-hosted and operator self-hosted NIM connector using OpenAI-compatible chat, streaming, embeddings, models, plus explicit NeMo Retriever reranking"
+archetypes = ["operational", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is auth, deployment_mode, base_url, rerank_base_url, explicit allowed_hosts for self-hosted endpoints, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+# The manifest schema accepts concrete ZoneId values only; project-specific
+# zones are added as explicit host policy entries rather than wildcard strings.
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:owner", "z:private", "z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = ["nvidia_nim.chat", "nvidia_nim.embeddings", "nvidia_nim.rerank", "nvidia_nim.models.read", "nvidia_nim.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+# Hosted mode uses NVIDIA's public HTTPS endpoints. Self-hosted mode is an
+# explicit operator exception for NIM containers reachable on localhost or an
+# allowlisted tailnet/private host. Private and tailnet IP literals are denied
+# unless configure sets allow_private_hosts=true.
+[sandbox]
+profile = "moderate"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 180000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."nvidia_nim.chat.completions"]
+description = "Create a bounded non-streaming NVIDIA NIM chat completion through POST /v1/chat/completions."
+capability = "nvidia_nim.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "meta/llama-3.1-8b-instruct" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, nvext = { type = "object" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.chat.completions".ai_hints]
+when_to_use = "Use for NVIDIA-hosted or operator self-hosted NIM chat inference."
+common_mistakes = ["Do not log prompts, completions, nvext payloads, tool-call arguments, or API keys.", "Set deployment_mode=self_hosted with explicit allowed_hosts for non-hosted NIM containers."]
+examples = ['{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"Summarize FCP in one sentence."}]}']
+related = ["nvidia_nim.chat.completions_stream", "nvidia_nim.models.list", "nvidia_nim.rerank"]
+
+[provides.operations."nvidia_nim.chat.completions_stream"]
+description = "Open a NVIDIA NIM OpenAI-compatible SSE chat-completions stream and return assembled content with redaction-safe chunk metadata."
+capability = "nvidia_nim.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "meta/llama-3.1-8b-instruct" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, nvext = { type = "object" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.chat.completions_stream".ai_hints]
+when_to_use = "Use when first-token latency matters for NIM-hosted chat inference."
+common_mistakes = ["Handle finish_reason and chunk counts.", "Do not treat provider-specific delta fields as audit-safe prompt content."]
+examples = ['{"model":"meta/llama-3.1-8b-instruct","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["nvidia_nim.chat.completions"]
+
+[provides.operations."nvidia_nim.embeddings.create"]
+description = "Create NVIDIA NIM text embeddings through POST /v1/embeddings."
+capability = "nvidia_nim.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string", default = "nvidia/nv-embedqa-e5-v5" }, input = {}, encoding_format = { type = "string" }, dimensions = { type = "integer", minimum = 1 }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.embeddings.create".ai_hints]
+when_to_use = "Use for NIM-hosted embedding models."
+common_mistakes = ["Do not log input text or embedding vectors.", "Ensure the configured deployment actually serves an embedding model."]
+examples = ['{"model":"nvidia/nv-embedqa-e5-v5","input":"hello"}']
+related = ["nvidia_nim.models.list", "nvidia_nim.rerank"]
+
+[provides.operations."nvidia_nim.rerank"]
+description = "Rerank passages using NVIDIA-hosted retrieval reranking or self-hosted NeMo Retriever /v1/ranking."
+capability = "nvidia_nim.rerank"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["query", "passages"], properties = { model = { type = "string", default = "nv-rerank-qa-mistral-4b:1" }, query = {}, passages = { type = "array", minItems = 1, maxItems = 512 }, truncate = { enum = ["START", "END", "NONE"] } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["ai.api.nvidia.com", "integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.rerank".ai_hints]
+when_to_use = "Use to rerank candidate passages before RAG answer generation."
+common_mistakes = ["Do not log query or passage text; logs should use byte counts and ranking counts.", "Hosted rerank uses NVIDIA's retrieval endpoint while self-hosted rerank uses /v1/ranking."]
+examples = ['{"query":"which way should I go?","passages":["first passage","second passage"],"truncate":"END"}']
+related = ["nvidia_nim.embeddings.create", "nvidia_nim.chat.completions"]
+
+[provides.operations."nvidia_nim.models.list"]
+description = "List configured NVIDIA NIM models from GET /v1/models."
+capability = "nvidia_nim.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.models.list".ai_hints]
+when_to_use = "Use to discover model IDs before sending chat, embedding, or rerank requests."
+common_mistakes = ["Hosted model names and self-hosted NIM_SERVED_MODEL_NAME values differ."]
+examples = ["{}"]
+related = ["nvidia_nim.chat.completions", "nvidia_nim.embeddings.create", "nvidia_nim.rerank"]
+
+[provides.operations."nvidia_nim.health"]
+description = "Probe NVIDIA NIM model listing with a bounded timeout and return connector health metadata."
+capability = "nvidia_nim.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["integrate.api.nvidia.com"], port_allow = [443, 80, 8000], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."nvidia_nim.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching NIM work."
+common_mistakes = ["Do not treat a missing hosted credential as self-hosted fallback."]
+examples = ["{}"]
+related = ["nvidia_nim.models.list"]

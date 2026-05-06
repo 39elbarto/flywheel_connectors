@@ -1,0 +1,388 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:a28c10ebb1f1d4600b5b9d9777de485f86686f32fd89691f3cd854b13ab08387"
+
+[connector]
+id = "fcp.qwen"
+name = "Qwen"
+version = "0.1.0"
+description = "Alibaba Qwen connector using DashScope OpenAI-compatible chat, streaming, embeddings, model listing, and Qwen-VL multimodal APIs"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = [
+    "qwen.chat",
+    "qwen.embeddings",
+    "qwen.models.read",
+    "qwen.health.read",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."qwen.chat.completions"]
+description = "Create a bounded non-streaming Qwen chat completion through DashScope OpenAI-compatible POST /chat/completions."
+capability = "qwen.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."qwen.chat.completions".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.max_completion_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.model]
+default = "qwen-plus"
+type = "string"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.stop]
+
+[provides.operations."qwen.chat.completions".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.tool_choice]
+
+[provides.operations."qwen.chat.completions".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."qwen.chat.completions".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."qwen.chat.completions".output_schema]
+type = "object"
+
+[provides.operations."qwen.chat.completions".network_constraints]
+host_allow = [
+    "dashscope-intl.aliyuncs.com",
+    "dashscope.aliyuncs.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."qwen.chat.completions".ai_hints]
+when_to_use = "Use for Alibaba Qwen text chat or Qwen-VL multimodal chat via DashScope OpenAI-compatible mode."
+common_mistakes = [
+    "Do not log prompts, completions, image URLs, or API keys.",
+    "Use qwen-vl/qwen3-vl/qvq models for image_url content blocks.",
+    "Do not call DashScope-native /api/v1/services endpoints from this connector.",
+]
+examples = [
+    '{"model":"qwen-plus","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}]}',
+    '{"model":"qwen-vl-plus","messages":[{"role":"user","content":[{"type":"text","text":"Describe the image."},{"type":"image_url","image_url":{"url":"https://example.com/image.png"}}]}]}',
+]
+related = [
+    "qwen.chat.completions_stream",
+    "qwen.models.list",
+]
+
+[provides.operations."qwen.chat.completions_stream"]
+description = "Open a Qwen SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "qwen.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."qwen.chat.completions_stream".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.max_completion_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.model]
+default = "qwen-plus"
+type = "string"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.stop]
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.tool_choice]
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."qwen.chat.completions_stream".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."qwen.chat.completions_stream".output_schema]
+type = "object"
+
+[provides.operations."qwen.chat.completions_stream".network_constraints]
+host_allow = [
+    "dashscope-intl.aliyuncs.com",
+    "dashscope.aliyuncs.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."qwen.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters and the caller can consume incremental chunk metadata."
+common_mistakes = [
+    "Handle finish_reason and tool-call deltas.",
+    "Do not log streamed text chunks.",
+]
+examples = ['{"model":"qwen-plus","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["qwen.chat.completions"]
+
+[provides.operations."qwen.embeddings.create"]
+description = "Create DashScope text embeddings through OpenAI-compatible POST /embeddings."
+capability = "qwen.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qwen.embeddings.create".input_schema]
+required = ["input"]
+type = "object"
+
+[provides.operations."qwen.embeddings.create".input_schema.properties.dimensions]
+minimum = 1
+type = "integer"
+
+[provides.operations."qwen.embeddings.create".input_schema.properties.encoding_format]
+type = "string"
+
+[provides.operations."qwen.embeddings.create".input_schema.properties.input]
+
+[provides.operations."qwen.embeddings.create".input_schema.properties.model]
+default = "text-embedding-v4"
+type = "string"
+
+[provides.operations."qwen.embeddings.create".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."qwen.embeddings.create".output_schema]
+type = "object"
+
+[provides.operations."qwen.embeddings.create".network_constraints]
+host_allow = [
+    "dashscope-intl.aliyuncs.com",
+    "dashscope.aliyuncs.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."qwen.embeddings.create".ai_hints]
+when_to_use = "Use for DashScope embedding models such as text-embedding-v4."
+common_mistakes = [
+    "Do not log input text or embedding vectors.",
+    "Do not assume Qwen chat models support embeddings.",
+]
+examples = ['{"model":"text-embedding-v4","input":"hello"}']
+related = ["qwen.models.list"]
+
+[provides.operations."qwen.health"]
+description = "Probe Qwen model listing with a short timeout and return connector health metadata."
+capability = "qwen.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qwen.health".input_schema]
+type = "object"
+
+[provides.operations."qwen.health".input_schema.properties]
+
+[provides.operations."qwen.health".output_schema]
+type = "object"
+
+[provides.operations."qwen.health".network_constraints]
+host_allow = [
+    "dashscope-intl.aliyuncs.com",
+    "dashscope.aliyuncs.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 5000
+total_timeout_ms = 5000
+max_response_bytes = 10485760
+
+[provides.operations."qwen.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible Qwen operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["qwen.models.list"]
+
+[provides.operations."qwen.models.list"]
+description = "List Qwen/DashScope models from OpenAI-compatible GET /models using the connector model-cache path."
+capability = "qwen.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."qwen.models.list".input_schema]
+type = "object"
+
+[provides.operations."qwen.models.list".input_schema.properties.refresh]
+default = false
+type = "boolean"
+
+[provides.operations."qwen.models.list".output_schema]
+type = "object"
+
+[provides.operations."qwen.models.list".network_constraints]
+host_allow = [
+    "dashscope-intl.aliyuncs.com",
+    "dashscope.aliyuncs.com",
+]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."qwen.models.list".ai_hints]
+when_to_use = "Use to discover currently active Qwen, Qwen-VL, and embedding model IDs before sending requests."
+common_mistakes = ["Do not assume every listed model supports every operation."]
+examples = ["{}"]
+related = [
+    "qwen.chat.completions",
+    "qwen.embeddings.create",
+]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 180000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

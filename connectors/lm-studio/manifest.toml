@@ -1,0 +1,406 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:20775a38dbb49346ca9959e023b1f0a04b59a61fca88684eac199c81d3c6d0a2"
+
+[connector]
+id = "fcp.lm_studio"
+name = "LM Studio"
+version = "0.1.0"
+description = "LM Studio local desktop connector using OpenAI-compatible /v1 chat, streaming, embeddings, and model-list APIs"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is optional auth, base_url, explicit allowed_hosts for non-loopback endpoints, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:owner"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = [
+    "lm_studio.chat",
+    "lm_studio.embeddings",
+    "lm_studio.models.read",
+    "lm_studio.health.read",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."lm_studio.chat.completions"]
+description = "Create a bounded non-streaming LM Studio chat completion through POST /v1/chat/completions."
+capability = "lm_studio.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."lm_studio.chat.completions".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.model]
+default = "local-model"
+type = "string"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.stop]
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.tool_choice]
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."lm_studio.chat.completions".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."lm_studio.chat.completions".output_schema]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [
+    1234,
+    443,
+    80,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."lm_studio.chat.completions".ai_hints]
+when_to_use = "Use for local or tailnet-hosted LM Studio chat completions when the requested model is already loaded."
+common_mistakes = [
+    "Do not log prompts, completions, tool-call arguments, API keys, or full base URLs.",
+    "Do not expect this connector to load missing models.",
+    "Non-loopback endpoints require explicit allowed_hosts configuration.",
+]
+examples = ['{"model":"local-model","messages":[{"role":"user","content":"Summarize FCP in one sentence."}]}']
+related = [
+    "lm_studio.chat.completions_stream",
+    "lm_studio.models.list",
+]
+
+[provides.operations."lm_studio.chat.completions_stream"]
+description = "Open an LM Studio OpenAI-compatible SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "lm_studio.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.model]
+default = "local-model"
+type = "string"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.stop]
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.tool_choice]
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."lm_studio.chat.completions_stream".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."lm_studio.chat.completions_stream".output_schema]
+type = "object"
+
+[provides.operations."lm_studio.chat.completions_stream".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [
+    1234,
+    443,
+    80,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."lm_studio.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters for a local or tailnet-hosted LM Studio model."
+common_mistakes = [
+    "Handle finish_reason and chunk counts.",
+    "Do not strip model-specific content; this connector surfaces LM Studio output as-is.",
+    "Evidence should use base_url_class, model hashes, byte counts, and status rather than prompt or completion text.",
+]
+examples = ['{"model":"local-model","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["lm_studio.chat.completions"]
+
+[provides.operations."lm_studio.embeddings.create"]
+description = "Create LM Studio text embeddings through POST /v1/embeddings."
+capability = "lm_studio.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."lm_studio.embeddings.create".input_schema]
+required = ["input"]
+type = "object"
+
+[provides.operations."lm_studio.embeddings.create".input_schema.properties.dimensions]
+minimum = 1
+type = "integer"
+
+[provides.operations."lm_studio.embeddings.create".input_schema.properties.encoding_format]
+type = "string"
+
+[provides.operations."lm_studio.embeddings.create".input_schema.properties.input]
+
+[provides.operations."lm_studio.embeddings.create".input_schema.properties.model]
+default = "local-embedding-model"
+type = "string"
+
+[provides.operations."lm_studio.embeddings.create".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."lm_studio.embeddings.create".output_schema]
+type = "object"
+
+[provides.operations."lm_studio.embeddings.create".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [
+    1234,
+    443,
+    80,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."lm_studio.embeddings.create".ai_hints]
+when_to_use = "Use for local embeddings with an already loaded LM Studio embedding model."
+common_mistakes = [
+    "Do not log input text or embedding vectors.",
+    "Do not auto-load embedding models.",
+]
+examples = ['{"model":"local-embedding-model","input":"hello"}']
+related = ["lm_studio.models.list"]
+
+[provides.operations."lm_studio.health"]
+description = "Probe LM Studio model listing with a short timeout and return connector health metadata."
+capability = "lm_studio.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."lm_studio.health".input_schema]
+type = "object"
+
+[provides.operations."lm_studio.health".input_schema.properties]
+
+[provides.operations."lm_studio.health".output_schema]
+type = "object"
+
+[provides.operations."lm_studio.health".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [
+    1234,
+    443,
+    80,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 5000
+max_response_bytes = 10485760
+
+[provides.operations."lm_studio.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching local model work."
+common_mistakes = ["Do not treat absent optional auth as a failed connector; local LM Studio may be unauthenticated."]
+examples = ["{}"]
+related = ["lm_studio.models.list"]
+
+[provides.operations."lm_studio.models.list"]
+description = "List loaded LM Studio models from GET /v1/models."
+capability = "lm_studio.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."lm_studio.models.list".input_schema]
+type = "object"
+
+[provides.operations."lm_studio.models.list".input_schema.properties.refresh]
+default = false
+type = "boolean"
+
+[provides.operations."lm_studio.models.list".output_schema]
+type = "object"
+
+[provides.operations."lm_studio.models.list".network_constraints]
+host_allow = [
+    "localhost",
+    "127.0.0.1",
+    "::1",
+]
+port_allow = [
+    1234,
+    443,
+    80,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."lm_studio.models.list".ai_hints]
+when_to_use = "Use to discover loaded LM Studio model IDs before sending chat, streaming, or embeddings requests."
+common_mistakes = [
+    "Do not infer missing models will be loaded automatically.",
+    "Do not call LM Studio-native model-management endpoints through this connector.",
+]
+examples = ["{}"]
+related = [
+    "lm_studio.chat.completions",
+    "lm_studio.embeddings.create",
+]
+
+[sandbox]
+profile = "moderate"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 300000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

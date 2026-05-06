@@ -1,0 +1,44 @@
+[package]
+name = "fcp-lm-studio"
+description = "LM Studio local and tailnet OpenAI-compatible LLM connector for the Flywheel Connector Protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lib]
+name = "fcp_lm_studio"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fcp-lm-studio"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+fcp-async-core = { workspace = true }
+fcp-core = { workspace = true }
+fcp-openai-compat = { workspace = true }
+fcp-prelude = { workspace = true }
+
+anyhow.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+
+[dev-dependencies]
+blake3.workspace = true
+ciborium.workspace = true
+fcp-crypto = { workspace = true }
+pretty_assertions.workspace = true
+toml.workspace = true
+wiremock.workspace = true

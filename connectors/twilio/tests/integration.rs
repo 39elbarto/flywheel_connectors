@@ -284,7 +284,7 @@ fn log_media_stream_e2e(
     scenario: &str,
     result: &serde_json::Value,
     latency_ms: u128,
-    details: serde_json::Value,
+    details: &serde_json::Value,
 ) {
     let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
     let record = json!({
@@ -302,16 +302,25 @@ fn log_media_stream_e2e(
         "reconnect_plan": result.get("reconnect_plan").cloned().unwrap_or_else(|| json!([])),
         "latency_ms": latency_ms,
         "cleanup": {
-            "clean_shutdown": result.get("clean_shutdown").cloned().unwrap_or_else(|| json!(false)),
-            "tainted": result.get("tainted").cloned().unwrap_or_else(|| json!(true)),
+            "clean_shutdown": result
+                .get("clean_shutdown")
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false)),
+            "tainted": result
+                .get("tainted")
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(true)),
         },
         "final_result": {
-            "accepted": result.get("accepted").cloned().unwrap_or_else(|| json!(false)),
+            "accepted": result
+                .get("accepted")
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false)),
             "status_code": result.get("status_code").cloned().unwrap_or_else(|| json!(0)),
             "reason_code": result.get("reason_code").cloned().unwrap_or_else(|| json!("missing")),
         },
         "skip_reason": serde_json::Value::Null,
-        "details": details,
+        "details": details.clone(),
     });
     writeln!(logs, "{record}").expect("write Twilio media stream e2e log line");
     logs.flush()
@@ -1597,7 +1606,7 @@ async fn media_stream_process_events_no_mock_e2e_jsonl_covers_callback_edges() {
             result["supervision"]["app_spec"]["child_scope"] == "twilio.media_stream.session",
             "{scenario}"
         );
-        log_media_stream_e2e(&mut logs, scenario, &result, latency_ms, details);
+        log_media_stream_e2e(&mut logs, scenario, &result, latency_ms, &details);
     }
 
     let jsonl = std::fs::read_to_string(&log_path).expect("read Twilio media stream e2e JSONL");

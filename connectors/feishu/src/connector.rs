@@ -4839,6 +4839,96 @@ mod tests {
     }
 
     #[test]
+    fn test_webhook_ingress_config_rejects_listener_and_missing_security() {
+        let missing_security = FeishuWebhookIngressConfig {
+            enabled: true,
+            ..FeishuWebhookIngressConfig::default()
+        };
+        let error = missing_security.validate().unwrap_err();
+        assert!(error.to_string().contains("verification_token and encrypt_key"));
+
+        let listener_transport = FeishuWebhookIngressConfig {
+            enabled: true,
+            transport: "connector_listener_socket".into(),
+            verification_token: Some("verify-token".into()),
+            encrypt_key: Some("encrypt-key".into()),
+            ..FeishuWebhookIngressConfig::default()
+        };
+        let error = listener_transport.validate().unwrap_err();
+        assert!(error.to_string().contains("embedded listener sockets"));
+    }
+
+    #[test]
+    fn test_webhook_configured_ingress_uses_configured_security_and_route() {
+        let ingress = configured_webhook_ingress();
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let mut input =
+            signed_webhook_input_with_key(raw_body, json!({}), "configured-encrypt-key");
+        input.as_object_mut().unwrap().remove("verification_token");
+        input.as_object_mut().unwrap().remove("encrypt_key");
+        input["path"] = json!("/feishu/webhook");
+        input["headers"]["content-type"] = json!("application/json; charset=utf-8");
+
+        let output = invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
+            .expect("configured ingress should supply security material");
+
+        assert_eq!(output["status_code"], 200);
+        assert_eq!(output["reason_code"], "event_accepted");
+        assert_eq!(output["request_region"]["configured_ingress"], true);
+        assert_eq!(
+            output["request_region"]["transport"],
+            FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED
+        );
+        assert_eq!(output["request_region"]["listener_socket_opened"], false);
+        assert_eq!(output["request_region"]["path"], "/feishu/webhook");
+        assert_eq!(output["request_region"]["route_checked"], true);
+        assert_eq!(output["request_region"]["content_type_checked"], true);
+        assert_eq!(
+            output["request_region"]["security_material_source"],
+            "webhook_ingress_config"
+        );
+        assert_eq!(
+            output["request_region"]["event_fanout"],
+            "host_consumes_returned_event_record"
+        );
+    }
+
+    #[test]
+    fn test_webhook_configured_ingress_rejects_route_and_content_type() {
+        let ingress = configured_webhook_ingress();
+        let raw_body = message_event_body("ou_allowed", "oc_allowed");
+        let mut input =
+            signed_webhook_input_with_key(raw_body, json!({}), "configured-encrypt-key");
+        input.as_object_mut().unwrap().remove("verification_token");
+        input.as_object_mut().unwrap().remove("encrypt_key");
+
+        let missing_route = invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
+            .expect("missing route should produce webhook response");
+        assert_eq!(missing_route["status_code"], 404);
+        assert_eq!(missing_route["reason_code"], "route_path_required");
+        assert_eq!(missing_route["request_region"]["route_checked"], true);
+
+        input["path"] = json!("/wrong/webhook");
+        input["headers"]["content-type"] = json!("application/json");
+        let wrong_route = invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
+            .expect("wrong route should produce webhook response");
+        assert_eq!(wrong_route["status_code"], 404);
+        assert_eq!(wrong_route["reason_code"], "route_path_mismatch");
+
+        input["path"] = json!("/feishu/webhook");
+        input["headers"]["content-type"] = json!("text/plain");
+        let wrong_content_type =
+            invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
+                .expect("wrong content type should produce webhook response");
+        assert_eq!(wrong_content_type["status_code"], 415);
+        assert_eq!(wrong_content_type["reason_code"], "unsupported_content_type");
+        assert_eq!(
+            wrong_content_type["request_region"]["content_type_checked"],
+            true
+        );
+    }
+
+    #[test]
     fn test_webhook_challenge_response() {
         let raw_body = serde_json::to_string(&json!({
             "type": "url_verification",

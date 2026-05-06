@@ -13,9 +13,10 @@ workspace = true
 
 [dependencies]
 # Hashing for the per-op binding hash (h ← H(zone | period | op | principal)).
-# Real implementation will use SHAKE256 to expand into Z_q^n; this stub
-# uses BLAKE3 as a placeholder for the API surface.
 blake3 = { workspace = true }
+
+# SHAKE256 expansion for deterministic lattice-vector / matrix-seed fixtures.
+sha3 = "0.11.0"
 
 # Constant-time byte comparison for trapdoor / preimage types (br-1zlht).
 subtle = { workspace = true }

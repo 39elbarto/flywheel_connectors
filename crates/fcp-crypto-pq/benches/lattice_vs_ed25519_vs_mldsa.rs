@@ -14,7 +14,7 @@
 //!   into [`fcp_crypto_pq`] (br-kyopb.1.3.1 stubs). The cryptographic
 //!   bodies of `sample_pre` / `verify` currently return
 //!   `LatticePqError::NotImplemented`; the structural / hashing /
-//!   parameter-check work IS real (BLAKE3 derivation of public-matrix
+//!   parameter-check work IS real (SHAKE256 derivation of public-matrix
 //!   placeholders, period-bounds checks, parameter agreement, etc.).
 //!
 //! ## What the lattice numbers mean — IMPORTANT
@@ -110,7 +110,7 @@ fn bench_keygen(c: &mut Criterion) {
         // The lattice analogue of "key generation" is `trap_gen`, which
         // returns the master public key + trapdoor. In the real impl
         // this is the most expensive lattice operation (lattice basis
-        // sampling); in the stub it's a single BLAKE3 hash so the
+        // sampling); in the scaffold it's a single SHAKE256 expansion so the
         // number is a lower bound.
         let params = LatticeParams::V4_REFERENCE;
         b.iter(|| {
@@ -147,7 +147,7 @@ fn bench_sign(c: &mut Criterion) {
 
     // The lattice analogue of "sign" is one delegate hop (issuance node
     // mints a per-(zone, period) sub-trapdoor). Real impl: CHKP basis-
-    // shortening over a lattice basis. Stub: deterministic BLAKE3
+    // shortening over a lattice basis. Scaffold: deterministic SHAKE256
     // chain. Numbers represent the structural bridge cost only.
     let (params, mp, mt, _, _) = lattice_setup();
     group.bench_function("lattice_delegate_one_hop", |b| {
@@ -224,7 +224,7 @@ fn bench_verify(c: &mut Criterion) {
 
     // Lattice verify: the cryptographic body returns NotImplemented;
     // what we measure here is the structural-check cost (parameter
-    // agreement, period bounds) plus the BLAKE3-stub branch. This is
+    // agreement, period bounds) plus the NotImplemented branch. This is
     // a hard floor for the production verify cost — real impl adds
     // matrix-vector multiplication + norm check on top of this.
     let (params, _, _, zp, _) = lattice_setup();

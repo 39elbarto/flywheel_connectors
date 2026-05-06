@@ -1,23 +1,26 @@
 //! # FCP post-quantum cryptographic primitives — lattice-trapdoor delegation
 //!
-//! Stub implementation (br-kyopb.1.3.1) of the four lattice-trapdoor primitives
+//! API scaffolding (br-kyopb.1.3.1) for the four lattice-trapdoor primitives
 //! that back V4 capability delegation. The full design is documented in
 //! `docs/post-quantum/lattice_trapdoor_delegation.md`.
 //!
 //! ## Status
 //!
-//! **All cryptographic operations are stubs.** This crate exists to pin the
-//! API contract that:
+//! **The MP12 / CHKP / GPV cryptographic operations are not implemented.**
+//! `trap_gen` and `delegate` return deterministic SHAKE256-derived seed
+//! placeholders so downstream wiring can pin fixtures. `sample_pre` and
+//! `verify` still return `Err(LatticePqError::NotImplemented { ... })` after
+//! their cheap structural checks. This crate exists to pin the API contract
+//! that:
 //!
 //! - `fcp_policy::lattice_delegation::LatticeDelegationVerifier` (br-kyopb.1.3.2)
 //!   will implement against,
 //! - the Lean 4 formal proof (br-kyopb.1.3.3) will model, and
 //! - the throughput benchmark (br-kyopb.1.3.4) will measure.
 //!
-//! Calling any stub function returns `Err(LatticePqError::NotImplemented { ... })`
-//! — the discriminant names the responsible follow-up bead. **Production code
-//! MUST treat `NotImplemented` as "fall back to V3 (Ed25519) capability
-//! verification" rather than as a hard failure.** See
+//! The `NotImplemented` discriminant names the responsible follow-up bead.
+//! **Production code MUST treat `NotImplemented` as "fall back to V3
+//! (Ed25519) capability verification" rather than as a hard failure.** See
 //! `docs/post-quantum/v3_v4_compatibility_ledger.md` for the cross-version
 //! dispatch rules.
 //!
@@ -40,6 +43,10 @@
 #![forbid(unsafe_code)]
 
 use serde::{Deserialize, Serialize};
+use sha3::{
+    Shake256,
+    digest::{ExtendableOutput, Update, XofReader},
+};
 use thiserror::Error;
 
 // ── Parameters ────────────────────────────────────────────────────────────
@@ -102,11 +109,11 @@ impl DelegationPeriod {
 /// Master public-matrix bundle returned by [`trap_gen`].
 ///
 /// In the real implementation `A_root` is an `n×m` matrix over `Z_q`
-/// (≈30 KB at `V4_REFERENCE`); we expose only its 32-byte content-hash
-/// so the public type is fixed-size and copy-friendly.
+/// (≈30 KB at `V4_REFERENCE`); we expose only its 32-byte public seed
+/// placeholder so the public type is fixed-size and copy-friendly.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MasterPublicKey {
-    /// 32-byte BLAKE3 hash of the canonical encoding of `A_root`.
+    /// 32-byte SHAKE256-derived public matrix seed placeholder.
     pub hash: [u8; 32],
     /// Parameters this key was generated for.
     pub params: LatticeParams,
@@ -137,10 +144,10 @@ impl PartialEq for MasterTrapdoor {
 
 /// Per-`(zone, period)` public matrix `A_zp` returned by [`delegate`].
 ///
-/// As with [`MasterPublicKey`], we carry a content-hash placeholder.
+/// As with [`MasterPublicKey`], we carry a public matrix seed placeholder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZonePeriodPublicKey {
-    /// 32-byte BLAKE3 hash of the canonical encoding of `A_zp`.
+    /// 32-byte SHAKE256-derived public matrix seed placeholder.
     pub hash: [u8; 32],
     /// Zone identifier this delegation authorizes for. Opaque to this
     /// crate — `fcp_policy` owns the canonical `ZoneId` type.
@@ -210,6 +217,137 @@ mod hex_array_64 {
             .map_err(|_| serde::de::Error::custom("expected 64 bytes"))?;
         Ok(arr)
     }
+}
+
+// ── Deterministic expansion scaffolding ───────────────────────────────────
+
+const SHAKE_DOMAIN_PREFIX: &[u8] = b"fcp-crypto-pq/lattice-v1";
+
+fn shake256_fill(tag: &[u8], feed: impl FnOnce(&mut Shake256), out: &mut [u8]) {
+    let mut shaker = Shake256::default();
+    update_len_prefixed(&mut shaker, SHAKE_DOMAIN_PREFIX);
+    update_len_prefixed(&mut shaker, tag);
+    feed(&mut shaker);
+    let mut reader = shaker.finalize_xof();
+    reader.read(out);
+}
+
+fn update_len_prefixed(shaker: &mut Shake256, bytes: &[u8]) {
+    let len = u64::try_from(bytes.len()).expect("SHAKE input length fits in u64");
+    Update::update(shaker, &len.to_le_bytes());
+    Update::update(shaker, bytes);
+}
+
+fn update_period(shaker: &mut Shake256, period: DelegationPeriod) {
+    Update::update(shaker, &period.start_secs.to_le_bytes());
+    Update::update(shaker, &period.end_secs.to_le_bytes());
+}
+
+fn update_params(shaker: &mut Shake256, params: LatticeParams) {
+    Update::update(shaker, &params.n.to_le_bytes());
+    Update::update(shaker, &params.q.to_le_bytes());
+    Update::update(shaker, &params.m.to_le_bytes());
+    Update::update(shaker, &params.sigma_x100.to_le_bytes());
+    Update::update(shaker, &[params.depth]);
+}
+
+fn trap_gen_seed(params: LatticeParams, purpose: &[u8]) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"trap-gen-seed",
+        |shaker| {
+            update_params(shaker, params);
+            update_len_prefixed(shaker, purpose);
+        },
+        &mut out,
+    );
+    out
+}
+
+fn zone_period_trapdoor_seed(
+    parent_trap: &MasterTrapdoor,
+    matrix_seed: &[u8; 32],
+    zone_id: &[u8; 32],
+    period: DelegationPeriod,
+    params: LatticeParams,
+) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"zone-period-trapdoor-placeholder",
+        |shaker| {
+            update_len_prefixed(shaker, &parent_trap.bytes);
+            update_len_prefixed(shaker, matrix_seed);
+            update_len_prefixed(shaker, zone_id);
+            update_period(shaker, period);
+            update_params(shaker, params);
+        },
+        &mut out,
+    );
+    out
+}
+
+/// Deterministically derive the public matrix seed for a `(zone, period)` child.
+///
+/// This is only the SHAKE256 public-seed scaffold for the eventual
+/// matrix-valued hash. It is **not** CHKP basis-shortening and does not prove
+/// possession of a trapdoor.
+#[must_use]
+pub fn zone_period_matrix_seed(
+    parent_pub: &MasterPublicKey,
+    zone_id: &[u8; 32],
+    period: DelegationPeriod,
+    params: LatticeParams,
+) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"zone-period-matrix-seed",
+        |shaker| {
+            update_len_prefixed(shaker, &parent_pub.hash);
+            update_len_prefixed(shaker, zone_id);
+            update_period(shaker, period);
+            update_params(shaker, params);
+        },
+        &mut out,
+    );
+    out
+}
+
+/// Expand an operation hash into the verification right-hand side in `Z_q^n`.
+///
+/// This pins the deterministic SHAKE256 rejection-sampling fixture needed by
+/// the future `A · e ≡ h (mod q)` check. It does **not** sample a preimage,
+/// validate a norm bound, or establish lattice soundness.
+///
+/// # Panics
+///
+/// Panics only on targets where `usize` cannot represent a `u32` lattice
+/// dimension.
+#[must_use]
+pub fn expand_operation_hash_rhs(h: OperationHash, params: LatticeParams) -> Vec<u64> {
+    let len = usize::try_from(params.n).expect("u32 lattice dimension fits in usize");
+    let modulus = params.q.max(1);
+    let modulus_u128 = u128::from(modulus);
+    let range = u128::from(u64::MAX) + 1;
+    let reject_above = range - (range % modulus_u128);
+
+    let mut out = Vec::with_capacity(len);
+    let mut reader_buf = [0_u8; 8];
+    let mut shaker = Shake256::default();
+    update_len_prefixed(&mut shaker, SHAKE_DOMAIN_PREFIX);
+    update_len_prefixed(&mut shaker, b"operation-rhs-vector");
+    update_len_prefixed(&mut shaker, &h.0);
+    update_params(&mut shaker, params);
+    let mut reader = shaker.finalize_xof();
+
+    while out.len() < len {
+        reader.read(&mut reader_buf);
+        let candidate = u128::from(u64::from_le_bytes(reader_buf));
+        if candidate < reject_above {
+            let coeff = candidate % modulus_u128;
+            out.push(u64::try_from(coeff).expect("coefficient fits in u64"));
+        }
+    }
+    out
 }
 
 // ── Errors ────────────────────────────────────────────────────────────────
@@ -287,11 +425,10 @@ pub type LatticePqResult<T> = Result<T, LatticePqError>;
 /// sampler — produces `(A_root ∈ Z_q^{n×m}, T_root)` such that
 /// `A_root · T_root ≡ G (mod q)` for the gadget matrix `G`.
 ///
-/// **Stub:** returns deterministic byte placeholders derived from
-/// `params` so call-sites have stable handles to thread, but the bytes
-/// are NOT cryptographic material. `MasterPublicKey.hash` and
-/// `MasterTrapdoor.bytes` are both `BLAKE3("trap_gen-stub-v0" || params)`
-/// XOR'd with a tag — distinct, but reproducible.
+/// **Scaffold:** returns deterministic SHAKE256-derived byte placeholders
+/// from `params` so call-sites have stable handles to thread, but the bytes
+/// are NOT cryptographic material. The public seed and trapdoor placeholder
+/// use distinct domain tags.
 ///
 /// # Errors
 ///
@@ -299,26 +436,14 @@ pub type LatticePqResult<T> = Result<T, LatticePqError>;
 /// real implementation may fail on entropy starvation; signature
 /// remains `LatticePqResult` to preserve forward compatibility.
 pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"trap_gen-stub-v0|");
-    hasher.update(&params.n.to_le_bytes());
-    hasher.update(&params.q.to_le_bytes());
-    hasher.update(&params.m.to_le_bytes());
-    hasher.update(&params.sigma_x100.to_le_bytes());
-    hasher.update(&[params.depth]);
-    let seed = *hasher.finalize().as_bytes();
-
-    let mut pub_hash = seed;
-    pub_hash[0] ^= 0xA0;
-    let mut trap_bytes = seed;
-    trap_bytes[1] ^= 0xB1;
-
     Ok((
         MasterPublicKey {
-            hash: pub_hash,
+            hash: trap_gen_seed(params, b"master-public-matrix-seed"),
             params,
         },
-        MasterTrapdoor { bytes: trap_bytes },
+        MasterTrapdoor {
+            bytes: trap_gen_seed(params, b"master-trapdoor-placeholder"),
+        },
     ))
 }
 
@@ -328,9 +453,10 @@ pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, Mast
 /// shortening — given the parent `(A_par, T_par)` and a `(zone, period)`
 /// label, derive `(A_zp, T_zp)` for the child certificate.
 ///
-/// **Stub:** binds `(zone_id, period)` into a deterministic placeholder
-/// that matches the master key by content-hash chaining. Always
-/// succeeds when `params` agree and `period` is well-ordered.
+/// **Scaffold:** binds `(zone_id, period)` into a deterministic SHAKE256
+/// public matrix seed plus a distinct trapdoor placeholder. Always succeeds
+/// when `params` agree and `period` is well-ordered, but does NOT perform
+/// CHKP basis-shortening.
 ///
 /// # Errors
 ///
@@ -358,19 +484,8 @@ pub fn delegate(
         });
     }
 
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"delegate-stub-v0|");
-    hasher.update(&parent_pub.hash);
-    hasher.update(&parent_trap.bytes);
-    hasher.update(&zone_id);
-    hasher.update(&period.start_secs.to_le_bytes());
-    hasher.update(&period.end_secs.to_le_bytes());
-    let seed = *hasher.finalize().as_bytes();
-
-    let mut pub_hash = seed;
-    pub_hash[0] ^= 0xC2;
-    let mut trap_bytes = seed;
-    trap_bytes[0] ^= 0xD3;
+    let pub_hash = zone_period_matrix_seed(parent_pub, &zone_id, period, params);
+    let trap_bytes = zone_period_trapdoor_seed(parent_trap, &pub_hash, &zone_id, period, params);
 
     Ok((
         ZonePeriodPublicKey {
@@ -549,6 +664,19 @@ mod tests {
     }
 
     #[test]
+    fn trap_gen_shake256_seed_fixtures_are_pinned() {
+        let (master_pub, master_trap) = trap_gen(LatticeParams::V4_REFERENCE).unwrap();
+        assert_eq!(
+            hex::encode(master_pub.hash),
+            "7f00d711a9de7cec422265e9cfb180de6c37aa7da3ff0375abf0249199b491ad"
+        );
+        assert_eq!(
+            hex::encode(master_trap.bytes),
+            "3e0fd286853ff52ba018cf47dc22749cd6c5e774ea94a9deccf6780e627076cf"
+        );
+    }
+
+    #[test]
     fn delegate_round_trips_through_stub() {
         let p = LatticeParams::V4_REFERENCE;
         let (master_pub, master_trap) = trap_gen(p).unwrap();
@@ -570,6 +698,37 @@ mod tests {
             &zp_trap.bytes[..],
             "child public hash and child trapdoor are tagged differently"
         );
+    }
+
+    #[test]
+    fn zone_period_matrix_seed_is_deterministic_and_domain_separated() {
+        let p = LatticeParams::V4_REFERENCE;
+        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let zone = [7u8; 32];
+        let period = ref_period();
+
+        let seed = zone_period_matrix_seed(&master_pub, &zone, period, p);
+        assert_eq!(
+            hex::encode(seed),
+            "7fbac36f184f312452bf9a49cb8eca8b80d820079bfbeda16cc253448d23e3ea"
+        );
+
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        assert_eq!(zp_pub.hash, seed, "delegate exposes the public seed");
+        assert_eq!(
+            hex::encode(zp_trap.bytes),
+            "bed911c5064fc6cda4c26d5fa0686a257543a289b2e1c6189b81a9be79e0ae2a"
+        );
+
+        let different_zone_seed = zone_period_matrix_seed(&master_pub, &[8u8; 32], period, p);
+        assert_ne!(seed, different_zone_seed, "zone id changes the seed");
+
+        let shifted = DelegationPeriod {
+            start_secs: period.start_secs + 1,
+            end_secs: period.end_secs + 1,
+        };
+        let different_period_seed = zone_period_matrix_seed(&master_pub, &zone, shifted, p);
+        assert_ne!(seed, different_period_seed, "period changes the seed");
     }
 
     #[test]
@@ -722,6 +881,47 @@ mod tests {
         let h_a = operation_hash(&zone, p, b"ab", b"cd");
         let h_b = operation_hash(&zone, p, b"a", b"bcd");
         assert_ne!(h_a, h_b, "length-prefix separation prevents splice");
+    }
+
+    #[test]
+    fn operation_hash_rhs_expands_with_shake256_fixture() {
+        let p = LatticeParams::V4_REFERENCE;
+        let zone = [42u8; 32];
+        let period = ref_period();
+        let h = operation_hash(&zone, period, b"op:read.user.profile", b"principal:alice");
+        assert_eq!(
+            hex::encode(h.0),
+            "375af0d88a424be189140204f0521bace77ef127291b14f609635265a7f7569e"
+        );
+
+        let rhs = expand_operation_hash_rhs(h, p);
+        assert_eq!(
+            rhs.len(),
+            usize::try_from(p.n).expect("u32 lattice dimension fits in usize")
+        );
+        assert!(
+            rhs.iter().all(|coeff| *coeff < p.q),
+            "all coefficients must be reduced modulo q"
+        );
+        assert_eq!(
+            &rhs[..8],
+            &[
+                988_739_933,
+                1_627_499_036,
+                20_657_642,
+                332_982_869,
+                4_070_681_389,
+                1_380_482_524,
+                3_733_962_268,
+                4_263_286_768,
+            ]
+        );
+
+        let different = expand_operation_hash_rhs(
+            operation_hash(&zone, period, b"op:read.user.profile", b"principal:bob"),
+            p,
+        );
+        assert_ne!(&rhs[..16], &different[..16], "principal changes the RHS");
     }
 
     #[test]

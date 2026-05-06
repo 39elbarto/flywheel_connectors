@@ -20,12 +20,11 @@ real today vs what will become real once the lattice arithmetic lands
 | Lattice stub | (see §3.3) |   (see §3.3) | (see §3.3) | (see §3.3) |
 
 Lattice-stub numbers are intentionally **omitted from this summary**
-because they reflect placeholder BLAKE3 hashing rather than the
-production lattice arithmetic. They appear in §3 as the **bridge-cost
-floor** the production verifier always pays, and §4 records the
-projected real-impl numbers from the lattice literature so the team
-has a concrete regression-tracking target for when `kyopb.1.3.1.1`
-lands.
+because they reflect placeholder seed expansion rather than the
+production lattice arithmetic. They appear in §3 as historical
+**bridge-cost floor** measurements, and §4 records the projected
+real-impl numbers from the lattice literature so the team has a
+concrete regression-tracking target for when `kyopb.1.3.1.1` lands.
 
 ## 1. Methodology
 
@@ -53,10 +52,15 @@ Three signature/delegation families across four shapes:
 - **ML-DSA-65** — production `fcp_crypto::ml_dsa` (RustCrypto `ml-dsa`
   crate, FIPS 204).
 - **Lattice-trapdoor** — `fcp_crypto_pq` (`br-kyopb.1.3.1` stubs).
-  `trap_gen` and `delegate` deterministically derive 32-byte
-  placeholders via BLAKE3; `sample_pre` returns
+  `trap_gen` and `delegate` now deterministically derive 32-byte
+  placeholders via SHAKE256; `sample_pre` returns
   `LatticePqError::NotImplemented` immediately; `verify` runs the
   structural checks and then returns `NotImplemented`.
+
+The concrete numbers in §3 were captured on 2026-05-02 before the
+SHAKE256 fixture scaffold in `flywheel_connectors-kyopb.1.3.1.1.1`;
+they remain useful only as lower-bound historical context until the
+research implementation reruns this benchmark.
 
 ### 1.3 Hardware + toolchain
 
@@ -111,9 +115,9 @@ Output lands in `target/criterion/` as HTML reports under each group
 | Lattice-trapdoor (stub)          |      92 |       2 | 10.9 M   |
 
 **Read:** Ed25519 keygen ~110k/s; ML-DSA-65 ~5k/s (~20× slower —
-matches FIPS 204 expectations). Lattice stub is one BLAKE3 — the real
-`TrapGen` will be ~3-5 orders of magnitude slower (lattice basis
-sampling). See §4.
+matches FIPS 204 expectations). Lattice stub was one seed expansion —
+the real `TrapGen` will be ~3-5 orders of magnitude slower (lattice
+basis sampling). See §4.
 
 ### 3.2 Group: `sign_or_issue`
 
@@ -122,15 +126,15 @@ sampling). See §4.
 | Ed25519 sign                            |   8,627 |      31 | 116,000  |
 | ML-DSA-65 sign                          | 230,028 |  13,621 |   4,350  |
 | Lattice `delegate` one hop (stub)       |     191 |       1 |  5.2 M   |
-| Lattice `operation_hash` (real, BLAKE3) |     143 |       1 |  7.0 M   |
+| Lattice `operation_hash` (real, BLAKE3 digest) |     143 |       1 |  7.0 M   |
 
 **Read:** Ed25519 sign and ML-DSA sign are both end-to-end real
 operations; the ~27× sign-time gap is inherent to ML-DSA's lattice
-sampling. The lattice `delegate` stub is two chained BLAKE3 hashes
+sampling. The lattice `delegate` stub was a chained seed derivation
 (parent → child seed); real CHKP basis-shortening will be
 substantially slower (see §4). The `operation_hash` row is *not* a
-stub — it's the production hash construction every real sub-token
-mint also pays.
+stub — it's the production digest construction every real sub-token
+mint also pays before SHAKE256 RHS expansion.
 
 ### 3.3 Group: `verify`
 

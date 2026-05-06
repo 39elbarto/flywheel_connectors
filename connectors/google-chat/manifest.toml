@@ -33,6 +33,84 @@ forbidden = ["system.exec", "network.listen"]
 
 # -- Operations ---------------------------------------------------------------
 
+[provides.operations."chat.ingest_webhook"]
+description = "Process a host-forwarded Google Chat webhook request"
+capability = "chat.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."chat.ingest_webhook".input_schema]
+required = ["method", "headers", "body"]
+type = "object"
+[provides.operations."chat.ingest_webhook".input_schema.properties.method]
+type = "string"
+[provides.operations."chat.ingest_webhook".input_schema.properties.headers]
+type = "object"
+[provides.operations."chat.ingest_webhook".input_schema.properties.body]
+description = "Raw JSON string or parsed JSON object forwarded by the FCP host request region"
+[provides.operations."chat.ingest_webhook".input_schema.properties.body_size_bytes]
+type = "integer"
+[provides.operations."chat.ingest_webhook".input_schema.properties.body_read_elapsed_ms]
+type = "integer"
+[provides.operations."chat.ingest_webhook".input_schema.properties.delivery_id]
+type = "string"
+[provides.operations."chat.ingest_webhook".input_schema.properties.source_id]
+type = "string"
+[provides.operations."chat.ingest_webhook".input_schema.properties.command_authorized]
+type = "boolean"
+[provides.operations."chat.ingest_webhook".input_schema.properties.dispatch_outcome]
+type = "string"
+enum = ["commit", "retryable_error", "nonretryable_error"]
+
+[provides.operations."chat.ingest_webhook".output_schema]
+required = ["accepted", "event_emitted", "status_code", "reason_code", "reason"]
+type = "object"
+[provides.operations."chat.ingest_webhook".output_schema.properties.accepted]
+type = "boolean"
+[provides.operations."chat.ingest_webhook".output_schema.properties.event_emitted]
+type = "boolean"
+[provides.operations."chat.ingest_webhook".output_schema.properties.status_code]
+type = "integer"
+[provides.operations."chat.ingest_webhook".output_schema.properties.reason_code]
+type = "string"
+[provides.operations."chat.ingest_webhook".output_schema.properties.reason]
+type = "string"
+[provides.operations."chat.ingest_webhook".output_schema.properties.event]
+type = "object"
+[provides.operations."chat.ingest_webhook".output_schema.properties.auth]
+type = "object"
+[provides.operations."chat.ingest_webhook".output_schema.properties.policy]
+type = "object"
+[provides.operations."chat.ingest_webhook".output_schema.properties.replay]
+type = "object"
+[provides.operations."chat.ingest_webhook".output_schema.properties.ingress]
+type = "object"
+
+[provides.operations."chat.ingest_webhook".network_constraints]
+host_allow = []
+port_allow = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 0
+total_timeout_ms = 3000
+max_response_bytes = 0
+
+[provides.operations."chat.ingest_webhook".ai_hints]
+when_to_use = "Handle a Google Chat callback that the FCP host has already accepted into a request region. The connector does not open a listener."
+common_mistakes = ["Letting the connector listen directly instead of using host-forwarded ingress", "Logging bearer tokens or raw webhook bodies", "Dropping Workspace Add-on payloads instead of normalizing chat.messagePayload"]
+examples = ['{"method":"POST","headers":{"Authorization":"Bearer <token>","Content-Type":"application/json"},"body":"{\"type\":\"MESSAGE\",\"space\":{\"name\":\"spaces/AAAA\",\"spaceType\":\"ROOM\"},\"message\":{\"name\":\"spaces/AAAA/messages/msg1\",\"text\":\"@flywheel hi\",\"sender\":{\"name\":\"users/123\"}}}"}']
+related = ["chat.reply_message"]
+
+# ------------------------------------------------------------------------------
+
 [provides.operations."chat.list_spaces"]
 description = "List all spaces the user has access to"
 capability = "chat.read"
@@ -390,7 +468,7 @@ related = ["chat.list_spaces"]
 
 [event_caps]
 streaming = false
-replay = false
+replay = true
 min_buffer_events = 50
 
 # -- Sandbox ------------------------------------------------------------------
@@ -421,7 +499,15 @@ window_ms = 60000
 burst = 10
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "chat.webhook"
+requests = 600
+window_ms = 60000
+burst = 60
+scope = "instance"
+
 [rate_limits.operation_pools]
+"chat.ingest_webhook" = ["chat.webhook"]
 "chat.list_spaces" = ["chat.read"]
 "chat.get_space" = ["chat.read"]
 "chat.send_message" = ["chat.write"]

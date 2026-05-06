@@ -12,7 +12,7 @@ pub struct Space {
     #[serde(default)]
     pub display_name: String,
     /// Type of the space.
-    #[serde(default, rename = "spaceType")]
+    #[serde(default, rename = "spaceType", alias = "type")]
     pub space_type: SpaceType,
     /// Whether the space uses threaded replies.
     #[serde(default)]
@@ -45,12 +45,21 @@ pub struct Message {
     /// Plain-text body of the message.
     #[serde(default)]
     pub text: String,
+    /// Google Chat slash-command argument text, when present.
+    #[serde(default)]
+    pub argument_text: String,
     /// Timestamp when the message was created (RFC 3339).
     #[serde(default)]
     pub create_time: String,
     /// Thread the message belongs to.
     #[serde(default)]
     pub thread: Option<Thread>,
+    /// Google Chat annotations, including user mentions and slash commands.
+    #[serde(default)]
+    pub annotations: Vec<Annotation>,
+    /// Attachments included with the message.
+    #[serde(default, rename = "attachment")]
+    pub attachments: Vec<Attachment>,
 }
 
 /// A thread in a Google Chat space.
@@ -74,12 +83,77 @@ pub struct User {
     /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Email address surfaced by some Chat event payloads.
+    #[serde(default)]
+    pub email: String,
     /// Domain ID of the user's organization.
     #[serde(default)]
     pub domain_id: String,
     /// Type of user (HUMAN or BOT).
     #[serde(default, rename = "type")]
     pub type_field: String,
+}
+
+/// A Google Chat event delivered by direct Chat callbacks or Workspace Add-ons.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatEvent {
+    /// Event type, usually `MESSAGE`.
+    #[serde(default, rename = "type", alias = "eventType")]
+    pub event_type: String,
+    /// Event timestamp.
+    #[serde(default)]
+    pub event_time: String,
+    /// Space where the event occurred.
+    pub space: Space,
+    /// User associated with the event.
+    #[serde(default)]
+    pub user: Option<User>,
+    /// Message payload for `MESSAGE` events.
+    #[serde(default)]
+    pub message: Option<Message>,
+}
+
+/// Google Chat message annotation.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Annotation {
+    /// Annotation type, for example `USER_MENTION`.
+    #[serde(default, rename = "type")]
+    pub type_field: String,
+    /// User mention details.
+    #[serde(default)]
+    pub user_mention: Option<UserMention>,
+    /// Slash command metadata, when present.
+    #[serde(default)]
+    pub slash_command: Option<serde_json::Value>,
+}
+
+/// Google Chat user mention annotation details.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UserMention {
+    /// Mentioned user.
+    #[serde(default)]
+    pub user: Option<User>,
+    /// Mention type.
+    #[serde(default, rename = "type")]
+    pub type_field: String,
+}
+
+/// Google Chat message attachment metadata.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Attachment {
+    /// Attachment resource name.
+    #[serde(default)]
+    pub name: String,
+    /// User-visible attachment name.
+    #[serde(default)]
+    pub content_name: String,
+    /// Attachment content type.
+    #[serde(default)]
+    pub content_type: String,
 }
 
 /// An emoji used as a Google Chat reaction.
@@ -460,12 +534,16 @@ mod tests {
             sender: Some(User {
                 name: "users/1".into(),
                 display_name: "Test".into(),
+                email: String::new(),
                 domain_id: "d1".into(),
                 type_field: "HUMAN".into(),
             }),
             text: "test message".into(),
+            argument_text: String::new(),
             create_time: "2026-03-14T00:00:00Z".into(),
             thread: None,
+            annotations: Vec::new(),
+            attachments: Vec::new(),
         };
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: Message = serde_json::from_str(&json).unwrap();

@@ -1,25 +1,306 @@
 //! FCP Google Chat Connector implementation.
 
-use std::sync::Arc;
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
 
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
-    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, IdempotencyClass,
-    Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
 };
 use reqwest::Url;
-use serde_json::json;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use tracing::info;
 
 use crate::client::{ChatClient, MessageReplyOption, MessageThreadTarget};
+use crate::types::{ChatEvent, Message, SpaceType, User};
+
+const OP_INGEST_WEBHOOK: &str = "chat.ingest_webhook";
+const CAP_WEBHOOK: &str = "chat.webhook";
+const EVENT_WEBHOOK_MESSAGE: &str = "chat.webhook.message";
+const DEFAULT_WEBHOOK_MAX_BODY_BYTES: u64 = 64 * 1024;
+const DEFAULT_WEBHOOK_PREAUTH_MAX_BODY_BYTES: u64 = 16 * 1024;
+const DEFAULT_WEBHOOK_BODY_TIMEOUT_MS: u64 = 3_000;
+const DEFAULT_WEBHOOK_AUTH_FAILURE_LIMIT_PER_MINUTE: u32 = 10;
+const DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE: u32 = 60;
+const DEFAULT_WEBHOOK_REPLAY_TTL_SECS: u64 = 86_400;
+const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES: usize = 1_000;
+const DEFAULT_MENTION_TEXT: &str = "@flywheel";
 
 /// FCP Google Chat Connector.
 pub struct ChatConnector {
     base: Arc<BaseConnector>,
     client: Option<ChatClient>,
+    webhook: GoogleChatWebhookConfig,
+    inbound_policy: GoogleChatInboundPolicy,
+    webhook_replay: Mutex<WebhookReplayState>,
+    webhook_rate: Mutex<WebhookRateState>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleChatWebhookConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default)]
+    allowed_bearer_tokens: Vec<String>,
+    #[serde(default = "default_webhook_max_body_bytes")]
+    max_body_bytes: u64,
+    #[serde(default = "default_webhook_preauth_max_body_bytes")]
+    preauth_max_body_bytes: u64,
+    #[serde(default = "default_webhook_body_timeout_ms")]
+    body_timeout_ms: u64,
+    #[serde(default = "default_webhook_auth_failure_limit_per_minute")]
+    auth_failure_limit_per_minute: u32,
+    #[serde(default = "default_webhook_sender_limit_per_minute")]
+    sender_limit_per_minute: u32,
+    #[serde(default = "default_webhook_replay_ttl_secs")]
+    replay_ttl_secs: u64,
+    #[serde(default = "default_webhook_replay_max_entries")]
+    replay_max_entries: usize,
+}
+
+impl Default for GoogleChatWebhookConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            allowed_bearer_tokens: Vec::new(),
+            max_body_bytes: default_webhook_max_body_bytes(),
+            preauth_max_body_bytes: default_webhook_preauth_max_body_bytes(),
+            body_timeout_ms: default_webhook_body_timeout_ms(),
+            auth_failure_limit_per_minute: default_webhook_auth_failure_limit_per_minute(),
+            sender_limit_per_minute: default_webhook_sender_limit_per_minute(),
+            replay_ttl_secs: default_webhook_replay_ttl_secs(),
+            replay_max_entries: default_webhook_replay_max_entries(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct GoogleChatInboundPolicy {
+    #[serde(default = "default_dm_policy")]
+    dm_policy: String,
+    #[serde(default)]
+    allow_from: Vec<String>,
+    #[serde(default = "default_group_policy")]
+    group_policy: String,
+    #[serde(default)]
+    group_allow_from: Vec<String>,
+    #[serde(default)]
+    spaces: Vec<String>,
+    #[serde(default)]
+    disabled_spaces: Vec<String>,
+    #[serde(default = "default_require_mention")]
+    require_mention: bool,
+    #[serde(default)]
+    mention_required_spaces: Vec<String>,
+    #[serde(default)]
+    bot_user: Option<String>,
+    #[serde(default)]
+    groups: BTreeMap<String, GoogleChatGroupEntry>,
+}
+
+impl Default for GoogleChatInboundPolicy {
+    fn default() -> Self {
+        Self {
+            dm_policy: default_dm_policy(),
+            allow_from: Vec::new(),
+            group_policy: default_group_policy(),
+            group_allow_from: Vec::new(),
+            spaces: Vec::new(),
+            disabled_spaces: Vec::new(),
+            require_mention: default_require_mention(),
+            mention_required_spaces: Vec::new(),
+            bot_user: None,
+            groups: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+struct GoogleChatGroupEntry {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    require_mention: Option<bool>,
+    #[serde(default)]
+    users: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct HostForwardedChatWebhookInput {
+    #[serde(default = "default_post_method")]
+    method: String,
+    #[serde(default)]
+    headers: BTreeMap<String, String>,
+    #[serde(default)]
+    body: Value,
+    #[serde(default)]
+    body_size_bytes: Option<u64>,
+    #[serde(default)]
+    body_read_elapsed_ms: Option<u64>,
+    #[serde(default)]
+    delivery_id: Option<String>,
+    #[serde(default)]
+    source_id: Option<String>,
+    #[serde(default)]
+    command_authorized: bool,
+    #[serde(default)]
+    require_mention: Option<bool>,
+    #[serde(default)]
+    mention_text: Option<String>,
+    #[serde(default)]
+    dispatch_outcome: WebhookDispatchOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum WebhookDispatchOutcome {
+    #[default]
+    Commit,
+    RetryableError,
+    NonretryableError,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WebhookReplayKey {
+    account_id: String,
+    space_name: String,
+    message_name: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookReplayDecision {
+    Claimed,
+    Duplicate,
+    Inflight,
+}
+
+impl WebhookReplayDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Duplicate => "duplicate",
+            Self::Inflight => "inflight",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayStateKind {
+    Inflight,
+    Committed,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReplayEntry {
+    state: ReplayStateKind,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Default)]
+struct WebhookReplayState {
+    entries: BTreeMap<WebhookReplayKey, ReplayEntry>,
+}
+
+impl WebhookReplayState {
+    fn claim(
+        &mut self,
+        key: WebhookReplayKey,
+        now: Instant,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> WebhookReplayDecision {
+        self.prune(now, max_entries);
+        if let Some(entry) = self.entries.get(&key) {
+            if entry.expires_at > now {
+                return match entry.state {
+                    ReplayStateKind::Committed => WebhookReplayDecision::Duplicate,
+                    ReplayStateKind::Inflight => WebhookReplayDecision::Inflight,
+                };
+            }
+        }
+        self.entries.insert(
+            key,
+            ReplayEntry {
+                state: ReplayStateKind::Inflight,
+                expires_at: now + ttl,
+            },
+        );
+        WebhookReplayDecision::Claimed
+    }
+
+    fn commit(&mut self, key: &WebhookReplayKey, now: Instant, ttl: Duration) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.state = ReplayStateKind::Committed;
+            entry.expires_at = now + ttl;
+        }
+    }
+
+    fn release(&mut self, key: &WebhookReplayKey) {
+        self.entries.remove(key);
+    }
+
+    fn prune(&mut self, now: Instant, max_entries: usize) {
+        self.entries.retain(|_, entry| entry.expires_at > now);
+        while self.entries.len() >= max_entries {
+            if let Some(key) = self.entries.keys().next().cloned() {
+                self.entries.remove(&key);
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RateEntry {
+    window_start: Instant,
+    count: u32,
+}
+
+#[derive(Debug, Default)]
+struct WebhookRateState {
+    entries: BTreeMap<String, RateEntry>,
+}
+
+impl WebhookRateState {
+    fn check(&mut self, key: &str, limit: u32, now: Instant) -> bool {
+        let window = Duration::from_secs(60);
+        let entry = self.entries.entry(key.to_string()).or_insert(RateEntry {
+            window_start: now,
+            count: 0,
+        });
+        if now.duration_since(entry.window_start) >= window {
+            entry.window_start = now;
+            entry.count = 0;
+        }
+        if entry.count >= limit {
+            return false;
+        }
+        entry.count += 1;
+        true
+    }
+}
+
+#[derive(Debug)]
+struct ParsedWebhookPayload {
+    event: ChatEvent,
+    add_on_auth_material: Option<String>,
+    source_format: &'static str,
+}
+
+#[derive(Debug)]
+struct InboundPolicyOutcome {
+    status: &'static str,
+    event_emitted: bool,
+    details: Value,
 }
 
 impl ChatConnector {
@@ -28,6 +309,10 @@ impl ChatConnector {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("google-chat"))),
             client: None,
+            webhook: GoogleChatWebhookConfig::default(),
+            inbound_policy: GoogleChatInboundPolicy::default(),
+            webhook_replay: Mutex::new(WebhookReplayState::default()),
+            webhook_rate: Mutex::new(WebhookRateState::default()),
             verifier: None,
             session_id: None,
         }
@@ -75,6 +360,8 @@ impl ChatConnector {
             }
             None => "https://chat.googleapis.com/v1".to_string(),
         };
+        let webhook = parse_webhook_config(params.get("webhook"))?;
+        let inbound_policy = parse_inbound_policy(params.get("inbound_policy"))?;
 
         let client = ChatClient::new_with_auth(materialized)
             .map_err(|e| FcpError::Internal {
@@ -84,6 +371,8 @@ impl ChatConnector {
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
+        self.webhook = webhook;
+        self.inbound_policy = inbound_policy;
         self.base
             .configured
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -92,7 +381,9 @@ impl ChatConnector {
         Ok(json!({
             "status": status,
             "details": {
-                "base_url": base_url
+                "base_url": base_url,
+                "webhook": webhook_config_summary(&self.webhook),
+                "inbound_policy": inbound_policy_summary(&self.inbound_policy)
             }
         }))
     }
@@ -134,7 +425,7 @@ impl ChatConnector {
             nonce: req.nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
-                replay: false,
+                replay: true,
                 min_buffer_events: 100,
                 requires_ack: false,
             }),
@@ -207,11 +498,68 @@ impl ChatConnector {
 
     pub async fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
         let introspection = Introspection {
-            events: vec![],
+            events: vec![webhook_event_info()],
             resource_types: vec![],
             auth_caps: None,
-            event_caps: None,
+            event_caps: Some(webhook_event_caps()),
             operations: vec![
+                op_info(
+                    OP_INGEST_WEBHOOK,
+                    "Process a host-forwarded Google Chat webhook request",
+                    json!({
+                        "type": "object",
+                        "required": ["method", "headers", "body"],
+                        "properties": {
+                            "method": { "type": "string", "description": "HTTP method supplied by the host request region" },
+                            "headers": { "type": "object", "description": "HTTP headers including Authorization and Content-Type" },
+                            "body": { "description": "Raw JSON string or parsed JSON object forwarded by the host" },
+                            "body_size_bytes": { "type": "integer", "description": "Host-measured request body size" },
+                            "body_read_elapsed_ms": { "type": "integer", "description": "Host-measured body read duration" },
+                            "delivery_id": { "type": "string" },
+                            "source_id": { "type": "string" },
+                            "command_authorized": { "type": "boolean" },
+                            "require_mention": { "type": "boolean" },
+                            "mention_text": { "type": "string" },
+                            "dispatch_outcome": {
+                                "type": "string",
+                                "enum": ["commit", "retryable_error", "nonretryable_error"]
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "required": ["accepted", "event_emitted", "status_code", "reason_code", "reason"],
+                        "properties": {
+                            "accepted": { "type": "boolean" },
+                            "event_emitted": { "type": "boolean" },
+                            "status_code": { "type": "integer" },
+                            "reason_code": { "type": "string" },
+                            "reason": { "type": "string" },
+                            "event": { "type": ["object", "null"] },
+                            "auth": { "type": "object" },
+                            "policy": { "type": "object" },
+                            "replay": { "type": "object" },
+                            "ingress": { "type": "object" },
+                            "redaction": { "type": "object" }
+                        }
+                    }),
+                    CAP_WEBHOOK,
+                    RiskLevel::Low,
+                    SafetyTier::Safe,
+                    IdempotencyClass::Strict,
+                    AgentHint {
+                        when_to_use: "Handle a Google Chat callback that the FCP host forwarded through a request region. This operation does not open a listener; it verifies bearer/Add-on token material, normalizes the payload, applies inbound policy, and returns a redacted event receipt.".into(),
+                        common_mistakes: vec![
+                            "Configuring a direct connector listener instead of forwarding through the host request region".into(),
+                            "Logging bearer tokens, raw request bodies, or unredacted sender IDs in evidence artifacts".into(),
+                            "Treating Workspace Add-on payloads as malformed instead of normalizing chat.messagePayload".into(),
+                        ],
+                        examples: vec![
+                            r#"{"method":"POST","headers":{"Authorization":"Bearer <token>","Content-Type":"application/json"},"body":"{\"type\":\"MESSAGE\",\"space\":{\"name\":\"spaces/AAAA\",\"spaceType\":\"ROOM\"},\"message\":{\"name\":\"spaces/AAAA/messages/msg1\",\"text\":\"@flywheel hi\",\"sender\":{\"name\":\"users/123\"}}}"}"#.into(),
+                        ],
+                        related: vec![CapabilityId::from_static("chat.reply_message")],
+                    },
+                ),
                 op_info(
                     "chat.list_spaces",
                     "List all spaces the user has access to",
@@ -481,14 +829,24 @@ impl ChatConnector {
             })?;
 
         let input = params.get("input").cloned().unwrap_or(json!({}));
-        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         match operation {
+            OP_INGEST_WEBHOOK => {
+                self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+                let input: HostForwardedChatWebhookInput =
+                    serde_json::from_value(input).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid Google Chat webhook input: {error}"),
+                    })?;
+                self.ingest_host_forwarded_webhook(&input)
+            }
             "chat.list_spaces" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let spaces = client.list_spaces().await.map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "spaces": spaces }))
             }
             "chat.get_space" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let space = client
                     .get_space(space_name)
@@ -497,6 +855,7 @@ impl ChatConnector {
                 Ok(json!({ "space": space }))
             }
             "chat.send_message" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let text = require_str(&input, "text")?;
                 let message = client
@@ -506,6 +865,7 @@ impl ChatConnector {
                 Ok(json!({ "message": message }))
             }
             "chat.reply_message" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let text = require_str(&input, "text")?;
                 let thread = reply_thread_target(&input)?;
@@ -517,6 +877,7 @@ impl ChatConnector {
                 Ok(json!({ "message": message }))
             }
             "chat.list_messages" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let messages = client
                     .list_messages(space_name)
@@ -525,6 +886,7 @@ impl ChatConnector {
                 Ok(json!({ "messages": messages }))
             }
             "chat.get_message" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let message_name = require_str(&input, "message_name")?;
                 let message = client
                     .get_message(message_name)
@@ -533,6 +895,7 @@ impl ChatConnector {
                 Ok(json!({ "message": message }))
             }
             "chat.add_reaction" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let message_name = require_str(&input, "message_name")?;
                 let unicode = require_str(&input, "unicode")?;
                 let reaction = client
@@ -542,6 +905,7 @@ impl ChatConnector {
                 Ok(json!({ "reaction": reaction }))
             }
             "chat.list_members" => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let members = client
                     .list_members(space_name)
@@ -553,6 +917,386 @@ impl ChatConnector {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
             }),
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn ingest_host_forwarded_webhook(
+        &self,
+        input: &HostForwardedChatWebhookInput,
+    ) -> FcpResult<Value> {
+        if !self.webhook.enabled {
+            return Ok(webhook_response(
+                false,
+                false,
+                404,
+                "webhook_disabled",
+                "Google Chat webhook ingress is not enabled",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress_details(input, &self.webhook, 0),
+            ));
+        }
+
+        let body_size_bytes = input
+            .body_size_bytes
+            .unwrap_or_else(|| measured_body_size(&input.body));
+        let ingress = ingress_details(input, &self.webhook, body_size_bytes);
+        if !input.method.eq_ignore_ascii_case("POST") {
+            return Ok(webhook_response(
+                false,
+                false,
+                405,
+                "method_not_allowed",
+                "Google Chat webhook ingress accepts POST only",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+        if !content_type_is_json(&input.headers) {
+            return Ok(webhook_response(
+                false,
+                false,
+                415,
+                "unsupported_media_type",
+                "Google Chat webhook ingress requires application/json",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+        if body_size_bytes > self.webhook.max_body_bytes {
+            return Ok(webhook_response(
+                false,
+                false,
+                413,
+                "payload_too_large",
+                "Google Chat webhook body exceeds configured maximum",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+        if input
+            .body_read_elapsed_ms
+            .is_some_and(|elapsed| elapsed > self.webhook.body_timeout_ms)
+        {
+            return Ok(webhook_response(
+                false,
+                false,
+                408,
+                "request_timeout",
+                "Google Chat webhook body read exceeded configured timeout",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+
+        let header_bearer = extract_bearer_token(&input.headers);
+        if header_bearer.is_none() && body_size_bytes > self.webhook.preauth_max_body_bytes {
+            return Ok(webhook_response(
+                false,
+                false,
+                413,
+                "preauth_payload_too_large",
+                "Google Chat Add-on token extraction body exceeds pre-auth maximum",
+                None,
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+
+        let parsed = match parse_google_chat_payload(&input.body) {
+            Ok(parsed) => parsed,
+            Err(message) => {
+                return Ok(webhook_response(
+                    false,
+                    false,
+                    400,
+                    "malformed_payload",
+                    &message,
+                    None,
+                    json!({ "decision": "not_evaluated" }),
+                    json!({ "decision": "not_evaluated" }),
+                    json!({ "decision": "not_evaluated" }),
+                    ingress,
+                ));
+            }
+        };
+
+        let bearer = header_bearer.or_else(|| parsed.add_on_auth_material.clone());
+        let Some(bearer) = bearer else {
+            self.record_webhook_auth_failure(
+                input.source_id.as_deref().unwrap_or("missing-token"),
+                &self.webhook,
+            )?;
+            return Ok(webhook_response(
+                false,
+                false,
+                401,
+                "missing_token",
+                "Google Chat webhook bearer token is missing",
+                None,
+                json!({ "decision": "missing", "token_redacted": true }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        };
+        let auth_source = if extract_bearer_token(&input.headers).is_some() {
+            "authorization_header"
+        } else {
+            "addon_payload"
+        };
+        if !bearer_allowed(&self.webhook.allowed_bearer_tokens, &bearer) {
+            self.record_webhook_auth_failure(
+                input.source_id.as_deref().unwrap_or("bad-token"),
+                &self.webhook,
+            )?;
+            return Ok(webhook_response(
+                false,
+                false,
+                401,
+                "invalid_token",
+                "Google Chat webhook bearer token was not accepted",
+                None,
+                json!({
+                    "decision": "rejected",
+                    "source": auth_source,
+                    "token_redacted": true,
+                }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+
+        if !parsed.event.event_type.eq_ignore_ascii_case("MESSAGE") {
+            return Ok(webhook_response(
+                true,
+                false,
+                200,
+                "ignored_event_type",
+                "Google Chat webhook event type is not MESSAGE",
+                None,
+                json!({
+                    "decision": "verified",
+                    "source": auth_source,
+                    "token_redacted": true,
+                    "payload_format": parsed.source_format,
+                }),
+                json!({ "decision": "ignored", "event_type": parsed.event.event_type }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        }
+
+        let Some(message) = parsed.event.message.as_ref() else {
+            return Ok(webhook_response(
+                false,
+                false,
+                400,
+                "malformed_payload",
+                "Google Chat MESSAGE event is missing message payload",
+                None,
+                json!({
+                    "decision": "verified",
+                    "source": auth_source,
+                    "token_redacted": true,
+                }),
+                json!({ "decision": "not_evaluated" }),
+                json!({ "decision": "not_evaluated" }),
+                ingress,
+            ));
+        };
+        self.record_authenticated_webhook_attempt(&parsed.event, message, &self.webhook)?;
+
+        let replay_key = WebhookReplayKey::new("default", &parsed.event.space.name, &message.name)?;
+        let ttl = Duration::from_secs(self.webhook.replay_ttl_secs);
+        let replay_decision =
+            self.claim_webhook_replay(replay_key.clone(), ttl, self.webhook.replay_max_entries)?;
+        if replay_decision != WebhookReplayDecision::Claimed {
+            return Ok(webhook_response(
+                true,
+                false,
+                200,
+                replay_decision.as_str(),
+                "Google Chat webhook delivery was already seen",
+                None,
+                json!({
+                    "decision": "verified",
+                    "source": auth_source,
+                    "token_redacted": true,
+                    "payload_format": parsed.source_format,
+                }),
+                json!({ "decision": "not_evaluated" }),
+                replay_details(&replay_key, replay_decision),
+                ingress,
+            ));
+        }
+
+        let policy =
+            enforce_google_chat_inbound_policy(&self.inbound_policy, input, &parsed.event)?;
+        if !policy.event_emitted {
+            self.commit_webhook_replay(&replay_key, ttl)?;
+            return Ok(webhook_response(
+                true,
+                false,
+                200,
+                policy.status,
+                "Google Chat webhook was accepted but not dispatched",
+                None,
+                json!({
+                    "decision": "verified",
+                    "source": auth_source,
+                    "token_redacted": true,
+                    "payload_format": parsed.source_format,
+                }),
+                policy.details,
+                replay_details(&replay_key, replay_decision),
+                ingress,
+            ));
+        }
+
+        let event = normalized_webhook_event(
+            input,
+            &parsed.event,
+            message,
+            &policy,
+            &replay_key,
+            auth_source,
+            parsed.source_format,
+            body_size_bytes,
+            &self.webhook,
+        );
+
+        match input.dispatch_outcome {
+            WebhookDispatchOutcome::Commit => {
+                self.commit_webhook_replay(&replay_key, ttl)?;
+                Ok(webhook_response(
+                    true,
+                    true,
+                    200,
+                    "processed",
+                    "Google Chat webhook event processed",
+                    Some(event),
+                    json!({
+                        "decision": "verified",
+                        "source": auth_source,
+                        "token_redacted": true,
+                        "payload_format": parsed.source_format,
+                    }),
+                    policy.details,
+                    replay_details(&replay_key, replay_decision),
+                    ingress,
+                ))
+            }
+            WebhookDispatchOutcome::RetryableError => {
+                self.release_webhook_replay(&replay_key)?;
+                Err(FcpError::External {
+                    service: "google_chat.webhook_dispatch".into(),
+                    message: "host-forwarded Google Chat webhook dispatch failed retryably".into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: Some(Duration::from_secs(1)),
+                })
+            }
+            WebhookDispatchOutcome::NonretryableError => {
+                self.commit_webhook_replay(&replay_key, ttl)?;
+                Err(FcpError::External {
+                    service: "google_chat.webhook_dispatch".into(),
+                    message: "host-forwarded Google Chat webhook dispatch failed nonretryably"
+                        .into(),
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                })
+            }
+        }
+    }
+
+    fn claim_webhook_replay(
+        &self,
+        key: WebhookReplayKey,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> FcpResult<WebhookReplayDecision> {
+        let mut replay = self.webhook_replay.lock().map_err(|_| FcpError::Internal {
+            message: "Google Chat webhook replay state lock poisoned".into(),
+        })?;
+        Ok(replay.claim(key, Instant::now(), ttl, max_entries))
+    }
+
+    fn commit_webhook_replay(&self, key: &WebhookReplayKey, ttl: Duration) -> FcpResult<()> {
+        self.webhook_replay
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "Google Chat webhook replay state lock poisoned".into(),
+            })?
+            .commit(key, Instant::now(), ttl);
+        Ok(())
+    }
+
+    fn release_webhook_replay(&self, key: &WebhookReplayKey) -> FcpResult<()> {
+        self.webhook_replay
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "Google Chat webhook replay state lock poisoned".into(),
+            })?
+            .release(key);
+        Ok(())
+    }
+
+    fn record_webhook_auth_failure(
+        &self,
+        source_id: &str,
+        webhook: &GoogleChatWebhookConfig,
+    ) -> FcpResult<()> {
+        let key = format!("auth_failure:{}", hash_identifier(source_id));
+        self.check_webhook_rate(&key, webhook.auth_failure_limit_per_minute)
+    }
+
+    fn record_authenticated_webhook_attempt(
+        &self,
+        event: &ChatEvent,
+        message: &Message,
+        webhook: &GoogleChatWebhookConfig,
+    ) -> FcpResult<()> {
+        let sender =
+            message_sender(message, event).map_or("unknown", |sender| sender.name.as_str());
+        let key = format!(
+            "sender:{}:{}",
+            hash_identifier(&event.space.name),
+            hash_identifier(sender)
+        );
+        self.check_webhook_rate(&key, webhook.sender_limit_per_minute)
+    }
+
+    fn check_webhook_rate(&self, key: &str, limit: u32) -> FcpResult<()> {
+        let mut rate = self.webhook_rate.lock().map_err(|_| FcpError::Internal {
+            message: "Google Chat webhook rate state lock poisoned".into(),
+        })?;
+        if rate.check(key, limit, Instant::now()) {
+            Ok(())
+        } else {
+            Err(FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                violation: None,
+            })
         }
     }
 
@@ -585,6 +1329,822 @@ impl Default for ChatConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl WebhookReplayKey {
+    fn new(account_id: &str, space_name: &str, message_name: &str) -> FcpResult<Self> {
+        let account_id = required_non_empty("account_id", account_id)?;
+        let space_name = required_non_empty("space.name", space_name)?;
+        let message_name = required_non_empty("message.name", message_name)?;
+        Ok(Self {
+            account_id,
+            space_name,
+            message_name,
+        })
+    }
+}
+
+const fn default_webhook_max_body_bytes() -> u64 {
+    DEFAULT_WEBHOOK_MAX_BODY_BYTES
+}
+
+const fn default_webhook_preauth_max_body_bytes() -> u64 {
+    DEFAULT_WEBHOOK_PREAUTH_MAX_BODY_BYTES
+}
+
+const fn default_webhook_body_timeout_ms() -> u64 {
+    DEFAULT_WEBHOOK_BODY_TIMEOUT_MS
+}
+
+const fn default_webhook_auth_failure_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_AUTH_FAILURE_LIMIT_PER_MINUTE
+}
+
+const fn default_webhook_sender_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE
+}
+
+const fn default_webhook_replay_ttl_secs() -> u64 {
+    DEFAULT_WEBHOOK_REPLAY_TTL_SECS
+}
+
+const fn default_webhook_replay_max_entries() -> usize {
+    DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES
+}
+
+fn default_post_method() -> String {
+    "POST".to_string()
+}
+
+fn default_dm_policy() -> String {
+    "pairing".to_string()
+}
+
+fn default_group_policy() -> String {
+    "allowlist".to_string()
+}
+
+const fn default_require_mention() -> bool {
+    true
+}
+
+fn parse_webhook_config(value: Option<&Value>) -> FcpResult<GoogleChatWebhookConfig> {
+    let config = match value {
+        Some(value) => {
+            serde_json::from_value(value.clone()).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid webhook config: {error}"),
+            })?
+        }
+        None => GoogleChatWebhookConfig::default(),
+    };
+    validate_webhook_config(&config)?;
+    Ok(config)
+}
+
+fn validate_webhook_config(config: &GoogleChatWebhookConfig) -> FcpResult<()> {
+    if config.enabled && config.allowed_bearer_tokens.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook.allowed_bearer_tokens must not be empty when webhook.enabled is true"
+                .into(),
+        });
+    }
+    validate_non_empty_entries(
+        "webhook.allowed_bearer_tokens",
+        &config.allowed_bearer_tokens,
+    )?;
+    if config.max_body_bytes == 0
+        || config.preauth_max_body_bytes == 0
+        || config.body_timeout_ms == 0
+        || config.auth_failure_limit_per_minute == 0
+        || config.sender_limit_per_minute == 0
+        || config.replay_ttl_secs == 0
+        || config.replay_max_entries == 0
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "Google Chat webhook limits must be greater than zero".into(),
+        });
+    }
+    if config.preauth_max_body_bytes > config.max_body_bytes {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "webhook.preauth_max_body_bytes must not exceed webhook.max_body_bytes".into(),
+        });
+    }
+    Ok(())
+}
+
+fn parse_inbound_policy(value: Option<&Value>) -> FcpResult<GoogleChatInboundPolicy> {
+    let policy = match value {
+        Some(value) => {
+            serde_json::from_value(value.clone()).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid inbound_policy config: {error}"),
+            })?
+        }
+        None => GoogleChatInboundPolicy::default(),
+    };
+    validate_inbound_policy(&policy)?;
+    Ok(policy)
+}
+
+fn validate_inbound_policy(policy: &GoogleChatInboundPolicy) -> FcpResult<()> {
+    validate_policy_value(
+        "inbound_policy.dm_policy",
+        &policy.dm_policy,
+        &["open", "allowlist", "pairing", "disabled"],
+    )?;
+    validate_policy_value(
+        "inbound_policy.group_policy",
+        &policy.group_policy,
+        &["open", "allowlist", "disabled"],
+    )?;
+    validate_non_empty_entries("inbound_policy.allow_from", &policy.allow_from)?;
+    validate_non_empty_entries("inbound_policy.group_allow_from", &policy.group_allow_from)?;
+    validate_non_empty_entries("inbound_policy.spaces", &policy.spaces)?;
+    validate_non_empty_entries("inbound_policy.disabled_spaces", &policy.disabled_spaces)?;
+    validate_non_empty_entries(
+        "inbound_policy.mention_required_spaces",
+        &policy.mention_required_spaces,
+    )?;
+    for (space, entry) in &policy.groups {
+        if space != "*" && !space.starts_with("spaces/") {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "inbound_policy.groups uses deprecated mutable key {space:?}; use stable spaces/<id>"
+                ),
+            });
+        }
+        validate_non_empty_entries("inbound_policy.groups.users", &entry.users)?;
+    }
+    Ok(())
+}
+
+fn validate_policy_value(field: &str, value: &str, allowed: &[&str]) -> FcpResult<()> {
+    if allowed.contains(&value) {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must be one of: {}", allowed.join(", ")),
+        })
+    }
+}
+
+fn validate_non_empty_entries(field: &str, values: &[String]) -> FcpResult<()> {
+    if values.iter().any(|value| value.trim().is_empty()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} entries must not be empty"),
+        });
+    }
+    Ok(())
+}
+
+fn webhook_config_summary(config: &GoogleChatWebhookConfig) -> Value {
+    json!({
+        "enabled": config.enabled,
+        "auth_mode": if config.allowed_bearer_tokens.is_empty() { "missing" } else { "bearer_allowlist" },
+        "token_material_redacted": true,
+        "allowed_bearer_token_count": config.allowed_bearer_tokens.len(),
+        "max_body_bytes": config.max_body_bytes,
+        "preauth_max_body_bytes": config.preauth_max_body_bytes,
+        "body_timeout_ms": config.body_timeout_ms,
+        "hosted_listener": false,
+    })
+}
+
+fn inbound_policy_summary(policy: &GoogleChatInboundPolicy) -> Value {
+    json!({
+        "dm_policy": policy.dm_policy,
+        "group_policy": policy.group_policy,
+        "allow_from_count": policy.allow_from.len(),
+        "group_allow_from_count": policy.group_allow_from.len(),
+        "spaces_count": policy.spaces.len(),
+        "disabled_spaces_count": policy.disabled_spaces.len(),
+        "require_mention": policy.require_mention,
+        "stable_group_entries": policy.groups.len(),
+        "ids_redacted": true,
+    })
+}
+
+const fn webhook_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: false,
+        replay: true,
+        min_buffer_events: 100,
+        requires_ack: false,
+    }
+}
+
+fn webhook_event_info() -> EventInfo {
+    EventInfo {
+        topic: EVENT_WEBHOOK_MESSAGE.to_string(),
+        schema: json!({
+            "type": "object",
+            "required": ["topic", "event_type", "space", "message", "sender", "policy", "auth"],
+            "properties": {
+                "topic": { "const": EVENT_WEBHOOK_MESSAGE },
+                "event_type": { "const": "host_forwarded_google_chat_message" },
+                "delivery_id": { "type": "string" },
+                "space": { "type": "object" },
+                "message": { "type": "object" },
+                "sender": { "type": "object" },
+                "thread": { "type": "object" },
+                "policy": { "type": "object" },
+                "auth": { "type": "object" },
+                "replay": { "type": "object" },
+                "ingress": { "type": "object" }
+            }
+        }),
+        requires_ack: false,
+    }
+}
+
+fn content_type_is_json(headers: &BTreeMap<String, String>) -> bool {
+    let Some(value) = header_value(headers, "content-type") else {
+        return false;
+    };
+    let media_type = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json" || media_type.ends_with("+json")
+}
+
+fn header_value<'a>(headers: &'a BTreeMap<String, String>, name: &str) -> Option<&'a str> {
+    headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+}
+
+fn extract_bearer_token(headers: &BTreeMap<String, String>) -> Option<String> {
+    let value = header_value(headers, "authorization")?;
+    let (scheme, material) = value.split_once(' ')?;
+    if scheme.eq_ignore_ascii_case("bearer") {
+        let material = material.trim();
+        (!material.is_empty()).then(|| material.to_string())
+    } else {
+        None
+    }
+}
+
+fn measured_body_size(body: &Value) -> u64 {
+    match body {
+        Value::String(body) => u64::try_from(body.len()).unwrap_or(u64::MAX),
+        other => serde_json::to_vec(other).map_or(u64::MAX, |body| {
+            u64::try_from(body.len()).unwrap_or(u64::MAX)
+        }),
+    }
+}
+
+fn parse_google_chat_payload(body: &Value) -> Result<ParsedWebhookPayload, String> {
+    let raw = match body {
+        Value::String(body) => serde_json::from_str::<Value>(body)
+            .map_err(|error| format!("Google Chat webhook body is not valid JSON: {error}"))?,
+        other => other.clone(),
+    };
+    let obj = raw
+        .as_object()
+        .ok_or_else(|| "Google Chat webhook payload must be a JSON object".to_string())?;
+
+    if obj
+        .get("commonEventObject")
+        .and_then(|value| value.get("hostApp"))
+        .and_then(Value::as_str)
+        .is_some_and(|host| host == "CHAT")
+        && obj.get("chat").is_some_and(Value::is_object)
+    {
+        let chat = obj.get("chat").expect("chat was checked");
+        let message_payload = chat.get("messagePayload").ok_or_else(|| {
+            "Google Chat Add-on payload is missing chat.messagePayload".to_string()
+        })?;
+        let event = json!({
+            "type": "MESSAGE",
+            "space": message_payload.get("space").cloned().unwrap_or(Value::Null),
+            "message": message_payload.get("message").cloned().unwrap_or(Value::Null),
+            "user": chat.get("user").cloned().unwrap_or(Value::Null),
+            "eventTime": chat.get("eventTime").cloned().unwrap_or(Value::Null),
+        });
+        let event: ChatEvent = serde_json::from_value(event)
+            .map_err(|error| format!("Google Chat Add-on payload is malformed: {error}"))?;
+        validate_chat_event(&event)?;
+        let add_on_auth_material = obj
+            .get("authorizationEventObject")
+            .and_then(|value| value.get("systemIdToken"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        return Ok(ParsedWebhookPayload {
+            event,
+            add_on_auth_material,
+            source_format: "workspace_addon",
+        });
+    }
+
+    let event: ChatEvent = serde_json::from_value(raw)
+        .map_err(|error| format!("Google Chat webhook payload is malformed: {error}"))?;
+    validate_chat_event(&event)?;
+    Ok(ParsedWebhookPayload {
+        event,
+        add_on_auth_material: None,
+        source_format: "chat_callback",
+    })
+}
+
+fn validate_chat_event(event: &ChatEvent) -> Result<(), String> {
+    if event.event_type.trim().is_empty() {
+        return Err("Google Chat webhook event type is missing".into());
+    }
+    if event.space.name.trim().is_empty() {
+        return Err("Google Chat webhook space.name is missing".into());
+    }
+    if event.event_type.eq_ignore_ascii_case("MESSAGE") {
+        let message = event
+            .message
+            .as_ref()
+            .ok_or_else(|| "Google Chat MESSAGE event is missing message".to_string())?;
+        if message.name.trim().is_empty() {
+            return Err("Google Chat webhook message.name is missing".into());
+        }
+    }
+    Ok(())
+}
+
+fn bearer_allowed(allowed: &[String], bearer: &str) -> bool {
+    allowed
+        .iter()
+        .any(|expected| constant_time_eq(expected.as_bytes(), bearer.as_bytes()))
+}
+
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    let max_len = expected.len().max(actual.len());
+    let mut diff = expected.len() ^ actual.len();
+    for index in 0..max_len {
+        let expected_byte = expected.get(index).copied().unwrap_or(0);
+        let actual_byte = actual.get(index).copied().unwrap_or(0);
+        diff |= usize::from(expected_byte ^ actual_byte);
+    }
+    diff == 0
+}
+
+fn enforce_google_chat_inbound_policy(
+    policy: &GoogleChatInboundPolicy,
+    input: &HostForwardedChatWebhookInput,
+    event: &ChatEvent,
+) -> FcpResult<InboundPolicyOutcome> {
+    let message = event
+        .message
+        .as_ref()
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Google Chat MESSAGE event is missing message".into(),
+        })?;
+    let sender = message_sender(message, event).ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "Google Chat MESSAGE event is missing sender".into(),
+    })?;
+    let is_group = event.space.space_type != SpaceType::DirectMessage;
+    Ok(if is_group {
+        enforce_google_chat_group_policy(policy, input, event, message, sender)
+    } else {
+        enforce_google_chat_dm_policy(policy, event, sender)
+    })
+}
+
+fn enforce_google_chat_dm_policy(
+    policy: &GoogleChatInboundPolicy,
+    event: &ChatEvent,
+    sender: &User,
+) -> InboundPolicyOutcome {
+    match policy.dm_policy.as_str() {
+        "disabled" => policy_drop(
+            "dm_disabled",
+            "dm_policy_disabled",
+            event,
+            sender,
+            json!({}),
+        ),
+        "pairing" => policy_drop(
+            "pairing_required",
+            "dm_pairing_required",
+            event,
+            sender,
+            json!({
+                "pairing": {
+                    "challenge_required": true,
+                    "reply_surface": "chat.reply_message",
+                    "sender_id_hash": hash_identifier(&sender.name),
+                }
+            }),
+        ),
+        "allowlist" if !sender_allowed(sender, &policy.allow_from) => policy_drop(
+            "sender_denied",
+            "dm_sender_not_allowlisted",
+            event,
+            sender,
+            json!({}),
+        ),
+        "allowlist" => policy_allow(
+            "dm_sender_allowlist_match",
+            event,
+            sender,
+            json!({ "is_group": false }),
+        ),
+        "open" => policy_allow(
+            "dm_policy_open",
+            event,
+            sender,
+            json!({ "is_group": false }),
+        ),
+        _ => policy_drop("dm_denied", "dm_policy_denied", event, sender, json!({})),
+    }
+}
+
+fn enforce_google_chat_group_policy(
+    policy: &GoogleChatInboundPolicy,
+    input: &HostForwardedChatWebhookInput,
+    event: &ChatEvent,
+    message: &Message,
+    sender: &User,
+) -> InboundPolicyOutcome {
+    let group_entry = policy
+        .groups
+        .get(&event.space.name)
+        .or_else(|| policy.groups.get("*"));
+    if group_entry.is_some_and(|entry| entry.enabled == Some(false)) {
+        return policy_drop(
+            "space_disabled",
+            "group_route_disabled",
+            event,
+            sender,
+            json!({}),
+        );
+    }
+    if allowlist_matches(&policy.disabled_spaces, &event.space.name) {
+        return policy_drop(
+            "space_disabled",
+            "group_space_disabled",
+            event,
+            sender,
+            json!({}),
+        );
+    }
+    if policy.group_policy == "disabled" {
+        return policy_drop(
+            "group_disabled",
+            "group_policy_disabled",
+            event,
+            sender,
+            json!({}),
+        );
+    }
+    let route_allowlisted = allowlist_matches(&policy.spaces, &event.space.name)
+        || group_entry.is_some()
+        || policy.group_policy == "open";
+    if !route_allowlisted {
+        return policy_drop(
+            "space_denied",
+            "group_space_not_allowlisted",
+            event,
+            sender,
+            json!({}),
+        );
+    }
+    let mut group_users = group_entry
+        .map(|entry| entry.users.clone())
+        .unwrap_or_default();
+    if group_users.is_empty() {
+        group_users.clone_from(&policy.group_allow_from);
+    }
+    if !group_users.is_empty() && !sender_allowed(sender, &group_users) {
+        return policy_drop(
+            "sender_denied",
+            "group_sender_not_allowlisted",
+            event,
+            sender,
+            json!({ "group_allow_from_configured": true }),
+        );
+    }
+    if message_text(message).trim_start().starts_with('/') && !input.command_authorized {
+        return policy_drop(
+            "command_denied",
+            "command_requires_authorization",
+            event,
+            sender,
+            json!({ "command_detected": true }),
+        );
+    }
+
+    let mention_required = input.require_mention.unwrap_or_else(|| {
+        group_entry
+            .and_then(|entry| entry.require_mention)
+            .unwrap_or_else(|| {
+                policy.require_mention
+                    || allowlist_matches(&policy.mention_required_spaces, &event.space.name)
+            })
+    });
+    let mention_text = input
+        .mention_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(DEFAULT_MENTION_TEXT);
+    let was_mentioned = message_mentions_bot(message, policy.bot_user.as_deref(), mention_text);
+    if mention_required && !was_mentioned {
+        return policy_drop(
+            "mention_required",
+            "group_message_missing_required_mention",
+            event,
+            sender,
+            json!({
+                "mention_required": true,
+                "mention_detected": false,
+            }),
+        );
+    }
+
+    policy_allow(
+        if policy.group_policy == "open" {
+            "group_policy_open"
+        } else {
+            "group_policy_allowlist_match"
+        },
+        event,
+        sender,
+        json!({
+            "is_group": true,
+            "mention_required": mention_required,
+            "mention_detected": was_mentioned,
+            "command_authorized": input.command_authorized,
+        }),
+    )
+}
+
+fn policy_allow(
+    reason: &str,
+    event: &ChatEvent,
+    sender: &User,
+    extra: Value,
+) -> InboundPolicyOutcome {
+    InboundPolicyOutcome {
+        status: "processed",
+        event_emitted: true,
+        details: merge_policy_json("allowed", reason, event, sender, extra),
+    }
+}
+
+fn policy_drop(
+    status: &'static str,
+    reason: &str,
+    event: &ChatEvent,
+    sender: &User,
+    extra: Value,
+) -> InboundPolicyOutcome {
+    InboundPolicyOutcome {
+        status,
+        event_emitted: false,
+        details: merge_policy_json("dropped", reason, event, sender, extra),
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn merge_policy_json(
+    decision: &str,
+    reason: &str,
+    event: &ChatEvent,
+    sender: &User,
+    extra: Value,
+) -> Value {
+    let mut base = json!({
+        "decision": decision,
+        "reason": reason,
+        "space_name_hash": hash_identifier(&event.space.name),
+        "sender_name_hash": hash_identifier(&sender.name),
+        "sender_email_hash": (!sender.email.trim().is_empty()).then(|| hash_identifier(&sender.email)),
+        "ids_redacted": true,
+    });
+    if let (Some(base), Some(extra)) = (base.as_object_mut(), extra.as_object()) {
+        for (key, value) in extra {
+            base.insert(key.clone(), value.clone());
+        }
+    }
+    base
+}
+
+fn message_sender<'a>(message: &'a Message, event: &'a ChatEvent) -> Option<&'a User> {
+    message.sender.as_ref().or(event.user.as_ref())
+}
+
+fn sender_allowed(sender: &User, allowlist: &[String]) -> bool {
+    allowlist_matches(allowlist, &sender.name)
+        || (!sender.email.trim().is_empty() && allowlist_matches(allowlist, &sender.email))
+        || sender
+            .name
+            .strip_prefix("users/")
+            .is_some_and(|id| allowlist_matches(allowlist, id))
+}
+
+fn allowlist_matches(allowlist: &[String], value: &str) -> bool {
+    let value = value.trim();
+    allowlist.iter().any(|entry| {
+        let entry = entry.trim();
+        entry == "*"
+            || entry == value
+            || entry.eq_ignore_ascii_case(value)
+            || wildcard_match(entry, value)
+    })
+}
+
+fn wildcard_match(pattern: &str, value: &str) -> bool {
+    if pattern == "*" {
+        return true;
+    }
+    let Some(prefix) = pattern.strip_suffix('*') else {
+        return false;
+    };
+    value.starts_with(prefix)
+}
+
+fn message_mentions_bot(message: &Message, bot_user: Option<&str>, mention_text: &str) -> bool {
+    let bot_user = bot_user.map(str::trim).filter(|value| !value.is_empty());
+    if message.text.contains(mention_text) || message.argument_text.contains(mention_text) {
+        return true;
+    }
+    message
+        .annotations
+        .iter()
+        .filter(|annotation| annotation.type_field == "USER_MENTION")
+        .filter_map(|annotation| annotation.user_mention.as_ref())
+        .filter_map(|mention| mention.user.as_ref())
+        .any(|user| {
+            user.name == "users/app"
+                || bot_user.is_some_and(|bot| user.name == bot)
+                || user
+                    .name
+                    .strip_prefix("users/")
+                    .is_some_and(|id| id == "app")
+        })
+}
+
+fn message_text(message: &Message) -> &str {
+    if message.argument_text.trim().is_empty() {
+        &message.text
+    } else {
+        &message.argument_text
+    }
+}
+
+fn normalized_webhook_event(
+    input: &HostForwardedChatWebhookInput,
+    event: &ChatEvent,
+    message: &Message,
+    policy: &InboundPolicyOutcome,
+    replay_key: &WebhookReplayKey,
+    auth_source: &str,
+    payload_format: &str,
+    body_size_bytes: u64,
+    webhook: &GoogleChatWebhookConfig,
+) -> Value {
+    let sender = message_sender(message, event);
+    let delivery_id = input
+        .delivery_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map_or_else(
+            || format!("google-chat:{}:{}", event.space.name, message.name),
+            ToString::to_string,
+        );
+    json!({
+        "topic": EVENT_WEBHOOK_MESSAGE,
+        "event_type": "host_forwarded_google_chat_message",
+        "delivery_id": delivery_id,
+        "space": {
+            "name_hash": hash_identifier(&event.space.name),
+            "display_name_hash": (!event.space.display_name.trim().is_empty()).then(|| hash_identifier(&event.space.display_name)),
+            "space_type": format!("{:?}", event.space.space_type),
+            "resource_uri": format!("google-chat://spaces/{}", hash_identifier(&event.space.name)),
+        },
+        "message": {
+            "name": message.name,
+            "name_hash": hash_identifier(&message.name),
+            "text": message_text(message),
+            "text_redacted_in_logs": true,
+            "create_time": message.create_time,
+            "attachment_count": message.attachments.len(),
+        },
+        "sender": {
+            "name_hash": sender.map(|user| hash_identifier(&user.name)),
+            "email_hash": sender.and_then(|user| (!user.email.trim().is_empty()).then(|| hash_identifier(&user.email))),
+            "display_name_hash": sender.and_then(|user| (!user.display_name.trim().is_empty()).then(|| hash_identifier(&user.display_name))),
+            "ids_redacted": true,
+        },
+        "thread": {
+            "name": message.thread.as_ref().map(|thread| thread.name.clone()).filter(|name| !name.is_empty()),
+            "thread_key_hash": message.thread.as_ref().and_then(|thread| (!thread.thread_key.trim().is_empty()).then(|| hash_identifier(&thread.thread_key))),
+        },
+        "auth": {
+            "decision": "verified",
+            "source": auth_source,
+            "payload_format": payload_format,
+            "token_redacted": true,
+        },
+        "policy": policy.details,
+        "replay": replay_details(replay_key, WebhookReplayDecision::Claimed),
+        "ingress": {
+            "mode": "host_forwarded",
+            "hosted_listener": false,
+            "body_size_bytes": body_size_bytes,
+            "body_limit_bytes": webhook.max_body_bytes,
+            "body_timeout_ms": webhook.body_timeout_ms,
+            "raw_payload_logged": false,
+        },
+    })
+}
+
+#[allow(clippy::needless_pass_by_value)]
+fn webhook_response(
+    accepted: bool,
+    event_emitted: bool,
+    status_code: u16,
+    reason_code: &str,
+    reason: &str,
+    event: Option<Value>,
+    auth: Value,
+    policy: Value,
+    replay: Value,
+    ingress: Value,
+) -> Value {
+    json!({
+        "accepted": accepted,
+        "event_emitted": event_emitted,
+        "status_code": status_code,
+        "reason_code": reason_code,
+        "reason": reason,
+        "event": event,
+        "auth": auth,
+        "policy": policy,
+        "replay": replay,
+        "ingress": ingress,
+        "redaction": {
+            "raw_body_logged": false,
+            "token_logged": false,
+            "sender_ids_logged": false,
+        },
+    })
+}
+
+fn ingress_details(
+    input: &HostForwardedChatWebhookInput,
+    webhook: &GoogleChatWebhookConfig,
+    body_size_bytes: u64,
+) -> Value {
+    json!({
+        "mode": "host_forwarded",
+        "source": input.source_id.as_deref().unwrap_or("host_forwarded"),
+        "method": input.method,
+        "body_size_bytes": body_size_bytes,
+        "body_limit_bytes": webhook.max_body_bytes,
+        "preauth_body_limit_bytes": webhook.preauth_max_body_bytes,
+        "body_read_elapsed_ms": input.body_read_elapsed_ms.unwrap_or(0),
+        "body_timeout_ms": webhook.body_timeout_ms,
+        "hosted_listener": false,
+    })
+}
+
+fn replay_details(key: &WebhookReplayKey, decision: WebhookReplayDecision) -> Value {
+    json!({
+        "decision": decision.as_str(),
+        "account_id_hash": hash_identifier(&key.account_id),
+        "space_name_hash": hash_identifier(&key.space_name),
+        "message_name_hash": hash_identifier(&key.message_name),
+    })
+}
+
+fn required_non_empty(field: &str, value: &str) -> FcpResult<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Google Chat webhook {field} must not be empty"),
+        })
+    } else {
+        Ok(value.to_string())
+    }
+}
+
+fn hash_identifier(value: &str) -> String {
+    let hash = blake3::hash(value.as_bytes());
+    format!("blake3:{}", hash.to_hex().as_str())
 }
 
 fn is_local_test_host(host: &str) -> bool {
@@ -1301,6 +2861,474 @@ mod tests {
                 "spaces/AAAA/messages/msg1/reactions/r1"
             );
             assert_eq!(result["reaction"]["emoji"]["unicode"], "\u{1f44d}");
+        });
+    }
+
+    fn webhook_config() -> Value {
+        json!({
+            "access_token": "test-token",
+            "webhook": {
+                "enabled": true,
+                "allowed_bearer_tokens": ["chat-webhook-token"],
+                "max_body_bytes": 4096,
+                "preauth_max_body_bytes": 2048,
+                "body_timeout_ms": 250,
+                "auth_failure_limit_per_minute": 2,
+                "sender_limit_per_minute": 10,
+                "replay_ttl_secs": 60,
+                "replay_max_entries": 16
+            },
+            "inbound_policy": {
+                "dm_policy": "pairing",
+                "allow_from": ["users/123"],
+                "group_policy": "allowlist",
+                "group_allow_from": ["users/123"],
+                "spaces": ["spaces/AAA"],
+                "disabled_spaces": ["spaces/DISABLED"],
+                "require_mention": true,
+                "bot_user": "users/app",
+                "groups": {
+                    "spaces/AAA": {
+                        "enabled": true,
+                        "require_mention": true,
+                        "users": ["users/123"]
+                    }
+                }
+            }
+        })
+    }
+
+    async fn configured_webhook_connector() -> ChatConnector {
+        let mut connector = ChatConnector::new();
+        connector
+            .handle_configure(webhook_config())
+            .await
+            .expect("configure Google Chat webhook connector");
+        connector
+    }
+
+    fn chat_event(message_id: &str, space: &str, sender: &str, text: &str) -> Value {
+        json!({
+            "type": "MESSAGE",
+            "eventTime": "2026-03-22T00:00:00Z",
+            "space": {
+                "name": space,
+                "displayName": "Engineering",
+                "spaceType": "ROOM"
+            },
+            "user": {
+                "name": sender,
+                "displayName": "Alice",
+                "email": "alice@example.com",
+                "type": "HUMAN"
+            },
+            "message": {
+                "name": format!("{space}/messages/{message_id}"),
+                "sender": {
+                    "name": sender,
+                    "displayName": "Alice",
+                    "email": "alice@example.com",
+                    "type": "HUMAN"
+                },
+                "text": text,
+                "createTime": "2026-03-22T00:00:00Z",
+                "thread": {
+                    "name": format!("{space}/threads/thread1")
+                },
+                "annotations": [
+                    {
+                        "type": "USER_MENTION",
+                        "userMention": {
+                            "user": {
+                                "name": "users/app",
+                                "type": "BOT"
+                            },
+                            "type": "MENTION"
+                        }
+                    }
+                ]
+            }
+        })
+    }
+
+    fn dm_event(message_id: &str, sender: &str, text: &str) -> Value {
+        let mut event = chat_event(message_id, "spaces/DM", sender, text);
+        event["space"]["spaceType"] = json!("DIRECT_MESSAGE");
+        event
+    }
+
+    fn addon_event(message_id: &str) -> Value {
+        json!({
+            "commonEventObject": {
+                "hostApp": "CHAT"
+            },
+            "authorizationEventObject": {
+                "systemIdToken": "chat-webhook-token"
+            },
+            "chat": {
+                "eventTime": "2026-03-22T00:00:00Z",
+                "user": {
+                    "name": "users/123",
+                    "displayName": "Alice"
+                },
+                "messagePayload": {
+                    "space": {
+                        "name": "spaces/AAA",
+                        "displayName": "Engineering",
+                        "type": "ROOM"
+                    },
+                    "message": {
+                        "name": format!("spaces/AAA/messages/{message_id}"),
+                        "sender": {
+                            "name": "users/123",
+                            "displayName": "Alice"
+                        },
+                        "text": "@flywheel from add-on"
+                    }
+                }
+            }
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn webhook_input(body: Value) -> Value {
+        json!({
+            "method": "POST",
+            "headers": {
+                "Authorization": "Bearer chat-webhook-token",
+                "Content-Type": "application/json"
+            },
+            "body": body.to_string(),
+            "body_size_bytes": body.to_string().len(),
+            "body_read_elapsed_ms": 5,
+            "delivery_id": "delivery-1",
+            "source_id": "chat-test-source",
+            "command_authorized": true
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn addon_webhook_input(body: Value) -> Value {
+        json!({
+            "method": "POST",
+            "headers": {
+                "Content-Type": "application/json"
+            },
+            "body": body.to_string(),
+            "body_size_bytes": body.to_string().len(),
+            "body_read_elapsed_ms": 5,
+            "delivery_id": "delivery-addon",
+            "source_id": "chat-addon-source",
+            "command_authorized": true
+        })
+    }
+
+    #[allow(clippy::needless_pass_by_value)]
+    fn invoke_webhook(input: Value) -> Value {
+        json!({
+            "operation": OP_INGEST_WEBHOOK,
+            "input": input
+        })
+    }
+
+    fn webhook_record(scenario: &str, result: &Result<Value, FcpError>) -> Value {
+        match result {
+            Ok(value) => json!({
+                "record_type": "google_chat_host_forwarded_webhook_e2e",
+                "scenario": scenario,
+                "accepted": value["accepted"],
+                "event_emitted": value["event_emitted"],
+                "status_code": value["status_code"],
+                "reason_code": value["reason_code"],
+                "auth_decision": value["auth"]["decision"],
+                "policy_decision": value["policy"]["decision"],
+                "replay_decision": value["replay"]["decision"],
+                "redaction": value["redaction"],
+                "hosted_listener": false,
+            }),
+            Err(error) => json!({
+                "record_type": "google_chat_host_forwarded_webhook_e2e",
+                "scenario": scenario,
+                "accepted": false,
+                "event_emitted": false,
+                "status_code": "error",
+                "reason_code": "fcp_error",
+                "error": error.to_string(),
+                "hosted_listener": false,
+            }),
+        }
+    }
+
+    fn encode_jsonl(records: &[Value]) -> String {
+        records
+            .iter()
+            .map(|record| serde_json::to_string(record).expect("serialize Google Chat evidence"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn maybe_write_webhook_jsonl(jsonl: &str) {
+        if let Some(path) = std::env::var_os("GOOGLE_CHAT_WEBHOOK_E2E_JSONL_OUT") {
+            std::fs::write(path, jsonl).expect("write Google Chat webhook evidence JSONL");
+        }
+    }
+
+    #[test]
+    fn configure_webhook_policy_redacts_and_rejects_mutable_group_keys() {
+        run_async_test(async {
+            let mut connector = ChatConnector::new();
+            let result = connector
+                .handle_configure(webhook_config())
+                .await
+                .expect("configure webhook");
+            assert_eq!(result["details"]["webhook"]["enabled"], true);
+            assert_eq!(
+                result["details"]["webhook"]["token_material_redacted"],
+                true
+            );
+            let encoded = serde_json::to_string(&result).expect("config result JSON");
+            assert!(!encoded.contains("chat-webhook-token"));
+
+            let mut bad = webhook_config();
+            bad["inbound_policy"]["groups"] = json!({
+                "Engineering": { "users": ["users/123"] }
+            });
+            let error = ChatConnector::new()
+                .handle_configure(bad)
+                .await
+                .expect_err("mutable group key must be rejected");
+            assert!(
+                error.to_string().contains("deprecated mutable key"),
+                "unexpected error: {error:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn introspect_exposes_host_forwarded_webhook_operation() {
+        let connector = ChatConnector::new();
+        let result = run_async_test(connector.handle_introspect()).unwrap();
+        let ops = result["operations"].as_array().unwrap();
+        assert!(
+            ops.iter()
+                .map(|op| op["id"].as_str().unwrap())
+                .any(|id| id == OP_INGEST_WEBHOOK)
+        );
+        assert_eq!(result["event_caps"]["streaming"], false);
+        assert_eq!(result["event_caps"]["replay"], true);
+        assert_eq!(result["events"][0]["topic"], EVENT_WEBHOOK_MESSAGE);
+    }
+
+    #[test]
+    fn webhook_ingest_accepts_header_bearer_normalizes_event_and_dedupes() {
+        run_async_test(async {
+            let mut connector = configured_webhook_connector().await;
+            let input = webhook_input(chat_event(
+                "msg-1",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel hello",
+            ));
+            let result = connector
+                .handle_invoke(invoke_webhook(input.clone()))
+                .await
+                .expect("webhook should process");
+            assert_eq!(result["accepted"], true);
+            assert_eq!(result["event_emitted"], true);
+            assert_eq!(result["auth"]["source"], "authorization_header");
+            assert_eq!(result["auth"]["token_redacted"], true);
+            assert_eq!(result["policy"]["decision"], "allowed");
+            assert_eq!(result["replay"]["decision"], "claimed");
+            assert_eq!(result["event"]["topic"], EVENT_WEBHOOK_MESSAGE);
+            assert_eq!(result["event"]["ingress"]["hosted_listener"], false);
+            assert!(
+                !serde_json::to_string(&result)
+                    .expect("webhook result JSON")
+                    .contains("chat-webhook-token")
+            );
+
+            let duplicate = connector
+                .handle_invoke(invoke_webhook(input))
+                .await
+                .expect("duplicate should be acknowledged");
+            assert_eq!(duplicate["event_emitted"], false);
+            assert_eq!(duplicate["reason_code"], "duplicate");
+        });
+    }
+
+    #[test]
+    fn webhook_ingest_accepts_addon_token_and_applies_policy_denials() {
+        run_async_test(async {
+            let mut connector = configured_webhook_connector().await;
+            let addon = connector
+                .handle_invoke(invoke_webhook(addon_webhook_input(addon_event("addon-1"))))
+                .await
+                .expect("add-on payload should process");
+            assert_eq!(addon["event_emitted"], true);
+            assert_eq!(addon["auth"]["source"], "addon_payload");
+            assert_eq!(addon["auth"]["payload_format"], "workspace_addon");
+
+            let denied_sender = connector
+                .handle_invoke(invoke_webhook(webhook_input(chat_event(
+                    "msg-2",
+                    "spaces/AAA",
+                    "users/999",
+                    "@flywheel hello",
+                ))))
+                .await
+                .expect("policy denial is an acknowledged drop");
+            assert_eq!(denied_sender["accepted"], true);
+            assert_eq!(denied_sender["event_emitted"], false);
+            assert_eq!(
+                denied_sender["policy"]["reason"],
+                "group_sender_not_allowlisted"
+            );
+
+            let missing_mention = connector
+                .handle_invoke(invoke_webhook(webhook_input({
+                    let mut event =
+                        chat_event("msg-3", "spaces/AAA", "users/123", "hello without mention");
+                    event["message"]["annotations"] = json!([]);
+                    event
+                })))
+                .await
+                .expect("missing mention is an acknowledged drop");
+            assert_eq!(missing_mention["event_emitted"], false);
+            assert_eq!(
+                missing_mention["policy"]["reason"],
+                "group_message_missing_required_mention"
+            );
+
+            let command = connector
+                .handle_invoke(invoke_webhook({
+                    let mut input = webhook_input(chat_event(
+                        "msg-4",
+                        "spaces/AAA",
+                        "users/123",
+                        "/deploy @flywheel",
+                    ));
+                    input["command_authorized"] = json!(false);
+                    input
+                }))
+                .await
+                .expect("unauthorized command is an acknowledged drop");
+            assert_eq!(command["event_emitted"], false);
+            assert_eq!(
+                command["policy"]["reason"],
+                "command_requires_authorization"
+            );
+
+            let dm = connector
+                .handle_invoke(invoke_webhook(webhook_input(dm_event(
+                    "dm-1",
+                    "users/999",
+                    "hello privately",
+                ))))
+                .await
+                .expect("DM pairing challenge is an acknowledged drop");
+            assert_eq!(dm["event_emitted"], false);
+            assert_eq!(dm["policy"]["reason"], "dm_pairing_required");
+        });
+    }
+
+    #[test]
+    fn webhook_ingest_guardrails_and_redacted_jsonl_evidence() {
+        run_async_test(async {
+            let mut connector = configured_webhook_connector().await;
+            let mut records = Vec::new();
+
+            let mut method = webhook_input(chat_event(
+                "guard-1",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel ok",
+            ));
+            method["method"] = json!("GET");
+            let method_result = connector.handle_invoke(invoke_webhook(method)).await;
+            assert_eq!(method_result.as_ref().unwrap()["status_code"], 405);
+            records.push(webhook_record("method_not_allowed", &method_result));
+
+            let mut content_type = webhook_input(chat_event(
+                "guard-2",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel ok",
+            ));
+            content_type["headers"]["Content-Type"] = json!("text/plain");
+            let content_type_result = connector.handle_invoke(invoke_webhook(content_type)).await;
+            assert_eq!(content_type_result.as_ref().unwrap()["status_code"], 415);
+            records.push(webhook_record(
+                "unsupported_media_type",
+                &content_type_result,
+            ));
+
+            let mut oversized = webhook_input(chat_event(
+                "guard-3",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel ok",
+            ));
+            oversized["body_size_bytes"] = json!(10_000);
+            let oversized_result = connector.handle_invoke(invoke_webhook(oversized)).await;
+            assert_eq!(oversized_result.as_ref().unwrap()["status_code"], 413);
+            records.push(webhook_record("payload_too_large", &oversized_result));
+
+            let mut timeout = webhook_input(chat_event(
+                "guard-4",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel ok",
+            ));
+            timeout["body_read_elapsed_ms"] = json!(1_000);
+            let timeout_result = connector.handle_invoke(invoke_webhook(timeout)).await;
+            assert_eq!(timeout_result.as_ref().unwrap()["status_code"], 408);
+            records.push(webhook_record("request_timeout", &timeout_result));
+
+            let mut missing_auth = webhook_input(chat_event(
+                "guard-5",
+                "spaces/AAA",
+                "users/123",
+                "@flywheel ok",
+            ));
+            missing_auth["headers"]
+                .as_object_mut()
+                .unwrap()
+                .remove("Authorization");
+            let missing_auth_result = connector.handle_invoke(invoke_webhook(missing_auth)).await;
+            assert_eq!(missing_auth_result.as_ref().unwrap()["status_code"], 401);
+            records.push(webhook_record("missing_token", &missing_auth_result));
+
+            let malformed = json!({
+                "method": "POST",
+                "headers": {
+                    "Authorization": "Bearer chat-webhook-token",
+                    "Content-Type": "application/json"
+                },
+                "body": "{not-json",
+                "body_size_bytes": 9,
+                "body_read_elapsed_ms": 5
+            });
+            let malformed_result = connector.handle_invoke(invoke_webhook(malformed)).await;
+            assert_eq!(malformed_result.as_ref().unwrap()["status_code"], 400);
+            records.push(webhook_record("malformed_payload", &malformed_result));
+
+            let success_result = connector
+                .handle_invoke(invoke_webhook(webhook_input(chat_event(
+                    "guard-6",
+                    "spaces/AAA",
+                    "users/123",
+                    "@flywheel ok",
+                ))))
+                .await;
+            assert_eq!(success_result.as_ref().unwrap()["event_emitted"], true);
+            records.push(webhook_record("success", &success_result));
+
+            let jsonl = encode_jsonl(&records);
+            maybe_write_webhook_jsonl(&jsonl);
+            assert!(jsonl.contains("google_chat_host_forwarded_webhook_e2e"));
+            assert!(!jsonl.contains("chat-webhook-token"));
+            assert!(!jsonl.contains("@flywheel ok"));
+            assert!(!jsonl.contains("alice@example.com"));
         });
     }
 }

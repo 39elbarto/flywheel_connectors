@@ -28,6 +28,7 @@ fcp-google-discovery = { path = "../../crates/fcp-google-discovery" }
 
 anyhow.workspace = true
 async-trait.workspace = true
+blake3.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

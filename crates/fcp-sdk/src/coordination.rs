@@ -520,6 +520,66 @@ impl ChatCoordinationAction {
     }
 }
 
+/// Connector send candidate evaluated by chat coordination.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCoordinationSendRequest {
+    zone: ZoneId,
+    connector: ConnectorId,
+    channel: ChannelId,
+    thread: Option<ThreadId>,
+    claimant: AgentId,
+}
+
+impl ChatCoordinationSendRequest {
+    /// Build a send candidate for an outbound chat operation.
+    #[must_use]
+    pub const fn new(
+        zone_id: ZoneId,
+        connector_id: ConnectorId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+        claimant_agent_id: AgentId,
+    ) -> Self {
+        Self {
+            zone: zone_id,
+            connector: connector_id,
+            channel: channel_id,
+            thread: thread_id,
+            claimant: claimant_agent_id,
+        }
+    }
+
+    /// Zone namespace for the send.
+    #[must_use]
+    pub const fn zone_id(&self) -> &ZoneId {
+        &self.zone
+    }
+
+    /// Connector namespace for the send.
+    #[must_use]
+    pub const fn connector_id(&self) -> &ConnectorId {
+        &self.connector
+    }
+
+    /// Channel or conversation id for the send.
+    #[must_use]
+    pub const fn channel_id(&self) -> &ChannelId {
+        &self.channel
+    }
+
+    /// Native thread id, when the platform provides one.
+    #[must_use]
+    pub const fn thread_id(&self) -> Option<&ThreadId> {
+        self.thread.as_ref()
+    }
+
+    /// Agent attempting the outbound send.
+    #[must_use]
+    pub const fn claimant_agent_id(&self) -> &AgentId {
+        &self.claimant
+    }
+}
+
 /// Connector-facing chat coordination policy.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChatCoordinationConfig {
@@ -663,6 +723,64 @@ impl ChatCoordinationConfig {
     pub fn decision_for_claim_outcome(&self, outcome: ClaimOutcome) -> ChatClaimDecision {
         ChatClaimDecision::from_claim_outcome(outcome, self.fail_open)
     }
+
+    /// Evaluate chat coordination before an outbound connector send.
+    ///
+    /// This is the connector-facing facade: it applies live policy, optionally
+    /// claims ownership through the supplied checker, and returns both the send
+    /// decision and the redaction-safe audit records that describe the path.
+    pub async fn claim_before_send<C>(
+        &self,
+        cx: &fcp_async_core::Cx,
+        checker: &C,
+        request: ChatCoordinationSendRequest,
+    ) -> ChatCoordinationSendDecision
+    where
+        C: ThreadOwnershipChecker + ?Sized,
+    {
+        let ChatCoordinationSendRequest {
+            zone,
+            connector,
+            channel,
+            thread,
+            claimant,
+        } = request;
+        let audit_channel_id = channel.clone();
+        let action = self.action_for_message(zone, connector, channel, thread);
+        match action {
+            ChatCoordinationAction::Skip { reason } => ChatCoordinationSendDecision::new(
+                ChatCoordinationAction::Skip { reason },
+                None,
+                ChatClaimDecision::Proceed,
+                vec![ChatCoordinationAuditRecord::coordination_skipped(
+                    &audit_channel_id,
+                    self.backend,
+                    reason,
+                )],
+            ),
+            ChatCoordinationAction::Claim { key } => {
+                let mut audit_records = vec![ChatCoordinationAuditRecord::claim_attempt(
+                    &key,
+                    self.backend,
+                    &claimant,
+                )];
+                let outcome = checker.claim(cx, key.clone(), claimant.clone()).await;
+                audit_records.push(ChatCoordinationAuditRecord::claim_outcome(
+                    &key,
+                    self.backend,
+                    &claimant,
+                    &outcome,
+                ));
+                let decision = self.decision_for_claim_outcome(outcome.clone());
+                ChatCoordinationSendDecision::new(
+                    ChatCoordinationAction::Claim { key },
+                    Some(outcome),
+                    decision,
+                    audit_records,
+                )
+            }
+        }
+    }
 }
 
 impl Default for ChatCoordinationConfig {
@@ -719,6 +837,141 @@ impl ChatClaimDecision {
             Self::Deny(error) => Some(error),
             Self::Proceed | Self::DegradedProceed { .. } => None,
         }
+    }
+}
+
+/// Connector-facing result of applying chat coordination before a send.
+#[derive(Debug, Clone)]
+pub struct ChatCoordinationSendDecision {
+    action: ChatCoordinationAction,
+    claim_outcome: Option<ClaimOutcome>,
+    decision: ChatClaimDecision,
+    audit_records: Vec<ChatCoordinationAuditRecord>,
+}
+
+impl ChatCoordinationSendDecision {
+    const fn new(
+        action: ChatCoordinationAction,
+        claim_outcome: Option<ClaimOutcome>,
+        decision: ChatClaimDecision,
+        audit_records: Vec<ChatCoordinationAuditRecord>,
+    ) -> Self {
+        Self {
+            action,
+            claim_outcome,
+            decision,
+            audit_records,
+        }
+    }
+
+    /// Policy action chosen for the outbound message.
+    #[must_use]
+    pub const fn action(&self) -> &ChatCoordinationAction {
+        &self.action
+    }
+
+    /// Backend claim outcome, when a claim was attempted.
+    #[must_use]
+    pub const fn claim_outcome(&self) -> Option<&ClaimOutcome> {
+        self.claim_outcome.as_ref()
+    }
+
+    /// Final connector send decision.
+    #[must_use]
+    pub const fn decision(&self) -> &ChatClaimDecision {
+        &self.decision
+    }
+
+    /// Redaction-safe audit records emitted before the connector send.
+    #[must_use]
+    pub fn audit_records(&self) -> &[ChatCoordinationAuditRecord] {
+        &self.audit_records
+    }
+
+    /// Whether the connector should perform the outbound send.
+    #[must_use]
+    pub const fn should_send(&self) -> bool {
+        self.decision.should_send()
+    }
+
+    /// Borrow the denial error, if the send must be blocked.
+    #[must_use]
+    pub const fn denial_error(&self) -> Option<&FcpError> {
+        self.decision.denial_error()
+    }
+
+    /// Redaction-safe degraded reason for fail-open sends.
+    #[must_use]
+    pub fn degraded_reason(&self) -> Option<&str> {
+        match &self.decision {
+            ChatClaimDecision::DegradedProceed { reason } => Some(reason.as_str()),
+            ChatClaimDecision::Proceed | ChatClaimDecision::Deny(_) => None,
+        }
+    }
+
+    /// Backend reason associated with an indeterminate claim, if any.
+    #[must_use]
+    pub fn indeterminate_reason(&self) -> Option<&str> {
+        match &self.claim_outcome {
+            Some(ClaimOutcome::Indeterminate(reason)) => Some(reason.as_str()),
+            Some(ClaimOutcome::Granted(_) | ClaimOutcome::AlreadyOwned(_)) | None => None,
+        }
+    }
+
+    /// Claim key selected for this send, when ownership was attempted.
+    #[must_use]
+    pub const fn claim_key(&self) -> Option<&ClaimKey> {
+        self.action.claim_key()
+    }
+
+    /// Peer owner that blocked the send, when known.
+    #[must_use]
+    pub const fn owner_agent_id(&self) -> Option<&AgentId> {
+        match &self.claim_outcome {
+            Some(ClaimOutcome::AlreadyOwned(owner)) => Some(owner),
+            Some(ClaimOutcome::Granted(_) | ClaimOutcome::Indeterminate(_)) | None => None,
+        }
+    }
+
+    /// Build the post-claim audit record for a successful connector send.
+    #[must_use]
+    pub fn send_executed_audit_record(
+        &self,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+    ) -> Option<ChatCoordinationAuditRecord> {
+        if !self.should_send() {
+            return None;
+        }
+        self.claim_key().map(|key| {
+            ChatCoordinationAuditRecord::send_executed(
+                key,
+                backend,
+                claimant_agent_id,
+                self.degraded_reason()
+                    .or_else(|| self.indeterminate_reason()),
+            )
+        })
+    }
+
+    /// Build the post-claim audit record for a denied connector send.
+    #[must_use]
+    pub fn send_denied_audit_record(
+        &self,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+    ) -> Option<ChatCoordinationAuditRecord> {
+        let key = self.claim_key()?;
+        let error = self.denial_error()?;
+        Some(ChatCoordinationAuditRecord::send_denied(
+            key,
+            backend,
+            claimant_agent_id,
+            error,
+            self.owner_agent_id(),
+            self.degraded_reason()
+                .or_else(|| self.indeterminate_reason()),
+        ))
     }
 }
 
@@ -1679,6 +1932,31 @@ mod tests {
             .expect("test runtime starts")
     }
 
+    fn run_claim_before_send<C>(
+        config: &ChatCoordinationConfig,
+        checker: &C,
+        channel_id: &str,
+        thread_id: Option<&str>,
+        agent_id: &str,
+    ) -> ChatCoordinationSendDecision
+    where
+        C: ThreadOwnershipChecker + ?Sized,
+    {
+        let cx = fcp_async_core::Cx::for_testing();
+        fcp_async_core::runtime::block_on_sync(config.claim_before_send(
+            &cx,
+            checker,
+            ChatCoordinationSendRequest::new(
+                ZoneId::work(),
+                connector("slack:chat:1.0.0"),
+                ChannelId::new(channel_id),
+                thread_id.map(ThreadId::new),
+                agent(agent_id),
+            ),
+        ))
+        .expect("test runtime starts")
+    }
+
     #[test]
     fn chat_coordination_config_defaults_match_parent_policy() {
         let config = ChatCoordinationConfig::default();
@@ -1760,6 +2038,71 @@ mod tests {
             ChatCoordinationAction::Claim { ref key }
                 if key.channel_id() == &channel && key.thread_id().as_str() == channel.as_str()
         ));
+    }
+
+    #[test]
+    fn claim_before_send_reports_skip_reasons_without_claiming() {
+        let checker = InMemoryThreadOwnershipChecker::new();
+
+        let disabled = run_claim_before_send(
+            &ChatCoordinationConfig::new().with_enabled(false),
+            &checker,
+            "C123",
+            Some("1700000000.000100"),
+            "alice",
+        );
+        assert!(disabled.should_send());
+        assert!(disabled.claim_outcome().is_none());
+        assert!(matches!(
+            disabled.action(),
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::Disabled
+            }
+        ));
+        assert_eq!(disabled.audit_records().len(), 1);
+        assert_eq!(
+            disabled.audit_records()[0].event(),
+            ChatCoordinationAuditEvent::CoordinationSkipped
+        );
+        assert_eq!(disabled.audit_records()[0].reason(), Some("disabled"));
+
+        let outside_allowlist = run_claim_before_send(
+            &ChatCoordinationConfig::new().with_allowlist_channels([ChannelId::new("C999")]),
+            &checker,
+            "C123",
+            Some("1700000000.000100"),
+            "alice",
+        );
+        assert!(outside_allowlist.should_send());
+        assert!(matches!(
+            outside_allowlist.action(),
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ChannelNotAllowed
+            }
+        ));
+        assert_eq!(
+            outside_allowlist.audit_records()[0].reason(),
+            Some("channel_not_allowed")
+        );
+
+        let threadless_dm = run_claim_before_send(
+            &ChatCoordinationConfig::new().with_dm_mode(DmMode::Skip),
+            &checker,
+            "D123",
+            None,
+            "alice",
+        );
+        assert!(threadless_dm.should_send());
+        assert!(matches!(
+            threadless_dm.action(),
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ThreadlessDmSkipped
+            }
+        ));
+        assert_eq!(
+            threadless_dm.audit_records()[0].reason(),
+            Some("threadless_dm_skipped")
+        );
     }
 
     #[test]
@@ -2021,6 +2364,148 @@ mod tests {
         );
         assert_eq!(checker.retry_attempts(), AGENT_MAIL_CLAIM_RETRY_ATTEMPTS);
         assert_eq!(checker.client().requests().len(), 2);
+    }
+
+    #[test]
+    fn claim_before_send_granted_path_returns_ordered_audit_records() {
+        let checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::Granted,
+            ]));
+        let claimant = agent("alice");
+        let decision = run_claim_before_send(
+            &ChatCoordinationConfig::new(),
+            &checker,
+            "C123",
+            Some("1700000000.000100"),
+            claimant.as_str(),
+        );
+
+        assert!(decision.should_send());
+        assert!(matches!(decision.decision(), ChatClaimDecision::Proceed));
+        assert_eq!(
+            decision.claim_outcome(),
+            Some(&ClaimOutcome::Granted(claimant.clone()))
+        );
+        assert_eq!(
+            decision
+                .audit_records()
+                .iter()
+                .map(ChatCoordinationAuditRecord::event)
+                .collect::<Vec<_>>(),
+            vec![
+                ChatCoordinationAuditEvent::ClaimAttempt,
+                ChatCoordinationAuditEvent::ClaimOutcome,
+            ]
+        );
+        assert_eq!(decision.audit_records()[1].outcome(), Some("granted"));
+        let executed = decision
+            .send_executed_audit_record(ChatCoordinationBackend::AgentMail, &claimant)
+            .expect("claim path can emit send execution audit");
+        assert_eq!(executed.event(), ChatCoordinationAuditEvent::SendExecuted);
+        assert_eq!(executed.reason(), None);
+        assert!(
+            decision
+                .send_denied_audit_record(ChatCoordinationBackend::AgentMail, &claimant)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn claim_before_send_conflict_denies_and_exposes_owner() {
+        let owner = agent("bob");
+        let claimant = agent("alice");
+        let checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::conflict(owner.clone()),
+            ]));
+        let decision = run_claim_before_send(
+            &ChatCoordinationConfig::new(),
+            &checker,
+            "C123",
+            Some("1700000000.000100"),
+            claimant.as_str(),
+        );
+
+        assert!(!decision.should_send());
+        assert_eq!(
+            decision.claim_outcome(),
+            Some(&ClaimOutcome::AlreadyOwned(owner.clone()))
+        );
+        assert_eq!(decision.owner_agent_id(), Some(&owner));
+        assert!(matches!(
+            decision.denial_error(),
+            Some(FcpError::Unauthorized {
+                code: THREAD_OWNED_BY_PEER_ERROR_CODE,
+                message,
+            }) if message == "thread_owned_by_peer:bob"
+        ));
+        let denied = decision
+            .send_denied_audit_record(ChatCoordinationBackend::AgentMail, &claimant)
+            .expect("denied claim can emit send denial audit");
+        assert_eq!(denied.event(), ChatCoordinationAuditEvent::SendDenied);
+        assert_eq!(denied.error_code(), Some(THREAD_OWNED_BY_PEER_ERROR_CODE));
+        assert!(denied.owner_agent_id().is_some());
+    }
+
+    #[test]
+    fn claim_before_send_unavailable_respects_fail_open_and_fail_closed() {
+        let claimant = agent("alice");
+        let fail_open_checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::unavailable("socket_closed"),
+                AgentMailThreadReservationOutcome::unavailable("still_down"),
+            ]));
+        let fail_open = run_claim_before_send(
+            &ChatCoordinationConfig::new().with_fail_open(true),
+            &fail_open_checker,
+            "C123",
+            Some("1700000000.000100"),
+            claimant.as_str(),
+        );
+        assert!(fail_open.should_send());
+        assert!(matches!(
+            fail_open.decision(),
+            ChatClaimDecision::DegradedProceed { reason }
+                if reason == AGENT_MAIL_UNAVAILABLE_REASON
+        ));
+        assert_eq!(
+            fail_open.indeterminate_reason(),
+            Some(AGENT_MAIL_UNAVAILABLE_REASON)
+        );
+        let executed = fail_open
+            .send_executed_audit_record(ChatCoordinationBackend::AgentMail, &claimant)
+            .expect("degraded claim can emit execution audit");
+        assert_eq!(executed.reason(), Some(AGENT_MAIL_UNAVAILABLE_REASON));
+
+        let fail_closed_checker =
+            AgentMailThreadOwnershipChecker::new(ScriptedAgentMailReservationClient::new([
+                AgentMailThreadReservationOutcome::unavailable("socket_closed"),
+                AgentMailThreadReservationOutcome::unavailable("still_down"),
+            ]));
+        let fail_closed = run_claim_before_send(
+            &ChatCoordinationConfig::new().with_fail_open(false),
+            &fail_closed_checker,
+            "C123",
+            Some("1700000000.000100"),
+            claimant.as_str(),
+        );
+        assert!(!fail_closed.should_send());
+        assert!(matches!(
+            fail_closed.denial_error(),
+            Some(FcpError::ConnectorUnavailable {
+                code: THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE,
+                message,
+            }) if message == "thread_ownership_indeterminate:agent_mail_unavailable"
+        ));
+        let denied = fail_closed
+            .send_denied_audit_record(ChatCoordinationBackend::AgentMail, &claimant)
+            .expect("fail-closed claim can emit denial audit");
+        assert_eq!(
+            denied.error_code(),
+            Some(THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE)
+        );
+        assert_eq!(denied.reason(), Some(AGENT_MAIL_UNAVAILABLE_REASON));
     }
 
     #[test]

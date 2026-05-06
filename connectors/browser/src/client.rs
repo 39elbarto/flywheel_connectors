@@ -629,6 +629,22 @@ impl CdpCaptureClip {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CdpMousePoint {
+    x: f64,
+    y: f64,
+}
+
+impl CdpMousePoint {
+    fn from_box_model(result: &serde_json::Value) -> BrowserResult<Self> {
+        let clip = CdpCaptureClip::from_box_model(result)?;
+        Ok(Self {
+            x: clip.x + (clip.width / 2.0),
+            y: clip.y + (clip.height / 2.0),
+        })
+    }
+}
+
 fn cdp_remote_value_to_result_string(value: &serde_json::Value) -> BrowserResult<String> {
     match value {
         serde_json::Value::String(text) => Ok(text.clone()),
@@ -790,6 +806,35 @@ fn cdp_wait_timeout_ms(timeout_ms: Option<u64>) -> BrowserResult<u64> {
             status_code: None,
         })
     }
+}
+
+fn cdp_mouse_event_params(
+    event_type: &str,
+    point: CdpMousePoint,
+    button: Option<&str>,
+    buttons: Option<u32>,
+    click_count: Option<u32>,
+) -> serde_json::Value {
+    let mut params = serde_json::Map::new();
+    params.insert(
+        "type".to_string(),
+        serde_json::Value::String(event_type.to_string()),
+    );
+    params.insert("x".to_string(), serde_json::json!(point.x));
+    params.insert("y".to_string(), serde_json::json!(point.y));
+    if let Some(button) = button {
+        params.insert(
+            "button".to_string(),
+            serde_json::Value::String(button.to_string()),
+        );
+    }
+    if let Some(buttons) = buttons {
+        params.insert("buttons".to_string(), serde_json::json!(buttons));
+    }
+    if let Some(click_count) = click_count {
+        params.insert("clickCount".to_string(), serde_json::json!(click_count));
+    }
+    serde_json::Value::Object(params)
 }
 
 fn cdp_required_object_number(
@@ -1236,6 +1281,70 @@ where
         cdp_parse_wait_result(&response)
     }
 
+    async fn click(
+        &mut self,
+        cx: &Cx,
+        selector: &str,
+        timeout_ms: Option<u64>,
+    ) -> BrowserResult<ClickResult> {
+        let readiness = self
+            .wait_for_selector(cx, selector, Some("visible"), timeout_ms)
+            .await?;
+        if !readiness.found {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol click selector `{selector}` was not visible before timeout"
+                ),
+                status_code: None,
+            });
+        }
+
+        let document = self
+            .call_method(
+                cx,
+                "DOM.getDocument",
+                Some(serde_json::json!({ "depth": 0, "pierce": false })),
+            )
+            .await?;
+        let root_node_id = cdp_required_node_id(&document, "/root/nodeId")?;
+        let query = self
+            .call_method(
+                cx,
+                "DOM.querySelector",
+                Some(serde_json::json!({
+                    "nodeId": root_node_id,
+                    "selector": selector,
+                })),
+            )
+            .await?;
+        let node_id = cdp_required_node_id(&query, "/nodeId").map_err(|_| BrowserError::Api {
+            message: format!("Chrome DevTools Protocol click selector `{selector}` did not match"),
+            status_code: None,
+        })?;
+        let box_model = self
+            .call_method(
+                cx,
+                "DOM.getBoxModel",
+                Some(serde_json::json!({ "nodeId": node_id })),
+            )
+            .await?;
+        let point = CdpMousePoint::from_box_model(&box_model)?;
+
+        for params in [
+            cdp_mouse_event_params("mouseMoved", point, Some("none"), Some(0), Some(0)),
+            cdp_mouse_event_params("mousePressed", point, Some("left"), Some(1), Some(1)),
+            cdp_mouse_event_params("mouseReleased", point, Some("left"), Some(0), Some(1)),
+        ] {
+            self.call_method(cx, "Input.dispatchMouseEvent", Some(params))
+                .await?;
+        }
+
+        Ok(ClickResult {
+            clicked: true,
+            navigation_url: None,
+        })
+    }
+
     async fn capture_screenshot(
         &mut self,
         cx: &Cx,
@@ -1509,6 +1618,7 @@ const WORKER_CLICK: BrowserControlOperation = BrowserControlOperation {
     target_policy: TARGET_ACTIVE_PAGE_INTERACTION,
     implementation: BrowserControlImplementation::Cdp {
         methods: &[
+            "Runtime.evaluate",
             "DOM.getDocument",
             "DOM.querySelector",
             "DOM.getBoxModel",
@@ -2711,6 +2821,7 @@ mod tests {
         assert_eq!(
             click["implementation"]["methods"],
             serde_json::json!([
+                "Runtime.evaluate",
                 "DOM.getDocument",
                 "DOM.querySelector",
                 "DOM.getBoxModel",
@@ -3319,6 +3430,124 @@ mod tests {
         assert!(format!("{bad_payload}").contains("invalid wait_for_selector payload"));
         assert!(alias.contains(r#"const state = "detached";"#));
         assert!(alias.contains("const timeoutMs = 0;"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_click_waits_resolves_box_and_dispatches_mouse_events() {
+        let cx = fcp_async_core::compatibility_cx();
+        let selector = "button.submit";
+        let wait_expression =
+            cdp_wait_for_selector_expression(selector, Some("visible"), Some(500)).unwrap();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": { "found": true },
+                        },
+                    },
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"root":{"nodeId":1}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":3,"result":{"nodeId":2}}"#.into()),
+            WebSocketMessage::Text(
+                r#"{"id":4,"result":{"model":{"content":[10,20,110,20,110,60,10,60]}}}"#.into(),
+            ),
+            WebSocketMessage::Text(r#"{"id":5,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":6,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":7,"result":{}}"#.into()),
+        ]));
+
+        let response = session.click(&cx, selector, Some(500)).await.unwrap();
+        let transport = session.into_transport();
+
+        assert!(response.clicked);
+        assert_eq!(response.navigation_url, None);
+        assert_eq!(transport.sent.len(), 7);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": wait_expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[1],
+            &serde_json::json!({
+                "id": 2,
+                "method": "DOM.getDocument",
+                "params": { "depth": 0, "pierce": false },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[2],
+            &serde_json::json!({
+                "id": 3,
+                "method": "DOM.querySelector",
+                "params": { "nodeId": 1, "selector": selector },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[3],
+            &serde_json::json!({
+                "id": 4,
+                "method": "DOM.getBoxModel",
+                "params": { "nodeId": 2 },
+            }),
+        );
+        for (index, event_type, button, buttons, click_count) in [
+            (4, "mouseMoved", "none", 0, 0),
+            (5, "mousePressed", "left", 1, 1),
+            (6, "mouseReleased", "left", 0, 1),
+        ] {
+            assert_cdp_text_message(
+                &transport.sent[index],
+                &serde_json::json!({
+                    "id": index + 1,
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {
+                        "button": button,
+                        "buttons": buttons,
+                        "clickCount": click_count,
+                        "type": event_type,
+                        "x": 60.0,
+                        "y": 40.0,
+                    },
+                }),
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_click_stops_when_selector_never_visible() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": { "found": false },
+                        },
+                    },
+                })
+                .to_string(),
+            )]));
+
+        let error = session.click(&cx, ".missing", Some(0)).await.unwrap_err();
+        let transport = session.into_transport();
+
+        assert!(format!("{error}").contains("not visible before timeout"));
+        assert_eq!(transport.sent.len(), 1);
     }
 
     #[fcp_async_core::runtime::test]

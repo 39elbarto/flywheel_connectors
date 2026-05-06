@@ -6,6 +6,7 @@ use std::time::Duration;
 
 use fcp_google_discovery::auth::GoogleMaterializedAuth;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use reqwest::header::{HeaderValue, RETRY_AFTER};
 use reqwest::{Client, RequestBuilder};
 use serde::de::DeserializeOwned;
 use tracing::{instrument, warn};
@@ -164,22 +165,36 @@ impl WorkspaceEventsClient {
         field_mask: Option<&str>,
     ) -> WorkspaceEventsResult<LongRunningOperation> {
         let url = format!("{}/subscriptions", self.events_base_url);
-        let mut body = serde_json::json!({
-            "targetResource": target_resource,
-            "eventTypes": event_types,
-            "notificationEndpoint": {
-                "pubsubTopic": pubsub_topic
-            },
-            "payloadOptions": {
-                "includeResource": include_resource
-            }
-        });
-        if let Some(ttl) = ttl {
-            body["ttl"] = serde_json::json!(ttl);
-        }
+        let mut payload_options = serde_json::Map::new();
+        payload_options.insert(
+            "includeResource".to_string(),
+            serde_json::json!(include_resource),
+        );
         if let Some(field_mask) = field_mask.filter(|mask| !mask.is_empty()) {
-            body["payloadOptions"]["fieldMask"] = serde_json::json!(field_mask);
+            payload_options.insert("fieldMask".to_string(), serde_json::json!(field_mask));
         }
+
+        let mut notification_endpoint = serde_json::Map::new();
+        notification_endpoint.insert("pubsubTopic".to_string(), serde_json::json!(pubsub_topic));
+
+        let mut body = serde_json::Map::new();
+        body.insert(
+            "targetResource".to_string(),
+            serde_json::json!(target_resource),
+        );
+        body.insert("eventTypes".to_string(), serde_json::json!(event_types));
+        body.insert(
+            "notificationEndpoint".to_string(),
+            serde_json::Value::Object(notification_endpoint),
+        );
+        body.insert(
+            "payloadOptions".to_string(),
+            serde_json::Value::Object(payload_options),
+        );
+        if let Some(ttl) = ttl {
+            body.insert("ttl".to_string(), serde_json::json!(ttl));
+        }
+        let body = serde_json::Value::Object(body);
         self.post_json(&url, &body, MissingResourceKind::Unknown)
             .await
     }
@@ -318,6 +333,10 @@ impl WorkspaceEventsClient {
         }
 
         let code = status.as_u16();
+        let retry_after_ms = resp
+            .headers()
+            .get(RETRY_AFTER)
+            .and_then(parse_retry_after_ms);
         let body = resp.text().await.unwrap_or_default();
         if let Ok(value) = serde_json::from_str::<serde_json::Value>(&body) {
             let message = value
@@ -327,7 +346,7 @@ impl WorkspaceEventsClient {
                 .or_else(|| value.get("message").and_then(|v| v.as_str()))
                 .unwrap_or(&body)
                 .to_string();
-            Err(map_api_error(code, message, missing_kind))
+            Err(map_api_error(code, message, missing_kind, retry_after_ms))
         } else {
             let preview: String = body.chars().take(200).collect();
             warn!(
@@ -335,15 +354,26 @@ impl WorkspaceEventsClient {
                 body_preview = %preview,
                 "Workspace Events API error"
             );
-            Err(map_api_error(code, body, missing_kind))
+            Err(map_api_error(code, body, missing_kind, retry_after_ms))
         }
     }
+}
+
+fn parse_retry_after_ms(value: &HeaderValue) -> Option<u64> {
+    value
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()?
+        .checked_mul(1_000)
 }
 
 fn map_api_error(
     status_code: u16,
     message: String,
     missing_kind: MissingResourceKind,
+    retry_after_ms: Option<u64>,
 ) -> WorkspaceEventsError {
     match status_code {
         401 | 403 => WorkspaceEventsError::Unauthorized,
@@ -364,7 +394,7 @@ fn map_api_error(
             },
         },
         429 => WorkspaceEventsError::RateLimited {
-            retry_after_ms: 60_000,
+            retry_after_ms: retry_after_ms.unwrap_or(60_000),
         },
         _ => WorkspaceEventsError::Api {
             status_code,

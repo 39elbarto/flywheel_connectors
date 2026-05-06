@@ -724,9 +724,9 @@ impl WorkspaceEventsConnector {
                 match operation {
                     "workspace_events.list_subscriptions" => {
                         let page_size = optional_u32(&input, "page_size")?;
-                        let page_token = optional_str(&input, "page_token");
+                        let pagination_cursor = optional_str(&input, "page_token");
                         let response = client
-                            .list_subscriptions(page_size, page_token)
+                            .list_subscriptions(page_size, pagination_cursor)
                             .await
                             .map_err(|e| e.to_fcp_error())?;
                         Ok(json!({
@@ -744,7 +744,7 @@ impl WorkspaceEventsConnector {
                     }
                     "workspace_events.create_subscription" => {
                         let target_resource = require_str(&input, "target_resource")?;
-                        let event_types = require_string_vec(&input, "event_types")?;
+                        let event_types = require_non_empty_string_vec(&input, "event_types")?;
                         let pubsub_topic = require_str(&input, "pubsub_topic")?;
                         let ttl = optional_str(&input, "ttl");
                         let include_resource =
@@ -785,6 +785,12 @@ impl WorkspaceEventsConnector {
                     "workspace_events.pull_events" => {
                         let pubsub_subscription = require_str(&input, "pubsub_subscription")?;
                         let max_messages = optional_u32(&input, "max_messages")?.unwrap_or(10);
+                        if max_messages == 0 {
+                            return Err(FcpError::InvalidRequest {
+                                code: 1001,
+                                message: "Field 'max_messages' must be greater than zero".into(),
+                            });
+                        }
                         let response = client
                             .pull_events(pubsub_subscription, max_messages)
                             .await
@@ -797,7 +803,7 @@ impl WorkspaceEventsConnector {
                     }
                     "workspace_events.ack_events" => {
                         let pubsub_subscription = require_str(&input, "pubsub_subscription")?;
-                        let ack_ids = require_string_vec(&input, "ack_ids")?;
+                        let ack_ids = require_non_empty_string_vec(&input, "ack_ids")?;
                         let _ = client
                             .ack_events(pubsub_subscription, &ack_ids)
                             .await
@@ -889,7 +895,7 @@ fn optional_u32(input: &serde_json::Value, field: &str) -> FcpResult<Option<u32>
     }
 }
 
-fn require_string_vec(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
+fn require_non_empty_string_vec(input: &serde_json::Value, field: &str) -> FcpResult<Vec<String>> {
     let values =
         input
             .get(field)
@@ -907,13 +913,18 @@ fn require_string_vec(input: &serde_json::Value, field: &str) -> FcpResult<Vec<S
     values
         .iter()
         .map(|value| {
-            value
-                .as_str()
-                .map(str::to_string)
-                .ok_or_else(|| FcpError::InvalidRequest {
+            let raw = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Field '{field}' must contain only strings"),
+            })?;
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(FcpError::InvalidRequest {
                     code: 1001,
-                    message: format!("Field '{field}' must contain only strings"),
-                })
+                    message: format!("Field '{field}' must not contain blank strings"),
+                });
+            }
+            Ok(trimmed.to_string())
         })
         .collect()
 }
@@ -922,18 +933,24 @@ fn decode_received_messages(messages: &[crate::types::ReceivedMessage]) -> Vec<s
     messages
         .iter()
         .map(|received| {
-            let (decoded_json, decoded_text) = received
+            let (decoded_json, decoded_text, decode_error) = received
                 .message
                 .as_ref()
-                .map_or((None, String::new()), |message| {
-                    STANDARD
-                        .decode(message.data.as_bytes())
-                        .ok()
-                        .map_or((None, String::new()), |bytes| {
+                .map_or((None, String::new(), None), |message| {
+                    STANDARD.decode(message.data.as_bytes()).map_or_else(
+                        |err| {
+                            (
+                                None,
+                                String::new(),
+                                Some(format!("invalid base64 Pub/Sub message data: {err}")),
+                            )
+                        },
+                        |bytes| {
                             let text = String::from_utf8_lossy(&bytes).to_string();
                             let decoded_json = serde_json::from_slice::<serde_json::Value>(&bytes).ok();
-                            (decoded_json, text)
-                        })
+                            (decoded_json, text, None)
+                        },
+                    )
                 });
 
             json!({
@@ -944,6 +961,7 @@ fn decode_received_messages(messages: &[crate::types::ReceivedMessage]) -> Vec<s
                 "attributes": received.message.as_ref().map(|message| message.attributes.clone()).unwrap_or_default(),
                 "decoded_json": decoded_json,
                 "decoded_text": if decoded_text.is_empty() { None::<String> } else { Some(decoded_text) },
+                "decode_error": decode_error,
             })
         })
         .collect()

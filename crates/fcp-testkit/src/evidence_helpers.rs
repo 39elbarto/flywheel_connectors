@@ -2878,6 +2878,7 @@ impl SwarmPrewarmColdStartEvidence {
             "activation_latency_ms": self.activation_latency_ms,
             "baseline_on_demand_latency_ms": self.baseline_on_demand_latency_ms,
             "p50_activation_latency_ms": self.latency.p50_ms,
+            "p95_activation_latency_ms": self.latency.p95_ms,
             "p99_activation_latency_ms": self.latency.p99_ms,
             "sandbox_layer": self.sandbox_layer,
             "sandbox_profile": self.sandbox_profile,
@@ -5920,6 +5921,7 @@ impl SwarmAdversarialRevocationThresholds {
 
 /// Input used to build one adversarial revocation event.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SwarmAdversarialRevocationEventInput {
     /// Scenario id shared by the run and JSONL records.
     pub scenario_id: String,
@@ -5971,6 +5973,7 @@ pub struct SwarmAdversarialRevocationEventInput {
 
 /// One replayable adversarial admission/revocation evidence row.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct SwarmAdversarialRevocationEvent {
     /// Event schema version.
     pub schema_version: String,
@@ -9054,6 +9057,7 @@ mod tests {
         assert_eq!(record["activation_latency_ms"], 18);
         assert_eq!(record["baseline_on_demand_latency_ms"], 96);
         assert_eq!(record["p50_activation_latency_ms"], 18);
+        assert_eq!(record["p95_activation_latency_ms"], 22);
         assert_eq!(record["p99_activation_latency_ms"], 26);
         assert_eq!(record["sandbox_layer"], "wasi");
         assert_eq!(record["sandbox_profile"], "strict");

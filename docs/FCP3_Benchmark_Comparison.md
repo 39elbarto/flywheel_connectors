@@ -48,6 +48,8 @@ profile/boundary, `CARGO_TARGET_DIR`, connector fixture id, pool size,
 admission decision, warm-checkout flag, error mapping, and cleanup result. That
 keeps cold-start comparisons tied to `fcp-host`/`fcp-sandbox` evidence instead
 of a latency-only artifact.
+The replayable top-level row exposes p50/p95/p99 activation latency fields so
+before/after promotion gates do not need to parse nested evidence payloads.
 
 ## Environment Capture For Final Review
 

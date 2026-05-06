@@ -1496,6 +1496,11 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .zip(warm_hit["baseline_on_demand_latency_ms"].as_u64())
             .is_some_and(|(p99, baseline)| p99 < baseline)
     );
+    assert!(
+        warm_hit["p50_activation_latency_ms"].is_u64()
+            && warm_hit["p95_activation_latency_ms"].is_u64()
+            && warm_hit["p99_activation_latency_ms"].is_u64()
+    );
     assert_eq!(empty_pool["fallback_reason"], "empty_pool");
     assert_eq!(empty_pool["admission_decision"], "fallback_on_demand");
     assert_eq!(empty_pool["warm_checkout"], false);
@@ -1524,6 +1529,11 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .as_u64()
             .zip(concurrent["baseline_on_demand_latency_ms"].as_u64())
             .is_some_and(|(p99, baseline)| p99 < baseline)
+    );
+    assert!(
+        concurrent["p50_activation_latency_ms"].is_u64()
+            && concurrent["p95_activation_latency_ms"].is_u64()
+            && concurrent["p99_activation_latency_ms"].is_u64()
     );
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;

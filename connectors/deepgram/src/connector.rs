@@ -2,20 +2,36 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use fcp_async_core::time;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use reqwest::{
     Client, Method, RequestBuilder, StatusCode,
     header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
 };
+use serde::Deserialize;
 use serde_json::{Value, json};
 use url::Url;
 
 const CONNECTOR_ID: &str = "fcp.deepgram";
 const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str =
-    "This first slice focuses on prerecorded transcription through the Listen API.";
+const BOUNDARY: &str = "This slice covers prerecorded transcription plus finite realtime transcription sessions through the Deepgram Listen WebSocket API.";
 const DEFAULT_BASE_URL: &str = "https://api.deepgram.com";
 const DEFAULT_TRANSCRIPTION_MODEL: &str = "nova-3";
+const DEFAULT_STREAMING_ENCODING: &str = "mulaw";
+const DEFAULT_STREAMING_SAMPLE_RATE: u64 = 8_000;
+const DEFAULT_STREAMING_ENDPOINTING_MS: u64 = 800;
+const DEFAULT_STREAMING_INTERIM_RESULTS: bool = true;
+const DEFAULT_STREAMING_CONNECT_TIMEOUT_MS: u64 = 10_000;
+const DEFAULT_STREAMING_TIMEOUT_MS: u64 = 30_000;
+const DEFAULT_STREAMING_MAX_EVENTS: usize = 128;
+const MAX_STREAMING_EVENTS: usize = 1_024;
+const DEFAULT_STREAMING_MAX_RECONNECT_ATTEMPTS: u32 = 5;
+const DEFAULT_STREAMING_RECONNECT_DELAY_MS: u64 = 1_000;
+const MAX_STREAMING_AUDIO_CHUNK_BYTES: usize = 256 * 1024;
+const MAX_STREAMING_AUDIO_TOTAL_BYTES: usize = 2 * 1024 * 1024;
 const MAX_DECLARED_MEDIA_BYTES: u64 = 1_073_741_824;
 
 #[derive(Clone)]
@@ -125,6 +141,252 @@ impl DeepgramConfig {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamingTranscriptionInput {
+    #[serde(alias = "audioBase64")]
+    audio_base64: Option<String>,
+    audio_b64: Option<String>,
+    #[serde(alias = "audioChunksBase64")]
+    audio_chunks_base64: Option<Vec<String>>,
+    audio_chunks_b64: Option<Vec<String>>,
+    session_id: Option<String>,
+    model: Option<String>,
+    audio_format: Option<StreamingAudioFormatInput>,
+    encoding: Option<String>,
+    #[serde(alias = "sampleRate")]
+    sample_rate: Option<u64>,
+    #[serde(alias = "endpointing", alias = "endpointingMs")]
+    endpointing_ms: Option<u64>,
+    interim_results: Option<bool>,
+    connect_timeout_ms: Option<u64>,
+    timeout_ms: Option<u64>,
+    max_events: Option<usize>,
+    max_reconnect_attempts: Option<u32>,
+    reconnect_delay_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StreamingAudioFormatInput {
+    encoding: Option<String>,
+    #[serde(alias = "sampleRate")]
+    sample_rate: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+struct StreamingTranscriptionOptions {
+    audio_chunks: Vec<Vec<u8>>,
+    session_id: String,
+    model: String,
+    encoding: String,
+    sample_rate: u64,
+    endpointing_ms: u64,
+    interim_results: bool,
+    connect_timeout_ms: u64,
+    timeout_ms: u64,
+    max_events: usize,
+    max_reconnect_attempts: u32,
+    reconnect_delay_ms: u64,
+}
+
+#[derive(Debug)]
+struct StreamingTranscriptionState {
+    provider_request_id: Option<String>,
+    done: bool,
+    text_segments: Vec<String>,
+    partials: Vec<Value>,
+    finals: Vec<Value>,
+    metadata: Vec<Value>,
+    events_seen: usize,
+}
+
+#[derive(Debug)]
+struct StreamingTranscriptionResult {
+    provider_request_id: Option<String>,
+    text: String,
+    partials: Vec<Value>,
+    finals: Vec<Value>,
+    metadata: Vec<Value>,
+    events_seen: usize,
+    audio_chunks_sent: usize,
+    audio_bytes_sent: usize,
+    reconnect_attempts: u32,
+}
+
+impl StreamingTranscriptionOptions {
+    fn from_input(value: Value) -> FcpResult<Self> {
+        let input: StreamingTranscriptionInput =
+            serde_json::from_value(value).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid streaming transcription request: {error}"),
+            })?;
+
+        let audio_chunks = decode_streaming_audio_chunks(
+            input.audio_base64.or(input.audio_b64),
+            input.audio_chunks_base64.or(input.audio_chunks_b64),
+        )?;
+        let audio_format = input.audio_format;
+        let encoding = normalize_streaming_encoding(
+            trim_to_non_empty(input.encoding)
+                .or_else(|| {
+                    audio_format
+                        .as_ref()
+                        .and_then(|format| trim_to_non_empty(format.encoding.clone()))
+                })
+                .as_deref(),
+        )?;
+        let sample_rate = bounded_u64(
+            "sample_rate",
+            input
+                .sample_rate
+                .or_else(|| audio_format.as_ref().and_then(|format| format.sample_rate)),
+            DEFAULT_STREAMING_SAMPLE_RATE,
+            8_000,
+            192_000,
+        )?;
+
+        Ok(Self {
+            audio_chunks,
+            session_id: trim_to_non_empty(input.session_id)
+                .unwrap_or_else(|| format!("fcp-deepgram-rt-{}", uuid::Uuid::new_v4())),
+            model: trim_to_non_empty(input.model)
+                .unwrap_or_else(|| DEFAULT_TRANSCRIPTION_MODEL.to_string()),
+            encoding,
+            sample_rate,
+            endpointing_ms: bounded_u64(
+                "endpointing_ms",
+                input.endpointing_ms,
+                DEFAULT_STREAMING_ENDPOINTING_MS,
+                0,
+                30_000,
+            )?,
+            interim_results: input
+                .interim_results
+                .unwrap_or(DEFAULT_STREAMING_INTERIM_RESULTS),
+            connect_timeout_ms: bounded_u64(
+                "connect_timeout_ms",
+                input.connect_timeout_ms,
+                DEFAULT_STREAMING_CONNECT_TIMEOUT_MS,
+                100,
+                120_000,
+            )?,
+            timeout_ms: bounded_u64(
+                "timeout_ms",
+                input.timeout_ms,
+                DEFAULT_STREAMING_TIMEOUT_MS,
+                100,
+                300_000,
+            )?,
+            max_events: bounded_usize(
+                "max_events",
+                input.max_events,
+                DEFAULT_STREAMING_MAX_EVENTS,
+                1,
+                MAX_STREAMING_EVENTS,
+            )?,
+            max_reconnect_attempts: bounded_u32(
+                "max_reconnect_attempts",
+                input.max_reconnect_attempts,
+                DEFAULT_STREAMING_MAX_RECONNECT_ATTEMPTS,
+                0,
+                DEFAULT_STREAMING_MAX_RECONNECT_ATTEMPTS,
+            )?,
+            reconnect_delay_ms: bounded_u64(
+                "reconnect_delay_ms",
+                input.reconnect_delay_ms,
+                DEFAULT_STREAMING_RECONNECT_DELAY_MS,
+                100,
+                30_000,
+            )?,
+        })
+    }
+}
+
+impl StreamingTranscriptionState {
+    const fn new() -> Self {
+        Self {
+            provider_request_id: None,
+            done: false,
+            text_segments: Vec::new(),
+            partials: Vec::new(),
+            finals: Vec::new(),
+            metadata: Vec::new(),
+            events_seen: 0,
+        }
+    }
+
+    fn apply_event(&mut self, event: Value) -> FcpResult<()> {
+        self.events_seen = self.events_seen.saturating_add(1);
+        let event_type = event.get("type").and_then(Value::as_str).unwrap_or("");
+        match event_type {
+            "Results" | "" if event.get("channel").is_some() => {
+                self.apply_result(event);
+                Ok(())
+            }
+            "Metadata" => {
+                if let Some(request_id) = deepgram_request_id(&event) {
+                    self.provider_request_id = Some(request_id.to_string());
+                }
+                self.metadata.push(event);
+                self.done = true;
+                Ok(())
+            }
+            "Error" | "error" => Err(FcpError::External {
+                service: "deepgram.streaming".into(),
+                message: deepgram_error_detail(&event),
+                status_code: None,
+                retryable: false,
+                retry_after: None,
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    fn apply_result(&mut self, event: Value) {
+        if let Some(request_id) = deepgram_request_id(&event) {
+            self.provider_request_id = Some(request_id.to_string());
+        }
+        let transcript = deepgram_transcript(&event).unwrap_or("");
+        let is_final = event
+            .get("is_final")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            || event
+                .get("speech_final")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        if is_final {
+            if !transcript.is_empty() {
+                self.text_segments.push(transcript.to_string());
+            }
+            self.finals.push(event);
+        } else {
+            self.partials.push(event);
+        }
+    }
+
+    fn into_result(
+        self,
+        options: &StreamingTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> StreamingTranscriptionResult {
+        let audio_chunks_sent = options.audio_chunks.len();
+        let audio_bytes_sent = options.audio_chunks.iter().map(Vec::len).sum();
+        StreamingTranscriptionResult {
+            provider_request_id: self.provider_request_id,
+            text: self.text_segments.join(" "),
+            partials: self.partials,
+            finals: self.finals,
+            metadata: self.metadata,
+            events_seen: self.events_seen,
+            audio_chunks_sent,
+            audio_bytes_sent,
+            reconnect_attempts,
+        }
+    }
+}
+
 #[derive(Clone)]
 struct DeepgramClient {
     http: Client,
@@ -222,6 +484,156 @@ impl DeepgramClient {
         )
         .await
     }
+
+    async fn stream_transcribe(&self, input: Value) -> FcpResult<Value> {
+        let options = StreamingTranscriptionOptions::from_input(input)?;
+        let result = Box::pin(self.run_streaming_transcription_with_reconnect(&options)).await?;
+
+        Ok(json!({
+            "session_id": options.session_id,
+            "provider_request_id": result.provider_request_id,
+            "model": options.model,
+            "audio_format": {
+                "encoding": options.encoding,
+                "sample_rate": options.sample_rate
+            },
+            "endpointing_ms": options.endpointing_ms,
+            "interim_results": options.interim_results,
+            "text": result.text,
+            "partials": result.partials,
+            "finals": result.finals,
+            "metadata": result.metadata,
+            "stats": {
+                "events_seen": result.events_seen,
+                "audio_chunks_sent": result.audio_chunks_sent,
+                "audio_bytes_sent": result.audio_bytes_sent,
+                "reconnect_attempts": result.reconnect_attempts
+            },
+            "provenance": {
+                "source": "deepgram.listen.stream",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    async fn run_streaming_transcription_with_reconnect(
+        &self,
+        options: &StreamingTranscriptionOptions,
+    ) -> FcpResult<StreamingTranscriptionResult> {
+        let mut attempt = 0;
+        loop {
+            let attempt_result =
+                Box::pin(self.run_streaming_transcription_once(options, attempt)).await;
+            match attempt_result {
+                Ok(result) => return Ok(result),
+                Err(error)
+                    if attempt < options.max_reconnect_attempts
+                        && should_retry_streaming_error(&error) =>
+                {
+                    attempt = attempt.saturating_add(1);
+                    time::sleep(Duration::from_millis(options.reconnect_delay_ms)).await;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn run_streaming_transcription_once(
+        &self,
+        options: &StreamingTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<StreamingTranscriptionResult> {
+        let timeout = Duration::from_millis(options.timeout_ms);
+        let session =
+            Box::pin(self.run_streaming_transcription_session(options, reconnect_attempts));
+        Box::pin(time::timeout(timeout, session))
+            .await
+            .unwrap_or_else(|_| {
+                Err(FcpError::UpstreamTimeout {
+                    service: "deepgram.streaming".into(),
+                })
+            })
+    }
+
+    async fn run_streaming_transcription_session(
+        &self,
+        options: &StreamingTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<StreamingTranscriptionResult> {
+        let url = deepgram_streaming_ws_url(&self.base_url, options)?;
+        let ws_config = deepgram_streaming_ws_config(&self.auth, options)?;
+        let client = WsClient::with_config(url, ws_config);
+        let connect_timeout = Duration::from_millis(options.connect_timeout_ms);
+        let mut connection = match time::timeout(connect_timeout, client.connect()).await {
+            Ok(Ok(connection)) => connection,
+            Ok(Err(error)) => return Err(map_streaming_stream_error(error)),
+            Err(_) => {
+                return Err(FcpError::UpstreamTimeout {
+                    service: "deepgram.streaming".into(),
+                });
+            }
+        };
+
+        let result = self
+            .drive_streaming_transcription_connection(&mut connection, options, reconnect_attempts)
+            .await;
+        let _ = connection.close().await;
+        result
+    }
+
+    async fn drive_streaming_transcription_connection(
+        &self,
+        connection: &mut fcp_streaming::WsConnection,
+        options: &StreamingTranscriptionOptions,
+        reconnect_attempts: u32,
+    ) -> FcpResult<StreamingTranscriptionResult> {
+        let mut state = StreamingTranscriptionState::new();
+
+        for audio in &options.audio_chunks {
+            connection
+                .send_binary(audio.clone())
+                .await
+                .map_err(map_streaming_stream_error)?;
+        }
+        connection
+            .send_json(&json!({"type": "Finalize"}))
+            .await
+            .map_err(map_streaming_stream_error)?;
+        connection
+            .send_json(&json!({"type": "CloseStream"}))
+            .await
+            .map_err(map_streaming_stream_error)?;
+
+        while !state.done {
+            if state.events_seen >= options.max_events {
+                return Err(FcpError::External {
+                    service: "deepgram.streaming".into(),
+                    message: "Streaming transcription reached max_events before Metadata".into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: None,
+                });
+            }
+            let Some(message) = connection
+                .recv()
+                .await
+                .map_err(map_streaming_stream_error)?
+            else {
+                return Err(FcpError::External {
+                    service: "deepgram.streaming".into(),
+                    message: "Streaming transcription connection closed before Metadata".into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: None,
+                });
+            };
+            state.apply_event(streaming_event_value(&message)?)?;
+        }
+
+        Ok(state.into_result(options, reconnect_attempts))
+    }
 }
 
 pub struct DeepgramConnector {
@@ -271,7 +683,9 @@ impl DeepgramConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["deepgram.listen"]
+            "capabilities": ["deepgram.listen", "deepgram.listen.streaming"],
+            "streaming_supported": true,
+            "streaming_session_mode": "finite"
         }))
     }
 
@@ -403,23 +817,60 @@ impl DeepgramConnector {
                         }
                     },
                     "output_schema": { "type": "object" }
+                },
+                {
+                    "id": "deepgram.listen.stream",
+                    "summary": "Run a finite Deepgram realtime transcription WebSocket session",
+                    "capability": "deepgram.listen.streaming",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "none",
+                    "input_schema": {
+                        "type": "object",
+                        "required": ["audio_base64"],
+                        "properties": {
+                            "audio_base64": { "type": "string" },
+                            "audio_b64": { "type": "string" },
+                            "audio_chunks_base64": { "type": "array", "items": { "type": "string" } },
+                            "audio_chunks_b64": { "type": "array", "items": { "type": "string" } },
+                            "session_id": { "type": "string" },
+                            "model": { "type": "string", "default": DEFAULT_TRANSCRIPTION_MODEL },
+                            "audio_format": {
+                                "type": "object",
+                                "properties": {
+                                    "encoding": { "type": "string", "default": DEFAULT_STREAMING_ENCODING },
+                                    "sample_rate": { "type": "integer", "default": DEFAULT_STREAMING_SAMPLE_RATE }
+                                }
+                            },
+                            "encoding": { "type": "string", "default": DEFAULT_STREAMING_ENCODING },
+                            "sample_rate": { "type": "integer", "default": DEFAULT_STREAMING_SAMPLE_RATE },
+                            "endpointing_ms": { "type": "integer", "default": DEFAULT_STREAMING_ENDPOINTING_MS },
+                            "interim_results": { "type": "boolean", "default": DEFAULT_STREAMING_INTERIM_RESULTS },
+                            "connect_timeout_ms": { "type": "integer", "default": DEFAULT_STREAMING_CONNECT_TIMEOUT_MS },
+                            "timeout_ms": { "type": "integer", "default": DEFAULT_STREAMING_TIMEOUT_MS },
+                            "max_events": { "type": "integer", "default": DEFAULT_STREAMING_MAX_EVENTS },
+                            "max_reconnect_attempts": { "type": "integer", "default": DEFAULT_STREAMING_MAX_RECONNECT_ATTEMPTS },
+                            "reconnect_delay_ms": { "type": "integer", "default": DEFAULT_STREAMING_RECONNECT_DELAY_MS }
+                        }
+                    },
+                    "output_schema": { "type": "object" }
                 }
             ],
             "deferred_operations": [
                 {
-                    "id": "deepgram.listen.stream",
-                    "summary": "Stream realtime Deepgram transcription",
+                    "id": "deepgram.listen.stream.long_running",
+                    "summary": "Host-supervised long-running Deepgram realtime transcription stream",
                     "capability": "deepgram.listen.streaming",
                     "provider_reference": "OpenClaw realtime transcription provider",
-                    "rationale": "Deferred until FCP has an asupersync-supervised WebSocket session lifecycle with audio chunk backpressure, partial/final transcript event fan-out, and cancellation proof.",
+                    "rationale": "Deferred until FCP host-owned stream subscriptions can supervise indefinite audio chunk fan-in, transcript broadcast fan-out, and cancellation across connector restarts. The bounded deepgram.listen.stream operation covers finite WebSocket sessions.",
                     "default_model": DEFAULT_TRANSCRIPTION_MODEL,
-                    "default_encoding": "mulaw",
-                    "default_sample_rate_hz": 8000,
-                    "default_endpointing_ms": 800,
-                    "interim_results_default": true,
+                    "default_encoding": DEFAULT_STREAMING_ENCODING,
+                    "default_sample_rate_hz": DEFAULT_STREAMING_SAMPLE_RATE,
+                    "default_endpointing_ms": DEFAULT_STREAMING_ENDPOINTING_MS,
+                    "interim_results_default": DEFAULT_STREAMING_INTERIM_RESULTS,
                     "required_proof": [
                         "LabRuntime cancellation drains without orphan transcript tasks",
-                        "loopback WebSocket e2e covers partial/final transcript frames",
+                        "long-running loopback WebSocket e2e covers partial/final transcript frames across host subscription shutdown",
                         "redacted JSONL records audio frame counts and close/finalize behavior"
                     ]
                 }
@@ -457,6 +908,7 @@ impl DeepgramConnector {
 
         let result = match operation {
             "deepgram.listen.transcribe" => client.transcribe(&input).await,
+            "deepgram.listen.stream" => Box::pin(client.stream_transcribe(input)).await,
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
@@ -475,7 +927,10 @@ impl DeepgramConnector {
             .or_else(|| params.get("operation"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let supported = operation == "deepgram.listen.transcribe";
+        let supported = matches!(
+            operation,
+            "deepgram.listen.transcribe" | "deepgram.listen.stream"
+        );
         let blocked_by_secretless_auth = supported
             && self
                 .config
@@ -611,6 +1066,293 @@ fn validate_declared_media_size(input: &Value) -> FcpResult<()> {
     Ok(())
 }
 
+fn deepgram_streaming_ws_url(
+    base_url: &str,
+    options: &StreamingTranscriptionOptions,
+) -> FcpResult<String> {
+    let mut parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url for streaming transcription: {error}"),
+    })?;
+
+    let scheme = match parsed.scheme() {
+        "https" => "wss",
+        "http" => "ws",
+        other => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Unsupported streaming transcription base_url scheme: {other}"),
+            });
+        }
+    };
+    parsed
+        .set_scheme(scheme)
+        .map_err(|()| FcpError::InvalidRequest {
+            code: 1003,
+            message: "Invalid streaming transcription WebSocket scheme".into(),
+        })?;
+
+    let path = parsed.path().trim_end_matches('/');
+    let stream_path = if path.is_empty() || path == "/" {
+        "/v1/listen".to_string()
+    } else if path.ends_with("/v1") {
+        format!("{path}/listen")
+    } else if path.ends_with("/v1/listen") {
+        path.to_string()
+    } else {
+        format!("{path}/v1/listen")
+    };
+    parsed.set_path(&stream_path);
+    parsed.set_query(None);
+    parsed
+        .query_pairs_mut()
+        .append_pair("model", &options.model)
+        .append_pair("encoding", &options.encoding)
+        .append_pair("sample_rate", &options.sample_rate.to_string())
+        .append_pair("endpointing", &options.endpointing_ms.to_string())
+        .append_pair("interim_results", &options.interim_results.to_string())
+        .finish();
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+fn deepgram_streaming_ws_config(
+    auth: &Auth,
+    options: &StreamingTranscriptionOptions,
+) -> FcpResult<WsConfig> {
+    let mut ws_config = WsConfig::new()
+        .with_connect_timeout(Duration::from_millis(options.connect_timeout_ms))
+        .with_ping_interval(None)
+        .with_max_message_size(1024 * 1024);
+    ws_config.auto_reconnect = false;
+    ws_config.max_reconnect_attempts = Some(0);
+    ws_config.reconnect_delay = Duration::from_millis(options.reconnect_delay_ms);
+
+    match auth {
+        Auth::ApiKey(value) => {
+            let value = value.to_str().map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Authorization header is not valid UTF-8: {error}"),
+            })?;
+            Ok(ws_config.with_header("Authorization", value))
+        }
+        Auth::CredentialId { _id: id } => {
+            Ok(ws_config.with_header("X-FCP-Credential-ID", id.as_str()))
+        }
+    }
+}
+
+fn streaming_event_value(message: &WsMessage) -> FcpResult<Value> {
+    message.json::<Value>().map_err(|error| FcpError::External {
+        service: "deepgram.streaming".into(),
+        message: format!("Malformed streaming WebSocket JSON: {error}"),
+        status_code: None,
+        retryable: false,
+        retry_after: None,
+    })
+}
+
+fn deepgram_transcript(event: &Value) -> Option<&str> {
+    event
+        .get("channel")
+        .and_then(|channel| channel.get("alternatives"))
+        .and_then(Value::as_array)
+        .and_then(|alternatives| alternatives.first())
+        .and_then(|alternative| alternative.get("transcript"))
+        .and_then(Value::as_str)
+}
+
+fn deepgram_request_id(event: &Value) -> Option<&str> {
+    event
+        .get("request_id")
+        .or_else(|| {
+            event
+                .get("metadata")
+                .and_then(|metadata| metadata.get("request_id"))
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+}
+
+fn deepgram_error_detail(event: &Value) -> String {
+    for field in ["description", "message", "error"] {
+        if let Some(message) = event.get(field).and_then(Value::as_str)
+            && !message.is_empty()
+        {
+            return message.to_string();
+        }
+    }
+    "Deepgram streaming transcription error".into()
+}
+
+fn map_streaming_stream_error(error: StreamError) -> FcpError {
+    match error {
+        StreamError::Timeout(_) => FcpError::UpstreamTimeout {
+            service: "deepgram.streaming".into(),
+        },
+        StreamError::HttpError {
+            status,
+            message,
+            retry_after,
+        } => FcpError::External {
+            service: "deepgram.streaming".into(),
+            message,
+            status_code: Some(status),
+            retryable: status == 429 || status >= 500,
+            retry_after,
+        },
+        other => FcpError::External {
+            service: "deepgram.streaming".into(),
+            message: other.to_string(),
+            status_code: None,
+            retryable: true,
+            retry_after: None,
+        },
+    }
+}
+
+const fn should_retry_streaming_error(error: &FcpError) -> bool {
+    matches!(
+        error,
+        FcpError::UpstreamTimeout { .. }
+            | FcpError::DependencyUnavailable { .. }
+            | FcpError::External {
+                retryable: true,
+                ..
+            }
+    )
+}
+
+fn trim_to_non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_streaming_encoding(value: Option<&str>) -> FcpResult<String> {
+    let encoding = value.unwrap_or(DEFAULT_STREAMING_ENCODING);
+    match encoding {
+        "linear16" | "linear32" | "mulaw" | "alaw" | "opus" | "ogg-opus" | "flac" | "amr-nb"
+        | "amr-wb" | "speex" | "g729" => Ok(encoding.to_string()),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Unsupported streaming audio encoding: {encoding}"),
+        }),
+    }
+}
+
+fn decode_streaming_audio_chunks(
+    audio_base64: Option<String>,
+    audio_chunks_base64: Option<Vec<String>>,
+) -> FcpResult<Vec<Vec<u8>>> {
+    let chunks = match (audio_base64, audio_chunks_base64) {
+        (Some(_), Some(_)) => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide either audio_base64/audio_b64 or audio_chunks_base64/audio_chunks_b64, not both".into(),
+            });
+        }
+        (Some(audio), None) => vec![audio],
+        (None, Some(chunks)) if !chunks.is_empty() => chunks,
+        (None, Some(_)) => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "audio_chunks_base64 cannot be empty".into(),
+            });
+        }
+        (None, None) => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "audio_base64 or audio_chunks_base64 is required".into(),
+            });
+        }
+    };
+
+    let mut total = 0usize;
+    chunks
+        .into_iter()
+        .enumerate()
+        .map(|(idx, chunk)| {
+            let chunk = chunk.trim();
+            if chunk.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("audio chunk {idx} cannot be empty"),
+                });
+            }
+            let decoded =
+                BASE64_STANDARD
+                    .decode(chunk)
+                    .map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("audio chunk {idx} is not valid base64: {error}"),
+                    })?;
+            if decoded.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("audio chunk {idx} decoded to empty bytes"),
+                });
+            }
+            if decoded.len() > MAX_STREAMING_AUDIO_CHUNK_BYTES {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("audio chunk {idx} exceeds 256KiB streaming frame limit"),
+                });
+            }
+            total = total.saturating_add(decoded.len());
+            if total > MAX_STREAMING_AUDIO_TOTAL_BYTES {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "streaming audio payload exceeds 2MiB finite-session limit".into(),
+                });
+            }
+            Ok(decoded)
+        })
+        .collect()
+}
+
+fn bounded_u64(name: &str, value: Option<u64>, default: u64, min: u64, max: u64) -> FcpResult<u64> {
+    let value = value.unwrap_or(default);
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        })
+    }
+}
+
+fn bounded_u32(name: &str, value: Option<u32>, default: u32, min: u32, max: u32) -> FcpResult<u32> {
+    let value = value.unwrap_or(default);
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        })
+    }
+}
+
+fn bounded_usize(
+    name: &str,
+    value: Option<usize>,
+    default: usize,
+    min: usize,
+    max: usize,
+) -> FcpResult<usize> {
+    let value = value.unwrap_or(default);
+    if (min..=max).contains(&value) {
+        Ok(value)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} must be between {min} and {max}"),
+        })
+    }
+}
+
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -711,6 +1453,73 @@ mod tests {
         }))
         .expect_err("expected invalid header value");
         assert!(error.to_string().contains("Authorization header"));
+    }
+
+    #[test]
+    fn streaming_options_use_openclaw_aligned_defaults() {
+        let audio = BASE64_STANDARD.encode(b"mulaw-audio");
+        let options = StreamingTranscriptionOptions::from_input(json!({
+            "audio_base64": audio
+        }))
+        .expect("streaming options should parse");
+
+        assert_eq!(options.model, DEFAULT_TRANSCRIPTION_MODEL);
+        assert_eq!(options.encoding, DEFAULT_STREAMING_ENCODING);
+        assert_eq!(options.sample_rate, DEFAULT_STREAMING_SAMPLE_RATE);
+        assert_eq!(options.endpointing_ms, DEFAULT_STREAMING_ENDPOINTING_MS);
+        assert_eq!(options.interim_results, DEFAULT_STREAMING_INTERIM_RESULTS);
+        assert_eq!(options.audio_chunks, vec![b"mulaw-audio".to_vec()]);
+    }
+
+    #[test]
+    fn streaming_options_reject_invalid_audio_chunk() {
+        let error = StreamingTranscriptionOptions::from_input(json!({
+            "audio_base64": "not base64"
+        }))
+        .expect_err("invalid base64 should fail");
+
+        assert!(error.to_string().contains("not valid base64"));
+    }
+
+    #[test]
+    fn streaming_state_collects_partial_final_and_metadata() {
+        let mut state = StreamingTranscriptionState::new();
+        state
+            .apply_event(json!({
+                "type": "Results",
+                "is_final": false,
+                "channel": {
+                    "alternatives": [{
+                        "transcript": "partial"
+                    }]
+                }
+            }))
+            .expect("partial should parse");
+        state
+            .apply_event(json!({
+                "type": "Results",
+                "is_final": true,
+                "metadata": { "request_id": "dg-rt-unit" },
+                "channel": {
+                    "alternatives": [{
+                        "transcript": "final"
+                    }]
+                }
+            }))
+            .expect("final should parse");
+        state
+            .apply_event(json!({
+                "type": "Metadata",
+                "request_id": "dg-rt-unit"
+            }))
+            .expect("metadata should parse");
+
+        assert!(state.done);
+        assert_eq!(state.provider_request_id.as_deref(), Some("dg-rt-unit"));
+        assert_eq!(state.partials.len(), 1);
+        assert_eq!(state.finals.len(), 1);
+        assert_eq!(state.text_segments, vec!["final".to_string()]);
+        assert_eq!(state.metadata.len(), 1);
     }
 
     #[fcp_async_core::runtime::test]

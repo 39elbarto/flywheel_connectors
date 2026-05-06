@@ -51,6 +51,12 @@ async fn deepgram_provider_contract_is_advertised() {
                     .with_default_model("nova-3")
                     .require_default_model(),
             )
+            .with_operation(
+                ProviderOperationContract::new("deepgram.listen.stream")
+                    .with_catalog_id("transcription")
+                    .with_default_model("nova-3")
+                    .require_default_model(),
+            )
             .with_base_url(ProviderBaseUrlContract::new(
                 "api",
                 "https://api.deepgram.com",
@@ -72,29 +78,67 @@ async fn deepgram_provider_contract_is_advertised() {
             )),
     );
 
-    let realtime = deferred_operation(&introspection, "deepgram.listen.stream");
+    let realtime = operation(&introspection, "deepgram.listen.stream");
     assert_eq!(
-        realtime.get("default_model").and_then(Value::as_str),
+        realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("model"))
+            .and_then(|model| model.get("default"))
+            .and_then(Value::as_str),
         Some("nova-3")
     );
     assert_eq!(
-        realtime.get("default_encoding").and_then(Value::as_str),
+        realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("encoding"))
+            .and_then(|encoding| encoding.get("default"))
+            .and_then(Value::as_str),
         Some("mulaw")
     );
     assert_eq!(
         realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("sample_rate"))
+            .and_then(|sample_rate| sample_rate.get("default"))
+            .and_then(Value::as_u64),
+        Some(8000)
+    );
+
+    let long_running = deferred_operation(&introspection, "deepgram.listen.stream.long_running");
+    assert_eq!(
+        long_running.get("default_model").and_then(Value::as_str),
+        Some("nova-3")
+    );
+    assert_eq!(
+        long_running.get("default_encoding").and_then(Value::as_str),
+        Some("mulaw")
+    );
+    assert_eq!(
+        long_running
             .get("default_sample_rate_hz")
             .and_then(Value::as_u64),
         Some(8000)
     );
     assert!(
-        realtime
+        long_running
             .get("rationale")
             .and_then(Value::as_str)
-            .is_some_and(
-                |rationale| rationale.contains("asupersync") && rationale.contains("WebSocket")
-            )
+            .is_some_and(|rationale| rationale.contains("host-owned")
+                && rationale.contains("deepgram.listen.stream"))
     );
+}
+
+fn operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {
+    introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("operations should be advertised")
+        .iter()
+        .find(|operation| operation.get("id").and_then(Value::as_str) == Some(id))
+        .expect("expected operation should be advertised")
 }
 
 fn deferred_operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {

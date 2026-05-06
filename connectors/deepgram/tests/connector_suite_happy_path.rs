@@ -1,3 +1,10 @@
+use asupersync::Cx;
+use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::net::websocket::{
+    CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
+};
+use base64::Engine;
+use fcp_async_core::net::{TcpListener, TcpStream};
 use fcp_deepgram::DeepgramConnector;
 use fcp_e2e::{ConnectorSuite, E2eRunner, InvokeExpectations};
 use fcp_prelude::{
@@ -8,6 +15,10 @@ use fcp_prelude::{
     SimulateResponse, SubscribeRequest, SubscribeResponse, UnsubscribeRequest, ZoneId,
 };
 use serde_json::json;
+use std::future::poll_fn;
+use std::io;
+use std::pin::Pin;
+use std::task::Poll;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
     matchers::{header, method, path},
@@ -15,6 +26,8 @@ use wiremock::{
 
 const OP_TRANSCRIBE: &str = "deepgram.listen.transcribe";
 const CAP_LISTEN: &str = "deepgram.listen";
+const MAX_HEADERS: usize = 16 * 1024;
+type TestServerWebSocket = ServerWebSocket<TcpStream>;
 
 struct DeepgramSuiteAdapter {
     connector: DeepgramConnector,
@@ -221,6 +234,89 @@ fn suite(server: &MockServer) -> ConnectorSuite {
     }
 }
 
+async fn read_http_headers<R>(stream: &mut R) -> io::Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut buf = Vec::with_capacity(1024);
+    let mut temp = [0_u8; 1024];
+    loop {
+        let read = poll_fn(|cx| {
+            let mut read_buf = ReadBuf::new(&mut temp);
+            match Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
+                Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buf.filled().len())),
+                Poll::Ready(Err(err)) => Poll::Ready(Err(err)),
+                Poll::Pending => Poll::Pending,
+            }
+        })
+        .await?;
+
+        if read == 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                "EOF before websocket handshake completed",
+            ));
+        }
+
+        let filled = temp.get(..read).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake read exceeded buffer",
+            )
+        })?;
+        buf.extend_from_slice(filled);
+        if buf.windows(4).any(|window| window == b"\r\n\r\n") {
+            return Ok(buf);
+        }
+        if buf.len() > MAX_HEADERS {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "websocket handshake headers too large",
+            ));
+        }
+    }
+}
+
+async fn accept_deepgram_test_websocket(mut stream: TcpStream) -> (TestServerWebSocket, String) {
+    let request = read_http_headers(&mut stream)
+        .await
+        .expect("read websocket handshake");
+    let headers = String::from_utf8_lossy(&request).into_owned();
+    let ws = WebSocketAcceptor::new()
+        .accept(&Cx::for_testing(), &request, stream)
+        .await
+        .expect("accept websocket");
+    (ws, headers)
+}
+
+async fn send_json_frame(ws: &mut TestServerWebSocket, value: serde_json::Value, context: &str) {
+    ws.send(&Cx::for_testing(), ServerWsMessage::text(value.to_string()))
+        .await
+        .expect(context);
+}
+
+async fn recv_frame(
+    ws: &mut TestServerWebSocket,
+    context: &str,
+) -> Result<ServerWsMessage, String> {
+    match ws.recv(&Cx::for_testing()).await {
+        Ok(Some(message)) => Ok(message),
+        Ok(None) => Err(format!("websocket closed before {context}")),
+        Err(err) => Err(format!("{context}: {err}")),
+    }
+}
+
+async fn recv_text_frame(ws: &mut TestServerWebSocket, context: &str) -> Result<String, String> {
+    match recv_frame(ws, context).await? {
+        ServerWsMessage::Text(text) => Ok(text),
+        other => Err(format!("expected text frame for {context}, got {other:?}")),
+    }
+}
+
+async fn close_test_websocket(ws: &mut TestServerWebSocket) {
+    let _ = ws.close(&Cx::for_testing(), CloseReason::normal()).await;
+}
+
 #[fcp_async_core::runtime::test]
 async fn connector_suite_transcribe_happy_path_uses_mock_server() {
     let server = MockServer::start().await;
@@ -251,4 +347,149 @@ async fn connector_suite_transcribe_happy_path_uses_mock_server() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn realtime_transcription_loopback_websocket_session() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind websocket listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+    let expected_audio = base64::engine::general_purpose::STANDARD.encode(b"mulaw-audio");
+
+    let ws_task = fcp_async_core::task::spawn({
+        async move {
+            let (tcp_stream, _) = listener.accept().await.expect("accept websocket client");
+            let (mut ws, headers) = accept_deepgram_test_websocket(tcp_stream).await;
+            assert!(
+                headers.starts_with(
+                    "GET /v1/listen?model=nova-3&encoding=mulaw&sample_rate=8000&endpointing=800&interim_results=true HTTP/1.1"
+                ),
+                "unexpected realtime websocket request: {headers}"
+            );
+            assert!(
+                headers.contains("Authorization: Token test-api-key-xyz"),
+                "missing authorization header: {headers}"
+            );
+
+            let audio = recv_frame(&mut ws, "receive binary audio").await?;
+            match audio {
+                ServerWsMessage::Binary(bytes) => {
+                    assert_eq!(bytes.as_ref(), b"mulaw-audio");
+                }
+                other => return Err(format!("expected binary audio frame, got {other:?}")),
+            }
+
+            let finalize = recv_text_frame(&mut ws, "receive finalize").await?;
+            let finalize: serde_json::Value =
+                serde_json::from_str(&finalize).expect("finalize json");
+            assert_eq!(finalize["type"], "Finalize");
+
+            let close_stream = recv_text_frame(&mut ws, "receive close stream").await?;
+            let close_stream: serde_json::Value =
+                serde_json::from_str(&close_stream).expect("close stream json");
+            assert_eq!(close_stream["type"], "CloseStream");
+
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "Results",
+                    "is_final": false,
+                    "speech_final": false,
+                    "channel": {
+                        "alternatives": [{
+                            "transcript": "hello from",
+                            "confidence": 0.91
+                        }]
+                    }
+                }),
+                "send partial results",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "Results",
+                    "is_final": true,
+                    "speech_final": true,
+                    "channel": {
+                        "alternatives": [{
+                            "transcript": "hello from deepgram realtime",
+                            "confidence": 0.99
+                        }]
+                    }
+                }),
+                "send final results",
+            )
+            .await;
+            send_json_frame(
+                &mut ws,
+                json!({
+                    "type": "Metadata",
+                    "request_id": "deepgram-rt-loopback",
+                    "sha256": "redacted-fixture-hash",
+                    "duration": 0.25,
+                    "channels": 1
+                }),
+                "send metadata",
+            )
+            .await;
+            close_test_websocket(&mut ws).await;
+            Ok::<(), String>(())
+        }
+    });
+
+    let mut connector = DeepgramConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "test-api-key-xyz",
+            "base_url": base_url
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({ "session_id": "deepgram-loopback-session" }))
+        .await
+        .expect("handshake should succeed");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "deepgram.listen.stream",
+            "input": {
+                "audio_base64": expected_audio,
+                "timeout_ms": 2_000,
+                "connect_timeout_ms": 1_000,
+                "max_reconnect_attempts": 0
+            }
+        }))
+        .await
+        .expect("realtime invoke should succeed");
+
+    assert!(
+        result["session_id"]
+            .as_str()
+            .expect("session id string")
+            .starts_with("fcp-deepgram-rt-")
+    );
+    assert_eq!(result["provider_request_id"], "deepgram-rt-loopback");
+    assert_eq!(result["model"], "nova-3");
+    assert_eq!(result["audio_format"]["encoding"], "mulaw");
+    assert_eq!(result["audio_format"]["sample_rate"], 8000);
+    assert_eq!(result["endpointing_ms"], 800);
+    assert_eq!(result["interim_results"], true);
+    assert_eq!(result["text"], "hello from deepgram realtime");
+    assert_eq!(result["partials"].as_array().expect("partials").len(), 1);
+    assert_eq!(result["finals"].as_array().expect("finals").len(), 1);
+    assert_eq!(result["stats"]["audio_chunks_sent"], 1);
+    assert_eq!(result["stats"]["audio_bytes_sent"], 11);
+    assert_eq!(result["stats"]["reconnect_attempts"], 0);
+    assert_eq!(result["provenance"]["source"], "deepgram.listen.stream");
+
+    ws_task
+        .await
+        .expect("websocket task")
+        .expect("websocket proof");
 }

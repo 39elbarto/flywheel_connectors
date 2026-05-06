@@ -6193,6 +6193,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-runway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-prelude",
+ "pretty_assertions",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-s3"
 version = "0.1.0"
 dependencies = [

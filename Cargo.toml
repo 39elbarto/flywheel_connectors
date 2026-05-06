@@ -53,6 +53,7 @@ members = [
     "connectors/openrouter",
     "connectors/nvidia-nim",
     "connectors/qwen",
+    "connectors/runway",
     "connectors/searxng",
     "connectors/lm-studio",
     "connectors/ollama",

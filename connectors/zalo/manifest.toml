@@ -5,13 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:f1b8abf1515f8d9b30b1603e1412954b6a7cbbd91769c8f3101fac861f88d99b"
+interface_hash = "blake3-256:fcp.interface.v2:39e3af8dcc64602ced02afdce33b3671b0df3f84e562abb69da56a1d93e8dd09"
 
 [connector]
 id = "fcp.zalo"
 name = "Zalo"
 version = "0.1.0"
-description = "Zalo Bot API connector for bot identity, outbound send, long polling, and webhook management"
+status = "incubating"
+description = "Incubating Zalo Bot API scaffold with only local webhook token verification implemented; bot identity, outbound send, long polling, and webhook management are planned"
 archetypes = ["bidirectional", "streaming", "operational"]
 format = "native"
 
@@ -27,8 +28,8 @@ allowed_targets = ["z:community"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
-forbidden = ["system.exec"]
+optional = ["zalo.messages", "zalo.updates", "zalo.webhook"]
+forbidden = ["network.listen", "system.exec"]
 
 [sandbox]
 profile = "strict"
@@ -39,7 +40,7 @@ deny_exec = true
 deny_ptrace = true
 
 [provides.operations."zalo.self.get_me"]
-description = "Get the current Zalo bot identity"
+description = "Planned operation to get the current Zalo bot identity"
 capability = "zalo.messages"
 risk_level = "low"
 safety_tier = "safe"
@@ -62,7 +63,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.messages.send"]
-description = "Send a message to a Zalo user via the Bot API"
+description = "Planned operation to send a message to a Zalo user via the Bot API"
 capability = "zalo.messages"
 risk_level = "medium"
 safety_tier = "safe"
@@ -94,7 +95,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.messages.send_photo"]
-description = "Send a photo message to a Zalo user via the Bot API"
+description = "Planned operation to send a photo message to a Zalo user via the Bot API"
 capability = "zalo.messages"
 risk_level = "medium"
 safety_tier = "safe"
@@ -126,7 +127,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.updates.poll"]
-description = "Poll for one pending Zalo update"
+description = "Planned operation to poll for one pending Zalo update"
 capability = "zalo.updates"
 risk_level = "low"
 safety_tier = "safe"
@@ -149,7 +150,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.webhook.set"]
-description = "Set the Zalo webhook URL"
+description = "Planned operation to set the Zalo webhook URL"
 capability = "zalo.webhook"
 risk_level = "medium"
 safety_tier = "safe"
@@ -177,7 +178,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.webhook.delete"]
-description = "Delete the configured Zalo webhook"
+description = "Planned operation to delete the configured Zalo webhook"
 capability = "zalo.webhook"
 risk_level = "medium"
 safety_tier = "safe"
@@ -200,7 +201,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.webhook.info"]
-description = "Get the current Zalo webhook configuration"
+description = "Planned operation to get the current Zalo webhook configuration"
 capability = "zalo.webhook"
 risk_level = "low"
 safety_tier = "safe"

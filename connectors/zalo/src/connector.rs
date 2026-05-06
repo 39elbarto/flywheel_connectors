@@ -10,6 +10,7 @@ const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
 const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
 const PARTIAL_SURFACE_REASON_CODE: &str = "partial_invoke_surface";
+const WEBHOOK_VERIFY_OPERATION_ID: &str = "zalo.webhook.verify";
 
 pub struct ZaloConnector {
     base: Arc<BaseConnector>,
@@ -70,6 +71,9 @@ impl ZaloConnector {
             "configured": self.configured,
             "handshaken": self.handshaken,
             "live_requests_supported": false,
+            "surface_status": "incubating",
+            "implemented_operations": [WEBHOOK_VERIFY_OPERATION_ID],
+            "planned_capabilities": ["zalo.messages", "zalo.updates", "zalo.webhook"],
         }))
     }
 
@@ -81,6 +85,7 @@ impl ZaloConnector {
                 { "name": "handshake", "passed": self.handshaken, "critical": false },
                 { "name": "webhook_verify", "passed": self.webhook_verify_challenge.is_some(), "critical": false, "message": "Local webhook token verification is implemented when webhook_verify_challenge is configured." },
                 { "name": "invoke_surface", "passed": false, "critical": false, "message": UNIMPLEMENTED_MESSAGE },
+                { "name": "surface_status", "passed": false, "critical": false, "message": "Connector remains incubating because upstream Zalo Bot API operations are planned." },
                 { "name": "surface_boundary", "passed": true, "critical": false, "message": BOUNDARY }
             ]
         }))
@@ -107,7 +112,10 @@ impl ZaloConnector {
         Ok(json!({
             "status": status,
             "reason_code": reason_code,
-            "message": message
+            "message": message,
+            "surface_status": "incubating",
+            "implemented_operations": [WEBHOOK_VERIFY_OPERATION_ID],
+            "planned_capabilities": ["zalo.messages", "zalo.updates", "zalo.webhook"]
         }))
     }
 
@@ -123,7 +131,7 @@ impl ZaloConnector {
                 { "id": "zalo.webhook.set", "summary": "Set the Zalo webhook URL", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
                 { "id": "zalo.webhook.delete", "summary": "Delete the Zalo webhook", "capability": "zalo.webhook", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
                 { "id": "zalo.webhook.info", "summary": "Get Zalo webhook info", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false },
-                { "id": "zalo.webhook.verify", "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": true }
+                { "id": WEBHOOK_VERIFY_OPERATION_ID, "summary": "Verify a webhook secret token against local config", "capability": "zalo.webhook", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": true }
             ],
             "surface_status": "incubating",
             "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
@@ -143,7 +151,7 @@ impl ZaloConnector {
                 message: "Missing operation_id".into(),
             })?;
 
-        if operation == "zalo.webhook.verify" {
+        if operation == WEBHOOK_VERIFY_OPERATION_ID {
             return self.invoke_webhook_verify(params.get("input").unwrap_or(&params));
         }
 
@@ -158,7 +166,7 @@ impl ZaloConnector {
                     | "zalo.webhook.set"
                     | "zalo.webhook.delete"
                     | "zalo.webhook.info"
-                    | "zalo.webhook.verify"
+                    | WEBHOOK_VERIFY_OPERATION_ID
             ) {
                 format!(
                     "Operation {operation} is planned but not implemented in this connector slice"
@@ -176,7 +184,7 @@ impl ZaloConnector {
             .and_then(Value::as_str)
             .unwrap_or("");
 
-        if operation == "zalo.webhook.verify" {
+        if operation == WEBHOOK_VERIFY_OPERATION_ID {
             let input = params.get("input").unwrap_or(&params);
             let supplied_challenge = input
                 .get("token")
@@ -224,7 +232,7 @@ impl ZaloConnector {
                     | "zalo.webhook.set"
                     | "zalo.webhook.delete"
                     | "zalo.webhook.info"
-                    | "zalo.webhook.verify"
+                    | WEBHOOK_VERIFY_OPERATION_ID
             ) {
                 UNIMPLEMENTED_MESSAGE
             } else {
@@ -305,7 +313,12 @@ impl Default for ZaloConnector {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
+    use fcp_manifest::{ConnectorManifest, ConnectorStatus};
+
+    const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
     #[fcp_async_core::runtime::test]
     async fn planned_only_connector_reports_degraded_readiness() {
@@ -333,6 +346,11 @@ mod tests {
             .expect("health should succeed");
         assert_eq!(health["status"], "degraded");
         assert_eq!(health["live_requests_supported"], false);
+        assert_eq!(health["surface_status"], "incubating");
+        assert_eq!(
+            health["implemented_operations"],
+            json!([WEBHOOK_VERIFY_OPERATION_ID])
+        );
 
         let introspect = connector
             .handle_introspect()
@@ -354,6 +372,77 @@ mod tests {
             .expect("self_check should succeed");
         assert_eq!(self_check["status"], "degraded");
         assert_eq!(self_check["reason_code"], PARTIAL_SURFACE_REASON_CODE);
+        assert_eq!(self_check["surface_status"], "incubating");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn manifest_and_introspection_align_on_incubating_planned_surface() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("manifest should validate");
+        assert_eq!(manifest.connector.status, ConnectorStatus::Incubating);
+        assert!(
+            manifest
+                .capabilities
+                .required
+                .iter()
+                .all(|capability| { !capability.as_str().starts_with("zalo.") })
+        );
+
+        let optional_capabilities = manifest
+            .capabilities
+            .optional
+            .iter()
+            .map(fcp_prelude::CapabilityId::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            optional_capabilities,
+            BTreeSet::from(["zalo.messages", "zalo.updates", "zalo.webhook"])
+        );
+
+        let mut connector = ZaloConnector::new();
+        connector
+            .handle_configure(json!({"webhook_verify_challenge": "challenge"}))
+            .await
+            .expect("configure should succeed");
+        let handshake = connector
+            .handle_handshake(json!({}))
+            .await
+            .expect("handshake should succeed");
+        assert_eq!(handshake["capabilities"], json!([]));
+        assert_eq!(
+            handshake["planned_capabilities"],
+            json!(["zalo.messages", "zalo.updates", "zalo.webhook"])
+        );
+        assert_eq!(handshake["surface_status"], "incubating");
+
+        let introspect = connector
+            .handle_introspect()
+            .await
+            .expect("introspect should succeed");
+        assert_eq!(introspect["surface_status"], "incubating");
+
+        let manifest_operations = manifest
+            .provides
+            .operations
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let introspected_operations = introspect["operations"]
+            .as_array()
+            .expect("operations should be an array")
+            .iter()
+            .map(|operation| operation["id"].as_str().expect("operation id"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(manifest_operations, introspected_operations);
+
+        let implemented = introspect["operations"]
+            .as_array()
+            .expect("operations should be an array")
+            .iter()
+            .filter(|operation| operation["implemented"].as_bool() == Some(true))
+            .map(|operation| operation["id"].as_str().expect("operation id"))
+            .collect::<Vec<_>>();
+        assert_eq!(implemented, vec![WEBHOOK_VERIFY_OPERATION_ID]);
     }
 
     #[fcp_async_core::runtime::test]
@@ -397,7 +486,7 @@ mod tests {
 
         let good = connector
             .handle_invoke(json!({
-                "operation_id": "zalo.webhook.verify",
+                "operation_id": WEBHOOK_VERIFY_OPERATION_ID,
                 "input": { "token": "expected-challenge" }
             }))
             .await
@@ -406,7 +495,7 @@ mod tests {
 
         let bad = connector
             .handle_invoke(json!({
-                "operation_id": "zalo.webhook.verify",
+                "operation_id": WEBHOOK_VERIFY_OPERATION_ID,
                 "input": { "token": "wrong-challenge" }
             }))
             .await
@@ -415,7 +504,7 @@ mod tests {
 
         let simulate = connector
             .handle_simulate(json!({
-                "operation_id": "zalo.webhook.verify",
+                "operation_id": WEBHOOK_VERIFY_OPERATION_ID,
                 "input": { "token": "expected-challenge" }
             }))
             .await
@@ -425,7 +514,7 @@ mod tests {
 
         let bad_simulate = connector
             .handle_simulate(json!({
-                "operation_id": "zalo.webhook.verify",
+                "operation_id": WEBHOOK_VERIFY_OPERATION_ID,
                 "input": { "token": "wrong-challenge" }
             }))
             .await

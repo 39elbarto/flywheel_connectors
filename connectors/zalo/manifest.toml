@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:a913c7d4d7467d11b909c01962453f9883006dc65050cd729d0374c98ee53ee8"
+interface_hash = "blake3-256:fcp.interface.v2:64b742ce63eb6a3700365d0421878b61f6da0e148fbebc5f6987e0944f415b03"
 
 [connector]
 id = "fcp.zalo"
 name = "Zalo"
 version = "0.1.0"
-description = "Experimental Zalo Bot API connector with live bot identity, outbound send, photo send, long polling, webhook management, and local webhook token verification"
+description = "Experimental Zalo Bot API connector with live bot identity, outbound send, photo send, long polling, host-forwarded webhook ingest, replay/rate policy, media bounds, webhook management, and local webhook token verification"
 archetypes = [
     "bidirectional",
     "streaming",
@@ -23,7 +23,7 @@ status = "experimental"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "Live Bot API slice: bot identity, message send, photo send, long-poll updates, webhook setup, and webhook token verification."
+migration_hint = "Experimental Bot API slice: bot identity, message send, photo send, long-poll update normalization, host-forwarded webhook ingest, webhook setup, and webhook token verification."
 
 [zones]
 home = "z:community"
@@ -45,6 +45,8 @@ optional = [
     "zalo.messages",
     "zalo.updates",
     "zalo.webhook",
+    "zalo.events",
+    "zalo.media",
 ]
 forbidden = [
     "network.listen",
@@ -148,7 +150,7 @@ examples = []
 related = []
 
 [provides.operations."zalo.updates.poll"]
-description = "Poll for one pending Zalo update via getUpdates"
+description = "Poll for pending Zalo updates via getUpdates and normalize them into policy-gated inbound events"
 capability = "zalo.updates"
 risk_level = "low"
 safety_tier = "safe"
@@ -162,12 +164,15 @@ type = "object"
 [provides.operations."zalo.updates.poll".output_schema]
 type = "object"
 
+[provides.operations."zalo.updates.poll".output_schema.properties.events]
+type = "array"
+
 [provides.operations."zalo.updates.poll".output_schema.properties.update_id]
 type = "string"
 
 [provides.operations."zalo.updates.poll".ai_hints]
-when_to_use = "When you need to consume one pending Zalo update from long polling."
-common_mistakes = []
+when_to_use = "When you need to consume Zalo updates through polling and get explicit policy-gated event objects plus a cursor."
+common_mistakes = ["Forgetting that inbound events default-deny until sender/chat/group allow policy is configured."]
 examples = []
 related = []
 
@@ -216,6 +221,58 @@ type = "string"
 [provides.operations."zalo.webhook.info".ai_hints]
 when_to_use = "When you need to inspect the current Zalo webhook target."
 common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."zalo.webhook.ingest"]
+description = "Validate and normalize a host-forwarded Zalo webhook request without opening a connector-owned listener"
+capability = "zalo.events"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."zalo.webhook.ingest".input_schema]
+required = [
+    "method",
+    "path",
+    "headers",
+    "body",
+]
+type = "object"
+
+[provides.operations."zalo.webhook.ingest".input_schema.properties.body]
+description = "Raw JSON webhook body forwarded by the host/gateway"
+type = "string"
+
+[provides.operations."zalo.webhook.ingest".input_schema.properties.headers]
+description = "Forwarded HTTP headers; x-bot-api-secret-token is required"
+type = "object"
+
+[provides.operations."zalo.webhook.ingest".input_schema.properties.method]
+description = "Forwarded HTTP method; must be POST"
+type = "string"
+
+[provides.operations."zalo.webhook.ingest".input_schema.properties.path]
+description = "Forwarded request path; must match configured webhook_path"
+type = "string"
+
+[provides.operations."zalo.webhook.ingest".output_schema]
+type = "object"
+
+[provides.operations."zalo.webhook.ingest".output_schema.properties.events]
+type = "array"
+
+[provides.operations."zalo.webhook.ingest".output_schema.properties.ingest_log]
+type = "object"
+
+[provides.operations."zalo.webhook.ingest".ai_hints]
+when_to_use = "When fcp-host or another trusted gateway has accepted a Zalo webhook HTTP request and needs the connector to verify method/path/secret/content-type/body/replay/rate policy and normalize events."
+common_mistakes = [
+    "Expecting the connector to open its own network listener.",
+    "Forgetting that sender/chat/group policy defaults to deny.",
+]
 examples = []
 related = []
 

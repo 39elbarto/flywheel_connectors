@@ -9,8 +9,8 @@ use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
-    OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
+    HealthSnapshot, IdempotencyClass, InstanceId, Introspection, InvokeRequest, InvokeResponse,
+    OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
@@ -350,6 +350,12 @@ impl SquareConnector {
             started_at: Instant::now(),
             verifier: None,
         }
+    }
+
+    /// Return this connector instance id for bound capability-token tests.
+    #[must_use]
+    pub const fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -985,7 +991,14 @@ impl FcpConnector for SquareConnector {
                 message: "Square request_timeout_ms must be greater than 0".into(),
             });
         }
-        config.access_token = config.access_token.trim().to_owned();
+        {
+            let SquareConfig {
+                access_token: auth_slot,
+                ..
+            } = &mut config;
+            let raw_auth = std::mem::take(auth_slot);
+            auth_slot.push_str(raw_auth.trim());
+        }
         config.base_url = normalize_square_base_url(&config.base_url).map_err(|message| {
             FcpError::InvalidRequest {
                 code: 1001,

@@ -13,8 +13,8 @@ use chrono::{Duration, Utc};
 use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
 use fcp_prelude::{
     ApprovalMode, CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector,
-    HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId, RequestId,
-    RiskLevel, SafetyTier, ZoneId,
+    FcpError, HandshakeRequest, IdempotencyClass, InvokeRequest, InvokeStatus, OperationId,
+    RequestId, RiskLevel, SafetyTier, SubscribeRequest, ZoneId,
 };
 use fcp_square::SquareConnector;
 use fcp_testkit::readiness_helpers::{
@@ -49,13 +49,19 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
-    let capability = match op {
-        OP_PAYMENTS_LIST => "square.payments.read",
-        OP_PAYMENTS_CREATE => "square.payments.write",
-        OP_CATALOG_LIST => "square.catalog.read",
-        _ => panic!("unsupported Square integration operation: {op}"),
-    };
+fn generate_valid_token(
+    signing_key: &Ed25519SigningKey,
+    instance_id: &str,
+    op: &'static str,
+) -> CapabilityToken {
+    let capability = [
+        (OP_PAYMENTS_LIST, "square.payments.read"),
+        (OP_PAYMENTS_CREATE, "square.payments.write"),
+        (OP_CATALOG_LIST, "square.catalog.read"),
+    ]
+    .into_iter()
+    .find_map(|(known_op, capability)| (known_op == op).then_some(capability))
+    .expect("unsupported Square integration operation");
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -70,8 +76,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
         .principal("user:test")
         .operations(&[op])
         .issuer("node:test")
+        .target_instance(instance_id)
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should validate")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
@@ -259,7 +267,11 @@ async fn invoke_payments_list_preserves_pagination_evidence() {
                 "cursor": "cursor-1",
                 "location_id": "LOC-1"
             }),
-            generate_valid_token(&signing_key, OP_PAYMENTS_LIST),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_PAYMENTS_LIST,
+            ),
         ))
         .await
         .unwrap();
@@ -301,7 +313,11 @@ async fn invoke_catalog_list_preserves_filter_evidence() {
                 "cursor": "cat-1",
                 "types": "ITEM,IMAGE"
             }),
-            generate_valid_token(&signing_key, OP_CATALOG_LIST),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_CATALOG_LIST,
+            ),
         ))
         .await
         .unwrap();
@@ -363,7 +379,11 @@ async fn invoke_payment_create_preserves_mutation_evidence() {
                 "customer_id": "CUST-1",
                 "note": "sandbox invoice 42"
             }),
-            generate_valid_token(&signing_key, OP_PAYMENTS_CREATE),
+            generate_valid_token(
+                &signing_key,
+                connector.instance_id().as_str(),
+                OP_PAYMENTS_CREATE,
+            ),
         ))
         .await
         .unwrap();
@@ -424,5 +444,74 @@ fn introspection_emits_v3_compliance_evidence() {
     println!(
         "square_introspection_evidence={}",
         serde_json::to_string_pretty(&value).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_ingress_is_explicitly_rejected_for_square_rest_slice() {
+    let manifest = include_str!("../manifest.toml");
+    assert!(manifest.contains("\"network.listen\""));
+    assert!(manifest.contains("webhook ingestion"));
+
+    let connector = SquareConnector::new();
+    let introspection = connector.introspect();
+    let operation_ids = introspection
+        .operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(operation_ids.len(), 12);
+    for rejected in [
+        "square.ingest_webhook_event",
+        "square.webhook.ingest",
+        "square.webhooks.ingest",
+        "square.subscription.events",
+    ] {
+        assert!(
+            !operation_ids.contains(&rejected),
+            "{rejected} must stay absent until Square webhook verification is implemented"
+        );
+    }
+
+    assert!(introspection.events.is_empty());
+    let event_caps = introspection.event_caps.as_ref().expect("event caps");
+    assert!(!event_caps.streaming);
+    assert!(!event_caps.replay);
+    assert_eq!(event_caps.min_buffer_events, 0);
+    assert!(!event_caps.requires_ack);
+
+    let subscribe_error = connector
+        .subscribe(SubscribeRequest {
+            r#type: "subscribe".into(),
+            id: RequestId::new("square-webhook-rejection-proof"),
+            topics: vec!["square.webhook".into()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        })
+        .await
+        .expect_err("Square webhooks must not silently subscribe");
+    assert!(matches!(subscribe_error, FcpError::StreamingNotSupported));
+
+    let health = connector.health().await;
+    let details = health.details.as_ref().expect("health details");
+    let non_goals = details["contract"]["non_goals"]
+        .as_array()
+        .expect("non-goals");
+    assert!(
+        non_goals
+            .iter()
+            .any(|entry| entry.as_str() == Some("webhook_ingest"))
+    );
+    println!(
+        "square_webhook_rejection_evidence={}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operations": operation_ids,
+            "event_caps": event_caps,
+            "non_goals": non_goals,
+        }))
+        .unwrap()
     );
 }

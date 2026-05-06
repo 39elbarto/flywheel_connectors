@@ -8,7 +8,10 @@
 use std::sync::Once;
 use std::time::Duration;
 
-use fcp_prelude::{ApprovalMode, FcpConnector, FcpError, IdempotencyClass, RiskLevel, SafetyTier};
+use fcp_prelude::{
+    ApprovalMode, FcpConnector, FcpError, IdempotencyClass, RequestId, RiskLevel, SafetyTier,
+    SubscribeRequest,
+};
 use fcp_sdk::migration::{
     ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig,
 };
@@ -573,6 +576,79 @@ fn manifest_and_operation_catalog_preserve_metadata_contract() {
     let health = operation("shopify.health");
     assert_eq!(health.safety_tier, SafetyTier::Safe);
     assert_eq!(health.requires_approval, Some(ApprovalMode::None));
+}
+
+#[fcp_async_core::runtime::test]
+async fn webhook_ingress_is_explicitly_rejected_for_rest_admin_slice() {
+    init_logging();
+
+    let manifest = include_str!("../manifest.toml");
+    assert!(manifest.contains("\"network.listen\""));
+
+    let connector = ShopifyConnector::new();
+    let introspection = connector.introspect();
+    let operation_ids = introspection
+        .operations
+        .iter()
+        .map(|operation| operation.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(operation_ids.len(), 12);
+    for rejected in [
+        "shopify.ingest_webhook_event",
+        "shopify.webhook.ingest",
+        "shopify.webhooks.ingest",
+        "shopify.webhook_subscriptions.create",
+    ] {
+        assert!(
+            !operation_ids.contains(&rejected),
+            "{rejected} must stay absent until Shopify webhook verification is implemented"
+        );
+    }
+
+    assert!(introspection.events.is_empty());
+    let event_caps = introspection
+        .event_caps
+        .as_ref()
+        .expect("event caps should be explicit");
+    assert!(!event_caps.streaming);
+    assert!(!event_caps.replay);
+    assert_eq!(event_caps.min_buffer_events, 0);
+    assert!(!event_caps.requires_ack);
+
+    let subscribe_error = connector
+        .subscribe(SubscribeRequest {
+            r#type: "subscribe".into(),
+            id: RequestId::new("shopify-webhook-rejection-proof"),
+            topics: vec!["shopify.webhook".into()],
+            since: None,
+            max_events_per_sec: None,
+            batch_ms: None,
+            window_size: None,
+            capability_token: None,
+        })
+        .await
+        .expect_err("Shopify webhooks must not silently subscribe");
+    assert!(matches!(subscribe_error, FcpError::StreamingNotSupported));
+
+    let health = connector.health().await;
+    let details = health.details.as_ref().expect("health details");
+    let non_goals = details["contract"]["non_goals"]
+        .as_array()
+        .expect("non-goals");
+    assert!(non_goals.iter().any(|entry| {
+        entry
+            .as_str()
+            .is_some_and(|text| text.contains("Webhook or streaming ingestion"))
+    }));
+    println!(
+        "shopify_webhook_rejection_evidence={}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "operations": operation_ids,
+            "event_caps": event_caps,
+            "non_goals": non_goals,
+        }))
+        .unwrap()
+    );
 }
 
 #[test]

@@ -14,6 +14,7 @@ const REQUEST_RESET: &str = "x-ratelimit-reset-requests";
 const TOKEN_LIMIT: &str = "x-ratelimit-limit-tokens";
 const TOKEN_REMAINING: &str = "x-ratelimit-remaining-tokens";
 const TOKEN_RESET: &str = "x-ratelimit-reset-tokens";
+const CLOUDFLARE_REMAINING: &str = "cf-ratelimit-remaining";
 
 /// Provider-specific rate-limit header overrides.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -107,6 +108,7 @@ pub fn parse_rate_limit_headers(
             config.request_remaining_header.as_ref(),
             REQUEST_REMAINING,
         )
+        .or_else(|| header_value(headers, CLOUDFLARE_REMAINING))
         .and_then(parse_u64),
         request_reset_after: override_value(config.request_reset_header.as_ref(), REQUEST_RESET)
             .and_then(parse_retry_after),
@@ -133,6 +135,9 @@ pub fn parse_retry_after(value: &str) -> Option<Duration> {
         return Some(Duration::from_secs(
             u64::try_from(seconds).unwrap_or(u64::MAX),
         ));
+    }
+    if let Ok(seconds) = value.parse::<f64>() {
+        return Duration::try_from_secs_f64(seconds).ok();
     }
 
     let retry_at = chrono::DateTime::parse_from_rfc2822(value).ok()?;
@@ -179,9 +184,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_cloudflare_remaining_alias() {
+        let headers = vec![("cf-ratelimit-remaining".to_string(), "3".to_string())];
+        let parsed = parse_rate_limit_headers(&headers, None);
+        assert_eq!(parsed.request_remaining, Some(3));
+    }
+
+    #[test]
     fn retry_after_date_in_past_is_zero() {
         let parsed = parse_retry_after("Sun, 06 Nov 1994 08:49:37 GMT");
         assert_eq!(parsed, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_after_fractional_seconds_parse() {
+        let parsed = parse_retry_after("0.25");
+        assert_eq!(parsed, Some(Duration::from_millis(250)));
     }
 
     proptest! {

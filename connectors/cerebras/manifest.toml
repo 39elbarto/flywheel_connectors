@@ -1,0 +1,126 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:cerebras-oai-compat"
+
+[connector]
+id = "fcp.cerebras"
+name = "Cerebras"
+version = "0.1.0"
+description = "Cerebras Inference connector using the OpenAI-compatible chat, streaming, and model APIs"
+archetypes = ["request-response", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default_model, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["cerebras.chat", "cerebras.models.read", "cerebras.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 180000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."cerebras.chat.completions"]
+description = "Create a bounded non-streaming Cerebras chat completion through POST /v1/chat/completions."
+capability = "cerebras.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama3.1-8b" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, max_completion_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string" }, reasoning_format = { type = "string" }, clear_thinking = { type = "boolean" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."cerebras.chat.completions".ai_hints]
+when_to_use = "Use for direct first-party Cerebras chat completions when high-throughput wafer-scale inference matters."
+common_mistakes = ["Do not log prompts, completions, reasoning text, or tool-call arguments.", "Prefer max_completion_tokens for Cerebras token budgeting."]
+examples = ['{"model":"llama3.1-8b","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}]}']
+related = ["cerebras.chat.completions_stream", "cerebras.models.list"]
+
+[provides.operations."cerebras.chat.completions_stream"]
+description = "Open a Cerebras SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "cerebras.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama3.1-8b" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, max_completion_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string" }, reasoning_format = { type = "string" }, clear_thinking = { type = "boolean" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 180000, max_response_bytes = 10485760 }
+
+[provides.operations."cerebras.chat.completions_stream".ai_hints]
+when_to_use = "Use when the caller can consume incremental Cerebras stream chunks."
+common_mistakes = ["Do not expect embeddings from this connector.", "Handle finish_reason and tool_call deltas from the returned chunks."]
+examples = ['{"model":"llama3.1-8b","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_completion_tokens":64}']
+related = ["cerebras.chat.completions"]
+
+[provides.operations."cerebras.models.list"]
+description = "List Cerebras models from GET /v1/models using the shared model-cache path."
+capability = "cerebras.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."cerebras.models.list".ai_hints]
+when_to_use = "Use to discover currently active Cerebras model IDs before sending chat or streaming requests."
+common_mistakes = ["Do not assume preview model availability is stable."]
+examples = ["{}"]
+related = ["cerebras.chat.completions"]
+
+[provides.operations."cerebras.health"]
+description = "Probe Cerebras model listing with a short timeout and return connector health metadata."
+capability = "cerebras.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."cerebras.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible Cerebras operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["cerebras.models.list"]
+
+[provides.operations."cerebras.embeddings.create"]
+description = "Declared for introspection honesty. Cerebras Inference does not currently expose embeddings in the first-party API reference."
+capability = "cerebras.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+availability = "not_supported"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.cerebras.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."cerebras.embeddings.create".ai_hints]
+when_to_use = "Do not invoke; use this metadata to explain that embeddings are intentionally unavailable for Cerebras."
+common_mistakes = ["Do not proxy embeddings through OpenRouter or OpenAI from this connector."]
+examples = ["{}"]
+related = ["cerebras.models.list"]

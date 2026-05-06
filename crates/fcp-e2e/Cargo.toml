@@ -15,6 +15,7 @@ e2e-full = [
     "discord",
     "google_ai",
     "gcp",
+    "cerebras",
     "groq",
     "qdrant",
     "telegram",
@@ -104,6 +105,7 @@ slack = ["dep:fcp-slack"]
 discord = ["dep:fcp-discord"]
 google_ai = ["dep:fcp-google-ai"]
 gcp = ["dep:fcp-gcp"]
+cerebras = ["dep:fcp-cerebras"]
 groq = ["dep:fcp-groq"]
 qdrant = ["dep:fcp-qdrant"]
 telegram = ["dep:fcp-telegram"]
@@ -210,6 +212,7 @@ fcp-slack = { path = "../../connectors/slack", optional = true }
 fcp-discord = { path = "../../connectors/discord", features = ["testing"], optional = true }
 fcp-google-ai = { path = "../../connectors/google-ai", optional = true }
 fcp-gcp = { path = "../../connectors/gcp", optional = true }
+fcp-cerebras = { path = "../../connectors/cerebras", optional = true }
 fcp-groq = { path = "../../connectors/groq", optional = true }
 fcp-qdrant = { path = "../../connectors/qdrant", optional = true }
 fcp-telegram = { path = "../../connectors/telegram", optional = true }

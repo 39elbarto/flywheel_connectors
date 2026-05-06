@@ -38,6 +38,7 @@ members = [
     "crates/fcp-webhook",
     "connectors/anthropic",
     "connectors/aws",
+    "connectors/cerebras",
     "connectors/groq",
     "connectors/discord",
     "connectors/openai",
@@ -316,6 +317,7 @@ fcp-conformance = { path = "crates/fcp-conformance" }
 fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
+fcp-cerebras = { path = "connectors/cerebras" }
 fcp-groq = { path = "connectors/groq" }
 fcp-host = { path = "crates/fcp-host" }
 fcp-kernel = { path = "crates/fcp-kernel" }

@@ -3770,6 +3770,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-fal"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-prelude",
+ "pretty_assertions",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-feishu"
 version = "0.1.0"
 dependencies = [
@@ -3860,6 +3881,33 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-fireworks"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-e2e",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "fcp-testkit",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "url",

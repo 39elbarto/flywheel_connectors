@@ -3406,8 +3406,8 @@ impl FcpConnector for FeishuConnector {
                 message: format!("Invalid Feishu config: {e}"),
             })?;
         validate_config(&config)?;
-        config.webhook_state = config.webhook_state.clone().validate()?;
-        config.webhook_ingress = config.webhook_ingress.clone().validate()?;
+        config.webhook_state = std::mem::take(&mut config.webhook_state).validate()?;
+        config.webhook_ingress = std::mem::take(&mut config.webhook_ingress).validate()?;
 
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let runtime = ConnectorRuntime::new(

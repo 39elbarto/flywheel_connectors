@@ -196,10 +196,10 @@ async fn setup_connector_with_extra_config(
         },
         "request_timeout_ms": 1_000
     });
-    if let (Some(config), Some(extra_config)) = (config.as_object_mut(), extra_config.as_object()) {
-        for (key, value) in extra_config {
-            config.insert(key.clone(), value.clone());
-        }
+    if let (Some(config), serde_json::Value::Object(extra_config)) =
+        (config.as_object_mut(), extra_config)
+    {
+        config.extend(extra_config);
     }
     connector.configure(config).await.unwrap();
     connector
@@ -537,13 +537,18 @@ async fn invoke_webhook_ingest_configured_host_ingress_emits_fanout_contract() {
             "bot_open_id": "ou_bot",
         }),
     );
-    webhook_input
-        .as_object_mut()
+    let webhook_object = webhook_input.as_object_mut().unwrap();
+    webhook_object.remove("verification_token");
+    webhook_object.remove("encrypt_key");
+    webhook_object.insert("path".to_owned(), json!("/feishu/webhook"));
+    webhook_object
+        .get_mut("headers")
+        .and_then(serde_json::Value::as_object_mut)
         .unwrap()
-        .remove("verification_token");
-    webhook_input.as_object_mut().unwrap().remove("encrypt_key");
-    webhook_input["path"] = json!("/feishu/webhook");
-    webhook_input["headers"]["content-type"] = json!("application/json; charset=utf-8");
+        .insert(
+            "content-type".to_owned(),
+            json!("application/json; charset=utf-8"),
+        );
 
     let response = connector
         .invoke(invoke_req(

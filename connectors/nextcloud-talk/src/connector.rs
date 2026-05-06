@@ -1,19 +1,25 @@
 //! Nextcloud Talk connector implementation.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    ConnectorId, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest, InvokeResponse, OperationId,
     OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
     SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use hmac::{Hmac, Mac};
+use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::NextcloudTalkClient;
@@ -31,6 +37,7 @@ const OP_GET_CONVERSATION: &str = "nextcloud_talk.get_conversation";
 const OP_CREATE_CONVERSATION: &str = "nextcloud_talk.create_conversation";
 const OP_GET_MESSAGES: &str = "nextcloud_talk.get_messages";
 const OP_POLL_CONVERSATION_EVENTS: &str = "nextcloud_talk.poll_conversation_events";
+const OP_INGEST_WEBHOOK: &str = "nextcloud_talk.ingest_webhook";
 const OP_SEND_MESSAGE: &str = "nextcloud_talk.send_message";
 const OP_DELETE_MESSAGE: &str = "nextcloud_talk.delete_message";
 const OP_SET_READ_MARKER: &str = "nextcloud_talk.set_read_marker";
@@ -44,6 +51,9 @@ const OP_SHARE_FILE: &str = "nextcloud_talk.share_file";
 const CAP_READ: &str = "nextcloud_talk.read";
 const CAP_WRITE: &str = "nextcloud_talk.write";
 const CAP_MANAGE: &str = "nextcloud_talk.manage";
+const CAP_WEBHOOK: &str = "nextcloud_talk.webhook";
+const EVENT_WEBHOOK_MESSAGE: &str = "nextcloud_talk.webhook.message";
+type HmacSha256 = Hmac<Sha256>;
 
 /// Connector doctor response.
 #[derive(Debug, Clone, Serialize)]
@@ -100,6 +110,8 @@ pub struct NextcloudTalkConnector {
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    webhook_replay: Mutex<NextcloudTalkWebhookReplayState>,
+    webhook_rate: Mutex<NextcloudTalkWebhookRateState>,
 }
 
 impl NextcloudTalkConnector {
@@ -114,6 +126,8 @@ impl NextcloudTalkConnector {
             retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
+            webhook_replay: Mutex::new(NextcloudTalkWebhookReplayState::default()),
+            webhook_rate: Mutex::new(NextcloudTalkWebhookRateState::default()),
         }
     }
 
@@ -253,6 +267,157 @@ impl Default for NextcloudTalkConnector {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct WebhookReplayKey {
+    account_id: String,
+    room_token: String,
+    message_id: String,
+}
+
+impl WebhookReplayKey {
+    fn new(account_id: &str, room_token: &str, message_id: &str) -> FcpResult<Self> {
+        if account_id.trim().is_empty()
+            || room_token.trim().is_empty()
+            || message_id.trim().is_empty()
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "webhook replay key requires account_id, room_token, and message_id"
+                    .into(),
+            });
+        }
+        Ok(Self {
+            account_id: account_id.trim().to_string(),
+            room_token: room_token.trim().to_string(),
+            message_id: message_id.trim().to_string(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookReplayDecision {
+    Claimed,
+    Duplicate,
+    Inflight,
+}
+
+impl WebhookReplayDecision {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claimed => "claimed",
+            Self::Duplicate => "duplicate",
+            Self::Inflight => "inflight",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookReplayEntryState {
+    InFlight,
+    Committed,
+}
+
+#[derive(Debug, Clone)]
+struct WebhookReplayEntry {
+    state: WebhookReplayEntryState,
+    expires_at: Instant,
+    sequence: u64,
+}
+
+#[derive(Debug, Default)]
+struct NextcloudTalkWebhookReplayState {
+    entries: BTreeMap<WebhookReplayKey, WebhookReplayEntry>,
+    next_sequence: u64,
+}
+
+impl NextcloudTalkWebhookReplayState {
+    fn claim(
+        &mut self,
+        key: WebhookReplayKey,
+        now: Instant,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> WebhookReplayDecision {
+        self.prune(now, max_entries);
+        if let Some(entry) = self.entries.get(&key) {
+            return match entry.state {
+                WebhookReplayEntryState::Committed => WebhookReplayDecision::Duplicate,
+                WebhookReplayEntryState::InFlight => WebhookReplayDecision::Inflight,
+            };
+        }
+
+        let sequence = self.next_sequence;
+        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.entries.insert(
+            key,
+            WebhookReplayEntry {
+                state: WebhookReplayEntryState::InFlight,
+                expires_at: now + ttl,
+                sequence,
+            },
+        );
+        self.prune(now, max_entries);
+        WebhookReplayDecision::Claimed
+    }
+
+    fn commit(&mut self, key: &WebhookReplayKey, now: Instant, ttl: Duration) {
+        if let Some(entry) = self.entries.get_mut(key) {
+            entry.state = WebhookReplayEntryState::Committed;
+            entry.expires_at = now + ttl;
+        }
+    }
+
+    fn release(&mut self, key: &WebhookReplayKey) {
+        self.entries.remove(key);
+    }
+
+    fn prune(&mut self, now: Instant, max_entries: usize) {
+        self.entries.retain(|_, entry| entry.expires_at > now);
+        while self.entries.len() > max_entries {
+            let Some(oldest_key) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.sequence)
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest_key);
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct NextcloudTalkWebhookRateState {
+    buckets: BTreeMap<String, WebhookRateBucket>,
+}
+
+#[derive(Debug, Clone)]
+struct WebhookRateBucket {
+    window_started: Instant,
+    count: u32,
+}
+
+impl NextcloudTalkWebhookRateState {
+    fn check(&mut self, key: &str, limit: u32, now: Instant) -> bool {
+        const WINDOW: Duration = Duration::from_mins(1);
+
+        let bucket = self
+            .buckets
+            .entry(key.to_string())
+            .or_insert_with(|| WebhookRateBucket {
+                window_started: now,
+                count: 0,
+            });
+        if now.duration_since(bucket.window_started) >= WINDOW {
+            bucket.window_started = now;
+            bucket.count = 0;
+        }
+        bucket.count = bucket.count.saturating_add(1);
+        bucket.count <= limit
+    }
+}
+
 fn setup_details(config: &NextcloudTalkConfig) -> serde_json::Value {
     json!({
         "account_id": config.account_id(),
@@ -281,6 +446,22 @@ fn webhook_details(config: &NextcloudTalkConfig) -> serde_json::Value {
             .map(secret_fingerprint),
         "secret_redacted": true,
         "backend_allowlist": effective_backend_allowlist(config),
+        "host_forwarded_ingress": true,
+        "hosted_listener": false,
+        "body": {
+            "max_body_bytes": config.webhook.max_body_bytes,
+            "timeout_ms": config.webhook.body_timeout_ms,
+        },
+        "rate_limits": {
+            "auth_failure_limit_per_minute": config.webhook.auth_failure_limit_per_minute,
+            "sender_limit_per_minute": config.webhook.sender_limit_per_minute,
+        },
+        "replay": {
+            "mode": "in_memory",
+            "ttl_secs": config.webhook.replay_ttl_secs,
+            "max_entries": config.webhook.replay_max_entries,
+            "persistent_storage_configured": false,
+        },
     })
 }
 
@@ -306,6 +487,10 @@ fn inbound_policy_details(config: &NextcloudTalkConfig) -> serde_json::Value {
         "allow_from_count": config.inbound_policy.allow_from.len(),
         "group_allow_from_count": config.inbound_policy.group_allow_from.len(),
         "rooms_count": config.inbound_policy.rooms.len(),
+        "disabled_rooms_count": config.inbound_policy.disabled_rooms.len(),
+        "mention_required_rooms_count": config.inbound_policy.mention_required_rooms.len(),
+        "mention_required_default": "host_forwarded_group_messages",
+        "command_authorization": "host_forwarded_input_flag",
     })
 }
 
@@ -342,9 +527,9 @@ fn effective_backend_allowlist(config: &NextcloudTalkConfig) -> Vec<String> {
     vec![config.normalized_server_url()]
 }
 
-fn secret_fingerprint(secret: &NextcloudTalkSecretRef) -> String {
+fn secret_fingerprint(secret_ref: &NextcloudTalkSecretRef) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(secret.fingerprint_material().as_bytes());
+    hasher.update(secret_ref.fingerprint_material().as_bytes());
     let digest = hex::encode(hasher.finalize());
     format!("sha256:{}", &digest[..16])
 }
@@ -615,6 +800,56 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "Expecting non-chat room state changes that the Talk HTTP API does not emit as messages",
             ],
             &[OP_GET_MESSAGES, OP_SET_READ_MARKER],
+        ),
+        op_info(
+            OP_INGEST_WEBHOOK,
+            "Ingest a host-forwarded Nextcloud Talk webhook",
+            "Verifies a host-forwarded Nextcloud Talk bot webhook without opening a listener: required headers, backend allowlist, HMAC-SHA256 random+body signature, body budget, timeout budget, replay claim/commit/release, and inbound sender/room policy are enforced before emitting an event envelope.",
+            json!({
+                "type": "object",
+                "required": ["headers", "body"],
+                "properties": {
+                    "headers": {
+                        "type": "object",
+                        "required": [
+                            "x-nextcloud-talk-signature",
+                            "x-nextcloud-talk-random",
+                            "x-nextcloud-talk-backend"
+                        ]
+                    },
+                    "body": { "type": "string", "minLength": 1 },
+                    "body_size_bytes": { "type": "integer", "minimum": 0 },
+                    "body_read_elapsed_ms": { "type": "integer", "minimum": 0 },
+                    "source_id": { "type": "string" },
+                    "delivery_id": { "type": "string" },
+                    "room_kind": { "type": "string", "enum": ["group", "dm"] },
+                    "mention_text": { "type": "string" },
+                    "require_mention": { "type": "boolean" },
+                    "command_authorized": { "type": "boolean" },
+                    "dispatch_outcome": { "type": "string", "enum": ["commit", "retryable_error", "nonretryable_error"] }
+                }
+            }),
+            json!({
+                "type": "object",
+                "properties": {
+                    "status": { "type": "string" },
+                    "event": { "type": ["object", "null"] },
+                    "signature": { "type": "object" },
+                    "replay": { "type": "object" },
+                    "policy": { "type": "object" }
+                }
+            }),
+            CAP_WEBHOOK,
+            RiskLevel::Medium,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            "Use this only when fcp-host has already accepted the HTTP request and is forwarding raw headers plus raw body to the connector for Nextcloud Talk bot webhook verification.",
+            &[
+                "Do not expose an in-connector listener; this operation is the host-forwarded ingress boundary",
+                "Do not send a parsed payload instead of the exact raw body because the HMAC covers random+body bytes",
+                "Do not expect credential_id secrets to verify locally until the host injects the secret material",
+            ],
+            &[OP_POLL_CONVERSATION_EVENTS],
         ),
         op_info(
             OP_SEND_MESSAGE,
@@ -970,6 +1205,83 @@ struct ShareFileInput {
     request: ShareFileRequest,
 }
 
+#[derive(Debug, Deserialize)]
+struct HostForwardedWebhookInput {
+    headers: BTreeMap<String, String>,
+    body: String,
+    #[serde(default)]
+    body_size_bytes: Option<u64>,
+    #[serde(default)]
+    body_read_elapsed_ms: Option<u64>,
+    #[serde(default)]
+    source_id: Option<String>,
+    #[serde(default)]
+    delivery_id: Option<String>,
+    #[serde(default)]
+    room_kind: Option<WebhookRoomKind>,
+    #[serde(default)]
+    mention_text: Option<String>,
+    #[serde(default)]
+    require_mention: Option<bool>,
+    #[serde(default)]
+    command_authorized: bool,
+    #[serde(default)]
+    dispatch_outcome: WebhookDispatchOutcome,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WebhookRoomKind {
+    #[default]
+    Group,
+    Dm,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+enum WebhookDispatchOutcome {
+    #[default]
+    Commit,
+    RetryableError,
+    NonretryableError,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityStreamsWebhookPayload {
+    #[serde(rename = "type")]
+    event_type: String,
+    actor: ActivityStreamsActor,
+    object: ActivityStreamsObject,
+    target: ActivityStreamsTarget,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityStreamsActor {
+    #[serde(rename = "type")]
+    actor_type: Option<String>,
+    id: String,
+    name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityStreamsObject {
+    #[serde(rename = "type")]
+    object_type: Option<String>,
+    id: String,
+    name: Option<String>,
+    content: Option<String>,
+    #[serde(rename = "mediaType")]
+    media_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ActivityStreamsTarget {
+    #[serde(rename = "type")]
+    target_type: Option<String>,
+    id: String,
+    name: Option<String>,
+}
+
 fn parse_input<T>(input: serde_json::Value, operation: &str) -> FcpResult<T>
 where
     T: DeserializeOwned,
@@ -1014,6 +1326,693 @@ fn resolve_poll_query(
     Ok(query)
 }
 
+const fn webhook_event_caps() -> EventCaps {
+    EventCaps {
+        streaming: false,
+        replay: true,
+        min_buffer_events: 0,
+        requires_ack: false,
+    }
+}
+
+fn webhook_event_info() -> EventInfo {
+    EventInfo {
+        topic: EVENT_WEBHOOK_MESSAGE.to_string(),
+        schema: json!({
+            "type": "object",
+            "required": ["topic", "event_type", "account_id_hash", "room_token_hash", "message_id"],
+            "properties": {
+                "topic": { "const": EVENT_WEBHOOK_MESSAGE },
+                "event_type": { "const": "host_forwarded_webhook_message" },
+                "account_id_hash": { "type": "string" },
+                "room_token_hash": { "type": "string" },
+                "message_id": { "type": "string" },
+                "signature": { "type": "object" },
+                "replay": { "type": "object" },
+                "policy": { "type": "object" }
+            }
+        }),
+        requires_ack: false,
+    }
+}
+
+#[derive(Debug)]
+struct NextcloudTalkWebhookHeaders {
+    signature: String,
+    random: String,
+    backend: String,
+}
+
+#[derive(Debug)]
+struct NextcloudTalkInboundMessage {
+    account_id: String,
+    room_token: String,
+    room_name: Option<String>,
+    message_id: String,
+    sender_id: String,
+    sender_name: Option<String>,
+    text: String,
+    sanitized_text: String,
+    media_type: String,
+    room_kind: WebhookRoomKind,
+    actor_type: Option<String>,
+    object_type: Option<String>,
+    target_type: Option<String>,
+}
+
+#[derive(Debug)]
+struct WebhookPolicyOutcome {
+    status: &'static str,
+    emit_event: bool,
+    details: Value,
+}
+
+impl NextcloudTalkConnector {
+    #[allow(clippy::too_many_lines)]
+    fn ingest_host_forwarded_webhook(
+        &self,
+        input: &HostForwardedWebhookInput,
+        config: &NextcloudTalkConfig,
+    ) -> FcpResult<Value> {
+        if !config.webhook.enabled {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "webhook mode is not enabled for Nextcloud Talk".into(),
+            });
+        }
+
+        let body_size_bytes = input
+            .body_size_bytes
+            .unwrap_or_else(|| u64::try_from(input.body.len()).unwrap_or(u64::MAX));
+        if body_size_bytes > config.webhook.max_body_bytes {
+            return Err(FcpError::ResourceExhausted {
+                resource: format!(
+                    "nextcloud_talk.forwarded_webhook_body:{body_size_bytes}>{}",
+                    config.webhook.max_body_bytes
+                ),
+            });
+        }
+
+        let body_read_elapsed_ms = input.body_read_elapsed_ms.unwrap_or(0);
+        if body_read_elapsed_ms > config.webhook.body_timeout_ms {
+            return Err(FcpError::UpstreamTimeout {
+                service: "nextcloud_talk.forwarded_webhook_body_read".into(),
+            });
+        }
+
+        let headers = extract_nextcloud_talk_headers(&input.headers)?;
+        let normalized_backend = verify_nextcloud_talk_backend(config, &headers.backend)?;
+        let source_id = input
+            .source_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|source| !source.is_empty())
+            .unwrap_or(&normalized_backend);
+        let webhook_hmac_material = config
+            .webhook
+            .bot_secret
+            .as_ref()
+            .and_then(NextcloudTalkSecretRef::inline_secret)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: "inline webhook.bot_secret is required for local HMAC verification".into(),
+            })?;
+
+        if !verify_nextcloud_talk_hmac(
+            webhook_hmac_material,
+            &headers.random,
+            &input.body,
+            &headers.signature,
+        ) {
+            self.record_webhook_auth_failure(source_id, config)?;
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "Nextcloud Talk webhook signature verification failed".into(),
+            });
+        }
+
+        let payload: ActivityStreamsWebhookPayload =
+            serde_json::from_str(&input.body).map_err(|error| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid Nextcloud Talk webhook JSON body: {error}"),
+            })?;
+        let message = payload_to_inbound_message(&payload, config, input.room_kind)?;
+        self.record_authenticated_webhook_attempt(&message, config)?;
+
+        let replay_key = WebhookReplayKey::new(
+            &message.account_id,
+            &message.room_token,
+            &message.message_id,
+        )?;
+        let ttl = Duration::from_secs(config.webhook.replay_ttl_secs);
+        let replay_decision =
+            self.claim_webhook_replay(replay_key.clone(), ttl, config.webhook.replay_max_entries)?;
+        if replay_decision != WebhookReplayDecision::Claimed {
+            return Ok(json!({
+                "status": replay_decision.as_str(),
+                "event": null,
+                "signature": signature_decision(&normalized_backend),
+                "replay": replay_details(&message, replay_decision),
+                "policy": {
+                    "decision": "not_evaluated",
+                    "reason": replay_decision.as_str(),
+                },
+            }));
+        }
+
+        if payload.event_type != "Create" {
+            self.commit_webhook_replay(&replay_key, ttl)?;
+            return Ok(json!({
+                "status": "ignored",
+                "event": null,
+                "signature": signature_decision(&normalized_backend),
+                "replay": replay_details(&message, WebhookReplayDecision::Claimed),
+                "policy": {
+                    "decision": "ignored",
+                    "reason": "non_create_activitystreams_event",
+                    "activity_type": payload.event_type,
+                },
+            }));
+        }
+
+        let policy_outcome = match enforce_nextcloud_talk_inbound_policy(config, input, &message) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                self.commit_webhook_replay(&replay_key, ttl)?;
+                return Err(error);
+            }
+        };
+
+        if !policy_outcome.emit_event {
+            self.commit_webhook_replay(&replay_key, ttl)?;
+            return Ok(json!({
+                "status": policy_outcome.status,
+                "event": null,
+                "signature": signature_decision(&normalized_backend),
+                "replay": replay_details(&message, WebhookReplayDecision::Claimed),
+                "policy": policy_outcome.details,
+            }));
+        }
+
+        let delivery_id = input
+            .delivery_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map_or_else(
+                || {
+                    format!(
+                        "nextcloud-talk:{}:{}:{}",
+                        message.account_id, message.room_token, message.message_id
+                    )
+                },
+                ToString::to_string,
+            );
+        let event = json!({
+            "topic": EVENT_WEBHOOK_MESSAGE,
+            "event_type": "host_forwarded_webhook_message",
+            "delivery_id": delivery_id,
+            "account_id_hash": hash_identifier(&message.account_id),
+            "room_token_hash": hash_identifier(&message.room_token),
+            "message_id": &message.message_id,
+            "room": {
+                "token": &message.room_token,
+                "name": &message.room_name,
+                "kind": match message.room_kind {
+                    WebhookRoomKind::Group => "group",
+                    WebhookRoomKind::Dm => "dm",
+                },
+                "resource_uri": format!("nextcloud-talk://accounts/{}/rooms/{}", hash_identifier(&message.account_id), hash_identifier(&message.room_token)),
+            },
+            "sender": {
+                "id_hash": hash_identifier(&message.sender_id),
+                "display_name": &message.sender_name,
+                "actor_type": &message.actor_type,
+            },
+            "message": {
+                "text": &message.text,
+                "sanitized_text": &message.sanitized_text,
+                "media_type": &message.media_type,
+                "object_type": &message.object_type,
+                "target_type": &message.target_type,
+            },
+            "signature": signature_decision(&normalized_backend),
+            "replay": replay_details(&message, WebhookReplayDecision::Claimed),
+            "policy": policy_outcome.details,
+            "ingress": {
+                "mode": "host_forwarded",
+                "hosted_listener": false,
+                "body_size_bytes": body_size_bytes,
+                "body_limit_bytes": config.webhook.max_body_bytes,
+                "body_read_elapsed_ms": body_read_elapsed_ms,
+                "body_timeout_ms": config.webhook.body_timeout_ms,
+                "source_hash": hash_identifier(source_id),
+                "raw_payload_logged": false,
+            },
+        });
+
+        match input.dispatch_outcome {
+            WebhookDispatchOutcome::Commit => {
+                self.commit_webhook_replay(&replay_key, ttl)?;
+                Ok(json!({
+                    "status": "processed",
+                    "event": event,
+                    "signature": signature_decision(&normalized_backend),
+                    "replay": replay_details(&message, WebhookReplayDecision::Claimed),
+                    "policy": policy_outcome.details,
+                }))
+            }
+            WebhookDispatchOutcome::RetryableError => {
+                self.release_webhook_replay(&replay_key)?;
+                Err(FcpError::External {
+                    service: "nextcloud_talk.webhook_dispatch".into(),
+                    message: "host-forwarded webhook dispatch failed retryably".into(),
+                    status_code: None,
+                    retryable: true,
+                    retry_after: Some(Duration::from_secs(1)),
+                })
+            }
+            WebhookDispatchOutcome::NonretryableError => {
+                self.commit_webhook_replay(&replay_key, ttl)?;
+                Err(FcpError::External {
+                    service: "nextcloud_talk.webhook_dispatch".into(),
+                    message: "host-forwarded webhook dispatch failed nonretryably".into(),
+                    status_code: None,
+                    retryable: false,
+                    retry_after: None,
+                })
+            }
+        }
+    }
+
+    fn claim_webhook_replay(
+        &self,
+        key: WebhookReplayKey,
+        ttl: Duration,
+        max_entries: usize,
+    ) -> FcpResult<WebhookReplayDecision> {
+        let mut replay = self.webhook_replay.lock().map_err(|_| FcpError::Internal {
+            message: "Nextcloud Talk webhook replay state lock poisoned".into(),
+        })?;
+        Ok(replay.claim(key, Instant::now(), ttl, max_entries))
+    }
+
+    fn commit_webhook_replay(&self, key: &WebhookReplayKey, ttl: Duration) -> FcpResult<()> {
+        self.webhook_replay
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "Nextcloud Talk webhook replay state lock poisoned".into(),
+            })?
+            .commit(key, Instant::now(), ttl);
+        Ok(())
+    }
+
+    fn release_webhook_replay(&self, key: &WebhookReplayKey) -> FcpResult<()> {
+        self.webhook_replay
+            .lock()
+            .map_err(|_| FcpError::Internal {
+                message: "Nextcloud Talk webhook replay state lock poisoned".into(),
+            })?
+            .release(key);
+        Ok(())
+    }
+
+    fn record_webhook_auth_failure(
+        &self,
+        source_id: &str,
+        config: &NextcloudTalkConfig,
+    ) -> FcpResult<()> {
+        let key = format!("auth_failure:{}", hash_identifier(source_id));
+        self.check_webhook_rate(&key, config.webhook.auth_failure_limit_per_minute)
+    }
+
+    fn record_authenticated_webhook_attempt(
+        &self,
+        message: &NextcloudTalkInboundMessage,
+        config: &NextcloudTalkConfig,
+    ) -> FcpResult<()> {
+        let key = format!(
+            "sender:{}:{}",
+            hash_identifier(&message.account_id),
+            hash_identifier(&message.sender_id)
+        );
+        self.check_webhook_rate(&key, config.webhook.sender_limit_per_minute)
+    }
+
+    fn check_webhook_rate(&self, key: &str, limit: u32) -> FcpResult<()> {
+        let mut rate = self.webhook_rate.lock().map_err(|_| FcpError::Internal {
+            message: "Nextcloud Talk webhook rate state lock poisoned".into(),
+        })?;
+        if rate.check(key, limit, Instant::now()) {
+            Ok(())
+        } else {
+            Err(FcpError::RateLimited {
+                retry_after_ms: 60_000,
+                violation: None,
+            })
+        }
+    }
+}
+
+fn extract_nextcloud_talk_headers(
+    headers: &BTreeMap<String, String>,
+) -> FcpResult<NextcloudTalkWebhookHeaders> {
+    Ok(NextcloudTalkWebhookHeaders {
+        signature: required_header(headers, "x-nextcloud-talk-signature")?,
+        random: required_header(headers, "x-nextcloud-talk-random")?,
+        backend: required_header(headers, "x-nextcloud-talk-backend")?,
+    })
+}
+
+fn required_header(headers: &BTreeMap<String, String>, name: &str) -> FcpResult<String> {
+    headers
+        .iter()
+        .find(|(header, _)| header.eq_ignore_ascii_case(name))
+        .map(|(_, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Missing required Nextcloud Talk webhook header: {name}"),
+        })
+}
+
+fn verify_nextcloud_talk_backend(config: &NextcloudTalkConfig, backend: &str) -> FcpResult<String> {
+    let normalized_backend = normalize_backend_url("headers.x-nextcloud-talk-backend", backend)?;
+    let allowed = effective_backend_allowlist(config)
+        .into_iter()
+        .filter_map(|allowed| normalize_backend_url("webhook.backend_allowlist", &allowed).ok())
+        .any(|allowed| allowed == normalized_backend);
+    if allowed {
+        return Ok(normalized_backend);
+    }
+    Err(FcpError::Unauthorized {
+        code: 2001,
+        message: "Nextcloud Talk webhook backend is not allowed".into(),
+    })
+}
+
+fn normalize_backend_url(field: &str, value: &str) -> FcpResult<String> {
+    let parsed = Url::parse(value.trim()).map_err(|error| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("Invalid {field}: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must use http or https"),
+        });
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must not contain a query string or fragment"),
+        });
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn verify_nextcloud_talk_hmac(
+    signing_material: &str,
+    random: &str,
+    body: &str,
+    presented: &str,
+) -> bool {
+    let mut mac = HmacSha256::new_from_slice(signing_material.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(random.as_bytes());
+    mac.update(body.as_bytes());
+    let expected = hex::encode(mac.finalize().into_bytes());
+    let presented = presented
+        .trim()
+        .strip_prefix("sha256=")
+        .unwrap_or_else(|| presented.trim())
+        .to_ascii_lowercase();
+    constant_time_eq(expected.as_bytes(), presented.as_bytes())
+}
+
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    let max_len = expected.len().max(actual.len());
+    let mut diff = expected.len() ^ actual.len();
+    for index in 0..max_len {
+        let expected_byte = expected.get(index).copied().unwrap_or(0);
+        let actual_byte = actual.get(index).copied().unwrap_or(0);
+        diff |= usize::from(expected_byte ^ actual_byte);
+    }
+    diff == 0
+}
+
+fn payload_to_inbound_message(
+    payload: &ActivityStreamsWebhookPayload,
+    config: &NextcloudTalkConfig,
+    room_kind: Option<WebhookRoomKind>,
+) -> FcpResult<NextcloudTalkInboundMessage> {
+    let conversation_ref = required_activity_value("target.id", &payload.target.id)?;
+    let message_id = required_activity_value("object.id", &payload.object.id)?;
+    let sender_id = required_activity_value("actor.id", &payload.actor.id)?;
+    let text = payload
+        .object
+        .content
+        .as_deref()
+        .or(payload.object.name.as_deref())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "Nextcloud Talk webhook object.content or object.name is required".into(),
+        })?
+        .to_string();
+    let sanitized_text = sanitize_inbound_text(&text);
+
+    Ok(NextcloudTalkInboundMessage {
+        account_id: config.account_id().to_string(),
+        room_token: conversation_ref,
+        room_name: payload
+            .target
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        message_id,
+        sender_id,
+        sender_name: payload
+            .actor
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
+        text,
+        sanitized_text,
+        media_type: payload
+            .object
+            .media_type
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("text/plain")
+            .to_string(),
+        room_kind: room_kind.unwrap_or_default(),
+        actor_type: payload.actor.actor_type.clone(),
+        object_type: payload.object.object_type.clone(),
+        target_type: payload.target.target_type.clone(),
+    })
+}
+
+fn required_activity_value(field: &str, value: &str) -> FcpResult<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Nextcloud Talk webhook {field} must not be empty"),
+        });
+    }
+    Ok(trimmed.to_string())
+}
+
+fn enforce_nextcloud_talk_inbound_policy(
+    config: &NextcloudTalkConfig,
+    input: &HostForwardedWebhookInput,
+    message: &NextcloudTalkInboundMessage,
+) -> FcpResult<WebhookPolicyOutcome> {
+    let policy = &config.inbound_policy;
+    if allowlist_matches(&policy.disabled_rooms, &message.room_token) {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook room is disabled by inbound policy".into(),
+        });
+    }
+
+    match message.room_kind {
+        WebhookRoomKind::Dm => enforce_nextcloud_talk_dm_policy(policy, message),
+        WebhookRoomKind::Group => enforce_nextcloud_talk_group_policy(policy, input, message),
+    }
+}
+
+fn enforce_nextcloud_talk_dm_policy(
+    policy: &crate::config::NextcloudTalkInboundPolicy,
+    message: &NextcloudTalkInboundMessage,
+) -> FcpResult<WebhookPolicyOutcome> {
+    match policy.dm_policy.as_str() {
+        "pairing" => Ok(WebhookPolicyOutcome {
+            status: "pairing_required",
+            emit_event: false,
+            details: json!({
+                "decision": "pairing_required",
+                "reason": "dm_pairing_required",
+                "sender_id_hash": hash_identifier(&message.sender_id),
+                "room_token_hash": hash_identifier(&message.room_token),
+            }),
+        }),
+        "allowlist" if !allowlist_matches(&policy.allow_from, &message.sender_id) => {
+            Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "Nextcloud Talk webhook DM sender denied by inbound policy".into(),
+            })
+        }
+        "allowlist" => Ok(WebhookPolicyOutcome {
+            status: "processed",
+            emit_event: true,
+            details: json!({
+                "decision": "allowed",
+                "reason": "dm_sender_allowlist_match",
+                "sender_id_hash": hash_identifier(&message.sender_id),
+            }),
+        }),
+        "open" => Ok(WebhookPolicyOutcome {
+            status: "processed",
+            emit_event: true,
+            details: json!({
+                "decision": "allowed",
+                "reason": "dm_policy_open",
+                "sender_id_hash": hash_identifier(&message.sender_id),
+            }),
+        }),
+        _ => Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook DM policy denied event".into(),
+        }),
+    }
+}
+
+fn enforce_nextcloud_talk_group_policy(
+    policy: &crate::config::NextcloudTalkInboundPolicy,
+    input: &HostForwardedWebhookInput,
+    message: &NextcloudTalkInboundMessage,
+) -> FcpResult<WebhookPolicyOutcome> {
+    if policy.group_policy == "disabled" {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook group events are disabled".into(),
+        });
+    }
+    if !allowlist_matches(&policy.rooms, &message.room_token) {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook room denied by allowlist policy".into(),
+        });
+    }
+    if policy.group_policy == "allowlist"
+        && !allowlist_matches(&policy.group_allow_from, &message.sender_id)
+    {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook group sender denied by allowlist policy".into(),
+        });
+    }
+    if message.text.trim_start().starts_with('/') && !input.command_authorized {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook command requires explicit authorization".into(),
+        });
+    }
+
+    let mention_required = input.require_mention.unwrap_or_else(|| {
+        policy.mention_required_rooms.is_empty()
+            || allowlist_matches(&policy.mention_required_rooms, &message.room_token)
+    });
+    let mention_text = input
+        .mention_text
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("@flywheel");
+    if mention_required && !message.text.contains(mention_text) {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Nextcloud Talk webhook group message missing required mention".into(),
+        });
+    }
+
+    Ok(WebhookPolicyOutcome {
+        status: "processed",
+        emit_event: true,
+        details: json!({
+            "decision": "allowed",
+            "reason": if policy.group_policy == "open" {
+                "group_policy_open"
+            } else {
+                "group_sender_allowlist_match"
+            },
+            "room_token_hash": hash_identifier(&message.room_token),
+            "sender_id_hash": hash_identifier(&message.sender_id),
+            "mention_required": mention_required,
+            "command_authorized": input.command_authorized,
+        }),
+    })
+}
+
+fn allowlist_matches(patterns: &[String], value: &str) -> bool {
+    patterns.iter().any(|pattern| {
+        let pattern = pattern.trim();
+        pattern == "*"
+            || pattern == value
+            || pattern
+                .strip_suffix('*')
+                .is_some_and(|prefix| value.starts_with(prefix))
+    })
+}
+
+fn signature_decision(backend: &str) -> Value {
+    json!({
+        "decision": "verified",
+        "algorithm": "hmac_sha256_random_plus_body",
+        "backend": backend,
+    })
+}
+
+fn replay_details(message: &NextcloudTalkInboundMessage, decision: WebhookReplayDecision) -> Value {
+    json!({
+        "decision": decision.as_str(),
+        "mode": "in_memory",
+        "key": {
+            "account_id_hash": hash_identifier(&message.account_id),
+            "room_token_hash": hash_identifier(&message.room_token),
+            "message_id": message.message_id,
+        },
+    })
+}
+
+fn sanitize_inbound_text(text: &str) -> String {
+    text.chars()
+        .map(|ch| {
+            if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+                ' '
+            } else {
+                ch
+            }
+        })
+        .collect()
+}
+
+fn hash_identifier(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("sha256:{}", &digest[..16])
+}
+
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         OP_HEALTH
@@ -1023,6 +2022,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         | OP_POLL_CONVERSATION_EVENTS
         | OP_LIST_PARTICIPANTS
         | OP_GET_CALL_STATE => CAP_READ,
+        OP_INGEST_WEBHOOK => CAP_WEBHOOK,
         OP_SEND_MESSAGE | OP_SET_READ_MARKER | OP_ADD_REACTION | OP_DELETE_REACTION
         | OP_SHARE_FILE => CAP_WRITE,
         OP_CREATE_CONVERSATION | OP_DELETE_MESSAGE | OP_ADD_PARTICIPANT | OP_REMOVE_PARTICIPANT => {
@@ -1058,6 +2058,8 @@ impl FcpConnector for NextcloudTalkConnector {
             message: format!("Failed to create Nextcloud Talk client: {error}"),
         })?;
 
+        self.webhook_replay = Mutex::new(NextcloudTalkWebhookReplayState::default());
+        self.webhook_rate = Mutex::new(NextcloudTalkWebhookRateState::default());
         self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
@@ -1087,12 +2089,7 @@ impl FcpConnector for NextcloudTalkConnector {
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
             nonce: req.nonce,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(webhook_event_caps()),
             auth_caps: None,
             op_catalog_hash: None,
         })
@@ -1202,15 +2199,10 @@ impl FcpConnector for NextcloudTalkConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: operations_info(),
-            events: Vec::new(),
+            events: vec![webhook_event_info()],
             resource_types: Vec::new(),
             auth_caps: None,
-            event_caps: Some(EventCaps {
-                streaming: false,
-                replay: false,
-                min_buffer_events: 0,
-                requires_ack: false,
-            }),
+            event_caps: Some(webhook_event_caps()),
         }
     }
 
@@ -1350,6 +2342,10 @@ impl NextcloudTalkConnector {
                     "not_modified": page.not_modified,
                 })
             }
+            OP_INGEST_WEBHOOK => {
+                let input: HostForwardedWebhookInput = parse_input(input, operation_name)?;
+                self.ingest_host_forwarded_webhook(&input, config)?
+            }
             OP_SEND_MESSAGE => {
                 let input: SendMessageInput = parse_input(input, operation_name)?;
                 let room_ref = parse_conversation_ref(input.token)?;
@@ -1466,11 +2462,14 @@ impl NextcloudTalkConnector {
 
 #[cfg(test)]
 mod tests {
+    use std::process::Command;
+
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::InstanceId;
+    use hmac::Mac;
     use wiremock::matchers::{body_string_contains, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1485,6 +2484,7 @@ mod tests {
                 CapabilityId::from_static(CAP_READ),
                 CapabilityId::from_static(CAP_WRITE),
                 CapabilityId::from_static(CAP_MANAGE),
+                CapabilityId::from_static(CAP_WEBHOOK),
             ],
             host: None,
             transport_caps: None,
@@ -1565,6 +2565,185 @@ mod tests {
         CapabilityToken::from_raw(cose)
     }
 
+    fn activity_body(event_type: &str, room: &str, sender: &str, message: &str) -> String {
+        activity_body_with_id(event_type, room, sender, "msg-42", message)
+    }
+
+    fn activity_body_with_id(
+        event_type: &str,
+        room: &str,
+        sender: &str,
+        message_id: &str,
+        message: &str,
+    ) -> String {
+        json!({
+            "type": event_type,
+            "actor": {
+                "type": "Person",
+                "id": sender,
+                "name": "Alice"
+            },
+            "object": {
+                "type": "Note",
+                "id": message_id,
+                "name": "fallback text",
+                "content": message,
+                "mediaType": "text/plain"
+            },
+            "target": {
+                "type": "Collection",
+                "id": room,
+                "name": "Engineering"
+            }
+        })
+        .to_string()
+    }
+
+    fn nextcloud_signature(signing_material: &str, random: &str, body: &str) -> String {
+        let mut mac =
+            HmacSha256::new_from_slice(signing_material.as_bytes()).expect("HMAC accepts test key");
+        mac.update(random.as_bytes());
+        mac.update(body.as_bytes());
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn signed_webhook_input(signing_material: &str, body: &str) -> serde_json::Value {
+        let random = "random-nonce-123";
+        json!({
+            "headers": {
+                "X-Nextcloud-Talk-Signature": nextcloud_signature(signing_material, random, body),
+                "X-Nextcloud-Talk-Random": random,
+                "X-Nextcloud-Talk-Backend": "https://cloud.example.com"
+            },
+            "body": body,
+            "body_size_bytes": 512,
+            "body_read_elapsed_ms": 10,
+            "source_id": "loopback-forwarder",
+            "delivery_id": "delivery-1"
+        })
+    }
+
+    async fn configured_webhook_connector(
+        config: serde_json::Value,
+    ) -> (NextcloudTalkConnector, Ed25519SigningKey) {
+        let mut connector = NextcloudTalkConnector::new();
+        connector.configure(config).await.expect("configure");
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut handshake = base_handshake();
+        handshake.host_public_key = verifying_key.to_bytes();
+        connector.handshake(handshake).await.expect("handshake");
+        (connector, signing_key)
+    }
+
+    fn webhook_config(signing_material: &str) -> serde_json::Value {
+        json!({
+            "server_url": "https://cloud.example.com",
+            "account_id": "work",
+            "auth": {
+                "mode": "credential_id",
+                "credential_id": "ocs_cred"
+            },
+            "webhook": {
+                "enabled": true,
+                "bot_secret": {
+                    "source": "inline",
+                    "secret": signing_material
+                },
+                "backend_allowlist": ["https://cloud.example.com"],
+                "auth_failure_limit_per_minute": 1,
+                "sender_limit_per_minute": 10,
+                "replay_ttl_secs": 60,
+                "replay_max_entries": 16
+            },
+            "inbound_policy": {
+                "dm_policy": "pairing",
+                "group_policy": "allowlist",
+                "group_allow_from": ["alice"],
+                "rooms": ["room123"],
+                "mention_required_rooms": ["room123"]
+            }
+        })
+    }
+
+    fn git_revision() -> String {
+        Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| String::from_utf8(output.stdout).ok())
+            .map(|stdout| stdout.trim().to_string())
+            .filter(|revision| !revision.is_empty())
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+
+    fn webhook_evidence_record(
+        scenario: &str,
+        account_id: &str,
+        room_token: &str,
+        message_id: &str,
+        latency_ms: u128,
+        result: Result<&Value, &FcpError>,
+        skip_reason: Option<&str>,
+    ) -> Value {
+        let (status, signature_decision, replay_decision, policy_decision, event_id, error) =
+            match result {
+                Ok(value) => (
+                    value["status"].clone(),
+                    value["signature"]["decision"].clone(),
+                    value["replay"]["decision"].clone(),
+                    value["policy"]["decision"].clone(),
+                    value["event"]["delivery_id"].clone(),
+                    Value::Null,
+                ),
+                Err(error) => (
+                    Value::String("error".to_string()),
+                    Value::String("error_before_or_during_verification".to_string()),
+                    Value::String("not_committed".to_string()),
+                    Value::String("error".to_string()),
+                    Value::Null,
+                    Value::String(error.to_string()),
+                ),
+            };
+        json!({
+            "record_type": "nextcloud_talk_host_forwarded_webhook_e2e",
+            "scenario": scenario,
+            "command_line": std::env::args().collect::<Vec<_>>().join(" "),
+            "git_revision": git_revision(),
+            "account_id_hash": hash_identifier(account_id),
+            "room_token_hash": hash_identifier(room_token),
+            "message_id": message_id,
+            "signature_decision": signature_decision,
+            "replay_decision": replay_decision,
+            "policy_decision": policy_decision,
+            "status": status,
+            "event_id": event_id,
+            "latency_ms": latency_ms,
+            "cleanup": {
+                "hosted_listener": false,
+                "replay_workers": 0,
+                "shutdown_required": false
+            },
+            "skip_reason": skip_reason,
+            "error": error,
+        })
+    }
+
+    fn encode_jsonl(records: &[Value]) -> String {
+        records
+            .iter()
+            .map(|record| serde_json::to_string(record).expect("serialize webhook evidence"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn maybe_write_webhook_jsonl(jsonl: &str) {
+        if let Some(path) = std::env::var_os("NEXTCLOUD_TALK_WEBHOOK_E2E_JSONL_OUT") {
+            std::fs::write(path, jsonl).expect("write webhook evidence JSONL");
+        }
+    }
+
     #[test]
     fn doctor_before_configure_fails() {
         let connector = NextcloudTalkConnector::new();
@@ -1624,7 +2803,7 @@ mod tests {
                     "enabled": true,
                     "bot_secret": {
                         "source": "inline",
-                        "secret": "super-secret-webhook-material"
+                        "secret": "super-private-webhook-material"
                     },
                     "backend_allowlist": ["https://cloud.example.com"]
                 },
@@ -1642,7 +2821,7 @@ mod tests {
         assert!(report.passed);
         assert!(encoded.contains("webhook_ready"));
         assert!(encoded.contains("sha256:"));
-        assert!(!encoded.contains("super-secret-webhook-material"));
+        assert!(!encoded.contains("super-private-webhook-material"));
         assert!(report.checks.iter().any(|check| {
             check.name == "webhook_readiness"
                 && check
@@ -1714,8 +2893,9 @@ mod tests {
     #[test]
     fn introspect_exposes_health_operation() {
         let connector = NextcloudTalkConnector::new();
-        let operations = connector.introspect().operations;
-        assert_eq!(operations.len(), 16);
+        let introspection = connector.introspect();
+        let operations = introspection.operations;
+        assert_eq!(operations.len(), 17);
         assert!(operations.iter().any(|op| op.id.as_str() == OP_HEALTH));
         assert!(
             operations
@@ -1727,6 +2907,722 @@ mod tests {
                 .iter()
                 .any(|op| op.id.as_str() == OP_POLL_CONVERSATION_EVENTS)
         );
+        assert!(
+            operations
+                .iter()
+                .any(|op| op.id.as_str() == OP_INGEST_WEBHOOK)
+        );
+        assert!(introspection.event_caps.expect("event caps").replay);
+        assert_eq!(introspection.events[0].topic, EVENT_WEBHOOK_MESSAGE);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_ingest_valid_signature_emits_event_and_dedupes() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let body = activity_body("Create", "room123", "alice", "hello @flywheel");
+        let input = signed_webhook_input(signing_material, &body);
+
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let response = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                input.clone(),
+            ))
+            .await
+            .expect("webhook ingest");
+        let result = response.result.as_ref().expect("webhook result");
+        assert_eq!(result["status"], "processed");
+        assert_eq!(result["event"]["topic"], EVENT_WEBHOOK_MESSAGE);
+        assert_eq!(result["event"]["signature"]["decision"], "verified");
+        assert_eq!(result["event"]["replay"]["decision"], "claimed");
+        assert_eq!(result["event"]["policy"]["decision"], "allowed");
+        assert!(
+            !serde_json::to_string(result)
+                .expect("result json")
+                .contains(signing_material)
+        );
+
+        let duplicate_grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let duplicate = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                duplicate_grant,
+                input,
+            ))
+            .await
+            .expect("duplicate webhook ingest");
+        let duplicate_result = duplicate.result.as_ref().expect("duplicate result");
+        assert_eq!(duplicate_result["status"], "duplicate");
+        assert!(duplicate_result["event"].is_null());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_ingest_rejects_missing_headers_bad_backend_and_bad_signature() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let body = activity_body("Create", "room123", "alice", "hello @flywheel");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let missing_headers = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                json!({ "headers": {}, "body": body }),
+            ))
+            .await
+            .expect_err("missing headers reject");
+        assert!(matches!(missing_headers, FcpError::InvalidRequest { .. }));
+
+        let body = activity_body("Create", "room123", "alice", "hello @flywheel");
+        let mut bad_backend = signed_webhook_input(signing_material, &body);
+        bad_backend["headers"]["X-Nextcloud-Talk-Backend"] = json!("https://evil.example.com");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let backend_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                bad_backend,
+            ))
+            .await
+            .expect_err("backend reject");
+        assert!(matches!(backend_error, FcpError::Unauthorized { .. }));
+
+        let mut bad_signature = signed_webhook_input(signing_material, &body);
+        bad_signature["headers"]["X-Nextcloud-Talk-Signature"] = json!("00");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let signature_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                bad_signature.clone(),
+            ))
+            .await
+            .expect_err("bad signature reject");
+        assert!(matches!(signature_error, FcpError::Unauthorized { .. }));
+
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let rate_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                bad_signature,
+            ))
+            .await
+            .expect_err("bad signature rate limited");
+        assert!(matches!(rate_error, FcpError::RateLimited { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_ingest_enforces_body_budgets_and_payload_shape() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let body = activity_body("Create", "room123", "alice", "hello @flywheel");
+        let mut oversized = signed_webhook_input(signing_material, &body);
+        oversized["body_size_bytes"] = json!(2_000_000);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let size_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                oversized,
+            ))
+            .await
+            .expect_err("oversized body reject");
+        assert!(matches!(size_error, FcpError::ResourceExhausted { .. }));
+
+        let mut timed_out = signed_webhook_input(signing_material, &body);
+        timed_out["body_read_elapsed_ms"] = json!(10_000);
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let timeout_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                timed_out,
+            ))
+            .await
+            .expect_err("body timeout reject");
+        assert!(matches!(timeout_error, FcpError::UpstreamTimeout { .. }));
+
+        let malformed_body = "{not-json";
+        let random = "random-nonce-123";
+        let malformed = json!({
+            "headers": {
+                "X-Nextcloud-Talk-Signature": nextcloud_signature(signing_material, random, malformed_body),
+                "X-Nextcloud-Talk-Random": random,
+                "X-Nextcloud-Talk-Backend": "https://cloud.example.com"
+            },
+            "body": malformed_body
+        });
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let json_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                malformed,
+            ))
+            .await
+            .expect_err("malformed JSON reject");
+        assert!(matches!(json_error, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_ingest_handles_non_create_pairing_policy_and_group_denials() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let update = signed_webhook_input(
+            signing_material,
+            &activity_body("Update", "room123", "alice", "hello @flywheel"),
+        );
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let response = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                update,
+            ))
+            .await
+            .expect("non-create ignored");
+        assert_eq!(
+            response.result.as_ref().expect("result")["status"],
+            "ignored"
+        );
+
+        let dm = signed_webhook_input(
+            signing_material,
+            &activity_body("Create", "room-dm", "alice", "hello privately"),
+        );
+        let mut dm = dm;
+        dm["room_kind"] = json!("dm");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let response = connector
+            .invoke(base_invoke(connector.id(), OP_INGEST_WEBHOOK, grant, dm))
+            .await
+            .expect("DM pairing challenge");
+        let result = response.result.as_ref().expect("dm result");
+        assert_eq!(result["status"], "pairing_required");
+        assert!(result["event"].is_null());
+
+        let denied_room = signed_webhook_input(
+            signing_material,
+            &activity_body("Create", "unlisted", "alice", "hello @flywheel"),
+        );
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let room_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                denied_room,
+            ))
+            .await
+            .expect_err("room denied");
+        assert!(matches!(room_error, FcpError::Unauthorized { .. }));
+
+        let missing_mention = signed_webhook_input(
+            signing_material,
+            &activity_body_with_id(
+                "Create",
+                "room123",
+                "alice",
+                "msg-44",
+                "hello without mention",
+            ),
+        );
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let mention_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                missing_mention,
+            ))
+            .await
+            .expect_err("mention denied");
+        assert!(matches!(mention_error, FcpError::Unauthorized { .. }));
+
+        let command = signed_webhook_input(
+            signing_material,
+            &activity_body_with_id("Create", "room123", "alice", "msg-45", "/deploy @flywheel"),
+        );
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let command_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                command,
+            ))
+            .await
+            .expect_err("command denied");
+        assert!(matches!(command_error, FcpError::Unauthorized { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_replay_releases_retryable_and_commits_nonretryable_dispatch_results() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let body = activity_body("Create", "room123", "alice", "hello @flywheel");
+        let mut retryable = signed_webhook_input(signing_material, &body);
+        retryable["dispatch_outcome"] = json!("retryable_error");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let retryable_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                retryable,
+            ))
+            .await
+            .expect_err("retryable dispatch error");
+        assert!(matches!(
+            retryable_error,
+            FcpError::External {
+                retryable: true,
+                ..
+            }
+        ));
+
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let response = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                signed_webhook_input(signing_material, &body),
+            ))
+            .await
+            .expect("released replay can process");
+        assert_eq!(
+            response.result.as_ref().expect("result")["status"],
+            "processed"
+        );
+
+        let nonretry_body =
+            activity_body_with_id("Create", "room123", "alice", "msg-43", "again @flywheel");
+        let mut nonretryable = signed_webhook_input(signing_material, &nonretry_body);
+        nonretryable["dispatch_outcome"] = json!("nonretryable_error");
+        nonretryable["delivery_id"] = json!("delivery-2");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let nonretry_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                nonretryable,
+            ))
+            .await
+            .expect_err("nonretryable dispatch error");
+        assert!(matches!(
+            nonretry_error,
+            FcpError::External {
+                retryable: false,
+                ..
+            }
+        ));
+
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let duplicate = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                signed_webhook_input(signing_material, &nonretry_body),
+            ))
+            .await
+            .expect("committed nonretryable replay should dedupe");
+        assert_eq!(
+            duplicate.result.as_ref().expect("duplicate")["status"],
+            "duplicate"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn webhook_ingest_no_mock_evidence_jsonl_covers_forwarded_ingress() {
+        let signing_material = "webhook-shared-material";
+        let (connector, signing_key) =
+            configured_webhook_connector(webhook_config(signing_material)).await;
+        let mut records = Vec::new();
+
+        let scenarios = [
+            (
+                "success",
+                "room123",
+                "msg-100",
+                signed_webhook_input(
+                    signing_material,
+                    &activity_body_with_id(
+                        "Create",
+                        "room123",
+                        "alice",
+                        "msg-100",
+                        "hello @flywheel",
+                    ),
+                ),
+            ),
+            (
+                "missing_headers",
+                "room123",
+                "msg-101",
+                json!({
+                    "headers": {},
+                    "body": activity_body_with_id(
+                        "Create",
+                        "room123",
+                        "alice",
+                        "msg-101",
+                        "hello @flywheel",
+                    )
+                }),
+            ),
+            ("malformed_payload", "room123", "msg-102", {
+                let body = "{not-json";
+                let random = "random-nonce-123";
+                json!({
+                    "headers": {
+                        "X-Nextcloud-Talk-Signature": nextcloud_signature(signing_material, random, body),
+                        "X-Nextcloud-Talk-Random": random,
+                        "X-Nextcloud-Talk-Backend": "https://cloud.example.com"
+                    },
+                    "body": body
+                })
+            }),
+            (
+                "disallowed_room",
+                "blocked-room",
+                "msg-103",
+                signed_webhook_input(
+                    signing_material,
+                    &activity_body_with_id(
+                        "Create",
+                        "blocked-room",
+                        "alice",
+                        "msg-103",
+                        "hello @flywheel",
+                    ),
+                ),
+            ),
+            (
+                "missing_mention",
+                "room123",
+                "msg-104",
+                signed_webhook_input(
+                    signing_material,
+                    &activity_body_with_id(
+                        "Create",
+                        "room123",
+                        "alice",
+                        "msg-104",
+                        "hello without mention",
+                    ),
+                ),
+            ),
+            ("pairing_challenge", "room-dm", "msg-105", {
+                let mut input = signed_webhook_input(
+                    signing_material,
+                    &activity_body_with_id(
+                        "Create",
+                        "room-dm",
+                        "alice",
+                        "msg-105",
+                        "hello privately",
+                    ),
+                );
+                input["room_kind"] = json!("dm");
+                input
+            }),
+            ("timeout", "room123", "msg-106", {
+                let mut input = signed_webhook_input(
+                    signing_material,
+                    &activity_body_with_id(
+                        "Create",
+                        "room123",
+                        "alice",
+                        "msg-106",
+                        "hello @flywheel",
+                    ),
+                );
+                input["body_read_elapsed_ms"] = json!(10_000);
+                input
+            }),
+        ];
+
+        for (scenario, room_token, message_id, input) in scenarios {
+            let grant = generate_valid_token(
+                &signing_key,
+                CAP_WEBHOOK,
+                &[OP_INGEST_WEBHOOK],
+                &connector.base.instance_id,
+            );
+            let start = std::time::Instant::now();
+            let response = connector
+                .invoke(base_invoke(connector.id(), OP_INGEST_WEBHOOK, grant, input))
+                .await;
+            let latency_ms = start.elapsed().as_millis();
+            let record = match response {
+                Ok(response) => {
+                    let value = response.result.as_ref().expect("webhook result");
+                    webhook_evidence_record(
+                        scenario,
+                        "work",
+                        room_token,
+                        message_id,
+                        latency_ms,
+                        Ok(value),
+                        None,
+                    )
+                }
+                Err(error) => webhook_evidence_record(
+                    scenario,
+                    "work",
+                    room_token,
+                    message_id,
+                    latency_ms,
+                    Err(&error),
+                    None,
+                ),
+            };
+            records.push(record);
+        }
+
+        let duplicate_input = signed_webhook_input(
+            signing_material,
+            &activity_body_with_id("Create", "room123", "alice", "msg-100", "hello @flywheel"),
+        );
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let start = std::time::Instant::now();
+        let duplicate = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                duplicate_input,
+            ))
+            .await
+            .expect("duplicate evidence invoke");
+        records.push(webhook_evidence_record(
+            "duplicate_replay",
+            "work",
+            "room123",
+            "msg-100",
+            start.elapsed().as_millis(),
+            Ok(duplicate.result.as_ref().expect("duplicate result")),
+            None,
+        ));
+
+        let mut bad_signature = signed_webhook_input(
+            signing_material,
+            &activity_body_with_id("Create", "room123", "alice", "msg-107", "hello @flywheel"),
+        );
+        bad_signature["headers"]["X-Nextcloud-Talk-Signature"] = json!("00");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let start = std::time::Instant::now();
+        let signature_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                bad_signature,
+            ))
+            .await
+            .expect_err("bad signature evidence");
+        records.push(webhook_evidence_record(
+            "bad_signature",
+            "work",
+            "room123",
+            "msg-107",
+            start.elapsed().as_millis(),
+            Err(&signature_error),
+            None,
+        ));
+
+        let mut invalid_backend = signed_webhook_input(
+            signing_material,
+            &activity_body_with_id("Create", "room123", "alice", "msg-108", "hello @flywheel"),
+        );
+        invalid_backend["headers"]["X-Nextcloud-Talk-Backend"] = json!("https://evil.example.com");
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WEBHOOK,
+            &[OP_INGEST_WEBHOOK],
+            &connector.base.instance_id,
+        );
+        let start = std::time::Instant::now();
+        let backend_error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_INGEST_WEBHOOK,
+                grant,
+                invalid_backend,
+            ))
+            .await
+            .expect_err("invalid backend evidence");
+        records.push(webhook_evidence_record(
+            "invalid_backend",
+            "work",
+            "room123",
+            "msg-108",
+            start.elapsed().as_millis(),
+            Err(&backend_error),
+            None,
+        ));
+
+        let jsonl = encode_jsonl(&records);
+        assert!(!jsonl.trim().is_empty());
+        assert!(!jsonl.contains(signing_material));
+        assert!(jsonl.contains("nextcloud_talk_host_forwarded_webhook_e2e"));
+        assert!(jsonl.contains("duplicate_replay"));
+        assert!(jsonl.contains("pairing_challenge"));
+        for line in jsonl.lines() {
+            let value: Value = serde_json::from_str(line).expect("JSONL line should parse");
+            assert_eq!(
+                value["record_type"],
+                "nextcloud_talk_host_forwarded_webhook_e2e"
+            );
+            assert!(
+                value["command_line"]
+                    .as_str()
+                    .is_some_and(|line| !line.is_empty())
+            );
+            assert!(
+                value["git_revision"]
+                    .as_str()
+                    .is_some_and(|revision| !revision.is_empty())
+            );
+            assert!(
+                value["account_id_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
+            );
+            assert!(
+                value["room_token_hash"]
+                    .as_str()
+                    .is_some_and(|hash| hash.starts_with("sha256:"))
+            );
+            assert!(value.get("signature_decision").is_some());
+            assert!(value.get("replay_decision").is_some());
+            assert!(value.get("policy_decision").is_some());
+            assert!(value.get("event_id").is_some());
+            assert!(value.get("latency_ms").is_some());
+            assert!(value.get("cleanup").is_some());
+            assert!(value.get("skip_reason").is_some());
+        }
+        maybe_write_webhook_jsonl(&jsonl);
     }
 
     #[fcp_async_core::runtime::test]
@@ -1835,7 +3731,7 @@ mod tests {
                 "auth": {
                     "mode": "app_password",
                     "username": "alice",
-                    "app_password": "secret"
+                    "app_password": "app-material"
                 },
                 "network": { "allow_private_networks": true }
             }))
@@ -1909,7 +3805,7 @@ mod tests {
                 "auth": {
                     "mode": "app_password",
                     "username": "alice",
-                    "app_password": "secret"
+                    "app_password": "app-material"
                 },
                 "network": { "allow_private_networks": true }
             }))
@@ -1990,7 +3886,7 @@ mod tests {
                 "auth": {
                     "mode": "app_password",
                     "username": "alice",
-                    "app_password": "secret"
+                    "app_password": "app-material"
                 },
                 "network": { "allow_private_networks": true }
             }))

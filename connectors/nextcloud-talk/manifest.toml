@@ -130,6 +130,23 @@ when_to_use = "Use this as the explicit polling fallback when you need event env
 common_mistakes = ["Forgetting to persist the returned cursor between polling iterations.", "Expecting this passive polling surface to also advance read markers or notification state."]
 related = ["nextcloud_talk.get_messages", "nextcloud_talk.set_read_marker"]
 
+[provides.operations."nextcloud_talk.ingest_webhook"]
+description = "Verify and normalize a host-forwarded Nextcloud Talk bot webhook"
+capability = "nextcloud_talk.webhook"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "strict"
+[provides.operations."nextcloud_talk.ingest_webhook".input_schema]
+type = "object"
+required = ["headers", "body"]
+[provides.operations."nextcloud_talk.ingest_webhook".output_schema]
+type = "object"
+[provides.operations."nextcloud_talk.ingest_webhook".ai_hints]
+when_to_use = "Use only when fcp-host forwards the raw headers and raw body from a Nextcloud Talk bot webhook; the connector still does not open a network listener."
+common_mistakes = ["Forwarding parsed JSON instead of the exact raw body covered by the HMAC.", "Expecting credential_id webhook secrets to verify locally before host secret injection is implemented.", "Treating replay duplicate responses as fresh events."]
+related = ["nextcloud_talk.poll_conversation_events"]
+
 [provides.operations."nextcloud_talk.send_message"]
 description = "Post a message into a Nextcloud Talk conversation"
 capability = "nextcloud_talk.write"

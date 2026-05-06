@@ -4891,6 +4891,7 @@ dependencies = [
  "fcp-prelude",
  "fcp-sdk",
  "hex",
+ "hmac 0.12.1",
  "percent-encoding",
  "reqwest 0.13.2",
  "serde",

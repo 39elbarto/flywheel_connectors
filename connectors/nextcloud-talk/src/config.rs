@@ -12,6 +12,12 @@ use serde_json::Value;
 
 const DEFAULT_ACCOUNT_ID: &str = "default";
 const DEFAULT_WEBHOOK_PUBLIC_PATH: &str = "/nextcloud-talk-webhook";
+const DEFAULT_WEBHOOK_MAX_BODY_BYTES: u64 = 1_048_576;
+const DEFAULT_WEBHOOK_BODY_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_WEBHOOK_AUTH_FAILURE_LIMIT_PER_MINUTE: u32 = 10;
+const DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE: u32 = 60;
+const DEFAULT_WEBHOOK_REPLAY_TTL_SECS: u64 = 86_400;
+const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES: usize = 1_000;
 
 /// Nextcloud Talk connector configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +107,30 @@ pub struct NextcloudTalkWebhookConfig {
     /// Allowed Nextcloud backend/base URLs accepted from webhook headers.
     #[serde(default)]
     pub backend_allowlist: Vec<String>,
+
+    /// Maximum host-forwarded body size accepted before signature verification.
+    #[serde(default = "default_webhook_max_body_bytes")]
+    pub max_body_bytes: u64,
+
+    /// Maximum host-forwarded body read duration reported by the host.
+    #[serde(default = "default_webhook_body_timeout_ms")]
+    pub body_timeout_ms: u64,
+
+    /// Invalid-auth attempts accepted per minute per source before throttling.
+    #[serde(default = "default_webhook_auth_failure_limit_per_minute")]
+    pub auth_failure_limit_per_minute: u32,
+
+    /// Authenticated events accepted per minute per sender before throttling.
+    #[serde(default = "default_webhook_sender_limit_per_minute")]
+    pub sender_limit_per_minute: u32,
+
+    /// In-memory replay entry TTL when persistent replay storage is not configured.
+    #[serde(default = "default_webhook_replay_ttl_secs")]
+    pub replay_ttl_secs: u64,
+
+    /// Maximum in-memory replay entries retained without persistent storage.
+    #[serde(default = "default_webhook_replay_max_entries")]
+    pub replay_max_entries: usize,
 }
 
 impl Default for NextcloudTalkWebhookConfig {
@@ -111,6 +141,12 @@ impl Default for NextcloudTalkWebhookConfig {
             public_url: None,
             bot_secret: None,
             backend_allowlist: Vec::new(),
+            max_body_bytes: default_webhook_max_body_bytes(),
+            body_timeout_ms: default_webhook_body_timeout_ms(),
+            auth_failure_limit_per_minute: default_webhook_auth_failure_limit_per_minute(),
+            sender_limit_per_minute: default_webhook_sender_limit_per_minute(),
+            replay_ttl_secs: default_webhook_replay_ttl_secs(),
+            replay_max_entries: default_webhook_replay_max_entries(),
         }
     }
 }
@@ -148,6 +184,14 @@ pub struct NextcloudTalkInboundPolicy {
     /// Allowed room tokens or wildcard patterns.
     #[serde(default)]
     pub rooms: Vec<String>,
+
+    /// Room tokens that are explicitly disabled even if broader allowlists match.
+    #[serde(default)]
+    pub disabled_rooms: Vec<String>,
+
+    /// Group room tokens that require an explicit bot mention before dispatch.
+    #[serde(default)]
+    pub mention_required_rooms: Vec<String>,
 }
 
 impl Default for NextcloudTalkInboundPolicy {
@@ -158,6 +202,8 @@ impl Default for NextcloudTalkInboundPolicy {
             allow_from: Vec::new(),
             group_allow_from: Vec::new(),
             rooms: Vec::new(),
+            disabled_rooms: Vec::new(),
+            mention_required_rooms: Vec::new(),
         }
     }
 }
@@ -207,6 +253,30 @@ const fn default_long_poll_timeout_secs() -> u64 {
 
 fn default_webhook_public_path() -> String {
     DEFAULT_WEBHOOK_PUBLIC_PATH.to_string()
+}
+
+const fn default_webhook_max_body_bytes() -> u64 {
+    DEFAULT_WEBHOOK_MAX_BODY_BYTES
+}
+
+const fn default_webhook_body_timeout_ms() -> u64 {
+    DEFAULT_WEBHOOK_BODY_TIMEOUT_MS
+}
+
+const fn default_webhook_auth_failure_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_AUTH_FAILURE_LIMIT_PER_MINUTE
+}
+
+const fn default_webhook_sender_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE
+}
+
+const fn default_webhook_replay_ttl_secs() -> u64 {
+    DEFAULT_WEBHOOK_REPLAY_TTL_SECS
+}
+
+const fn default_webhook_replay_max_entries() -> usize {
+    DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES
 }
 
 fn default_dm_policy() -> String {
@@ -418,12 +488,48 @@ impl NextcloudTalkWebhookConfig {
             let parsed = parse_http_url("webhook.public_url", url)?;
             config.validate_url_policy("webhook.public_url", &parsed)?;
         }
-        if let Some(secret) = &self.bot_secret {
-            secret.validate()?;
+        if let Some(secret_ref) = &self.bot_secret {
+            secret_ref.validate()?;
         }
         for backend in &self.backend_allowlist {
             let parsed = parse_http_url("webhook.backend_allowlist", backend)?;
             config.validate_url_policy("webhook.backend_allowlist", &parsed)?;
+        }
+        if self.max_body_bytes == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.max_body_bytes must be greater than zero".into(),
+            });
+        }
+        if self.body_timeout_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.body_timeout_ms must be greater than zero".into(),
+            });
+        }
+        if self.auth_failure_limit_per_minute == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.auth_failure_limit_per_minute must be greater than zero".into(),
+            });
+        }
+        if self.sender_limit_per_minute == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.sender_limit_per_minute must be greater than zero".into(),
+            });
+        }
+        if self.replay_ttl_secs == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.replay_ttl_secs must be greater than zero".into(),
+            });
+        }
+        if self.replay_max_entries == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook.replay_max_entries must be greater than zero".into(),
+            });
         }
         Ok(())
     }
@@ -452,7 +558,9 @@ impl NextcloudTalkWebhookConfig {
 impl NextcloudTalkSecretRef {
     fn validate(&self) -> FcpResult<()> {
         match self {
-            Self::Inline { secret } => validate_non_empty("webhook.bot_secret.secret", secret),
+            Self::Inline { secret: material } => {
+                validate_non_empty("webhook.bot_secret.secret", material)
+            }
             Self::CredentialId { credential_id } => {
                 validate_non_empty("webhook.bot_secret.credential_id", credential_id)
             }
@@ -472,8 +580,17 @@ impl NextcloudTalkSecretRef {
     #[must_use]
     pub fn fingerprint_material(&self) -> &str {
         match self {
-            Self::Inline { secret } => secret,
+            Self::Inline { secret: material } => material,
             Self::CredentialId { credential_id } => credential_id,
+        }
+    }
+
+    /// Return inline secret material when the connector can verify webhooks locally.
+    #[must_use]
+    pub fn inline_secret(&self) -> Option<&str> {
+        match self {
+            Self::Inline { secret: material } => Some(material),
+            Self::CredentialId { .. } => None,
         }
     }
 }
@@ -493,6 +610,11 @@ impl NextcloudTalkInboundPolicy {
         validate_non_empty_entries("inbound_policy.allow_from", &self.allow_from)?;
         validate_non_empty_entries("inbound_policy.group_allow_from", &self.group_allow_from)?;
         validate_non_empty_entries("inbound_policy.rooms", &self.rooms)?;
+        validate_non_empty_entries("inbound_policy.disabled_rooms", &self.disabled_rooms)?;
+        validate_non_empty_entries(
+            "inbound_policy.mention_required_rooms",
+            &self.mention_required_rooms,
+        )?;
         if self.dm_policy == "open" && self.allow_from.is_empty() {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -673,7 +795,7 @@ mod tests {
             "auth": {
                 "mode": "app_password",
                 "username": "alice",
-                "app_password": "secret"
+                "app_password": "app-material"
             }
         }))
         .expect("config should parse");
@@ -844,6 +966,83 @@ mod tests {
         assert_eq!(config.account_id(), "work");
         assert_eq!(config.webhook.readiness_label(), "webhook_ready");
         assert_eq!(config.webhook.secret_source_label(), "credential_id");
+        assert_eq!(config.webhook.max_body_bytes, 1_048_576);
+        assert_eq!(config.webhook.body_timeout_ms, 5_000);
+        assert_eq!(config.webhook.auth_failure_limit_per_minute, 10);
+        assert_eq!(config.webhook.sender_limit_per_minute, 60);
+        assert_eq!(config.webhook.replay_ttl_secs, 86_400);
+        assert_eq!(config.webhook.replay_max_entries, 1_000);
+    }
+
+    #[test]
+    fn parse_webhook_ingress_limits_and_room_policy() {
+        let config = NextcloudTalkConfig::from_value(serde_json::json!({
+            "server_url": "https://cloud.example.com",
+            "auth": {
+                "mode": "credential_id",
+                "credential_id": "ocs_cred"
+            },
+            "webhook": {
+                "enabled": true,
+                "bot_secret": {
+                    "source": "inline",
+                    "secret": "webhook-shared-material"
+                },
+                "max_body_bytes": 4096,
+                "body_timeout_ms": 250,
+                "auth_failure_limit_per_minute": 3,
+                "sender_limit_per_minute": 5,
+                "replay_ttl_secs": 30,
+                "replay_max_entries": 8
+            },
+            "inbound_policy": {
+                "dm_policy": "allowlist",
+                "allow_from": ["alice"],
+                "group_policy": "allowlist",
+                "group_allow_from": ["bob"],
+                "rooms": ["room123"],
+                "disabled_rooms": ["room-disabled"],
+                "mention_required_rooms": ["room123"]
+            }
+        }))
+        .expect("webhook limits should parse");
+
+        assert_eq!(config.webhook.max_body_bytes, 4096);
+        assert_eq!(config.webhook.body_timeout_ms, 250);
+        assert_eq!(config.webhook.auth_failure_limit_per_minute, 3);
+        assert_eq!(config.webhook.sender_limit_per_minute, 5);
+        assert_eq!(config.webhook.replay_ttl_secs, 30);
+        assert_eq!(config.webhook.replay_max_entries, 8);
+        assert_eq!(
+            config.inbound_policy.disabled_rooms,
+            vec!["room-disabled".to_string()]
+        );
+        assert_eq!(
+            config.inbound_policy.mention_required_rooms,
+            vec!["room123".to_string()]
+        );
+    }
+
+    #[test]
+    fn reject_zero_webhook_ingress_limits() {
+        let error = NextcloudTalkConfig::from_value(serde_json::json!({
+            "server_url": "https://cloud.example.com",
+            "auth": {
+                "mode": "credential_id",
+                "credential_id": "ocs_cred"
+            },
+            "webhook": {
+                "enabled": true,
+                "bot_secret": {
+                    "source": "inline",
+                    "secret": "webhook-shared-material"
+                },
+                "max_body_bytes": 0
+            }
+        }))
+        .expect_err("zero body limit must be rejected");
+
+        assert!(error.to_string().contains("webhook.max_body_bytes"));
     }
 
     #[test]

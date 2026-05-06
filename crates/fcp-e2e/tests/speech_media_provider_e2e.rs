@@ -40,6 +40,7 @@ async fn speech_media_provider_loopback_emits_redacted_evidence() {
     assert!(!jsonl.contains("https://media.example.test"));
     assert!(!jsonl.contains("fixture transcript"));
     assert!(!jsonl.contains("hello from fixture"));
+    assert!(!jsonl.contains("unsupported format fixture"));
     assert!(!jsonl.contains("AQIDBAU="));
     assert_eq!(fcp_e2e::scan_log_jsonl(&jsonl).error_count, 0);
 }
@@ -120,6 +121,32 @@ async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
             "model_id": "nova-3",
             "media_reference_hash": hash_label("https://media.example.test/path/rate-limit.wav"),
             "media_byte_count": Value::Null,
+            "stream_frame_count": 0_u64
+        }),
+    }));
+
+    let oversized = deepgram_invoke(
+        &rate_connector,
+        json!({
+            "audio_url": "https://media.example.test/path/oversized.wav",
+            "media_byte_count": 1_073_741_825_u64
+        }),
+    )
+    .await
+    .expect_err("oversized media fixture should fail before network I/O");
+    records.push(evidence_record(EvidenceInput {
+        provider: "deepgram",
+        operation: DEEPGRAM_TRANSCRIBE,
+        scenario_id: "deepgram_oversized_media_denial",
+        latency_ms: 0,
+        http_status: None,
+        retry_decision: "not_attempted",
+        fcp_error_mapping: classify_error(&oversized),
+        skip_reason: None,
+        details: json!({
+            "model_id": "nova-3",
+            "media_reference_hash": hash_label("https://media.example.test/path/oversized.wav"),
+            "media_byte_count": 1_073_741_825_u64,
             "stream_frame_count": 0_u64
         }),
     }));
@@ -212,7 +239,37 @@ async fn run_elevenlabs_fixture_script(records: &mut Vec<Value>) {
             "model_id": "eleven_multilingual_v2",
             "audio_content_type": speech["content_type"].clone(),
             "audio_byte_count": speech["audio_size_bytes"].clone(),
+            "output_format": "mp3_44100_128",
             "generated_text_hash": hash_label("hello from fixture"),
+            "stream_frame_count": 0_u64
+        }),
+    }));
+
+    let unsupported_format = elevenlabs_invoke(
+        &connector,
+        ELEVEN_TTS,
+        json!({
+            "voice_id": "voice-fixture",
+            "text": "unsupported format fixture",
+            "output_format": "wav"
+        }),
+    )
+    .await
+    .expect_err("unsupported output format should fail before network I/O");
+    records.push(evidence_record(EvidenceInput {
+        provider: "elevenlabs",
+        operation: ELEVEN_TTS,
+        scenario_id: "elevenlabs_unsupported_output_format",
+        latency_ms: 0,
+        http_status: None,
+        retry_decision: "not_attempted",
+        fcp_error_mapping: classify_error(&unsupported_format),
+        skip_reason: None,
+        details: json!({
+            "voice_id": "voice-fixture",
+            "model_id": "eleven_multilingual_v2",
+            "output_format": "wav",
+            "generated_text_hash": hash_label("unsupported format fixture"),
             "stream_frame_count": 0_u64
         }),
     }));
@@ -442,6 +499,7 @@ fn evidence_record(input: EvidenceInput<'_>) -> Value {
         "media_byte_count": details.get("media_byte_count").cloned().unwrap_or(Value::Null),
         "audio_content_type": details.get("audio_content_type").cloned().unwrap_or(Value::Null),
         "audio_byte_count": details.get("audio_byte_count").cloned().unwrap_or(Value::Null),
+        "output_format": details.get("output_format").cloned().unwrap_or(Value::Null),
         "transcript_char_count": details.get("transcript_char_count").cloned().unwrap_or(Value::Null),
         "voice_count": details.get("voice_count").cloned().unwrap_or(Value::Null),
         "generated_text_hash": details.get("generated_text_hash").cloned().unwrap_or(Value::Null),

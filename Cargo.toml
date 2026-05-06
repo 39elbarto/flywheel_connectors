@@ -19,6 +19,7 @@ members = [
     "crates/fcp-kernel",
     "crates/fcp-manifest",
     "crates/fcp-mesh",
+    "crates/fcp-openai-compat",
     "crates/fcp-policy",
     "crates/fcp-prelude",
     "crates/fcp-evidence",
@@ -318,6 +319,7 @@ fcp-host = { path = "crates/fcp-host" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
+fcp-openai-compat = { path = "crates/fcp-openai-compat" }
 fcp-oauth = { path = "crates/fcp-oauth" }
 fcp-policy = { path = "crates/fcp-policy" }
 fcp-prelude = { path = "crates/fcp-prelude" }

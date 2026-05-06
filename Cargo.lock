@@ -5162,6 +5162,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-openai-compat"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "fcp-async-core",
+ "futures-util",
+ "pretty_assertions",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-openrouter"
 version = "0.1.0"
 dependencies = [

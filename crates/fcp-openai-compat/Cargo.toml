@@ -1,0 +1,29 @@
+[package]
+name = "fcp-openai-compat"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+description = "OpenAI-compatible client infrastructure for FCP connectors"
+
+[lints]
+workspace = true
+
+[dependencies]
+bytes = { workspace = true }
+chrono = { workspace = true }
+fcp-async-core = { workspace = true }
+futures-util = { workspace = true }
+rand = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+pretty_assertions = { workspace = true }
+proptest = { workspace = true }
+wiremock = { workspace = true }

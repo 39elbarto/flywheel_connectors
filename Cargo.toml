@@ -45,6 +45,7 @@ members = [
     "connectors/openai",
     "connectors/openrouter",
     "connectors/telegram",
+    "connectors/voyage",
     "connectors/twitter",
     "connectors/vectordb",
     "connectors/wolfram",
@@ -322,6 +323,7 @@ fcp-cerebras = { path = "connectors/cerebras" }
 fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
 fcp-host = { path = "crates/fcp-host" }
+fcp-voyage = { path = "connectors/voyage" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }

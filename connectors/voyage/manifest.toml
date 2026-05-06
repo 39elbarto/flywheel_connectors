@@ -1,0 +1,125 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:voyage-embeddings-rerank"
+
+[connector]
+id = "fcp.voyage"
+name = "Voyage"
+version = "0.1.0"
+description = "Voyage AI connector for text embeddings, multimodal embeddings, and reranking"
+archetypes = ["request-response"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["voyage.embeddings", "voyage.rerank", "voyage.models.read", "voyage.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."voyage.embeddings.create"]
+description = "Create Voyage text embeddings through POST /v1/embeddings."
+capability = "voyage.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string", default = "voyage-3.5" }, input = {}, input_type = { type = "string", enum = ["query", "document"] }, truncation = { type = "boolean" }, output_dimension = { type = "integer", enum = [256, 512, 1024, 2048] }, output_dtype = { type = "string", enum = ["float", "int8", "uint8", "binary", "ubinary"] }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.voyageai.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."voyage.embeddings.create".ai_hints]
+when_to_use = "Use for Voyage text embeddings with query/document input_type semantics."
+common_mistakes = ["Do not log input text, API keys, or embedding vectors.", "Use input_type=query for queries and input_type=document for indexed documents."]
+examples = ['{"model":"voyage-3.5","input":"hello","input_type":"document"}']
+related = ["voyage.rerank", "voyage.models.list"]
+
+[provides.operations."voyage.embeddings.create_multimodal"]
+description = "Create Voyage multimodal embeddings through POST /v1/multimodalembeddings."
+capability = "voyage.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["inputs"], properties = { model = { type = "string", default = "voyage-multimodal-3.5" }, inputs = { type = "array", minItems = 1, maxItems = 1000 }, input_type = { type = "string", enum = ["query", "document"] }, truncation = { type = "boolean" }, output_encoding = { type = "string", enum = ["base64"] }, output_dimension = { type = "integer", enum = [256, 512, 1024, 2048] }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.voyageai.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."voyage.embeddings.create_multimodal".ai_hints]
+when_to_use = "Use for Voyage multimodal text/image retrieval vectors."
+common_mistakes = ["Do not log text, image URLs, or vector contents."]
+examples = ['{"inputs":[{"content":[{"type":"text","text":"chart"}]}],"input_type":"query"}']
+related = ["voyage.embeddings.create"]
+
+[provides.operations."voyage.rerank"]
+description = "Rerank retrieved documents through POST /v1/rerank."
+capability = "voyage.rerank"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["query", "documents"], properties = { query = { type = "string", minLength = 1 }, documents = { type = "array", minItems = 1, maxItems = 1000 }, model = { type = "string", default = "rerank-2.5" }, top_k = { type = "integer", minimum = 1 }, return_documents = { type = "boolean" }, truncation = { type = "boolean" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.voyageai.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."voyage.rerank".ai_hints]
+when_to_use = "Use after first-pass retrieval to refine candidate ordering."
+common_mistakes = ["Do not log query text or candidate document content."]
+examples = ['{"query":"q","documents":["d1","d2"],"top_k":1}']
+related = ["voyage.embeddings.create"]
+
+[provides.operations."voyage.models.list"]
+description = "List a conservative documented Voyage model catalog."
+capability = "voyage.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.voyageai.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."voyage.models.list".ai_hints]
+when_to_use = "Use to discover documented Voyage model IDs before sending embeddings or rerank requests."
+common_mistakes = ["Do not assume older model defaults remain current."]
+examples = ["{}"]
+related = ["voyage.embeddings.create", "voyage.rerank"]
+
+[provides.operations."voyage.health"]
+description = "Return connector readiness metadata and documented Voyage model catalog count."
+capability = "voyage.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.voyageai.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."voyage.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching Voyage operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["voyage.models.list"]

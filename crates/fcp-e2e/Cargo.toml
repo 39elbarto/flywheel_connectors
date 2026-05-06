@@ -18,6 +18,7 @@ e2e-full = [
     "cerebras",
     "glm",
     "groq",
+    "voyage",
     "qdrant",
     "telegram",
     "pinecone",
@@ -109,6 +110,7 @@ gcp = ["dep:fcp-gcp"]
 cerebras = ["dep:fcp-cerebras"]
 glm = ["dep:fcp-glm"]
 groq = ["dep:fcp-groq"]
+voyage = ["dep:fcp-voyage"]
 qdrant = ["dep:fcp-qdrant"]
 telegram = ["dep:fcp-telegram"]
 pinecone = ["dep:fcp-pinecone"]
@@ -217,6 +219,7 @@ fcp-gcp = { path = "../../connectors/gcp", optional = true }
 fcp-cerebras = { path = "../../connectors/cerebras", optional = true }
 fcp-glm = { path = "../../connectors/glm", optional = true }
 fcp-groq = { path = "../../connectors/groq", optional = true }
+fcp-voyage = { path = "../../connectors/voyage", optional = true }
 fcp-qdrant = { path = "../../connectors/qdrant", optional = true }
 fcp-telegram = { path = "../../connectors/telegram", optional = true }
 fcp-pinecone = { path = "../../connectors/pinecone", optional = true }

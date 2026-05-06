@@ -5,7 +5,10 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
-use reqwest::{Client, Method, RequestBuilder, StatusCode};
+use reqwest::{
+    Client, Method, RequestBuilder, StatusCode,
+    header::{HeaderMap, HeaderName, HeaderValue},
+};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -20,10 +23,11 @@ const TTS_MODEL_IDS: &[&str] = &[
     "eleven_turbo_v2_5",
     "eleven_monolingual_v1",
 ];
+const MAX_OPTIMIZE_STREAMING_LATENCY: u64 = 4;
 
 #[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    ApiKey(HeaderValue),
     CredentialId { _id: String },
 }
 
@@ -52,7 +56,9 @@ impl Auth {
 
     fn apply(&self, request: RequestBuilder) -> RequestBuilder {
         match self {
-            Self::ApiKey(key) => request.header("xi-api-key", key),
+            Self::ApiKey(value) => {
+                with_header(request, HeaderName::from_static("xi-api-key"), value)
+            }
             // Credential IDs are host-side references, not upstream auth material.
             Self::CredentialId { .. } => request,
         }
@@ -78,7 +84,7 @@ impl std::fmt::Debug for ElevenLabsConfig {
 
 impl ElevenLabsConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let upstream_key = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -91,8 +97,8 @@ impl ElevenLabsConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (upstream_key, credential_id) {
+            (Some(key), None) => Auth::ApiKey(elevenlabs_auth_header(&key)?),
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -555,6 +561,7 @@ impl ElevenlabsConnector {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(DEFAULT_TTS_MODEL_ID);
+        validate_model_id(model_id)?;
         let mut body = json!({
             "text": text,
             "model_id": model_id,
@@ -562,6 +569,7 @@ impl ElevenlabsConnector {
         copy_if_present(&mut body, input, "language_code");
         copy_if_present(&mut body, input, "pronunciation_dictionary_locators");
         copy_if_present(&mut body, input, "seed");
+        validate_apply_text_normalization(input)?;
         copy_if_present(&mut body, input, "apply_text_normalization");
         if let Some(voice_settings) = input.get("voice_settings") {
             validate_voice_settings(voice_settings)?;
@@ -575,9 +583,22 @@ impl ElevenlabsConnector {
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty());
+        if let Some(output_format) = output_format {
+            validate_output_format(output_format)?;
+        }
         let optimize_streaming_latency = input
             .get("optimize_streaming_latency")
             .and_then(Value::as_u64);
+        if let Some(latency) = optimize_streaming_latency
+            && latency > MAX_OPTIMIZE_STREAMING_LATENCY
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "optimize_streaming_latency must be between 0 and {MAX_OPTIMIZE_STREAMING_LATENCY}"
+                ),
+            });
+        }
 
         client
             .synthesize(voice_id, body, output_format, optimize_streaming_latency)
@@ -665,6 +686,72 @@ fn copy_if_present(target: &mut Value, source: &Value, field: &str) {
         if let Some(target_object) = target.as_object_mut() {
             target_object.insert(field.to_owned(), value.clone());
         }
+    }
+}
+
+fn elevenlabs_auth_header(api_key: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(api_key).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("api_key cannot be represented as a safe xi-api-key header: {error}"),
+    })
+}
+
+fn with_header(request: RequestBuilder, name: HeaderName, value: &HeaderValue) -> RequestBuilder {
+    let mut headers = HeaderMap::new();
+    headers.insert(name, value.clone());
+    request.headers(headers)
+}
+
+fn validate_model_id(model_id: &str) -> FcpResult<()> {
+    if !TTS_MODEL_IDS.contains(&model_id) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Unsupported ElevenLabs model_id: {model_id}"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_apply_text_normalization(input: &Value) -> FcpResult<()> {
+    let Some(value) = input.get("apply_text_normalization") else {
+        return Ok(());
+    };
+    let Some(mode) = value.as_str().map(str::trim) else {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "apply_text_normalization must be one of auto, on, or off".into(),
+        });
+    };
+    if !matches!(mode, "auto" | "on" | "off") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "apply_text_normalization must be one of auto, on, or off".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_output_format(output_format: &str) -> FcpResult<()> {
+    let Some((codec, rest)) = output_format.split_once('_') else {
+        return Err(unsupported_output_format(output_format));
+    };
+    if !matches!(codec, "mp3" | "pcm" | "ulaw" | "alaw" | "opus") {
+        return Err(unsupported_output_format(output_format));
+    }
+    if rest.is_empty()
+        || !rest.split('_').all(|part| {
+            !part.is_empty() && part.chars().all(|character| character.is_ascii_digit())
+        })
+    {
+        return Err(unsupported_output_format(output_format));
+    }
+    Ok(())
+}
+
+fn unsupported_output_format(output_format: &str) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Unsupported ElevenLabs output_format: {output_format}"),
     }
 }
 
@@ -850,6 +937,15 @@ mod tests {
     }
 
     #[test]
+    fn api_key_must_fit_safe_header_value() {
+        let error = ElevenLabsConfig::from_params(&json!({
+            "api_key": "bad\nkey"
+        }))
+        .expect_err("expected invalid header value");
+        assert!(error.to_string().contains("xi-api-key header"));
+    }
+
+    #[test]
     fn request_path_preserves_base_prefix() {
         let config = ElevenLabsConfig::from_params(&json!({
             "api_key": "test-key"
@@ -976,6 +1072,113 @@ mod tests {
             .expect_err("out-of-range voice settings should fail before network I/O");
 
         assert!(error.to_string().contains("voice_settings.speed"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_rejects_unsupported_output_format_before_network_io() {
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key"
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "output-format-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello",
+                    "output_format": "wav"
+                }
+            }))
+            .await
+            .expect_err("unsupported output format should fail before network I/O");
+
+        assert!(error.to_string().contains("output_format"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_rejects_unknown_model_before_network_io() {
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key"
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "model-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello",
+                    "model_id": "unknown_model"
+                }
+            }))
+            .await
+            .expect_err("unknown model should fail before network I/O");
+
+        assert!(error.to_string().contains("model_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_rejects_invalid_normalization_and_latency_before_network_io() {
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key"
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "normalization-latency-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let normalization_error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello",
+                    "apply_text_normalization": "always"
+                }
+            }))
+            .await
+            .expect_err("invalid normalization should fail before network I/O");
+        assert!(
+            normalization_error
+                .to_string()
+                .contains("apply_text_normalization")
+        );
+
+        let latency_error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.generate",
+                "input": {
+                    "voice_id": "voice-default",
+                    "text": "hello",
+                    "optimize_streaming_latency": 5_u64
+                }
+            }))
+            .await
+            .expect_err("invalid latency should fail before network I/O");
+        assert!(
+            latency_error
+                .to_string()
+                .contains("optimize_streaming_latency")
+        );
     }
 
     #[fcp_async_core::runtime::test]

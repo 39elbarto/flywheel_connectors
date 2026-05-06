@@ -3,7 +3,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
-use reqwest::{Client, Method, RequestBuilder, StatusCode};
+use reqwest::{
+    Client, Method, RequestBuilder, StatusCode,
+    header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue},
+};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -13,10 +16,11 @@ const BOUNDARY: &str =
     "This first slice focuses on prerecorded transcription through the Listen API.";
 const DEFAULT_BASE_URL: &str = "https://api.deepgram.com";
 const DEFAULT_TRANSCRIPTION_MODEL: &str = "nova-3";
+const MAX_DECLARED_MEDIA_BYTES: u64 = 1_073_741_824;
 
 #[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    ApiKey(HeaderValue),
     CredentialId { _id: String },
 }
 
@@ -45,7 +49,7 @@ impl Auth {
 
     fn apply(&self, request: RequestBuilder) -> RequestBuilder {
         match self {
-            Self::ApiKey(key) => request.header("Authorization", format!("Token {key}")),
+            Self::ApiKey(value) => with_header(request, AUTHORIZATION, value),
             Self::CredentialId { .. } => request,
         }
     }
@@ -70,7 +74,7 @@ impl std::fmt::Debug for DeepgramConfig {
 
 impl DeepgramConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let upstream_key = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
@@ -83,8 +87,8 @@ impl DeepgramConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (upstream_key, credential_id) {
+            (Some(key), None) => Auth::ApiKey(deepgram_auth_header(&key)?),
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -167,6 +171,7 @@ impl DeepgramClient {
     }
 
     async fn transcribe(&self, input: &Value) -> FcpResult<Value> {
+        validate_declared_media_size(input)?;
         let audio_url = input
             .get("audio_url")
             .and_then(Value::as_str)
@@ -175,7 +180,8 @@ impl DeepgramClient {
             .ok_or_else(|| FcpError::InvalidRequest {
                 code: 1003,
                 message: "audio_url must be a non-empty string".into(),
-            })?;
+            })
+            .and_then(sanitize_audio_url)?;
 
         let model = input
             .get("model")
@@ -378,6 +384,11 @@ impl DeepgramConnector {
                         "required": ["audio_url"],
                         "properties": {
                             "audio_url": { "type": "string" },
+                            "media_byte_count": {
+                                "type": "integer",
+                                "minimum": 1,
+                                "maximum": MAX_DECLARED_MEDIA_BYTES
+                            },
                             "model": { "type": "string", "default": DEFAULT_TRANSCRIPTION_MODEL },
                             "language": { "type": "string" },
                             "detect_language": { "type": "boolean" },
@@ -514,6 +525,73 @@ fn normalize_base_url(
     Ok(parsed.to_string().trim_end_matches('/').to_string())
 }
 
+fn sanitize_audio_url(raw_url: &str) -> FcpResult<String> {
+    let mut parsed = Url::parse(raw_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid audio_url: {error}"),
+    })?;
+    let host = parsed.host_str().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "audio_url must include a host".into(),
+    })?;
+    let is_localhost = matches!(host, "127.0.0.1" | "localhost");
+    let valid_scheme = parsed.scheme() == "https" || (parsed.scheme() == "http" && is_localhost);
+    if !valid_scheme {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "audio_url must use https (or http only for localhost tests)".into(),
+        });
+    }
+    parsed
+        .set_username("")
+        .map_err(|()| FcpError::InvalidRequest {
+            code: 1003,
+            message: "audio_url username could not be stripped".into(),
+        })?;
+    parsed
+        .set_password(None)
+        .map_err(|()| FcpError::InvalidRequest {
+            code: 1003,
+            message: "audio_url password could not be stripped".into(),
+        })?;
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+fn deepgram_auth_header(api_key: &str) -> FcpResult<HeaderValue> {
+    HeaderValue::from_str(&format!("Token {api_key}")).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("api_key cannot be represented as a safe Authorization header: {error}"),
+    })
+}
+
+fn with_header(request: RequestBuilder, name: HeaderName, value: &HeaderValue) -> RequestBuilder {
+    let mut headers = HeaderMap::new();
+    headers.insert(name, value.clone());
+    request.headers(headers)
+}
+
+fn validate_declared_media_size(input: &Value) -> FcpResult<()> {
+    for field in ["media_byte_count", "audio_byte_count"] {
+        let Some(value) = input.get(field) else {
+            continue;
+        };
+        let Some(byte_count) = value.as_u64() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must be an integer byte count"),
+            });
+        };
+        if byte_count == 0 || byte_count > MAX_DECLARED_MEDIA_BYTES {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("{field} must be between 1 and {MAX_DECLARED_MEDIA_BYTES} bytes"),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
     headers
         .get(reqwest::header::RETRY_AFTER)
@@ -573,7 +651,7 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{header, method, path, query_param};
+    use wiremock::matchers::{body_json, header, method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
@@ -605,6 +683,15 @@ mod tests {
         }))
         .expect_err("expected invalid timeout");
         assert!(error.to_string().contains("greater than 0"));
+    }
+
+    #[test]
+    fn api_key_must_fit_safe_authorization_header() {
+        let error = DeepgramConfig::from_params(&json!({
+            "api_key": "bad\nkey"
+        }))
+        .expect_err("expected invalid header value");
+        assert!(error.to_string().contains("Authorization header"));
     }
 
     #[fcp_async_core::runtime::test]
@@ -724,6 +811,85 @@ mod tests {
             }))
             .await
             .expect("default model transcription should succeed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn transcribe_strips_audio_url_credentials_and_fragment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/listen"))
+            .and(query_param("model", DEFAULT_TRANSCRIPTION_MODEL))
+            .and(header("authorization", "Token test-key"))
+            .and(body_json(json!({
+                "url": "https://media.example.test/audio.wav?download=1"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": {
+                    "channels": [{
+                        "alternatives": [{
+                            "transcript": "sanitized"
+                        }]
+                    }]
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let config = DeepgramConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .expect("expected valid config");
+        let client = DeepgramClient::new(&config).expect("expected client");
+        client
+            .transcribe(&json!({
+                "audio_url": "https://user:secret@media.example.test/audio.wav?download=1#secret-fragment",
+                "media_byte_count": 12_u64
+            }))
+            .await
+            .expect("sanitized transcription should succeed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn transcribe_rejects_insecure_audio_url_before_network_io() {
+        let server = MockServer::start().await;
+        let config = DeepgramConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .expect("expected valid config");
+        let client = DeepgramClient::new(&config).expect("expected client");
+
+        let error = client
+            .transcribe(&json!({
+                "audio_url": "http://media.example.test/audio.wav"
+            }))
+            .await
+            .expect_err("insecure media URL should fail before network I/O");
+
+        assert!(error.to_string().contains("audio_url must use https"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn transcribe_rejects_declared_oversized_media_before_network_io() {
+        let server = MockServer::start().await;
+        let config = DeepgramConfig::from_params(&json!({
+            "api_key": "test-key",
+            "base_url": server.uri()
+        }))
+        .expect("expected valid config");
+        let client = DeepgramClient::new(&config).expect("expected client");
+
+        let error = client
+            .transcribe(&json!({
+                "audio_url": "https://media.example.test/audio.wav",
+                "media_byte_count": MAX_DECLARED_MEDIA_BYTES + 1
+            }))
+            .await
+            .expect_err("oversized media should fail before network I/O");
+
+        assert!(error.to_string().contains("media_byte_count"));
     }
 
     #[fcp_async_core::runtime::test]

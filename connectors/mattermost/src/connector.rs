@@ -23,6 +23,11 @@ use fcp_sdk::runtime::{
     InMemoryStreamingSession, StreamingConnection, StreamingError, StreamingSession,
     StreamingSupervisor, SupervisorConfig,
 };
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
+};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::{Deserialize, de::DeserializeOwned};
 use serde_json::{Value, json};
@@ -59,6 +64,128 @@ const SOCKET_DEFAULT_TOPICS: &[&str] = &[
     "mattermost.typing",
 ];
 
+fn default_mattermost_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_mattermost_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn mattermost_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
 async fn connect_mattermost_websocket(
     url: &str,
     config: fcp_streaming::WsConfig,
@@ -77,7 +204,6 @@ enum MattermostSocketSupervisorEvent {
 }
 
 /// Mattermost connector state.
-#[derive(Debug)]
 pub struct MattermostConnector {
     base: Arc<BaseConnector>,
     config: Option<MattermostConfig>,
@@ -96,7 +222,25 @@ pub struct MattermostConnector {
     subscribed_topics: Arc<RwLock<Vec<String>>>,
     monitor_policy: MattermostMonitorPolicy,
     monitor_policy_audit: Arc<MattermostMonitorPolicyAudit>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     started_at: Instant,
+}
+
+impl std::fmt::Debug for MattermostConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostConnector")
+            .field("base", &self.base)
+            .field("config", &self.config)
+            .field("client_configured", &self.client.is_some())
+            .field("runtime_configured", &self.runtime.is_some())
+            .field("retry_config", &self.retry_config)
+            .field("verifier_configured", &self.verifier.is_some())
+            .field("monitor_policy", &self.monitor_policy)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("started_at", &self.started_at)
+            .finish_non_exhaustive()
+    }
 }
 
 impl MattermostConnector {
@@ -122,6 +266,8 @@ impl MattermostConnector {
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
             monitor_policy: MattermostMonitorPolicy::default(),
             monitor_policy_audit: Arc::new(MattermostMonitorPolicyAudit::default()),
+            chat_coordination_config: default_mattermost_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             started_at: Instant::now(),
         }
     }
@@ -144,6 +290,18 @@ impl MattermostConnector {
         self.event_tx.subscribe()
     }
 
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
+    }
+
     /// Configure the connector.
     ///
     /// # Errors
@@ -151,6 +309,10 @@ impl MattermostConnector {
     /// Returns an error if the configuration JSON is invalid or the client cannot be built.
     pub fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
         let monitor_policy = MattermostMonitorPolicy::from_config(config.get("monitor_policy"))?;
+        let chat_coordination_config = parse_mattermost_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let mut config: MattermostConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 5001,
@@ -228,6 +390,7 @@ impl MattermostConnector {
         self.client = Some(client);
         self.config = Some(config);
         self.monitor_policy = monitor_policy;
+        self.chat_coordination_config = chat_coordination_config;
         self.monitor_policy_audit.reset();
         self.base.set_configured(true);
         Ok(())
@@ -322,12 +485,20 @@ impl MattermostConnector {
             message: "connector ready state missing capability verifier".into(),
         })?;
         // dja9u.1.c: typestate handoff via verify_bound.
-        let _bound = verifier.verify_bound(
+        let bound = verifier.verify_bound(
             req.capability_token.clone(),
             &required_capability,
             &req.operation,
             &[],
         )?;
+        let zone_id = verifier.zone_id.clone();
+        let claimant_agent_id = bound
+            .claims()
+            .get_principal_id()
+            .or_else(|| bound.claims().get_subject())
+            .unwrap_or_else(|| self.base.instance_id.as_str())
+            .to_owned();
+        let claimant_agent_id = AgentId::new(claimant_agent_id);
 
         let client = self.client.as_ref().ok_or_else(|| FcpError::Internal {
             message: "connector ready state missing Mattermost client".into(),
@@ -348,7 +519,10 @@ impl MattermostConnector {
             "mattermost.create_direct_channel" => {
                 invoke_create_direct_channel(client, &req.input).await?
             }
-            "mattermost.create_post" => invoke_create_post(client, &req.input).await?,
+            "mattermost.create_post" => {
+                self.invoke_create_post(client, &req.input, zone_id, claimant_agent_id)
+                    .await?
+            }
             "mattermost.get_post" => invoke_get_post(client, &req.input).await?,
             "mattermost.get_posts_for_channel" => {
                 invoke_get_posts_for_channel(client, &req.input).await?
@@ -388,6 +562,79 @@ impl MattermostConnector {
         };
 
         Ok(InvokeResponse::ok(req.id, output))
+    }
+
+    async fn invoke_create_post(
+        &self,
+        client: &MattermostClient,
+        input: &serde_json::Value,
+        zone_id: ZoneId,
+        claimant_agent_id: AgentId,
+    ) -> FcpResult<serde_json::Value> {
+        let create_req: CreatePostRequest =
+            serde_json::from_value(input.clone()).map_err(|e| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("invalid create_post input: {e}"),
+            })?;
+        validate_create_post_request(&create_req)?;
+        let coordination = self
+            .claim_before_mattermost_send(
+                zone_id,
+                &create_req.channel_id,
+                create_req.root_id.as_deref(),
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Mattermost create_post denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
+        let post = client.create_post(&create_req).await.map_err(map_mm_err)?;
+        let mut response = to_json(post)?;
+        let response_object = response.as_object_mut().ok_or_else(|| FcpError::Internal {
+            message: "Serialized Mattermost post response was not an object".into(),
+        })?;
+        response_object.insert(
+            "coordination".into(),
+            json!(mattermost_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            )),
+        );
+        Ok(response)
+    }
+
+    async fn claim_before_mattermost_send(
+        &self,
+        zone_id: ZoneId,
+        channel_id: &str,
+        root_id: Option<&str>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(channel_id.trim().to_owned());
+        let thread_id = root_id
+            .map(str::trim)
+            .filter(|root_id| !root_id.is_empty())
+            .map(|root_id| ThreadId::new(root_id.to_owned()));
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 
     /// Shutdown the connector.
@@ -951,20 +1198,6 @@ async fn invoke_create_direct_channel(
         .await
         .map_err(map_mm_err)?;
     to_json(channel)
-}
-
-async fn invoke_create_post(
-    client: &MattermostClient,
-    input: &serde_json::Value,
-) -> FcpResult<serde_json::Value> {
-    let create_req: CreatePostRequest =
-        serde_json::from_value(input.clone()).map_err(|e| FcpError::InvalidRequest {
-            code: 1003,
-            message: format!("invalid create_post input: {e}"),
-        })?;
-    validate_create_post_request(&create_req)?;
-    let post = client.create_post(&create_req).await.map_err(map_mm_err)?;
-    to_json(post)
 }
 
 fn validate_create_post_request(request: &CreatePostRequest) -> FcpResult<()> {
@@ -3719,8 +3952,11 @@ mod tests {
     use std::thread::{self, JoinHandle};
 
     use base64::Engine as _;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_prelude::{CapabilityToken, RequestId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId};
+    use fcp_sdk::{ClaimKey, ClaimOutcome};
     use sha1::{Digest as Sha1Digest, Sha1};
 
     fn invoke_request(
@@ -3745,6 +3981,73 @@ mod tests {
             correlation_id: None,
             provenance: None,
             approval_tokens: Vec::new(),
+        }
+    }
+
+    fn handshake_with_signing_key(
+        connector: &mut MattermostConnector,
+        signing_key: &Ed25519SigningKey,
+        capability: CapabilityId,
+    ) {
+        connector
+            .handshake(&HandshakeRequest {
+                protocol_version: "1.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0_u8; 32],
+                capabilities_requested: vec![capability],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .expect("handshake should succeed");
+    }
+
+    fn generate_valid_token_for_principal(
+        connector: &MattermostConnector,
+        signing_key: &Ed25519SigningKey,
+        operation: &str,
+        principal: &str,
+    ) -> CapabilityToken {
+        let capability = required_capability_for_operation(operation)
+            .expect("test operation should have a capability");
+        let constraints = CapabilityConstraints {
+            resource_allow: vec!["*".into()],
+            ..Default::default()
+        };
+        let mut constraints_cbor = Vec::new();
+        ciborium::into_writer(&constraints, &mut constraints_cbor)
+            .expect("constraints should serialize");
+        let now = Utc::now();
+        let cose = CapabilityTokenBuilder::new()
+            .capability_id(capability.as_str())
+            .zone_id("z:work")
+            .principal(principal)
+            .operations(&[operation])
+            .issuer("node:test")
+            .validity(now, now + ChronoDuration::hours(1))
+            .target_instance(connector.base.instance_id.as_ref())
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("constraints CBOR should be valid")
+            .sign(signing_key)
+            .expect("test token should sign");
+        CapabilityToken::from_raw(cose)
+    }
+
+    struct IndeterminateThreadOwnershipChecker {
+        reason: &'static str,
+    }
+
+    #[async_trait::async_trait]
+    impl ThreadOwnershipChecker for IndeterminateThreadOwnershipChecker {
+        async fn claim(
+            &self,
+            _cx: &fcp_async_core::Cx,
+            _key: ClaimKey,
+            _agent_id: AgentId,
+        ) -> ClaimOutcome {
+            ClaimOutcome::Indeterminate(self.reason.to_string())
         }
     }
 
@@ -4560,6 +4863,202 @@ mod tests {
         });
 
         assert!(result.is_ok());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn create_post_granted_claim_sends_with_coordination_audit() {
+        let (base_url, server) = spawn_mattermost_loopback_rest(1);
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut connector = MattermostConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        connector
+            .configure(json!({
+                "base_url": base_url,
+                "token": "tok_coordination",
+                "request_timeout_ms": 5_000,
+                "chat_coordination": {
+                    "backend": "in_memory"
+                }
+            }))
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        handshake_with_signing_key(
+            &mut connector,
+            &signing_key,
+            CapabilityId::from_static("mattermost.write"),
+        );
+        let token = generate_valid_token_for_principal(
+            &connector,
+            &signing_key,
+            "mattermost.create_post",
+            "agent:alpha",
+        );
+
+        let response = connector
+            .invoke(invoke_request(
+                &connector,
+                "mattermost.create_post",
+                json!({
+                    "channel_id": "c_loop",
+                    "message": "loopback post",
+                    "root_id": "root_loop"
+                }),
+                token,
+            ))
+            .await
+            .unwrap();
+        let result = response.result.expect("create_post should return a result");
+        assert_eq!(result["id"], "p_loop");
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit should be an array");
+        let events = coordination
+            .iter()
+            .filter_map(|record| record.get("event").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec!["claim_attempt", "claim_outcome", "send_executed"]
+        );
+        assert_eq!(coordination[1]["outcome"], "granted");
+        assert_eq!(coordination[2]["backend"], "in_memory");
+        let coordination_text = Value::Array(coordination.clone()).to_string();
+        assert!(!coordination_text.contains("root_loop"));
+        assert!(!coordination_text.contains("c_loop"));
+        assert!(!coordination_text.contains("agent:alpha"));
+
+        let requests = server
+            .join()
+            .expect("loopback REST server thread should finish");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "POST");
+        assert_eq!(requests[0].target, "/api/v4/posts");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn create_post_denies_duplicate_owner_before_rest_send() {
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let key = ClaimKey::for_chat_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.mattermost"),
+            ChannelId::new("c_loop"),
+            Some(ThreadId::new("root_loop")),
+            DmMode::TreatAsThread,
+        )
+        .expect("rooted Mattermost post should produce a claim key");
+        assert!(matches!(
+            checker.claim_now(key, AgentId::new("agent:alpha"), Instant::now()),
+            ClaimOutcome::Granted(_)
+        ));
+
+        let mut connector = MattermostConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        connector
+            .configure(json!({
+                "base_url": "http://127.0.0.1:9",
+                "token": "tok_coordination",
+                "request_timeout_ms": 100,
+                "chat_coordination": {
+                    "backend": "in_memory"
+                }
+            }))
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        handshake_with_signing_key(
+            &mut connector,
+            &signing_key,
+            CapabilityId::from_static("mattermost.write"),
+        );
+        let token = generate_valid_token_for_principal(
+            &connector,
+            &signing_key,
+            "mattermost.create_post",
+            "agent:beta",
+        );
+
+        let error = connector
+            .invoke(invoke_request(
+                &connector,
+                "mattermost.create_post",
+                json!({
+                    "channel_id": "c_loop",
+                    "message": "must not reach REST",
+                    "root_id": "root_loop"
+                }),
+                token,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FcpError::Unauthorized { code: 4090, .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("thread_owned_by_peer:agent:alpha")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn create_post_fail_open_sends_with_degraded_coordination_audit() {
+        let (base_url, server) = spawn_mattermost_loopback_rest(1);
+        let mut connector = MattermostConnector::new().with_thread_ownership_checker(
+            Arc::new(IndeterminateThreadOwnershipChecker {
+                reason: "agent_mail_unavailable",
+            }),
+            ChatCoordinationBackend::AgentMail,
+        );
+        connector
+            .configure(json!({
+                "base_url": base_url,
+                "token": "tok_coordination",
+                "request_timeout_ms": 5_000,
+                "chat_coordination": {
+                    "backend": "agent_mail",
+                    "fail_open": true
+                }
+            }))
+            .unwrap();
+        let signing_key = Ed25519SigningKey::generate();
+        handshake_with_signing_key(
+            &mut connector,
+            &signing_key,
+            CapabilityId::from_static("mattermost.write"),
+        );
+        let token = generate_valid_token_for_principal(
+            &connector,
+            &signing_key,
+            "mattermost.create_post",
+            "agent:alpha",
+        );
+
+        let response = connector
+            .invoke(invoke_request(
+                &connector,
+                "mattermost.create_post",
+                json!({
+                    "channel_id": "c_loop",
+                    "message": "loopback post",
+                    "root_id": "root_loop"
+                }),
+                token,
+            ))
+            .await
+            .unwrap();
+        let result = response.result.expect("create_post should return a result");
+        assert_eq!(result["id"], "p_loop");
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit should be an array");
+        assert_eq!(coordination[1]["outcome"], "indeterminate");
+        assert_eq!(coordination[1]["reason"], "agent_mail_unavailable");
+        assert_eq!(coordination[2]["event"], "send_executed");
+        assert_eq!(coordination[2]["reason"], "agent_mail_unavailable");
+        assert_eq!(coordination[2]["backend"], "agent_mail");
+
+        let requests = server
+            .join()
+            .expect("loopback REST server thread should finish");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].target, "/api/v4/posts");
     }
 
     #[fcp_async_core::runtime::test]
@@ -5498,16 +5997,19 @@ mod tests {
             .expect("configured connector should have a Mattermost client");
 
         let file_body = base64::engine::general_purpose::STANDARD.encode(b"hello file");
-        let created = invoke_create_post(
-            client,
-            &json!({
-                "channel_id": "c_loop",
-                "message": "loopback post",
-                "file_ids": ["f_loop"]
-            }),
-        )
-        .await
-        .unwrap();
+        let created = connector
+            .invoke_create_post(
+                client,
+                &json!({
+                    "channel_id": "c_loop",
+                    "message": "loopback post",
+                    "file_ids": ["f_loop"]
+                }),
+                ZoneId::work(),
+                AgentId::new("agent_loopback"),
+            )
+            .await
+            .unwrap();
         assert_eq!(created["id"], "p_loop");
 
         let fetched = invoke_get_post(client, &json!({"post_id": "p_loop"}))

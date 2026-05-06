@@ -11,12 +11,17 @@ use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, ZoneId,
+};
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::client::{ChatClient, MessageReplyOption, MessageThreadTarget};
 use crate::types::{ChatEvent, Message, SpaceType, User};
@@ -36,6 +41,128 @@ const DEFAULT_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
 const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MENTION_TEXT: &str = "@flywheel";
 
+fn default_google_chat_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_google_chat_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn google_chat_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
 /// FCP Google Chat Connector.
 pub struct ChatConnector {
     base: Arc<BaseConnector>,
@@ -46,6 +173,8 @@ pub struct ChatConnector {
     webhook_rate: Mutex<WebhookRateState>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<fcp_core::SessionId>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -319,7 +448,21 @@ impl ChatConnector {
             webhook_rate: Mutex::new(WebhookRateState::default()),
             verifier: None,
             session_id: None,
+            chat_coordination_config: default_google_chat_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     pub async fn handle_configure(
@@ -367,6 +510,10 @@ impl ChatConnector {
         let request_timeout = request_timeout_from_params(&params)?;
         let webhook = parse_webhook_config(params.get("webhook"))?;
         let inbound_policy = parse_inbound_policy(params.get("inbound_policy"))?;
+        let chat_coordination_config = parse_google_chat_chat_coordination_config(
+            params.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
 
         let client = ChatClient::new_with_auth(materialized)
             .map_err(|e| FcpError::Internal {
@@ -379,6 +526,7 @@ impl ChatConnector {
         self.client = Some(client);
         self.webhook = webhook;
         self.inbound_policy = inbound_policy;
+        self.chat_coordination_config = chat_coordination_config;
         self.base
             .configured
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -914,11 +1062,34 @@ impl ChatConnector {
                 let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
                 let space_name = require_str(&input, "space_name")?;
                 let text = require_str(&input, "text")?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_google_chat_send(
+                        zone_id,
+                        space_name,
+                        None,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Google Chat send_message denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let message = client
                     .create_message(space_name, text)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "message": message }))
+                Ok(json!({
+                    "message": message,
+                    "coordination": google_chat_coordination_audit_records(
+                        &coordination,
+                        self.chat_coordination_config.backend(),
+                        &claimant_agent_id,
+                    )
+                }))
             }
             "chat.reply_message" => {
                 let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -926,11 +1097,34 @@ impl ChatConnector {
                 let text = require_str(&input, "text")?;
                 let thread = reply_thread_target(&input)?;
                 let reply_option = reply_option_from_input(&input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_google_chat_send(
+                        zone_id,
+                        space_name,
+                        Some(thread),
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Google Chat reply_message denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let message = client
                     .reply_message(space_name, text, thread, reply_option)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                Ok(json!({ "message": message }))
+                Ok(json!({
+                    "message": message,
+                    "coordination": google_chat_coordination_audit_records(
+                        &coordination,
+                        self.chat_coordination_config.backend(),
+                        &claimant_agent_id,
+                    )
+                }))
             }
             OP_SEND_MEDIA_MESSAGE => {
                 let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -943,6 +1137,22 @@ impl ChatConnector {
                 let text = optional_str(&input, "text")?;
                 let thread = optional_reply_thread_target(&input)?;
                 let reply_option = reply_option_from_input(&input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_google_chat_send(
+                        zone_id,
+                        space_name,
+                        thread,
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        error = %error,
+                        "Google Chat send_media_message denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let upload = client
                     .upload_attachment(space_name, filename, content_type, &media)
                     .await
@@ -977,7 +1187,12 @@ impl ChatConnector {
                         "bytes": media.len(),
                         "max_bytes": max_bytes,
                         "attachment_upload_token_redacted": true
-                    }
+                    },
+                    "coordination": google_chat_coordination_audit_records(
+                        &coordination,
+                        self.chat_coordination_config.backend(),
+                        &claimant_agent_id,
+                    )
                 }))
             }
             "chat.list_messages" => {
@@ -1022,6 +1237,40 @@ impl ChatConnector {
                 message: format!("Unknown operation: {operation}"),
             }),
         }
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_google_chat_send(
+        &self,
+        zone_id: ZoneId,
+        space_name: &str,
+        thread: Option<MessageThreadTarget<'_>>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(space_name.trim().to_owned());
+        let thread_id = thread.map(google_chat_thread_id);
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 
     #[allow(clippy::too_many_lines)]
@@ -2367,6 +2616,15 @@ fn reply_thread_target(input: &serde_json::Value) -> FcpResult<MessageThreadTarg
     }
 }
 
+fn google_chat_thread_id(thread: MessageThreadTarget<'_>) -> ThreadId {
+    match thread {
+        MessageThreadTarget::Name(thread_name) => ThreadId::new(thread_name.trim().to_owned()),
+        MessageThreadTarget::Key(thread_key) => {
+            ThreadId::new(format!("thread_key:{}", thread_key.trim()))
+        }
+    }
+}
+
 fn optional_reply_thread_target(
     input: &serde_json::Value,
 ) -> FcpResult<Option<MessageThreadTarget<'_>>> {
@@ -2958,6 +3216,11 @@ mod tests {
                 .unwrap();
             assert_eq!(result["message"]["name"], "spaces/AAAA/messages/msg1");
             assert_eq!(result["message"]["text"], "Hello!");
+            assert!(result["coordination"].as_array().is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record["event"] == "send_executed")
+            }));
         });
     }
 
@@ -3009,6 +3272,72 @@ mod tests {
                 result["message"]["thread"]["name"],
                 "spaces/AAAA/threads/thread1"
             );
+            assert!(result["coordination"].as_array().is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record["event"] == "send_executed")
+            }));
+        });
+    }
+
+    #[test]
+    fn reply_message_denies_duplicate_owner_before_http_send() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/.+/messages$"))
+                .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
+                .and(header("Authorization", "Bearer test-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/msg2",
+                    "text": "Thread reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+            let mut owner = ChatConnector::new()
+                .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+            let mut peer = ChatConnector::new()
+                .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+            for connector in [&mut owner, &mut peer] {
+                connector
+                    .handle_configure(json!({
+                        "access_token": "test-token",
+                        "base_url": format!("{}/v1", server.uri())
+                    }))
+                    .await
+                    .unwrap();
+            }
+
+            owner
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "Thread reply",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await
+                .expect("owner send should claim and execute");
+            let denied = peer
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "Peer reply",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await
+                .expect_err("peer should be denied before HTTP send");
+            assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
+            let requests = server.received_requests().await.unwrap_or_default();
+            assert_eq!(requests.len(), 1);
         });
     }
 
@@ -3192,9 +3521,77 @@ mod tests {
             assert_eq!(result["message"]["name"], "spaces/AAAA/messages/media1");
             assert_eq!(result["media"]["bytes"], 11);
             assert_eq!(result["media"]["attachment_upload_token_redacted"], true);
+            assert!(result["coordination"].as_array().is_some_and(|records| {
+                records
+                    .iter()
+                    .any(|record| record["event"] == "send_executed")
+            }));
             let encoded = serde_json::to_string(&result).expect("media result JSON");
             assert!(!encoded.contains("upload-token-123"));
             assert!(!encoded.contains("aGVsbG8gbWVkaWE="));
+        });
+    }
+
+    #[test]
+    fn send_media_message_denies_duplicate_owner_before_upload() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/.+/messages$"))
+                .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/reply1",
+                    "text": "owner reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+            let mut owner = ChatConnector::new()
+                .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+            let mut peer = ChatConnector::new()
+                .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+            for connector in [&mut owner, &mut peer] {
+                connector
+                    .handle_configure(json!({
+                        "access_token": "test-token",
+                        "base_url": format!("{}/v1", server.uri())
+                    }))
+                    .await
+                    .unwrap();
+            }
+
+            owner
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "owner reply",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await
+                .expect("owner send should claim and execute");
+            let denied = peer
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "caption",
+                        "filename": "blocked.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "YmxvY2tlZA==",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await
+                .expect_err("peer media send should be denied before upload");
+            assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
+            let requests = server.received_requests().await.unwrap_or_default();
+            assert_eq!(requests.len(), 1);
         });
     }
 

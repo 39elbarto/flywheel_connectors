@@ -283,6 +283,457 @@ impl CdpNavigateResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct CdpEvaluateResponse {
+    result: String,
+}
+
+impl CdpEvaluateResponse {
+    fn from_result(result: &serde_json::Value) -> BrowserResult<Self> {
+        if let Some(exception) = result.get("exceptionDetails") {
+            let mut redacted_exception = exception.clone();
+            redact_sensitive_json(&mut redacted_exception);
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol Runtime.evaluate failed: {}",
+                    serde_json::to_string(&redacted_exception)?
+                ),
+                status_code: None,
+            });
+        }
+
+        let remote_object = result.get("result").ok_or_else(|| BrowserError::Api {
+            message: "Chrome DevTools Protocol Runtime.evaluate response is missing result object"
+                .into(),
+            status_code: None,
+        })?;
+
+        let result = if let Some(value) = remote_object.get("value") {
+            cdp_remote_value_to_result_string(value)?
+        } else if let Some(value) = remote_object
+            .get("unserializableValue")
+            .and_then(serde_json::Value::as_str)
+        {
+            value.to_string()
+        } else if remote_object
+            .get("type")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|kind| kind == "undefined")
+        {
+            "undefined".to_string()
+        } else if let Some(description) = remote_object
+            .get("description")
+            .and_then(serde_json::Value::as_str)
+        {
+            description.to_string()
+        } else {
+            return Err(BrowserError::Api {
+                message:
+                    "Chrome DevTools Protocol Runtime.evaluate result has no serializable value"
+                        .into(),
+                status_code: None,
+            });
+        };
+
+        Ok(Self { result })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CdpScreenshotResponse {
+    image_data: String,
+    width: u32,
+    height: u32,
+}
+
+impl CdpScreenshotResponse {
+    fn from_capture_result(
+        result: &serde_json::Value,
+        clip: CdpCaptureClip,
+    ) -> BrowserResult<Self> {
+        let image_data = result
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.captureScreenshot response is missing data"
+                    .into(),
+                status_code: None,
+            })?
+            .to_string();
+
+        Ok(Self {
+            image_data,
+            width: capture_dimension_to_u32("width", clip.width)?,
+            height: capture_dimension_to_u32("height", clip.height)?,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CdpCookieResponse {
+    cookies: Vec<Cookie>,
+}
+
+impl CdpCookieResponse {
+    fn from_result(result: &serde_json::Value, domain_filter: Option<&str>) -> BrowserResult<Self> {
+        let cookies = result
+            .get("cookies")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Network.getCookies response is missing cookies"
+                    .into(),
+                status_code: None,
+            })?;
+        let mut parsed = Vec::new();
+        for cookie in cookies {
+            let cookie = cdp_cookie_from_value(cookie)?;
+            if cookie_matches_domain_filter(cookie.domain.as_deref(), domain_filter) {
+                parsed.push(cookie);
+            }
+        }
+
+        Ok(Self { cookies: parsed })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CdpSetCookiesResponse {
+    set_count: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct CdpCaptureClip {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+}
+
+impl CdpCaptureClip {
+    fn new(x: f64, y: f64, width: f64, height: f64) -> BrowserResult<Self> {
+        for (name, value) in [("x", x), ("y", y), ("width", width), ("height", height)] {
+            if !value.is_finite() {
+                return Err(BrowserError::Api {
+                    message: format!(
+                        "Chrome DevTools Protocol screenshot clip {name} is not finite"
+                    ),
+                    status_code: None,
+                });
+            }
+        }
+
+        if width <= 0.0 || height <= 0.0 {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol screenshot clip must have positive dimensions: width={width}, height={height}"
+                ),
+                status_code: None,
+            });
+        }
+
+        Ok(Self {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+
+    fn from_box_model(result: &serde_json::Value) -> BrowserResult<Self> {
+        let content = result
+            .get("model")
+            .and_then(|model| model.get("content"))
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| BrowserError::Api {
+                message:
+                    "Chrome DevTools Protocol DOM.getBoxModel response is missing model.content"
+                        .into(),
+                status_code: None,
+            })?;
+        if content.len() != 8 {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol DOM.getBoxModel content quad must have 8 coordinates, got {}",
+                    content.len()
+                ),
+                status_code: None,
+            });
+        }
+
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for point in content.chunks_exact(2) {
+            let [x_value, y_value] = point else {
+                return Err(BrowserError::Api {
+                    message: "Chrome DevTools Protocol DOM.getBoxModel content point is malformed"
+                        .into(),
+                    status_code: None,
+                });
+            };
+            let x = cdp_required_number(x_value, "DOM.getBoxModel model.content x")?;
+            let y = cdp_required_number(y_value, "DOM.getBoxModel model.content y")?;
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+        }
+
+        Self::new(min_x, min_y, max_x - min_x, max_y - min_y)
+    }
+
+    fn from_layout_metrics(result: &serde_json::Value, full_page: bool) -> BrowserResult<Self> {
+        if full_page {
+            let content = result
+                .get("cssContentSize")
+                .or_else(|| result.get("contentSize"))
+                .ok_or_else(|| BrowserError::Api {
+                    message: "Chrome DevTools Protocol Page.getLayoutMetrics response is missing content size"
+                        .into(),
+                    status_code: None,
+                })?;
+            return Self::new(
+                cdp_required_object_number(content, "x", "Page.getLayoutMetrics content x")?,
+                cdp_required_object_number(content, "y", "Page.getLayoutMetrics content y")?,
+                cdp_required_object_number(
+                    content,
+                    "width",
+                    "Page.getLayoutMetrics content width",
+                )?,
+                cdp_required_object_number(
+                    content,
+                    "height",
+                    "Page.getLayoutMetrics content height",
+                )?,
+            );
+        }
+
+        let viewport = result
+            .get("cssVisualViewport")
+            .or_else(|| result.get("visualViewport"))
+            .or_else(|| result.get("cssLayoutViewport"))
+            .or_else(|| result.get("layoutViewport"))
+            .ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.getLayoutMetrics response is missing viewport size"
+                    .into(),
+                status_code: None,
+            })?;
+        Self::new(
+            cdp_required_object_number(viewport, "pageX", "Page.getLayoutMetrics viewport pageX")
+                .or_else(|_| {
+                cdp_required_object_number(viewport, "x", "Page.getLayoutMetrics viewport x")
+            })?,
+            cdp_required_object_number(viewport, "pageY", "Page.getLayoutMetrics viewport pageY")
+                .or_else(|_| {
+                cdp_required_object_number(viewport, "y", "Page.getLayoutMetrics viewport y")
+            })?,
+            cdp_required_object_number(
+                viewport,
+                "clientWidth",
+                "Page.getLayoutMetrics viewport clientWidth",
+            )
+            .or_else(|_| {
+                cdp_required_object_number(
+                    viewport,
+                    "width",
+                    "Page.getLayoutMetrics viewport width",
+                )
+            })?,
+            cdp_required_object_number(
+                viewport,
+                "clientHeight",
+                "Page.getLayoutMetrics viewport clientHeight",
+            )
+            .or_else(|_| {
+                cdp_required_object_number(
+                    viewport,
+                    "height",
+                    "Page.getLayoutMetrics viewport height",
+                )
+            })?,
+        )
+    }
+
+    fn descriptor(self) -> serde_json::Value {
+        serde_json::json!({
+            "x": self.x,
+            "y": self.y,
+            "width": self.width,
+            "height": self.height,
+            "scale": 1,
+        })
+    }
+}
+
+fn cdp_remote_value_to_result_string(value: &serde_json::Value) -> BrowserResult<String> {
+    match value {
+        serde_json::Value::String(text) => Ok(text.clone()),
+        serde_json::Value::Null => Ok("null".to_string()),
+        other => Ok(serde_json::to_string(other)?),
+    }
+}
+
+fn cdp_required_object_number(
+    object: &serde_json::Value,
+    field: &str,
+    label: &str,
+) -> BrowserResult<f64> {
+    cdp_required_number(object.get(field).unwrap_or(&serde_json::Value::Null), label)
+}
+
+fn cdp_required_number(value: &serde_json::Value, label: &str) -> BrowserResult<f64> {
+    let number = value.as_f64().ok_or_else(|| BrowserError::Api {
+        message: format!("Chrome DevTools Protocol response is missing numeric {label}"),
+        status_code: None,
+    })?;
+    if number.is_finite() {
+        Ok(number)
+    } else {
+        Err(BrowserError::Api {
+            message: format!("Chrome DevTools Protocol response {label} is not finite"),
+            status_code: None,
+        })
+    }
+}
+
+fn cdp_required_node_id(result: &serde_json::Value, path: &str) -> BrowserResult<u64> {
+    result
+        .pointer(path)
+        .and_then(serde_json::Value::as_u64)
+        .filter(|node_id| *node_id != 0)
+        .ok_or_else(|| BrowserError::Api {
+            message: format!("Chrome DevTools Protocol response is missing non-zero {path}"),
+            status_code: None,
+        })
+}
+
+fn capture_dimension_to_u32(name: &str, value: f64) -> BrowserResult<u32> {
+    if !value.is_finite() || value <= 0.0 || value > f64::from(u32::MAX) {
+        return Err(BrowserError::Api {
+            message: format!("Chrome DevTools Protocol screenshot {name} is out of range: {value}"),
+            status_code: None,
+        });
+    }
+
+    let rounded = value.ceil();
+    format!("{rounded:.0}")
+        .parse::<u32>()
+        .map_err(|err| BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol screenshot {name} cannot be represented as u32: {err}"
+            ),
+            status_code: None,
+        })
+}
+
+fn cdp_screenshot_format(format: Option<&str>) -> BrowserResult<String> {
+    let format = format.unwrap_or("png").to_ascii_lowercase();
+    if matches!(format.as_str(), "jpeg" | "png" | "webp") {
+        Ok(format)
+    } else {
+        Err(BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol Page.captureScreenshot does not support image format `{format}`"
+            ),
+            status_code: None,
+        })
+    }
+}
+
+fn cdp_cookie_from_value(value: &serde_json::Value) -> BrowserResult<Cookie> {
+    let name = cdp_required_object_string(value, "name", "Network.Cookie name")?;
+    let cookie_value = cdp_required_object_string(value, "value", "Network.Cookie value")?;
+
+    Ok(Cookie {
+        name,
+        value: cookie_value,
+        domain: cdp_optional_object_string(value, "domain"),
+        path: cdp_optional_object_string(value, "path"),
+        expires: value.get("expires").and_then(serde_json::Value::as_f64),
+        http_only: value.get("httpOnly").and_then(serde_json::Value::as_bool),
+        secure: value.get("secure").and_then(serde_json::Value::as_bool),
+        same_site: cdp_optional_object_string(value, "sameSite"),
+    })
+}
+
+fn cdp_cookie_param(cookie: &Cookie) -> serde_json::Value {
+    let mut param = serde_json::Map::new();
+    param.insert(
+        "name".to_string(),
+        serde_json::Value::String(cookie.name.clone()),
+    );
+    param.insert(
+        "value".to_string(),
+        serde_json::Value::String(cookie.value.clone()),
+    );
+    if let Some(domain) = &cookie.domain {
+        param.insert(
+            "domain".to_string(),
+            serde_json::Value::String(domain.clone()),
+        );
+    }
+    if let Some(path) = &cookie.path {
+        param.insert("path".to_string(), serde_json::Value::String(path.clone()));
+    }
+    if let Some(expires) = cookie.expires {
+        param.insert("expires".to_string(), serde_json::json!(expires));
+    }
+    if let Some(http_only) = cookie.http_only {
+        param.insert("httpOnly".to_string(), serde_json::Value::Bool(http_only));
+    }
+    if let Some(secure) = cookie.secure {
+        param.insert("secure".to_string(), serde_json::Value::Bool(secure));
+    }
+    if let Some(same_site) = &cookie.same_site {
+        param.insert(
+            "sameSite".to_string(),
+            serde_json::Value::String(same_site.clone()),
+        );
+    }
+    serde_json::Value::Object(param)
+}
+
+fn cdp_required_object_string(
+    object: &serde_json::Value,
+    field: &str,
+    label: &str,
+) -> BrowserResult<String> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| BrowserError::Api {
+            message: format!("Chrome DevTools Protocol response is missing non-empty {label}"),
+            status_code: None,
+        })
+}
+
+fn cdp_optional_object_string(object: &serde_json::Value, field: &str) -> Option<String> {
+    object
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+}
+
+fn cookie_matches_domain_filter(cookie_domain: Option<&str>, domain_filter: Option<&str>) -> bool {
+    let Some(domain_filter) = domain_filter else {
+        return true;
+    };
+    let Some(cookie_domain) = cookie_domain else {
+        return false;
+    };
+
+    let normalized_cookie = cookie_domain.trim_start_matches('.').to_ascii_lowercase();
+    let normalized_filter = domain_filter.trim_start_matches('.').to_ascii_lowercase();
+    normalized_cookie == normalized_filter
+        || normalized_cookie
+            .strip_suffix(&normalized_filter)
+            .is_some_and(|prefix| prefix.ends_with('.'))
+}
+
 #[async_trait::async_trait]
 trait CdpCommandTransport {
     async fn send_cdp_message(&mut self, cx: &Cx, message: WebSocketMessage) -> BrowserResult<()>;
@@ -401,6 +852,137 @@ where
             .call_method(cx, "Page.navigate", Some(serde_json::json!({ "url": url })))
             .await?;
         CdpNavigateResponse::from_result(&result)
+    }
+
+    async fn evaluate_expression(
+        &mut self,
+        cx: &Cx,
+        expression: &str,
+    ) -> BrowserResult<CdpEvaluateResponse> {
+        let result = self
+            .call_method(
+                cx,
+                "Runtime.evaluate",
+                Some(serde_json::json!({
+                    "expression": expression,
+                    "awaitPromise": true,
+                    "returnByValue": true,
+                })),
+            )
+            .await?;
+        CdpEvaluateResponse::from_result(&result)
+    }
+
+    async fn capture_screenshot(
+        &mut self,
+        cx: &Cx,
+        selector: Option<&str>,
+        full_page: bool,
+        format: Option<&str>,
+        quality: Option<u32>,
+    ) -> BrowserResult<CdpScreenshotResponse> {
+        let clip = if let Some(selector) = selector {
+            let document = self
+                .call_method(
+                    cx,
+                    "DOM.getDocument",
+                    Some(serde_json::json!({ "depth": 0, "pierce": false })),
+                )
+                .await?;
+            let root_node_id = cdp_required_node_id(&document, "/root/nodeId")?;
+            let query = self
+                .call_method(
+                    cx,
+                    "DOM.querySelector",
+                    Some(serde_json::json!({
+                        "nodeId": root_node_id,
+                        "selector": selector,
+                    })),
+                )
+                .await?;
+            let node_id = query
+                .get("nodeId")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|node_id| *node_id != 0)
+                .ok_or_else(|| BrowserError::Api {
+                    message: format!(
+                        "Chrome DevTools Protocol DOM.querySelector selector `{selector}` did not match any node"
+                    ),
+                    status_code: None,
+                })?;
+            let box_model = self
+                .call_method(
+                    cx,
+                    "DOM.getBoxModel",
+                    Some(serde_json::json!({ "nodeId": node_id })),
+                )
+                .await?;
+            CdpCaptureClip::from_box_model(&box_model)?
+        } else {
+            let layout_metrics = self.call_method(cx, "Page.getLayoutMetrics", None).await?;
+            CdpCaptureClip::from_layout_metrics(&layout_metrics, full_page)?
+        };
+
+        let format = cdp_screenshot_format(format)?;
+        let mut params = serde_json::Map::new();
+        params.insert(
+            "captureBeyondViewport".to_string(),
+            serde_json::json!(full_page || selector.is_some()),
+        );
+        params.insert("clip".to_string(), clip.descriptor());
+        params.insert("format".to_string(), serde_json::Value::String(format));
+        params.insert("fromSurface".to_string(), serde_json::Value::Bool(true));
+        if let Some(quality) = quality {
+            if quality > 100 {
+                return Err(BrowserError::Api {
+                    message: format!(
+                        "Chrome DevTools Protocol Page.captureScreenshot quality must be <= 100, got {quality}"
+                    ),
+                    status_code: None,
+                });
+            }
+            params.insert("quality".to_string(), serde_json::json!(quality));
+        }
+
+        let result = self
+            .call_method(
+                cx,
+                "Page.captureScreenshot",
+                Some(serde_json::Value::Object(params)),
+            )
+            .await?;
+        CdpScreenshotResponse::from_capture_result(&result, clip)
+    }
+
+    async fn get_cookies(
+        &mut self,
+        cx: &Cx,
+        domain_filter: Option<&str>,
+    ) -> BrowserResult<CdpCookieResponse> {
+        let result = self.call_method(cx, "Network.getCookies", None).await?;
+        CdpCookieResponse::from_result(&result, domain_filter)
+    }
+
+    async fn set_cookies(
+        &mut self,
+        cx: &Cx,
+        cookies: &[Cookie],
+    ) -> BrowserResult<CdpSetCookiesResponse> {
+        let set_count = u32::try_from(cookies.len()).map_err(|err| BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol Network.setCookies cookie count exceeds u32: {err}"
+            ),
+            status_code: None,
+        })?;
+        let cdp_cookies = cookies.iter().map(cdp_cookie_param).collect::<Vec<_>>();
+        self.call_method(
+            cx,
+            "Network.setCookies",
+            Some(serde_json::json!({ "cookies": cdp_cookies })),
+        )
+        .await?;
+
+        Ok(CdpSetCookiesResponse { set_count })
     }
 
     fn next_command(
@@ -1594,6 +2176,18 @@ mod tests {
         }
     }
 
+    fn assert_cdp_text_message(message: &WebSocketMessage, expected: &serde_json::Value) {
+        assert!(
+            matches!(message, WebSocketMessage::Text(_)),
+            "expected CDP text WebSocket message, got {message:?}"
+        );
+        let WebSocketMessage::Text(text) = message else {
+            return;
+        };
+        let actual = serde_json::from_str::<serde_json::Value>(text).unwrap();
+        assert_eq!(&actual, expected);
+    }
+
     #[async_trait::async_trait]
     impl CdpCommandTransport for FakeCdpTransport {
         async fn send_cdp_message(
@@ -2076,6 +2670,347 @@ mod tests {
 
         let missing_frame = CdpNavigateResponse::from_result(&serde_json::json!({})).unwrap_err();
         assert!(format!("{missing_frame}").contains("missing frameId"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_evaluate_expression_issues_documented_command() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                r#"{"id":1,"result":{"result":{"type":"string","value":"Example Domain"}}}"#.into(),
+            )]));
+
+        let response = session
+            .evaluate_expression(&cx, "document.title")
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            response,
+            CdpEvaluateResponse {
+                result: "Example Domain".to_string(),
+            }
+        );
+        assert_eq!(transport.sent.len(), 1);
+        assert!(matches!(
+            &transport.sent[0],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":1,"method":"Runtime.evaluate","params":{"awaitPromise":true,"expression":"document.title","returnByValue":true}}"#
+        ));
+    }
+
+    #[test]
+    fn test_cdp_evaluate_response_serializes_non_string_values() {
+        let object = CdpEvaluateResponse::from_result(&serde_json::json!({
+            "result": { "type": "object", "value": { "ok": true } }
+        }))
+        .unwrap();
+        let undefined = CdpEvaluateResponse::from_result(&serde_json::json!({
+            "result": { "type": "undefined" }
+        }))
+        .unwrap();
+        let unserializable = CdpEvaluateResponse::from_result(&serde_json::json!({
+            "result": { "type": "number", "unserializableValue": "NaN" }
+        }))
+        .unwrap();
+
+        assert_eq!(object.result, r#"{"ok":true}"#);
+        assert_eq!(undefined.result, "undefined");
+        assert_eq!(unserializable.result, "NaN");
+    }
+
+    #[test]
+    fn test_cdp_evaluate_response_redacts_exception_details() {
+        let token_field = ["access", "_token"].concat();
+        let cookie_field = ["coo", "kie"].concat();
+        let exception_description =
+            format!("{token_field}=value-alpha; {cookie_field}=session-alpha");
+
+        let error = CdpEvaluateResponse::from_result(&serde_json::json!({
+            "exceptionDetails": {
+                "text": "Uncaught Authorization failed for Bearer browser-token",
+                "exception": {
+                    "description": exception_description
+                }
+            }
+        }))
+        .unwrap_err();
+
+        let message = format!("{error}");
+        assert!(!message.contains("browser-token"));
+        assert!(!message.contains("value-alpha"));
+        assert!(!message.contains("session-alpha"));
+        assert!(message.contains("[redacted]"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_capture_screenshot_issues_full_page_sequence() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(
+                r#"{"id":1,"result":{"cssContentSize":{"x":0,"y":0,"width":1280,"height":2048}}}"#
+                    .into(),
+            ),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"data":"image-alpha"}}"#.into()),
+        ]));
+
+        let response = session
+            .capture_screenshot(&cx, None, true, Some("jpeg"), Some(80))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            response,
+            CdpScreenshotResponse {
+                image_data: "image-alpha".to_string(),
+                width: 1280,
+                height: 2048,
+            }
+        );
+        assert_eq!(transport.sent.len(), 2);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Page.getLayoutMetrics",
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[1],
+            &serde_json::json!({
+                "id": 2,
+                "method": "Page.captureScreenshot",
+                "params": {
+                    "captureBeyondViewport": true,
+                    "clip": { "x": 0.0, "y": 0.0, "width": 1280.0, "height": 2048.0, "scale": 1 },
+                    "format": "jpeg",
+                    "fromSurface": true,
+                    "quality": 80,
+                }
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_capture_screenshot_uses_selector_clip() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":2}}"#.into()),
+            WebSocketMessage::Text(
+                r#"{"id":3,"result":{"model":{"content":[10.5,20,110.5,20,110.5,70.25,10.5,70.25]}}}"#
+                    .into(),
+            ),
+            WebSocketMessage::Text(r#"{"id":4,"result":{"data":"image-beta"}}"#.into()),
+        ]));
+
+        let response = session
+            .capture_screenshot(&cx, Some("#main"), false, None, None)
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(
+            response,
+            CdpScreenshotResponse {
+                image_data: "image-beta".to_string(),
+                width: 100,
+                height: 51,
+            }
+        );
+        assert_eq!(transport.sent.len(), 4);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "DOM.getDocument",
+                "params": { "depth": 0, "pierce": false },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[1],
+            &serde_json::json!({
+                "id": 2,
+                "method": "DOM.querySelector",
+                "params": { "nodeId": 1, "selector": "#main" },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[2],
+            &serde_json::json!({
+                "id": 3,
+                "method": "DOM.getBoxModel",
+                "params": { "nodeId": 2 },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[3],
+            &serde_json::json!({
+                "id": 4,
+                "method": "Page.captureScreenshot",
+                "params": {
+                    "captureBeyondViewport": true,
+                    "clip": { "x": 10.5, "y": 20.0, "width": 100.0, "height": 50.25, "scale": 1 },
+                    "format": "png",
+                    "fromSurface": true,
+                }
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_capture_screenshot_rejects_missing_selector() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":0}}"#.into()),
+        ]));
+
+        let error = session
+            .capture_screenshot(&cx, Some("#missing"), false, None, None)
+            .await
+            .unwrap_err();
+        let transport = session.into_transport();
+
+        assert!(format!("{error}").contains("selector `#missing` did not match"));
+        assert_eq!(transport.sent.len(), 2);
+    }
+
+    #[test]
+    fn test_cdp_screenshot_response_rejects_missing_data_and_bad_clip() {
+        let clip = CdpCaptureClip::new(0.0, 0.0, 10.0, 20.0).unwrap();
+        let missing_data =
+            CdpScreenshotResponse::from_capture_result(&serde_json::json!({}), clip).unwrap_err();
+        let empty_clip = CdpCaptureClip::new(0.0, 0.0, 0.0, 20.0).unwrap_err();
+
+        assert!(format!("{missing_data}").contains("missing data"));
+        assert!(format!("{empty_clip}").contains("positive dimensions"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_get_cookies_issues_documented_command_and_filters_domain() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(
+                r#"{"id":1,"result":{"cookies":[{"name":"theme","value":"light","domain":".example.test","path":"/","httpOnly":true,"secure":true,"sameSite":"Lax"},{"name":"mode","value":"dense","domain":"app.example.test","path":"/app"},{"name":"outside","value":"skip","domain":"example.org","path":"/"},{"name":"host","value":"local","path":"/"}]}}"#
+                    .into(),
+            ),
+        ]));
+
+        let response = session
+            .get_cookies(&cx, Some("example.test"))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response.cookies.len(), 2);
+        assert_eq!(response.cookies[0].name, "theme");
+        assert_eq!(response.cookies[0].value, "light");
+        assert_eq!(response.cookies[0].domain.as_deref(), Some(".example.test"));
+        assert_eq!(response.cookies[0].path.as_deref(), Some("/"));
+        assert_eq!(response.cookies[0].http_only, Some(true));
+        assert_eq!(response.cookies[0].secure, Some(true));
+        assert_eq!(response.cookies[0].same_site.as_deref(), Some("Lax"));
+        assert_eq!(response.cookies[1].name, "mode");
+        assert_eq!(
+            response.cookies[1].domain.as_deref(),
+            Some("app.example.test")
+        );
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Network.getCookies",
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_set_cookies_issues_documented_command_and_counts_input() {
+        let cx = fcp_async_core::compatibility_cx();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                r#"{"id":1,"result":{}}"#.into(),
+            )]));
+        let cookies = [
+            Cookie {
+                name: "theme".to_string(),
+                value: "light".to_string(),
+                domain: Some(".example.test".to_string()),
+                path: Some("/".to_string()),
+                expires: Some(4_102_444_800.0),
+                http_only: Some(true),
+                secure: Some(true),
+                same_site: Some("Lax".to_string()),
+            },
+            Cookie {
+                name: "mode".to_string(),
+                value: "dense".to_string(),
+                domain: Some("app.example.test".to_string()),
+                path: Some("/app".to_string()),
+                expires: None,
+                http_only: None,
+                secure: Some(false),
+                same_site: None,
+            },
+        ];
+
+        let response = session.set_cookies(&cx, &cookies).await.unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response, CdpSetCookiesResponse { set_count: 2 });
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Network.setCookies",
+                "params": {
+                    "cookies": [
+                        {
+                            "name": "theme",
+                            "value": "light",
+                            "domain": ".example.test",
+                            "path": "/",
+                            "expires": 4_102_444_800.0,
+                            "httpOnly": true,
+                            "secure": true,
+                            "sameSite": "Lax",
+                        },
+                        {
+                            "name": "mode",
+                            "value": "dense",
+                            "domain": "app.example.test",
+                            "path": "/app",
+                            "secure": false,
+                        },
+                    ],
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn test_cdp_cookie_response_rejects_missing_name_or_value() {
+        let missing_name = CdpCookieResponse::from_result(
+            &serde_json::json!({ "cookies": [{ "value": "light" }] }),
+            None,
+        )
+        .unwrap_err();
+        let missing_value = CdpCookieResponse::from_result(
+            &serde_json::json!({ "cookies": [{ "name": "theme" }] }),
+            None,
+        )
+        .unwrap_err();
+        let missing_list =
+            CdpCookieResponse::from_result(&serde_json::json!({}), None).unwrap_err();
+
+        assert!(format!("{missing_name}").contains("Network.Cookie name"));
+        assert!(format!("{missing_value}").contains("Network.Cookie value"));
+        assert!(format!("{missing_list}").contains("missing cookies"));
     }
 
     #[test]

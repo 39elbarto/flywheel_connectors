@@ -126,9 +126,94 @@ async fn deepgram_provider_contract_is_advertised() {
         long_running
             .get("rationale")
             .and_then(Value::as_str)
-            .is_some_and(|rationale| rationale.contains("host-owned")
-                && rationale.contains("deepgram.listen.stream"))
+            .is_some_and(
+                |rationale| rationale.contains("Retired from connector-local invoke")
+                    && rationale.contains("deepgram.listen.stream")
+            )
     );
+    assert_connector_local_retired(
+        long_running,
+        "deepgram.listen.stream",
+        &[
+            "stream_subscription_lifecycle",
+            "audio_chunk_fan_in",
+            "policy_gated_transcript_fan_out",
+            "supervised_shutdown_and_restart",
+        ],
+    );
+
+    let manifest = parsed_manifest();
+    let connector = manifest
+        .get("connector")
+        .and_then(toml::Value::as_table)
+        .expect("manifest connector table should parse");
+    assert!(
+        connector
+            .get("description")
+            .and_then(toml::Value::as_str)
+            .is_some_and(|description| description.contains("bounded realtime transcription"))
+    );
+    assert!(
+        connector
+            .get("archetypes")
+            .and_then(toml::Value::as_array)
+            .expect("manifest archetypes should parse")
+            .iter()
+            .any(|archetype| archetype.as_str() == Some("streaming"))
+    );
+    let migration_hint = connector
+        .get("state")
+        .and_then(toml::Value::as_table)
+        .and_then(|state| state.get("migration_hint"))
+        .and_then(toml::Value::as_str)
+        .expect("manifest migration_hint should parse");
+    assert!(migration_hint.contains("retired from connector-local invoke"));
+    assert!(migration_hint.contains("host owns stream session lifecycle"));
+}
+
+fn assert_connector_local_retired(
+    operation: &Value,
+    expected_fallback: &str,
+    expected_host_capabilities: &[&str],
+) {
+    assert_eq!(
+        operation.get("outcome").and_then(Value::as_str),
+        Some("retired_from_connector_local_invoke")
+    );
+    assert_eq!(
+        operation
+            .get("host_platform_required")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        operation
+            .get("connector_local_invoke")
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert_eq!(
+        operation
+            .get("finite_fallback_operation")
+            .and_then(Value::as_str),
+        Some(expected_fallback)
+    );
+    let capabilities = operation
+        .get("required_host_capabilities")
+        .and_then(Value::as_array)
+        .expect("required host capabilities should be advertised");
+    for expected in expected_host_capabilities {
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some(*expected)),
+            "missing required host capability {expected}"
+        );
+    }
+}
+
+fn parsed_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("manifest TOML should parse")
 }
 
 fn operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {

@@ -1395,7 +1395,17 @@ fn deferred_operations_info() -> Vec<Value> {
             "summary": "Host-supervised long-running ElevenLabs Scribe transcription stream",
             "capability": "elevenlabs.stt.streaming",
             "provider_reference": "OpenClaw Scribe v2 Realtime transcription provider",
-            "rationale": "Deferred until FCP host-owned subscriptions can supervise indefinite audio fan-in, transcript broadcast fan-out, and shutdown across connector restarts. The bounded elevenlabs.scribe.realtime.transcribe operation covers finite WebSocket sessions.",
+            "outcome": "retired_from_connector_local_invoke",
+            "host_platform_required": true,
+            "connector_local_invoke": "unsupported",
+            "finite_fallback_operation": "elevenlabs.scribe.realtime.transcribe",
+            "required_host_capabilities": [
+                "stream_subscription_lifecycle",
+                "audio_chunk_fan_in",
+                "policy_gated_transcript_fan_out",
+                "supervised_shutdown_and_restart"
+            ],
+            "rationale": "Retired from connector-local invoke until FCP host-owned subscriptions can supervise indefinite audio fan-in, transcript broadcast fan-out, and shutdown across connector restarts. Use the bounded elevenlabs.scribe.realtime.transcribe operation for finite WebSocket sessions.",
             "default_model_id": DEFAULT_STT_MODEL_ID,
             "default_audio_format": DEFAULT_STT_AUDIO_FORMAT,
             "default_sample_rate_hz": DEFAULT_STT_SAMPLE_RATE,
@@ -1411,7 +1421,17 @@ fn deferred_operations_info() -> Vec<Value> {
             "summary": "Host-supervised ElevenLabs WebSocket input-stream synthesis",
             "capability": "elevenlabs.tts.streaming",
             "provider_reference": "ElevenLabs text-to-speech WebSocket input-stream API",
-            "rationale": "Deferred until FCP host-owned sessions can supervise partial text fan-in, alignment fan-out, and shutdown across connector restarts. The bounded elevenlabs.tts.stream operation covers finite HTTP chunked synthesis.",
+            "outcome": "retired_from_connector_local_invoke",
+            "host_platform_required": true,
+            "connector_local_invoke": "unsupported",
+            "finite_fallback_operation": "elevenlabs.tts.stream",
+            "required_host_capabilities": [
+                "stream_subscription_lifecycle",
+                "partial_text_fan_in",
+                "policy_gated_audio_and_alignment_fan_out",
+                "supervised_shutdown_and_restart"
+            ],
+            "rationale": "Retired from connector-local invoke until FCP host-owned sessions can supervise partial text fan-in, alignment fan-out, and shutdown across connector restarts. Use the bounded elevenlabs.tts.stream operation for finite HTTP chunked synthesis.",
             "default_model_id": DEFAULT_TTS_MODEL_ID,
             "required_proof": [
                 "LabRuntime cancellation drains without orphan audio tasks",

@@ -173,8 +173,20 @@ async fn elevenlabs_provider_contract_is_advertised() {
         long_running
             .get("rationale")
             .and_then(Value::as_str)
-            .is_some_and(|rationale| rationale.contains("host-owned")
-                && rationale.contains("elevenlabs.scribe.realtime.transcribe"))
+            .is_some_and(
+                |rationale| rationale.contains("Retired from connector-local invoke")
+                    && rationale.contains("elevenlabs.scribe.realtime.transcribe")
+            )
+    );
+    assert_connector_local_retired(
+        long_running,
+        "elevenlabs.scribe.realtime.transcribe",
+        &[
+            "stream_subscription_lifecycle",
+            "audio_chunk_fan_in",
+            "policy_gated_transcript_fan_out",
+            "supervised_shutdown_and_restart",
+        ],
     );
 
     let streaming_tts = deferred_operation(&introspection, "elevenlabs.tts.input_stream.websocket");
@@ -184,6 +196,74 @@ async fn elevenlabs_provider_contract_is_advertised() {
             .and_then(Value::as_str),
         Some("eleven_multilingual_v2")
     );
+    assert_connector_local_retired(
+        streaming_tts,
+        "elevenlabs.tts.stream",
+        &[
+            "stream_subscription_lifecycle",
+            "partial_text_fan_in",
+            "policy_gated_audio_and_alignment_fan_out",
+            "supervised_shutdown_and_restart",
+        ],
+    );
+
+    let manifest = parsed_manifest();
+    let migration_hint = manifest
+        .get("connector")
+        .and_then(toml::Value::as_table)
+        .and_then(|connector| connector.get("state"))
+        .and_then(toml::Value::as_table)
+        .and_then(|state| state.get("migration_hint"))
+        .and_then(toml::Value::as_str)
+        .expect("manifest migration_hint should parse");
+    assert!(migration_hint.contains("retired from connector-local invoke"));
+    assert!(migration_hint.contains("Long-running Scribe sessions"));
+    assert!(migration_hint.contains("WebSocket input-stream TTS"));
+}
+
+fn assert_connector_local_retired(
+    operation: &Value,
+    expected_fallback: &str,
+    expected_host_capabilities: &[&str],
+) {
+    assert_eq!(
+        operation.get("outcome").and_then(Value::as_str),
+        Some("retired_from_connector_local_invoke")
+    );
+    assert_eq!(
+        operation
+            .get("host_platform_required")
+            .and_then(Value::as_bool),
+        Some(true)
+    );
+    assert_eq!(
+        operation
+            .get("connector_local_invoke")
+            .and_then(Value::as_str),
+        Some("unsupported")
+    );
+    assert_eq!(
+        operation
+            .get("finite_fallback_operation")
+            .and_then(Value::as_str),
+        Some(expected_fallback)
+    );
+    let capabilities = operation
+        .get("required_host_capabilities")
+        .and_then(Value::as_array)
+        .expect("required host capabilities should be advertised");
+    for expected in expected_host_capabilities {
+        assert!(
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some(*expected)),
+            "missing required host capability {expected}"
+        );
+    }
+}
+
+fn parsed_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("manifest TOML should parse")
 }
 
 fn operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {

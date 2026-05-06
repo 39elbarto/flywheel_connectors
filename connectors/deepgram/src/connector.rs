@@ -856,25 +856,7 @@ impl DeepgramConnector {
                     "output_schema": { "type": "object" }
                 }
             ],
-            "deferred_operations": [
-                {
-                    "id": "deepgram.listen.stream.long_running",
-                    "summary": "Host-supervised long-running Deepgram realtime transcription stream",
-                    "capability": "deepgram.listen.streaming",
-                    "provider_reference": "OpenClaw realtime transcription provider",
-                    "rationale": "Deferred until FCP host-owned stream subscriptions can supervise indefinite audio chunk fan-in, transcript broadcast fan-out, and cancellation across connector restarts. The bounded deepgram.listen.stream operation covers finite WebSocket sessions.",
-                    "default_model": DEFAULT_TRANSCRIPTION_MODEL,
-                    "default_encoding": DEFAULT_STREAMING_ENCODING,
-                    "default_sample_rate_hz": DEFAULT_STREAMING_SAMPLE_RATE,
-                    "default_endpointing_ms": DEFAULT_STREAMING_ENDPOINTING_MS,
-                    "interim_results_default": DEFAULT_STREAMING_INTERIM_RESULTS,
-                    "required_proof": [
-                        "LabRuntime cancellation drains without orphan transcript tasks",
-                        "long-running loopback WebSocket e2e covers partial/final transcript frames across host subscription shutdown",
-                        "redacted JSONL records audio frame counts and close/finalize behavior"
-                    ]
-                }
-            ],
+            "deferred_operations": deferred_operations_info(),
             "events": [],
             "resource_types": []
         }))
@@ -963,6 +945,36 @@ impl Default for DeepgramConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn deferred_operations_info() -> Vec<Value> {
+    vec![json!({
+        "id": "deepgram.listen.stream.long_running",
+        "summary": "Host-supervised long-running Deepgram realtime transcription stream",
+        "capability": "deepgram.listen.streaming",
+        "provider_reference": "OpenClaw realtime transcription provider",
+        "outcome": "retired_from_connector_local_invoke",
+        "host_platform_required": true,
+        "connector_local_invoke": "unsupported",
+        "finite_fallback_operation": "deepgram.listen.stream",
+        "required_host_capabilities": [
+            "stream_subscription_lifecycle",
+            "audio_chunk_fan_in",
+            "policy_gated_transcript_fan_out",
+            "supervised_shutdown_and_restart"
+        ],
+        "rationale": "Retired from connector-local invoke until FCP host-owned stream subscriptions can supervise indefinite audio chunk fan-in, transcript broadcast fan-out, and cancellation across connector restarts. Use the bounded deepgram.listen.stream operation for finite WebSocket sessions.",
+        "default_model": DEFAULT_TRANSCRIPTION_MODEL,
+        "default_encoding": DEFAULT_STREAMING_ENCODING,
+        "default_sample_rate_hz": DEFAULT_STREAMING_SAMPLE_RATE,
+        "default_endpointing_ms": DEFAULT_STREAMING_ENDPOINTING_MS,
+        "interim_results_default": DEFAULT_STREAMING_INTERIM_RESULTS,
+        "required_proof": [
+            "LabRuntime cancellation drains without orphan transcript tasks",
+            "long-running loopback WebSocket e2e covers partial/final transcript frames across host subscription shutdown",
+            "redacted JSONL records audio frame counts and close/finalize behavior"
+        ]
+    })]
 }
 
 fn normalize_base_url(

@@ -18,7 +18,7 @@ format = "native"
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "Supports voice discovery, request-response TTS, bounded HTTP chunked TTS streaming, and finite Scribe realtime transcription."
+migration_hint = "Supports voice discovery, request-response TTS, bounded HTTP chunked TTS streaming, and finite Scribe realtime transcription. Long-running Scribe sessions and WebSocket input-stream TTS are retired from connector-local invoke until the host owns stream session lifecycle, fan-in/fan-out, shutdown, and restart supervision."
 
 [zones]
 home = "z:work"

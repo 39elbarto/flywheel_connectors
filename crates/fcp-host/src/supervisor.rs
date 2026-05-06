@@ -345,6 +345,7 @@ impl ConnectorPrewarmConfig {
     }
 
     /// Decide whether a warm entry can be checked out for an invocation.
+    #[allow(clippy::too_many_lines)]
     #[must_use]
     pub fn decide_checkout(
         &self,
@@ -2061,12 +2062,8 @@ mod tests {
 
     #[test]
     fn prewarm_config_serde_roundtrip() -> serde_json::Result<()> {
-        let config = ConnectorPrewarmConfig::warm_pool(
-            2,
-            8,
-            Duration::from_secs(60),
-            Duration::from_secs(2),
-        );
+        let config =
+            ConnectorPrewarmConfig::warm_pool(2, 8, Duration::from_mins(1), Duration::from_secs(2));
         let json = serde_json::to_string(&config)?;
         assert!(json.contains("\"strategy\":\"warm_pool\""));
         let parsed: ConnectorPrewarmConfig = serde_json::from_str(&json)?;

@@ -25,19 +25,21 @@ use fcp_crypto::{CryptoError, Ed25519Signature, Ed25519VerifyingKey};
 use fcp_prelude::{ConnectorId, NodeSignature, PrincipalId, ZoneId};
 use serde::{Deserialize, Serialize};
 
-/// Domain separator for [`EmergencyRevocationRequest::signing_bytes`]
-/// — the owner signs over a transcript prefixed with this string so a
+/// Domain separator for [`EmergencyRevocationRequest::signing_bytes`].
+///
+/// The owner signs over a transcript prefixed with this string so a
 /// signature for an emergency-revocation request cannot be replayed
 /// against any other transcript shape.
 pub const EMERGENCY_REVOCATION_REQUEST_DOMAIN: &[u8] = b"FCP2-EMERGENCY-REVOCATION-REQUEST-V1";
 
-/// Default per-zone rate-limit window (mirrors
-/// `PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS`).
+/// Default per-zone rate-limit window.
+///
+/// Mirrors `PriorityGossipPolicy::EMERGENCY_RATE_LIMIT_PER_ZONE_SECS`.
 /// Recorded here as a `u64` ms value for direct use by the token
 /// bucket; see [`EmergencyRevocationRateLimiter`].
 pub const EMERGENCY_REVOCATION_RATE_LIMIT_PER_ZONE_MS: u64 = 60_000;
 
-/// POST /admin/emergency_revoke body — owner-signed, replay-protected.
+/// `POST /admin/emergency_revoke` body — owner-signed, replay-protected.
 ///
 /// Validation checklist (host MUST perform all four before
 /// triggering an emergency burst):
@@ -76,7 +78,7 @@ impl EmergencyRevocationRequest {
     /// Construct an unsigned request. Call [`Self::sign_with`] to
     /// attach the owner signature once the transcript is finalized.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         zone_id: ZoneId,
         connector: Option<ConnectorId>,
         reason: String,
@@ -321,10 +323,11 @@ pub struct EmergencyRevocationAuditEvent {
 
 // ── Nonce replay store ─────────────────────────────────────────────────
 
-/// Per-zone replay-protection store for emergency-revocation
-/// nonces. Bounded in size (LRU-eviction once `max_entries_per_zone`
-/// is hit) so an attacker cannot grow the host's memory footprint by
-/// flooding nonces.
+/// Per-zone replay-protection store for emergency-revocation nonces.
+///
+/// Bounded in size (LRU-eviction once `max_entries_per_zone` is hit)
+/// so an attacker cannot grow the host's memory footprint by flooding
+/// nonces.
 ///
 /// In-process implementation — production deployment should layer
 /// this on top of a persistent backing store so a host restart does
@@ -533,7 +536,7 @@ mod tests {
         altered_window_high.not_after_unix_ms = u64::MAX;
         assert_ne!(baseline, altered_window_high.signing_bytes());
 
-        let mut altered_connector = base.clone();
+        let mut altered_connector = base;
         altered_connector.connector =
             Some(ConnectorId::from_static("github:request_response:1.0.0"));
         assert_ne!(baseline, altered_connector.signing_bytes());
@@ -615,11 +618,7 @@ mod tests {
         }
         // Capacity is 2 — most prior nonces have been evicted; the
         // store grew bounded by capacity.
-        let stored_count = store
-            .seen_per_zone
-            .get(&zone)
-            .map(HashSet::len)
-            .unwrap_or(0);
+        let stored_count = store.seen_per_zone.get(&zone).map_or(0, HashSet::len);
         assert!(
             stored_count <= 2,
             "capacity exceeded: stored {stored_count}"
@@ -631,9 +630,10 @@ mod tests {
         let req = sample_request();
         assert!(req.is_within_validity_window(req.not_before_unix_ms));
         assert!(req.is_within_validity_window(req.not_after_unix_ms));
-        assert!(
-            req.is_within_validity_window((req.not_before_unix_ms + req.not_after_unix_ms) / 2)
-        );
+        assert!(req.is_within_validity_window(u64::midpoint(
+            req.not_before_unix_ms,
+            req.not_after_unix_ms,
+        )));
         assert!(!req.is_within_validity_window(req.not_before_unix_ms - 1));
         assert!(!req.is_within_validity_window(req.not_after_unix_ms + 1));
     }
@@ -663,7 +663,7 @@ mod tests {
         let err = limiter
             .try_consume(&zone, t0 + 30_000)
             .expect_err("second consume within window must fail");
-        assert!(err >= 29 && err <= 31, "unexpected retry_after: {err}");
+        assert!((29..=31).contains(&err), "unexpected retry_after: {err}");
 
         // Second revoke 60s later succeeds (window has refilled).
         limiter

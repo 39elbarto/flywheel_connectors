@@ -1352,7 +1352,7 @@ fn non_empty_os_env(key: &str) -> Option<OsString> {
 
 fn connector_zone_state_dir(root: &StdPath, connector_id: &ConnectorId, zone: &ZoneId) -> PathBuf {
     root.join(sanitize_state_path_segment(connector_id.as_str()))
-        .join(sanitize_state_path_segment(&zone.to_string()))
+        .join(sanitize_state_path_segment(zone.as_ref()))
 }
 
 fn sanitize_state_path_segment(value: &str) -> String {
@@ -3232,15 +3232,15 @@ async fn verify_live_request(
         .map_err(|error| {
             HostError::PreflightFailed(format!("persisted capability verification failed: {error}"))
         })?;
-    if !persisted_verify.valid {
-        if let Some(reason) = authoritative_persisted_capability_rejection_reason(
+    if !persisted_verify.valid
+        && let Some(reason) = authoritative_persisted_capability_rejection_reason(
             &persisted_verify,
             "persisted capability verification rejected the live request",
-        ) {
-            return Err(HostError::PreflightFailed(format!(
-                "capability token rejected by host state: {reason}"
-            )));
-        }
+        )
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "capability token rejected by host state: {reason}"
+        )));
     }
 
     let principal = claims_principal(verified_claims).ok_or_else(|| {
@@ -6806,13 +6806,10 @@ async fn invoke_handler(
         operation: operation_name.clone(),
         operation_id: operation_id.clone(),
         correlation_id: correlation_id.clone(),
-        occurred_at: u64::try_from(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        )
-        .unwrap_or(0),
+        occurred_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
     };
 
     let preflight = evaluate_live_preflight(&state, &request, asserted_principal.as_deref()).await;

@@ -435,7 +435,7 @@ impl CriuConnectorMigrator {
         })
     }
 
-    fn ensure_supported_platform(&self) -> Result<(), LinuxMigrationError> {
+    const fn ensure_supported_platform(&self) -> Result<(), LinuxMigrationError> {
         if self.require_linux && !cfg!(target_os = "linux") {
             return Err(LinuxMigrationError::UnsupportedPlatform);
         }

@@ -206,11 +206,11 @@ fn invoke_response_error_canonical_cbor_deterministic_fixture() {
     ));
 }
 
-/// Pin the deterministic-signature property of CapabilityTokenBuilder
-/// + Ed25519: signing the SAME constraints + SAME validity + SAME
-/// key MUST produce byte-identical COSE bytes across runs. If this
-/// regresses, golden fixtures everywhere in the workspace become
-/// flaky.
+/// Pin the deterministic-signature property of `CapabilityTokenBuilder`.
+///
+/// Ed25519 signing over the same constraints, validity, and key MUST
+/// produce byte-identical COSE bytes across runs. If this regresses,
+/// golden fixtures everywhere in the workspace become flaky.
 #[test]
 fn capability_token_signing_is_deterministic_across_runs() {
     let token_a = deterministic_capability_token();

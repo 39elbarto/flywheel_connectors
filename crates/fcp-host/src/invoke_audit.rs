@@ -610,7 +610,10 @@ mod tests {
             Some("connector subprocess crashed")
         );
         assert_eq!(
-            entry.metadata.get("duration_ms").and_then(|v| v.as_u64()),
+            entry
+                .metadata
+                .get("duration_ms")
+                .and_then(serde_json::Value::as_u64),
             Some(17)
         );
     }

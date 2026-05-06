@@ -52,7 +52,7 @@
 //!
 //! ## Acceptance criteria status (from bead)
 //!
-//! - ✅ Boot log records DeploymentMode and reason — see
+//! - ✅ Boot log records `DeploymentMode` and reason — see
 //!   [`DeploymentClassification::boot_log_line`].
 //! - ✅ Risky/Dangerous invocations in Evaluation mode return
 //!   structured denial — see [`DeploymentTierRefusal`].
@@ -66,7 +66,7 @@
 //! ## Threshold rationale
 //!
 //! [`MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE`] = 2 matches the bead's
-//! sequence step 2 — "transition to MeshActive only when ≥2 healthy
+//! sequence step 2 — "transition to `MeshActive` only when ≥2 healthy
 //! mesh peers exist". Two is the smallest count that survives one
 //! peer being lost mid-operation without immediate quorum loss; it
 //! is intentionally NOT the same as
@@ -81,9 +81,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// Minimum number of healthy mesh peers required to transition out
-/// of [`DeploymentMode::Evaluation`]. Matches bead hr0rr.1 §"Sequence"
-/// step 2: "transition to MeshActive only when ≥2 healthy mesh
-/// peers exist". Counted exclusive of self.
+/// of [`DeploymentMode::Evaluation`].
+///
+/// Matches bead hr0rr.1 §"Sequence" step 2: "transition to
+/// `MeshActive` only when ≥2 healthy mesh peers exist". Counted
+/// exclusive of self.
 pub const MIN_HEALTHY_MESH_PEERS_FOR_ACTIVE: u32 = 2;
 
 /// Operator-visible warning string emitted every health-check while
@@ -232,7 +234,7 @@ pub enum DeploymentClassificationReason {
     InsufficientMeshQuorum {
         /// Observed healthy peer count.
         observed: u32,
-        /// Required minimum for MeshActive.
+        /// Required minimum for `MeshActive`.
         required: u32,
     },
     /// Lease coordinator was configured (i.e.,
@@ -274,16 +276,6 @@ impl DeploymentClassificationReason {
     }
 }
 
-/// Pure classifier — no I/O, no state, no async. Order of checks
-/// matches the priority of disqualifiers in the bead:
-///   1. Stale revocation snapshot → Evaluation (any peer count
-///      cannot compensate for not knowing what's revoked).
-///   2. Lease coordinator configured but unreachable → Evaluation
-///      (lease-bound ops cannot proceed).
-///   3. Healthy peer count < threshold → Evaluation (insufficient
-///      quorum).
-///   4. Otherwise → MeshActive.
-
 /// Domain-separation tag for signed [`MeshQuorumSignals`].
 ///
 /// Prevents a signed-signals byte string from being re-interpreted
@@ -311,7 +303,7 @@ pub const MESH_QUORUM_SIGNALS_DOMAIN: &[u8] = b"FCP3-MESH-QUORUM-SIGNALS-V1";
 pub struct SignedMeshQuorumSignals {
     /// The raw signals being attested.
     pub signals: MeshQuorumSignals,
-    /// KeyId of the node that signed these signals. Resolved to a
+    /// `KeyId` of the node that signed these signals. Resolved to a
     /// verifying key by the caller's key resolver at verify time.
     pub attesting_kid: KeyId,
     /// Ed25519 signature over [`Self::signing_bytes`].
@@ -434,12 +426,13 @@ where
     Ok(classify_deployment_mode(signed.signals))
 }
 
-/// Fail-soft variant of [`classify_deployment_mode_verified`]:
-/// signature verification failure produces a structured Evaluation
+/// Fail-soft variant of [`classify_deployment_mode_verified`].
+///
+/// Signature verification failure produces a structured `Evaluation`
 /// classification (with [`DeploymentClassificationReason::SignedSignalsRejected`])
 /// rather than an `Err`. Use on hot paths that must always produce
 /// some classification rather than abort — the security promise is
-/// the same (an attacker cannot promote to MeshActive without a
+/// the same (an attacker cannot promote to `MeshActive` without a
 /// valid signature).
 #[must_use]
 pub fn classify_deployment_mode_verified_or_evaluation<F>(
@@ -449,18 +442,25 @@ pub fn classify_deployment_mode_verified_or_evaluation<F>(
 where
     F: FnOnce(&KeyId) -> Option<Ed25519VerifyingKey>,
 {
-    match classify_deployment_mode_verified(signed, resolve_key) {
-        Ok(classification) => classification,
-        Err(_) => DeploymentClassification {
+    classify_deployment_mode_verified(signed, resolve_key).unwrap_or({
+        DeploymentClassification {
             mode: DeploymentMode::Evaluation,
             signals: signed.signals,
             reason: DeploymentClassificationReason::SignedSignalsRejected,
-        },
-    }
+        }
+    })
 }
 
+/// Pure classifier — no I/O, no state, no async.
+///
+/// Order of checks matches the priority of disqualifiers in the bead:
+///
+/// 1. Stale revocation snapshot → `Evaluation`.
+/// 2. Lease coordinator configured but unreachable → `Evaluation`.
+/// 3. Healthy peer count below threshold → `Evaluation`.
+/// 4. Otherwise → `MeshActive`.
 #[must_use]
-pub fn classify_deployment_mode(signals: MeshQuorumSignals) -> DeploymentClassification {
+pub const fn classify_deployment_mode(signals: MeshQuorumSignals) -> DeploymentClassification {
     if !signals.revocation_snapshot_fresh {
         return DeploymentClassification {
             mode: DeploymentMode::Evaluation,
@@ -530,7 +530,7 @@ pub enum DeploymentTierRefusal {
 ///
 /// Admission rules:
 ///
-/// | Tier      | Evaluation              | MeshActive               |
+/// | Tier      | Evaluation              | `MeshActive`             |
 /// |-----------|-------------------------|--------------------------|
 /// | Safe      | ALLOW                   | ALLOW                    |
 /// | Risky     | REFUSE (`TierRequires…`)| ALLOW                    |
@@ -548,7 +548,7 @@ pub enum DeploymentTierRefusal {
 ///
 /// Returns [`DeploymentTierRefusal`] when admission denies the
 /// request.
-pub fn admit_safety_tier(
+pub const fn admit_safety_tier(
     classification: &DeploymentClassification,
     tier: SafetyTier,
 ) -> Result<(), DeploymentTierRefusal> {
@@ -581,8 +581,11 @@ pub const fn evaluation_mode_boot_warning() -> &'static str {
     EVALUATION_MODE_HEALTH_WARNING
 }
 
-/// Emit the canonical boot-log entry via `tracing::info!` at boot
-/// time and `tracing::warn!` whenever the mode is `Evaluation`.
+/// Emit the canonical boot-log entry.
+///
+/// Uses `tracing::info!` at boot time and `tracing::warn!` whenever
+/// the mode is `Evaluation`.
+///
 /// Test seam: returns the rendered line so callers can assert on
 /// it without capturing tracing output.
 pub fn emit_boot_log(classification: &DeploymentClassification) -> String {
@@ -762,7 +765,9 @@ mod tests {
                     DeploymentClassificationReason::InsufficientMeshQuorum { .. }
                 ));
             }
-            other => panic!("expected TierRequiresMeshActive, got {other:?}"),
+            other @ DeploymentTierRefusal::TierForbidden { .. } => {
+                panic!("expected TierRequiresMeshActive, got {other:?}")
+            }
         }
     }
 
@@ -839,7 +844,9 @@ mod tests {
                     DeploymentClassificationReason::RevocationSnapshotStale
                 );
             }
-            other => panic!("expected TierRequiresMeshActive, got {other:?}"),
+            other @ DeploymentTierRefusal::TierForbidden { .. } => {
+                panic!("expected TierRequiresMeshActive, got {other:?}")
+            }
         }
     }
 

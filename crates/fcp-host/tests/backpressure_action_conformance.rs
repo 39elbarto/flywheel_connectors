@@ -287,11 +287,13 @@ async fn backpressure_action_conformance_delay_action_actually_sleeps_at_integra
     // Tight bulkhead (max_concurrent = 4) so a few permit-holders push
     // pressure_per_mille above the controller's soft_limit (850) and
     // drive QueueCongested → Delay action under default weights.
-    let mut config = ResilienceConfig::default();
-    config.bulkhead = BulkheadConfig {
-        max_concurrent: 4,
-        max_queued: 32,
-        queue_timeout: Duration::from_secs(2),
+    let config = ResilienceConfig {
+        bulkhead: BulkheadConfig {
+            max_concurrent: 4,
+            max_queued: 32,
+            queue_timeout: Duration::from_secs(2),
+        },
+        ..ResilienceConfig::default()
     };
     let layer = Arc::new(ResilienceLayer::new(config));
     let cid = connector_id();

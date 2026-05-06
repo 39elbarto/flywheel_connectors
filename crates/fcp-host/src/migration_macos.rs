@@ -418,13 +418,13 @@ impl MacosConnectorSnapshotter {
             .map_or_else(unix_epoch_millis, Ok)?;
 
         if !self.mach_task_capture {
-            return self.fallback_snapshot(request, captured_at_unix_ms, None);
+            return Self::fallback_snapshot(request, captured_at_unix_ms, None);
         }
 
         let task_port = match MachTaskPort::for_pid(request.pid) {
             Ok(task_port) => task_port,
             Err(MacosProcessSnapshotError::TaskPortUnavailable { kern_return, .. }) => {
-                return self.fallback_snapshot(request, captured_at_unix_ms, Some(kern_return));
+                return Self::fallback_snapshot(request, captured_at_unix_ms, Some(kern_return));
             }
             Err(error) => return Err(error),
         };
@@ -472,17 +472,16 @@ impl MacosConnectorSnapshotter {
     }
 
     fn fallback_snapshot(
-        &self,
         request: &MacosConnectorSnapshotRequest,
         captured_at_unix_ms: u64,
         task_for_pid_kern_return: Option<kern_return_t>,
     ) -> Result<MacosProcessSnapshot, MacosProcessSnapshotError> {
-        let bytes = request.graceful_checkpoint_bytes.clone().ok_or(
+        let bytes = request.graceful_checkpoint_bytes.clone().ok_or_else(|| {
             MacosProcessSnapshotError::TaskPortUnavailable {
                 pid: request.pid,
                 kern_return: task_for_pid_kern_return.unwrap_or(KERN_SUCCESS),
-            },
-        )?;
+            }
+        })?;
 
         Ok(MacosProcessSnapshot {
             schema_version: MACOS_SNAPSHOT_SCHEMA_VERSION,
@@ -511,7 +510,7 @@ impl MachTaskPort {
         // SAFETY: `mach_task_self` returns the current task send right, and
         // `task_for_pid` writes one Mach port name into the valid `task`
         // out-parameter. The pid is bounds-checked for the C `pid_t` ABI.
-        let kern_return = unsafe { task_for_pid(mach_task_self(), pid_i32, &mut task) };
+        let kern_return = unsafe { task_for_pid(mach_task_self(), pid_i32, &raw mut task) };
         if kern_return != KERN_SUCCESS || task == MACH_PORT_NULL || task == MACH_PORT_DEAD {
             return Err(MacosProcessSnapshotError::TaskPortUnavailable { pid, kern_return });
         }
@@ -529,8 +528,8 @@ impl MachTaskPort {
             task_info(
                 self.name as task_name_t,
                 TASK_DYLD_INFO,
-                (&mut dyld_info as *mut task_dyld_info).cast::<integer_t>(),
-                &mut count,
+                (&raw mut dyld_info).cast::<integer_t>(),
+                &raw mut count,
             )
         };
         if kern_return != KERN_SUCCESS {
@@ -569,12 +568,12 @@ impl MachTaskPort {
             let kern_return = unsafe {
                 mach_vm_region(
                     self.name,
-                    &mut address,
-                    &mut size,
+                    &raw mut address,
+                    &raw mut size,
                     VM_REGION_BASIC_INFO_64,
-                    (&mut region_info as *mut vm_region_basic_info_64).cast::<integer_t>(),
-                    &mut count,
-                    &mut object_name,
+                    (&raw mut region_info).cast::<integer_t>(),
+                    &raw mut count,
+                    &raw mut object_name,
                 )
             };
             deallocate_port_name(object_name);
@@ -663,7 +662,13 @@ impl MachTaskPort {
         // of that allocation in this process. Mach writes at most `sample_size`
         // bytes and reports the initialized byte count via `out_size`.
         let kern_return = unsafe {
-            mach_vm_read_overwrite(self.name, address, sample_size, data_address, &mut out_size)
+            mach_vm_read_overwrite(
+                self.name,
+                address,
+                sample_size,
+                data_address,
+                &raw mut out_size,
+            )
         };
         if kern_return != KERN_SUCCESS {
             return Ok(None);
@@ -807,9 +812,8 @@ mod tests {
         let snapshotter = MacosConnectorSnapshotter::default().with_mach_task_capture(false);
         let snapshot = snapshotter.snapshot_connector(&request)?;
 
-        let error = match snapshot.chunked_payload(0) {
-            Ok(_) => return Err("zero chunk size unexpectedly succeeded".into()),
-            Err(error) => error,
+        let Err(error) = snapshot.chunked_payload(0) else {
+            return Err("zero chunk size unexpectedly succeeded".into());
         };
 
         assert!(matches!(error, MacosProcessSnapshotError::ZeroChunkSize));

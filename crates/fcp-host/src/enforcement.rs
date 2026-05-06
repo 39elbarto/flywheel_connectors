@@ -272,7 +272,7 @@ impl Default for RevocationCascadeVerifier {
 impl RevocationCascadeVerifier {
     /// Create a verifier with the supplied cascade-walk policy.
     #[must_use]
-    pub fn new(config: CascadeConfig) -> Self {
+    pub const fn new(config: CascadeConfig) -> Self {
         Self {
             config,
             registry_age_secs: 0,
@@ -284,7 +284,7 @@ impl RevocationCascadeVerifier {
 
     /// Override the age of the revocation snapshot used by lookups.
     #[must_use]
-    pub fn with_registry_age_secs(mut self, age_secs: u64) -> Self {
+    pub const fn with_registry_age_secs(mut self, age_secs: u64) -> Self {
         self.registry_age_secs = age_secs;
         self
     }
@@ -569,7 +569,7 @@ impl EnforcementContextBuilder {
 
     /// Set the request object id used by capability-constraint checks.
     #[must_use]
-    pub fn constraint_object_id(mut self, object_id: ObjectId) -> Self {
+    pub const fn constraint_object_id(mut self, object_id: ObjectId) -> Self {
         self.constraint_object_id = Some(object_id);
         self
     }
@@ -1245,13 +1245,14 @@ impl EnforcementCheck for CascadeRevocationCheck {
 /// `.safety_tier(t).deployment_classification(c)` builder calls.
 /// The legacy back-compat behavior is preserved as
 /// [`MissingFieldPolicy::Skip`] for callers that explicitly opt in.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum MissingFieldPolicy {
     /// Missing `safety_tier` OR `deployment_classification` →
-    /// `CheckOutcome::Deny` with reason_code
+    /// `CheckOutcome::Deny` with `reason_code`
     /// `"TIER_ADMISSION_NOT_CONFIGURED"`. This is the fail-CLOSED
     /// default: a request whose tier admission cannot be evaluated
     /// MUST NOT proceed.
+    #[default]
     Deny,
     /// Missing fields → `CheckOutcome::Skip` with explanatory
     /// reason. Use only for explicit back-compat with pre-nsrx3
@@ -1261,17 +1262,11 @@ pub enum MissingFieldPolicy {
     Skip,
 }
 
-impl Default for MissingFieldPolicy {
-    fn default() -> Self {
-        Self::Deny
-    }
-}
-
 /// Validates the request's [`SafetyTier`] is admissible under the
 /// host's current [`DeploymentClassification`] (br-nsrx3 / hr0rr.A,
 /// hardened by br-298px).
 ///
-/// Composes the [`admit_safety_tier`] predicate hr0rr.1 (CrimsonWolf,
+/// Composes the [`admit_safety_tier`] predicate hr0rr.1 (`CrimsonWolf`,
 /// commit 26d7919dd). Refuses `Risky` and `Dangerous` tiers when
 /// the host is in `DeploymentMode::Evaluation` (insufficient mesh
 /// quorum). Always refuses `Forbidden`. Always allows `Safe` and
@@ -1283,7 +1278,7 @@ impl Default for MissingFieldPolicy {
 /// missing, the check honors [`Self::on_missing`]:
 ///
 /// * [`MissingFieldPolicy::Deny`] (production default) — returns
-///   `CheckOutcome::Deny` with reason_code
+///   `CheckOutcome::Deny` with `reason_code`
 ///   `"TIER_ADMISSION_NOT_CONFIGURED"`. A security gate whose
 ///   inputs aren't populated MUST NOT silently skip — that is the
 ///   br-298px review finding's argument.
@@ -1297,7 +1292,7 @@ pub struct DeploymentTierCheck {
 
 impl DeploymentTierCheck {
     /// Strict (fail-CLOSED) constructor — missing context fields
-    /// produce [`CheckOutcome::Deny`] with reason_code
+    /// produce [`CheckOutcome::Deny`] with `reason_code`
     /// `"TIER_ADMISSION_NOT_CONFIGURED"`. This is the production
     /// default per br-298px.
     #[must_use]
@@ -1887,12 +1882,12 @@ impl EnforcementCheck for RevocationCheck {
 /// inside `crates/fcp-host/src/bin/fcp-host.rs::verify_live_request`
 /// and `evaluate_live_preflight`:
 ///
-/// - Zone binding: `allowed_zones` check (verify_live_request line ~1735).
+/// - Zone binding: `allowed_zones` check (`verify_live_request` line ~1735).
 /// - Operation allow-list: `allowed_operations` check
-///   (verify_live_request line ~1747, br-ike8x).
+///   (`verify_live_request` line ~1747, br-ike8x).
 /// - Capability token: `CapabilityVerifier::verify_unbound` at
 ///   gateway vantage (line ~1785).
-/// - Holder proof: explicit holder_node + holder_proof match
+/// - Holder proof: explicit `holder_node` + `holder_proof` match
 ///   (line ~1800), fail-closed pending live signature verification.
 /// - Persisted lifecycle verify: `state.lifecycle.verify_capability_token`.
 ///
@@ -2110,7 +2105,7 @@ fn test_context() -> EnforcementContext {
 
 /// Test fixture: a `DeploymentClassification` for a fully-active
 /// mesh deployment. Used by [`test_context`] so the strict
-/// DeploymentTierCheck admits the request and downstream pipeline
+/// `DeploymentTierCheck` admits the request and downstream pipeline
 /// checks run (br-298px).
 #[cfg(test)]
 fn test_mesh_active_classification() -> std::sync::Arc<DeploymentClassification> {
@@ -5759,7 +5754,7 @@ mod tests {
                 assert_eq!(check_name, "deployment_tier");
                 assert_eq!(reason_code, "TIER_REQUIRES_MESH_ACTIVE");
             }
-            other => {
+            other @ PipelineOutcome::Allow => {
                 panic!("expected Deny at deployment_tier for Risky-in-Evaluation, got {other:?}")
             }
         }

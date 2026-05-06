@@ -1,0 +1,125 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:931ded4d08e83be3da47dfac1a269ed3a77338f3ce4cae40c3d273fced2e902c"
+
+[connector]
+id = "fcp.moonshot"
+name = "Moonshot Kimi"
+version = "0.1.0"
+description = "Moonshot/Kimi OpenAI-compatible long-context chat connector using chat, streaming, model listing, and explicit context-limit checks"
+archetypes = ["operational", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default_model, context-window guard, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["moonshot.chat", "moonshot.models.read", "moonshot.health.read", "moonshot.embeddings"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 192
+cpu_percent = 25
+wall_clock_timeout_ms = 300000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."moonshot.chat.completions"]
+description = "Create a bounded non-streaming Moonshot/Kimi chat completion through POST /v1/chat/completions."
+capability = "moonshot.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "kimi-k2.6" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1, deprecated = true }, max_completion_tokens = { type = "integer", minimum = 1 }, estimated_input_tokens = { type = "integer", minimum = 0 }, context_window_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, thinking = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.moonshot.ai", "api.moonshot.cn"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."moonshot.chat.completions".ai_hints]
+when_to_use = "Use for direct Moonshot/Kimi long-context chat, coding, Chinese/English conversation, and Kimi K2.x model access."
+common_mistakes = ["Do not log prompts, completions, tool-call arguments, API keys, or long-context document text.", "Pass estimated_input_tokens when the caller has a token estimate; this connector rejects over-window requests instead of truncating.", "Current official Kimi docs do not expose /v1/embeddings, so use another embeddings connector."]
+examples = ['{"model":"kimi-k2.6","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}],"max_completion_tokens":256,"estimated_input_tokens":32}']
+related = ["moonshot.chat.completions_stream", "moonshot.models.list"]
+
+[provides.operations."moonshot.chat.completions_stream"]
+description = "Open a Moonshot/Kimi SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "moonshot.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "kimi-k2.6" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1, deprecated = true }, max_completion_tokens = { type = "integer", minimum = 1 }, estimated_input_tokens = { type = "integer", minimum = 0 }, context_window_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, thinking = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.moonshot.ai", "api.moonshot.cn"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."moonshot.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters and the caller can consume incremental chunk metadata."
+common_mistakes = ["Handle finish_reason, reasoning_content deltas, and tool-call deltas.", "Do not log streamed content from private long-context inputs."]
+examples = ['{"model":"kimi-k2.6","messages":[{"role":"user","content":"Stream one sentence."}],"max_completion_tokens":64}']
+related = ["moonshot.chat.completions"]
+
+[provides.operations."moonshot.models.list"]
+description = "List Moonshot/Kimi models from GET /v1/models using the shared model-cache path."
+capability = "moonshot.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.moonshot.ai", "api.moonshot.cn"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."moonshot.models.list".ai_hints]
+when_to_use = "Use to discover currently active Moonshot/Kimi model IDs before sending chat or streaming requests."
+common_mistakes = ["Do not assume every listed model supports every input modality or thinking mode.", "Do not mix API keys between the .ai and .cn platforms."]
+examples = ["{}"]
+related = ["moonshot.chat.completions"]
+
+[provides.operations."moonshot.health"]
+description = "Probe Moonshot/Kimi model listing with a short timeout and return connector health metadata."
+capability = "moonshot.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.moonshot.ai", "api.moonshot.cn"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."moonshot.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible Moonshot operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["moonshot.models.list"]
+
+[provides.operations."moonshot.embeddings.create"]
+description = "Declared for introspection honesty. Current official Kimi API docs do not expose a first-party embeddings endpoint."
+capability = "moonshot.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.moonshot.ai", "api.moonshot.cn"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."moonshot.embeddings.create".ai_hints]
+when_to_use = "Do not invoke; use this metadata to explain that Moonshot embeddings are intentionally unavailable in the first-party Kimi API."
+common_mistakes = ["Do not proxy embeddings through OpenAI, Voyage, or another provider from this connector."]
+examples = ["{}"]
+related = ["moonshot.models.list"]

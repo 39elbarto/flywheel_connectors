@@ -48,6 +48,7 @@ members = [
     "connectors/fireworks",
     "connectors/glm",
     "connectors/groq",
+    "connectors/moonshot",
     "connectors/openai",
     "connectors/openrouter",
     "connectors/searxng",
@@ -337,6 +338,7 @@ fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-fireworks = { path = "connectors/fireworks" }
 fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
+fcp-moonshot = { path = "connectors/moonshot" }
 fcp-host = { path = "crates/fcp-host" }
 fcp-searxng = { path = "connectors/searxng" }
 fcp-ollama = { path = "connectors/ollama" }

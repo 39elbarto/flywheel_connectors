@@ -34,7 +34,7 @@ use std::future::poll_fn;
 use std::io::{self, Read, Write};
 use std::net::TcpListener as StdTcpListener;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::task::Poll;
 use std::thread;
 use std::time::Duration as StdDuration;
@@ -68,7 +68,7 @@ fn generate_valid_token_for_operation(
     };
     let mut cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-    let cose = CapabilityTokenBuilder::new()
+    let mut builder = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
         .principal("user:test")
@@ -76,10 +76,35 @@ fn generate_valid_token_for_operation(
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
-        .expect("test constraints CBOR should be valid")
-        .sign(signing_key)
-        .unwrap();
+        .expect("test constraints CBOR should be valid");
+    if let Some(instance_id) = token_instance_for(signing_key) {
+        builder = builder.target_instance(&instance_id);
+    }
+    let cose = builder.sign(signing_key).unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
+}
+
+fn token_instance_registry() -> &'static Mutex<HashMap<[u8; 32], String>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<[u8; 32], String>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn register_token_instance(signing_key: &Ed25519SigningKey, instance_id: &str) {
+    token_instance_registry()
+        .lock()
+        .expect("lock token instance registry")
+        .insert(
+            signing_key.verifying_key().to_bytes(),
+            instance_id.to_string(),
+        );
+}
+
+fn token_instance_for(signing_key: &Ed25519SigningKey) -> Option<String> {
+    token_instance_registry()
+        .lock()
+        .expect("lock token instance registry")
+        .get(&signing_key.verifying_key().to_bytes())
+        .cloned()
 }
 
 async fn setup_handshake(connector: &mut SlackConnector, caps: &[&str]) -> Ed25519SigningKey {
@@ -96,6 +121,8 @@ async fn setup_handshake(connector: &mut SlackConnector, caps: &[&str]) -> Ed255
         }))
         .await
         .expect("handshake should succeed");
+
+    register_token_instance(&signing_key, connector.instance_id());
 
     signing_key
 }
@@ -451,6 +478,312 @@ async fn reply_thread_happy_path() {
 
     assert_eq!(result["message"]["text"], "Thread reply");
     assert_eq!(result["message"]["thread_ts"], "1234567890.123456");
+}
+
+#[fcp_async_core::runtime::test]
+async fn progress_draft_text_sends_then_edits() {
+    let _ctx = AsyncTestContext::for_scenario("slack.progress_draft.text_send_edit");
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| {
+        assert_eq!(request.method, "POST");
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer xoxb-test-token-xyz")
+        );
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack draft body json");
+        match idx {
+            0 => {
+                assert_eq!(request.path, "/chat.postMessage");
+                assert_eq!(body["channel"], "C01234567");
+                assert_eq!(body["thread_ts"], "1234567890.123456");
+                assert_eq!(body["text"], "starting");
+                assert!(body.get("blocks").is_none());
+                StructuredHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "channel": "C01234567",
+                        "ts": "1234567890.200000",
+                        "message": slack_message("starting", "1234567890.200000")
+                    }),
+                )
+            }
+            1 => {
+                assert_eq!(request.path, "/chat.update");
+                assert_eq!(body["channel"], "C01234567");
+                assert_eq!(body["ts"], "1234567890.200000");
+                assert_eq!(body["text"], "still working");
+                StructuredHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "channel": "C01234567",
+                        "ts": "1234567890.200000",
+                        "message": slack_message("still working", "1234567890.200000")
+                    }),
+                )
+            }
+            _ => unreachable!("unexpected fake Slack request"),
+        }
+    });
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.write"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let token =
+        generate_valid_token_for_operation(&key, "slack.write", "slack.update_progress_draft");
+
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": {
+                "draft_id": "turn-1",
+                "channel": "C01234567",
+                "thread_ts": "1234567890.123456",
+                "text": "starting"
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("first progress draft update should send");
+    assert_eq!(first["status"], "sent");
+    assert_eq!(first["draft"]["message_ts"], "1234567890.200000");
+
+    let second = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": {
+                "draft_id": "turn-1",
+                "channel": "C01234567",
+                "thread_ts": "1234567890.123456",
+                "text": "still working",
+                "flush": true
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("second progress draft update should edit");
+    assert_eq!(second["status"], "edited");
+    assert_eq!(fake_server.requests().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn progress_draft_rich_blocks_and_duplicate_suppression() {
+    let _ctx = AsyncTestContext::for_scenario("slack.progress_draft.rich_duplicate");
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack draft body json");
+        match idx {
+            0 => {
+                assert_eq!(request.path, "/chat.postMessage");
+                assert_eq!(body["text"], "fallback");
+                assert_eq!(body["blocks"][0]["text"]["text"], "*Working*");
+                StructuredHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "channel": "C01234567",
+                        "ts": "1234567890.300000",
+                        "message": {
+                            "type": "message",
+                            "user": "U01234567",
+                            "text": "fallback",
+                            "ts": "1234567890.300000",
+                            "blocks": body["blocks"].clone()
+                        }
+                    }),
+                )
+            }
+            1 => {
+                assert_eq!(request.path, "/chat.update");
+                assert_eq!(body["text"], "fallback");
+                assert!(
+                    body["blocks"][1]["fields"][1]["text"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .contains("cargo test")
+                );
+                StructuredHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "channel": "C01234567",
+                        "ts": "1234567890.300000",
+                        "message": {
+                            "type": "message",
+                            "user": "U01234567",
+                            "text": "fallback",
+                            "ts": "1234567890.300000",
+                            "blocks": body["blocks"].clone()
+                        }
+                    }),
+                )
+            }
+            _ => unreachable!("unexpected fake Slack request"),
+        }
+    });
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.write"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let token =
+        generate_valid_token_for_operation(&key, "slack.write", "slack.update_progress_draft");
+
+    let base_input = json!({
+        "draft_id": "turn-rich",
+        "channel": "C01234567",
+        "text": "fallback",
+        "render_mode": "rich",
+        "label": "Working",
+        "progress_lines": [{
+            "kind": "tool",
+            "label": "Cargo",
+            "detail": "cargo check",
+            "status": "running"
+        }]
+    });
+
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": base_input,
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("rich progress draft should send");
+    assert_eq!(first["status"], "sent");
+
+    let changed_blocks = json!({
+        "draft_id": "turn-rich",
+        "channel": "C01234567",
+        "text": "fallback",
+        "render_mode": "rich",
+        "label": "Working",
+        "progress_lines": [{
+            "kind": "tool",
+            "label": "Cargo",
+            "detail": "cargo test",
+            "status": "running"
+        }],
+        "flush": true
+    });
+    let second = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": changed_blocks.clone(),
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("same text with changed blocks should edit");
+    assert_eq!(second["status"], "edited");
+
+    let duplicate = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": changed_blocks,
+            "capability_token": token
+        }))
+        .await
+        .expect("duplicate text and blocks should be skipped");
+    assert_eq!(duplicate["status"], "skipped");
+    assert_eq!(duplicate["reason"], "duplicate");
+    assert_eq!(fake_server.requests().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn progress_draft_clear_deletes_visible_message() {
+    let _ctx = AsyncTestContext::for_scenario("slack.progress_draft.clear");
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| {
+        let body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("slack draft body json");
+        match idx {
+            0 => {
+                assert_eq!(request.path, "/chat.postMessage");
+                StructuredHttpResponse::json(
+                    200,
+                    &json!({
+                        "ok": true,
+                        "channel": "C01234567",
+                        "ts": "1234567890.400000",
+                        "message": slack_message("temporary", "1234567890.400000")
+                    }),
+                )
+            }
+            1 => {
+                assert_eq!(request.path, "/chat.delete");
+                assert_eq!(body["channel"], "C01234567");
+                assert_eq!(body["ts"], "1234567890.400000");
+                StructuredHttpResponse::json(200, &json!({ "ok": true }))
+            }
+            _ => unreachable!("unexpected fake Slack request"),
+        }
+    });
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.write"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let token =
+        generate_valid_token_for_operation(&key, "slack.write", "slack.update_progress_draft");
+
+    connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": {
+                "draft_id": "turn-clear",
+                "channel": "C01234567",
+                "text": "temporary"
+            },
+            "capability_token": token.clone()
+        }))
+        .await
+        .expect("progress draft should send before clear");
+
+    let cleared = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": {
+                "draft_id": "turn-clear",
+                "channel": "C01234567",
+                "action": "clear"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("clear should delete visible draft");
+    assert_eq!(cleared["status"], "cleared");
+    assert_eq!(fake_server.requests().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn progress_draft_rejects_oversized_text_before_outbound_call() {
+    let _ctx = AsyncTestContext::for_scenario("slack.progress_draft.oversized");
+    let fake_server = StructuredFakeHttpServer::spawn(0, |_idx, _request| {
+        unreachable!("oversized progress draft should not reach fake Slack")
+    });
+
+    let mut connector = SlackConnector::new();
+    let key = setup_handshake(&mut connector, &["slack.write"]).await;
+    setup_configure(&mut connector, fake_server.url()).await;
+    let token =
+        generate_valid_token_for_operation(&key, "slack.write", "slack.update_progress_draft");
+
+    let err = connector
+        .handle_invoke(json!({
+            "operation": "slack.update_progress_draft",
+            "input": {
+                "draft_id": "turn-oversized",
+                "channel": "C01234567",
+                "text": "x".repeat(4206)
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect_err("oversized fallback text should be rejected");
+    assert!(
+        err.to_string().contains("exceeds max_chars"),
+        "unexpected error: {err}"
+    );
+    assert!(fake_server.requests().is_empty());
 }
 
 #[fcp_async_core::runtime::test]
@@ -1787,12 +2120,13 @@ async fn lifecycle_introspect_lists_all_operations() {
     let result = connector.handle_introspect().await.unwrap();
 
     let ops = result["operations"].as_array().unwrap();
-    assert_eq!(ops.len(), 10);
+    assert_eq!(ops.len(), 11);
 
     let op_ids: Vec<&str> = ops.iter().map(|o| o["id"].as_str().unwrap()).collect();
     for expected in &[
         "slack.post_message",
         "slack.reply_thread",
+        "slack.update_progress_draft",
         "slack.get_channel_history",
         "slack.search_messages",
         "slack.list_channels",

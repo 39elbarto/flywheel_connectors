@@ -1,11 +1,11 @@
 //! FCP Slack Connector implementation.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::{
     Arc,
     atomic::{AtomicU64, Ordering},
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
@@ -35,6 +35,15 @@ const SOCKET_SUBSCRIBE_TOPIC_MAX_CHARS: usize = 128;
 const SOCKET_SUBSCRIBE_TOPIC_MAX_COUNT: usize = 64;
 const MONITOR_POLICY_MAX_SET_ITEMS: usize = 256;
 const MONITOR_POLICY_ID_MAX_CHARS: usize = 128;
+const SLACK_TEXT_LIMIT_CHARS: usize = 4_205;
+const SLACK_MAX_BLOCKS: usize = 50;
+const SLACK_BLOCK_JSON_MAX_BYTES: usize = 12 * 1024;
+const SLACK_PROGRESS_DRAFT_ID_MAX_CHARS: usize = 128;
+const SLACK_PROGRESS_LINE_MAX_COUNT: usize = 50;
+const SLACK_PROGRESS_LINE_FALLBACK_MAX_CHARS: usize = 72;
+const SLACK_PROGRESS_FIELD_MAX_CHARS: usize = 1_800;
+const SLACK_PROGRESS_DETAIL_MAX_CHARS: usize = 48;
+const SLACK_PROGRESS_DRAFT_MIN_THROTTLE_MS: u64 = 250;
 
 fn is_local_test_host(host: &str) -> bool {
     (cfg!(test) || cfg!(debug_assertions)) && matches!(host, "localhost" | "127.0.0.1" | "::1")
@@ -117,6 +126,7 @@ pub struct SlackConnector {
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
     monitor_policy: Arc<RwLock<SlackMonitorPolicy>>,
+    progress_drafts: Arc<RwLock<BTreeMap<String, SlackProgressDraftState>>>,
 }
 
 impl SlackConnector {
@@ -137,6 +147,7 @@ impl SlackConnector {
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
             monitor_policy: Arc::new(RwLock::new(SlackMonitorPolicy::default())),
+            progress_drafts: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
 
@@ -144,6 +155,12 @@ impl SlackConnector {
     #[must_use]
     pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
         self.event_tx.subscribe()
+    }
+
+    /// Return this connector instance identifier for capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     /// Handle configure method.
@@ -191,6 +208,7 @@ impl SlackConnector {
         self.socket_mode_token = Some(socket_mode_token);
         *self.subscribed_topics.write().await = Vec::new();
         *self.monitor_policy.write().await = monitor_policy.clone();
+        self.progress_drafts.write().await.clear();
         self.base.set_configured(true);
         info!("Slack connector configured");
 
@@ -343,6 +361,55 @@ impl SlackConnector {
                         related: vec![
                             CapabilityId::from_static("slack.post_message"),
                             CapabilityId::from_static("slack.get_channel_history"),
+                        ],
+                    },
+                ),
+                op_info(
+                    "slack.update_progress_draft",
+                    "Send, edit, or clear a Slack progress draft message",
+                    json!({
+                        "type": "object",
+                        "required": ["draft_id", "channel"],
+                        "properties": {
+                            "draft_id": { "type": "string", "description": "Stable caller-owned progress draft identifier" },
+                            "channel": { "type": "string", "description": "Channel ID" },
+                            "thread_ts": { "type": "string", "description": "Optional thread timestamp for the first draft message" },
+                            "action": { "type": "string", "enum": ["update", "clear", "discard", "seal", "force_new_message"] },
+                            "text": { "type": "string", "description": "Plain text fallback for the draft" },
+                            "blocks": { "type": "array", "description": "Optional Slack Block Kit blocks; fallback text remains required" },
+                            "progress_lines": { "type": "array", "description": "Typed progress lines used to derive text and rich blocks" },
+                            "label": { "type": "string", "description": "Optional progress heading" },
+                            "render_mode": { "type": "string", "enum": ["text", "rich"] },
+                            "max_chars": { "type": "integer", "description": "Maximum fallback text characters, clamped to Slack's text limit" },
+                            "throttle_ms": { "type": "integer", "description": "Optional duplicate/edit throttle; values below 250ms are clamped" },
+                            "flush": { "type": "boolean", "description": "Bypass throttle for a final/forced update" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "status": { "type": "string" },
+                            "draft": { "type": "object" },
+                            "message": { "type": "object" },
+                            "receipt": { "type": "object" }
+                        }
+                    }),
+                    "slack.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Render long-running tool or agent progress as a Slack draft that sends first, edits later, and can be cleared.".into(),
+                        common_mistakes: vec![
+                            "Omitting plain text fallback when sending blocks".into(),
+                            "Reusing a draft_id across different channels or threads".into(),
+                        ],
+                        examples: vec![
+                            r#"{"draft_id":"turn-123","channel":"C01234567","label":"Working","progress_lines":[{"kind":"tool","label":"Cargo","detail":"cargo test -p fcp-slack","status":"running"}],"render_mode":"rich"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("slack.post_message"),
+                            CapabilityId::from_static("slack.reply_thread"),
                         ],
                     },
                 ),
@@ -997,6 +1064,7 @@ impl SlackConnector {
         match operation {
             "slack.post_message" => self.invoke_post_message(input).await,
             "slack.reply_thread" => self.invoke_reply_thread(input).await,
+            "slack.update_progress_draft" => self.invoke_update_progress_draft(input).await,
             "slack.get_channel_history" => self.invoke_get_channel_history(input).await,
             "slack.search_messages" => self.invoke_search_messages(input).await,
             "slack.list_channels" => self.invoke_list_channels(input).await,
@@ -1053,6 +1121,212 @@ impl SlackConnector {
         };
 
         Ok(json!({ "message": message, "receipt": receipt }))
+    }
+
+    async fn invoke_update_progress_draft(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+        let draft_id = require_progress_draft_id(&input)?;
+        let channel = require_str(&input, "channel")?;
+        let action = SlackProgressDraftAction::parse(
+            input
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("update"),
+        )?;
+        let thread_ts = input.get("thread_ts").and_then(Value::as_str);
+
+        match action {
+            SlackProgressDraftAction::Clear => {
+                let (channel_to_delete, ts_to_delete) = {
+                    let mut drafts = self.progress_drafts.write().await;
+                    match drafts.remove(draft_id) {
+                        Some(state) => (state.channel, state.message_ts),
+                        None => (None, None),
+                    }
+                };
+                if let (Some(channel_to_delete), Some(ts_to_delete)) =
+                    (channel_to_delete, ts_to_delete)
+                {
+                    client
+                        .delete_message(&channel_to_delete, &ts_to_delete)
+                        .await
+                        .map_err(|e: SlackError| e.to_fcp_error())?;
+                }
+                return Ok(json!({
+                    "status": "cleared",
+                    "draft": progress_draft_summary(draft_id, channel, thread_ts, None),
+                }));
+            }
+            SlackProgressDraftAction::Discard | SlackProgressDraftAction::Seal => {
+                let mut drafts = self.progress_drafts.write().await;
+                let state = drafts.entry(draft_id.to_string()).or_default();
+                state.stopped = true;
+                return Ok(json!({
+                    "status": "sealed",
+                    "draft": progress_draft_summary(
+                        draft_id,
+                        state.channel.as_deref().unwrap_or(channel),
+                        state.thread_ts.as_deref().or(thread_ts),
+                        state.message_ts.as_deref(),
+                    ),
+                }));
+            }
+            SlackProgressDraftAction::ForceNewMessage => {
+                let mut drafts = self.progress_drafts.write().await;
+                let state = drafts.entry(draft_id.to_string()).or_default();
+                state.channel = None;
+                state.thread_ts = None;
+                state.message_ts = None;
+                state.last_sent_key.clear();
+                state.last_sent_at = None;
+                state.stopped = false;
+                if !progress_draft_has_update_payload(&input) {
+                    return Ok(json!({
+                        "status": "reset",
+                        "draft": progress_draft_summary(draft_id, channel, thread_ts, None),
+                    }));
+                }
+            }
+            SlackProgressDraftAction::Update => {}
+        }
+
+        let payload = render_progress_draft_payload(&input)?;
+        let text = payload.text.trim_end().to_string();
+        if text.trim().is_empty() {
+            return Ok(json!({
+                "status": "skipped",
+                "reason": "empty",
+                "draft": progress_draft_summary(draft_id, channel, thread_ts, None),
+            }));
+        }
+
+        let max_chars = parse_progress_draft_max_chars(&input)?;
+        if text.chars().count() > max_chars {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "progress draft text length {} exceeds max_chars {max_chars}",
+                    text.chars().count()
+                ),
+            });
+        }
+
+        let sent_key = progress_draft_sent_key(&text, payload.blocks.as_deref())?;
+        let throttle_ms = parse_progress_draft_throttle_ms(&input)?;
+        let flush = input.get("flush").and_then(Value::as_bool).unwrap_or(false);
+
+        let decision = {
+            let mut drafts = self.progress_drafts.write().await;
+            let state = drafts.entry(draft_id.to_string()).or_default();
+            bind_progress_draft_state(state, channel, thread_ts)?;
+            if state.stopped {
+                return Ok(json!({
+                    "status": "stopped",
+                    "draft": progress_draft_summary(
+                        draft_id,
+                        state.channel.as_deref().unwrap_or(channel),
+                        state.thread_ts.as_deref().or(thread_ts),
+                        state.message_ts.as_deref(),
+                    ),
+                }));
+            }
+            if state.last_sent_key == sent_key {
+                return Ok(json!({
+                    "status": "skipped",
+                    "reason": "duplicate",
+                    "draft": progress_draft_summary(
+                        draft_id,
+                        state.channel.as_deref().unwrap_or(channel),
+                        state.thread_ts.as_deref().or(thread_ts),
+                        state.message_ts.as_deref(),
+                    ),
+                }));
+            }
+            if !flush
+                && throttle_ms > 0
+                && state
+                    .last_sent_at
+                    .is_some_and(|sent_at| sent_at.elapsed() < Duration::from_millis(throttle_ms))
+            {
+                return Ok(json!({
+                    "status": "skipped",
+                    "reason": "throttled",
+                    "throttle_ms": throttle_ms,
+                    "draft": progress_draft_summary(
+                        draft_id,
+                        state.channel.as_deref().unwrap_or(channel),
+                        state.thread_ts.as_deref().or(thread_ts),
+                        state.message_ts.as_deref(),
+                    ),
+                }));
+            }
+            ProgressDraftSendDecision {
+                channel: state.channel.clone().unwrap_or_else(|| channel.to_string()),
+                thread_ts: state.thread_ts.clone(),
+                message_ts: state.message_ts.clone(),
+            }
+        };
+
+        let (effect, message) = if let Some(message_ts) = decision.message_ts.as_deref() {
+            (
+                "message_updated",
+                client
+                    .update_message(
+                        &decision.channel,
+                        message_ts,
+                        &text,
+                        payload.blocks.as_deref(),
+                    )
+                    .await
+                    .map_err(|e: SlackError| e.to_fcp_error())?,
+            )
+        } else {
+            (
+                "message_created",
+                client
+                    .post_message_with_blocks(
+                        &decision.channel,
+                        &text,
+                        decision.thread_ts.as_deref(),
+                        payload.blocks.as_deref(),
+                    )
+                    .await
+                    .map_err(|e: SlackError| e.to_fcp_error())?,
+            )
+        };
+
+        {
+            let mut drafts = self.progress_drafts.write().await;
+            let state = drafts.entry(draft_id.to_string()).or_default();
+            state.channel = Some(decision.channel.clone());
+            state.thread_ts = decision.thread_ts.or_else(|| thread_ts.map(str::to_string));
+            state.message_ts = Some(message.ts.clone());
+            state.last_sent_key = sent_key;
+            state.last_sent_at = Some(Instant::now());
+            state.stopped = false;
+        }
+
+        let receipt = OperationReceipt {
+            operation: "slack.update_progress_draft".into(),
+            effect: effect.into(),
+            resource: format!("slack:draft:{draft_id}:channel:{}", decision.channel),
+            timestamp: message.ts.clone(),
+        };
+
+        Ok(json!({
+            "status": if effect == "message_created" { "sent" } else { "edited" },
+            "draft": progress_draft_summary(
+                draft_id,
+                &decision.channel,
+                thread_ts,
+                Some(message.ts.as_str()),
+            ),
+            "message": message,
+            "receipt": receipt,
+        }))
     }
 
     async fn invoke_get_channel_history(
@@ -1388,6 +1662,7 @@ impl SlackConnector {
         _params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         self.stop_socket_mode().await;
+        self.progress_drafts.write().await.clear();
         if let Some(client) = &self.client {
             client.shutdown();
         }
@@ -1412,6 +1687,70 @@ struct SocketModeFrame {
     envelope_id: Option<String>,
     #[serde(default)]
     payload: Option<Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SlackProgressDraftAction {
+    Update,
+    Clear,
+    Discard,
+    Seal,
+    ForceNewMessage,
+}
+
+impl SlackProgressDraftAction {
+    fn parse(value: &str) -> FcpResult<Self> {
+        match value.trim() {
+            "" | "update" => Ok(Self::Update),
+            "clear" => Ok(Self::Clear),
+            "discard" => Ok(Self::Discard),
+            "seal" => Ok(Self::Seal),
+            "force_new_message" => Ok(Self::ForceNewMessage),
+            other => Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("unsupported progress draft action: {other}"),
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct SlackProgressDraftState {
+    channel: Option<String>,
+    thread_ts: Option<String>,
+    message_ts: Option<String>,
+    last_sent_key: String,
+    last_sent_at: Option<Instant>,
+    stopped: bool,
+}
+
+#[derive(Debug, Clone)]
+struct ProgressDraftSendDecision {
+    channel: String,
+    thread_ts: Option<String>,
+    message_ts: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ProgressDraftPayload {
+    text: String,
+    blocks: Option<Vec<Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ProgressDraftLine {
+    kind: String,
+    label: String,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    icon: Option<String>,
+    #[serde(default)]
+    detail: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    tool_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1528,6 +1867,414 @@ impl SlackMonitorPolicy {
                 .is_some_and(|text| slack_text_mentions_bot(text, bot_user_id))
         })
     }
+}
+
+fn require_progress_draft_id<'a>(input: &'a Value) -> FcpResult<&'a str> {
+    let draft_id = require_str(input, "draft_id")?.trim();
+    if draft_id.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "draft_id must not be empty".into(),
+        });
+    }
+    if draft_id.len() > SLACK_PROGRESS_DRAFT_ID_MAX_CHARS
+        || !draft_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | ':' | '.'))
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "draft_id must be an ASCII identifier of at most {SLACK_PROGRESS_DRAFT_ID_MAX_CHARS} characters"
+            ),
+        });
+    }
+    Ok(draft_id)
+}
+
+fn progress_draft_has_update_payload(input: &Value) -> bool {
+    input
+        .get("text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+        || input
+            .get("progress_lines")
+            .and_then(Value::as_array)
+            .is_some_and(|lines| !lines.is_empty())
+}
+
+fn bind_progress_draft_state(
+    state: &mut SlackProgressDraftState,
+    channel: &str,
+    thread_ts: Option<&str>,
+) -> FcpResult<()> {
+    match state.channel.as_deref() {
+        Some(bound_channel) if bound_channel != channel => {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "progress draft is already bound to a different channel".into(),
+            });
+        }
+        Some(_) => {}
+        None => state.channel = Some(channel.to_string()),
+    }
+
+    if let Some(thread_ts) = thread_ts {
+        match state.thread_ts.as_deref() {
+            Some(bound_thread_ts) if bound_thread_ts != thread_ts => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "progress draft is already bound to a different thread_ts".into(),
+                });
+            }
+            Some(_) => {}
+            None => state.thread_ts = Some(thread_ts.to_string()),
+        }
+    }
+
+    Ok(())
+}
+
+fn progress_draft_summary(
+    draft_id: &str,
+    channel: &str,
+    thread_ts: Option<&str>,
+    message_ts: Option<&str>,
+) -> Value {
+    json!({
+        "draft_id": draft_id,
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "message_ts": message_ts,
+    })
+}
+
+fn parse_progress_draft_max_chars(input: &Value) -> FcpResult<usize> {
+    let Some(raw) = input.get("max_chars") else {
+        return Ok(SLACK_TEXT_LIMIT_CHARS);
+    };
+    let max_chars = raw.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "max_chars must be a positive integer".into(),
+    })?;
+    if max_chars == 0 {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "max_chars must be greater than zero".into(),
+        });
+    }
+    Ok(usize::try_from(max_chars)
+        .unwrap_or(SLACK_TEXT_LIMIT_CHARS)
+        .min(SLACK_TEXT_LIMIT_CHARS))
+}
+
+fn parse_progress_draft_throttle_ms(input: &Value) -> FcpResult<u64> {
+    let Some(raw) = input.get("throttle_ms") else {
+        return Ok(0);
+    };
+    let throttle_ms = raw.as_u64().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "throttle_ms must be a non-negative integer".into(),
+    })?;
+    if throttle_ms == 0 {
+        Ok(0)
+    } else {
+        Ok(throttle_ms.max(SLACK_PROGRESS_DRAFT_MIN_THROTTLE_MS))
+    }
+}
+
+fn render_progress_draft_payload(input: &Value) -> FcpResult<ProgressDraftPayload> {
+    let progress_lines = parse_progress_draft_lines(input)?;
+    let label = input
+        .get("label")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|label| !label.is_empty());
+
+    let text = input
+        .get("text")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            progress_lines
+                .as_ref()
+                .map(|lines| format_progress_draft_text(label, lines))
+        })
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "progress draft update requires text or progress_lines".into(),
+        })?;
+
+    let explicit_blocks = parse_progress_draft_blocks(input)?;
+    let render_mode = input
+        .get("render_mode")
+        .and_then(Value::as_str)
+        .unwrap_or("text");
+    let blocks = match explicit_blocks {
+        Some(blocks) => Some(blocks),
+        None if render_mode == "rich" => progress_lines
+            .as_ref()
+            .and_then(|lines| build_progress_draft_blocks(label, lines)),
+        None => None,
+    };
+
+    Ok(ProgressDraftPayload { text, blocks })
+}
+
+fn parse_progress_draft_lines(input: &Value) -> FcpResult<Option<Vec<ProgressDraftLine>>> {
+    let Some(value) = input.get("progress_lines") else {
+        return Ok(None);
+    };
+    let lines = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "progress_lines must be an array".into(),
+    })?;
+    if lines.len() > SLACK_PROGRESS_LINE_MAX_COUNT {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "progress_lines must contain at most {SLACK_PROGRESS_LINE_MAX_COUNT} entries"
+            ),
+        });
+    }
+
+    let parsed = lines
+        .iter()
+        .map(|line| {
+            let parsed: ProgressDraftLine =
+                serde_json::from_value(line.clone()).map_err(|e| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!("invalid progress line: {e}"),
+                })?;
+            validate_progress_draft_line(parsed)
+        })
+        .collect::<FcpResult<Vec<_>>>()?;
+    Ok(Some(parsed))
+}
+
+fn validate_progress_draft_line(mut line: ProgressDraftLine) -> FcpResult<ProgressDraftLine> {
+    line.kind = line.kind.trim().to_string();
+    line.label = line.label.trim().to_string();
+    if line.kind.is_empty() || line.label.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "progress line kind and label must not be empty".into(),
+        });
+    }
+    if !matches!(
+        line.kind.as_str(),
+        "tool" | "item" | "plan" | "approval" | "command-output" | "patch"
+    ) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported progress line kind: {}", line.kind),
+        });
+    }
+    line.text = normalize_optional_progress_string(line.text);
+    line.icon = normalize_optional_progress_string(line.icon);
+    line.detail = normalize_optional_progress_string(line.detail);
+    line.status = normalize_optional_progress_string(line.status);
+    line.tool_name = normalize_optional_progress_string(line.tool_name);
+    Ok(line)
+}
+
+fn normalize_optional_progress_string(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn parse_progress_draft_blocks(input: &Value) -> FcpResult<Option<Vec<Value>>> {
+    let Some(value) = input.get("blocks") else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    let blocks = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "blocks must be an array".into(),
+    })?;
+    validate_progress_draft_blocks(blocks)
+}
+
+fn validate_progress_draft_blocks(blocks: &[Value]) -> FcpResult<Option<Vec<Value>>> {
+    if blocks.len() > SLACK_MAX_BLOCKS {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("blocks must contain at most {SLACK_MAX_BLOCKS} entries"),
+        });
+    }
+    let mut parsed = Vec::with_capacity(blocks.len());
+    for block in blocks {
+        let object = block.as_object().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "each block must be an object".into(),
+        })?;
+        let block_type =
+            object
+                .get("type")
+                .and_then(Value::as_str)
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "each block must include a string type".into(),
+                })?;
+        if block_type.trim().is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "block type must not be empty".into(),
+            });
+        }
+        let block_json = serde_json::to_vec(block).map_err(|e| FcpError::Internal {
+            message: format!("failed to serialize Slack block: {e}"),
+        })?;
+        if block_json.len() > SLACK_BLOCK_JSON_MAX_BYTES {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "each block JSON payload must be at most {SLACK_BLOCK_JSON_MAX_BYTES} bytes"
+                ),
+            });
+        }
+        parsed.push(block.clone());
+    }
+    Ok((!parsed.is_empty()).then_some(parsed))
+}
+
+fn progress_draft_sent_key(text: &str, blocks: Option<&[Value]>) -> FcpResult<String> {
+    let block_key = match blocks {
+        Some(blocks) => serde_json::to_string(blocks).map_err(|e| FcpError::Internal {
+            message: format!("failed to serialize progress draft blocks: {e}"),
+        })?,
+        None => String::new(),
+    };
+    Ok(format!("{text}\n{block_key}"))
+}
+
+fn format_progress_draft_text(label: Option<&str>, lines: &[ProgressDraftLine]) -> String {
+    let rendered = lines
+        .iter()
+        .map(format_progress_draft_line)
+        .filter(|line| !line.is_empty())
+        .map(|line| {
+            if line
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_punctuation())
+            {
+                line
+            } else {
+                format!("- {line}")
+            }
+        });
+    label
+        .into_iter()
+        .map(str::to_string)
+        .chain(rendered)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn format_progress_draft_line(line: &ProgressDraftLine) -> String {
+    let text = line.text.clone().unwrap_or_else(|| {
+        let detail = [line.detail.as_deref(), line.status.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" - ");
+        if detail.is_empty() {
+            line.label.clone()
+        } else if let Some(icon) = &line.icon {
+            format!("{icon} {}: {detail}", line.label)
+        } else {
+            format!("{}: {detail}", line.label)
+        }
+    });
+    compact_progress_text(&text, SLACK_PROGRESS_LINE_FALLBACK_MAX_CHARS)
+}
+
+fn build_progress_draft_blocks(
+    label: Option<&str>,
+    lines: &[ProgressDraftLine],
+) -> Option<Vec<Value>> {
+    let mut blocks = Vec::new();
+    if let Some(label) = label {
+        blocks.push(json!({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": format!("*{}*", escape_slack_mrkdwn(label))
+            }
+        }));
+    }
+
+    let available = SLACK_MAX_BLOCKS.saturating_sub(blocks.len());
+    let start = lines.len().saturating_sub(available);
+    for line in &lines[start..] {
+        let title = match &line.icon {
+            Some(icon) => format!("{icon} *{}*", escape_slack_mrkdwn(&line.label)),
+            None => format!("*{}*", escape_slack_mrkdwn(&line.label)),
+        };
+        let detail = [line.detail.as_deref(), line.status.as_deref()]
+            .into_iter()
+            .flatten()
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>()
+            .join(" - ");
+        let detail = if detail.is_empty() {
+            " ".to_string()
+        } else {
+            escape_slack_mrkdwn(&compact_progress_text(
+                &detail,
+                SLACK_PROGRESS_DETAIL_MAX_CHARS,
+            ))
+        };
+        blocks.push(json!({
+            "type": "section",
+            "fields": [
+                {
+                    "type": "mrkdwn",
+                    "text": compact_progress_text(&title, SLACK_PROGRESS_FIELD_MAX_CHARS)
+                },
+                {
+                    "type": "mrkdwn",
+                    "text": compact_progress_text(&detail, SLACK_PROGRESS_FIELD_MAX_CHARS)
+                }
+            ]
+        }));
+    }
+
+    (!blocks.is_empty()).then_some(blocks)
+}
+
+fn compact_progress_text(value: &str, max_chars: usize) -> String {
+    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let chars = normalized.chars().collect::<Vec<_>>();
+    if chars.len() <= max_chars {
+        return normalized;
+    }
+    if max_chars <= 1 {
+        return "...".into();
+    }
+    let keep_start = ((max_chars - 3) / 2).max(1);
+    let keep_end = max_chars.saturating_sub(keep_start + 3).max(1);
+    format!(
+        "{}...{}",
+        chars.iter().take(keep_start).collect::<String>().trim_end(),
+        chars
+            .iter()
+            .skip(chars.len().saturating_sub(keep_end))
+            .collect::<String>()
+            .trim_start()
+    )
+}
+
+fn escape_slack_mrkdwn(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn invalid_monitor_policy(message: impl Into<String>) -> FcpError {
@@ -2032,6 +2779,7 @@ fn socket_payload_principal(payload: &Value) -> Principal {
 
 fn required_capability_for_operation(operation: &str) -> &str {
     match operation {
+        "slack.update_progress_draft" => "slack.write",
         "slack.upload_file" => "slack.files.write",
         "slack.download_file" => "slack.files.read",
         _ => operation,
@@ -2043,6 +2791,7 @@ fn is_supported_operation(operation: &str) -> bool {
         operation,
         "slack.post_message"
             | "slack.reply_thread"
+            | "slack.update_progress_draft"
             | "slack.get_channel_history"
             | "slack.search_messages"
             | "slack.list_channels"
@@ -2064,6 +2813,27 @@ fn validate_simulate_input(operation: &str, input: &serde_json::Value) -> FcpRes
             require_str(input, "channel")?;
             require_str(input, "text")?;
             require_str(input, "thread_ts")?;
+        }
+        "slack.update_progress_draft" => {
+            require_progress_draft_id(input)?;
+            require_str(input, "channel")?;
+            let action = input
+                .get("action")
+                .and_then(Value::as_str)
+                .unwrap_or("update");
+            let action = SlackProgressDraftAction::parse(action)?;
+            if matches!(
+                action,
+                SlackProgressDraftAction::Update | SlackProgressDraftAction::ForceNewMessage
+            ) && progress_draft_has_update_payload(input)
+            {
+                let _ = render_progress_draft_payload(input)?;
+            } else if matches!(action, SlackProgressDraftAction::Update) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "progress draft update requires text or progress_lines".into(),
+                });
+            }
         }
         "slack.get_channel_history" | "slack.set_channel_topic" => {
             require_str(input, "channel")?;
@@ -2125,6 +2895,15 @@ fn resource_uris_for_operation(
             let thread_ts = require_str(input, "thread_ts")?;
             push_unique(format!("slack:channel:{channel}"));
             push_unique(format!("slack:thread:{channel}:{thread_ts}"));
+        }
+        "slack.update_progress_draft" => {
+            let draft_id = require_progress_draft_id(input)?;
+            let channel = require_str(input, "channel")?;
+            push_unique(format!("slack:channel:{channel}"));
+            push_unique(format!("slack:draft:{draft_id}"));
+            if let Some(thread_ts) = input.get("thread_ts").and_then(Value::as_str) {
+                push_unique(format!("slack:thread:{channel}:{thread_ts}"));
+            }
         }
         "slack.get_channel_history" | "slack.set_channel_topic" => {
             let channel = require_str(input, "channel")?;
@@ -2302,14 +3081,19 @@ mod tests {
         fcp_async_core::runtime::block_on_sync(future).expect("build sync test runtime")
     }
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> CapabilityToken {
-        generate_token_with_resources(signing_key, cap, &["*"])
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        instance_id: &str,
+    ) -> CapabilityToken {
+        generate_token_with_resources(signing_key, cap, &["*"], Some(instance_id))
     }
 
     fn generate_token_with_resources(
         signing_key: &Ed25519SigningKey,
         cap: &str,
         resource_allow: &[&str],
+        instance_id: Option<&str>,
     ) -> CapabilityToken {
         let now = Utc::now();
         // C3.4: tokens MUST include constraints (default-deny)
@@ -2322,7 +3106,7 @@ mod tests {
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        let cose = CapabilityTokenBuilder::new()
+        let mut builder = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
             .principal("user:test")
@@ -2330,9 +3114,11 @@ mod tests {
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
-            .expect("test constraints CBOR should be valid")
-            .sign(signing_key)
-            .unwrap();
+            .expect("test constraints CBOR should be valid");
+        if let Some(instance_id) = instance_id {
+            builder = builder.target_instance(instance_id);
+        }
+        let cose = builder.sign(signing_key).unwrap();
         CapabilityToken::from_raw(cose)
     }
 
@@ -2343,12 +3129,23 @@ mod tests {
         input: serde_json::Value,
         resource_allow: &[&str],
     ) -> serde_json::Value {
+        simulate_request_for_instance(signing_key, cap, operation, input, resource_allow, None)
+    }
+
+    fn simulate_request_for_instance(
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        operation: &'static str,
+        input: serde_json::Value,
+        resource_allow: &[&str],
+        instance_id: Option<&str>,
+    ) -> serde_json::Value {
         let req = SimulateRequest::new(
             ConnectorId::from_static("slack"),
             OperationId::from_static(operation),
             ZoneId::work(),
             input,
-            generate_token_with_resources(signing_key, cap, resource_allow),
+            generate_token_with_resources(signing_key, cap, resource_allow, instance_id),
         );
         serde_json::to_value(req).expect("serialize simulate request")
     }
@@ -2412,12 +3209,13 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let response: SimulateResponse = serde_json::from_value(
             connector
-                .handle_simulate(simulate_request(
+                .handle_simulate(simulate_request_for_instance(
                     &signing_key,
                     "slack.post_message",
                     "slack.post_message",
                     json!({"channel": "C123", "text": "hello"}),
                     &["*"],
+                    Some(connector.instance_id()),
                 ))
                 .await
                 .unwrap(),
@@ -2441,12 +3239,13 @@ mod tests {
         let signing_key = Ed25519SigningKey::generate();
         let response: SimulateResponse = serde_json::from_value(
             connector
-                .handle_simulate(simulate_request(
+                .handle_simulate(simulate_request_for_instance(
                     &signing_key,
                     "slack.post_message",
                     "slack.post_message",
                     json!({"channel": "C123", "text": "hello"}),
                     &["*"],
+                    Some(connector.instance_id()),
                 ))
                 .await
                 .unwrap(),
@@ -2553,19 +3352,20 @@ mod tests {
 
         let response: SimulateResponse = serde_json::from_value(
             connector
-                .handle_simulate(simulate_request(
+                .handle_simulate(simulate_request_for_instance(
                     &signing_key,
                     "slack.post_message",
                     "slack.post_message",
                     json!({"channel": "C123", "text": "hello"}),
                     &["*"],
+                    Some(connector.instance_id()),
                 ))
                 .await
                 .unwrap(),
         )
         .unwrap();
 
-        assert!(response.would_succeed);
+        assert!(response.would_succeed, "simulate denied: {response:?}");
     }
 
     #[fcp_async_core::runtime::test]
@@ -2593,12 +3393,13 @@ mod tests {
 
         let response: SimulateResponse = serde_json::from_value(
             connector
-                .handle_simulate(simulate_request(
+                .handle_simulate(simulate_request_for_instance(
                     &signing_key,
                     "slack.post_message",
                     "slack.post_message",
                     json!({"channel": "C-denied", "text": "hello"}),
                     &["slack:channel:C-allowed"],
+                    Some(connector.instance_id()),
                 ))
                 .await
                 .unwrap(),
@@ -2634,7 +3435,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "slack.list_channels");
+        let token =
+            generate_valid_token(&signing_key, "slack.list_channels", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
@@ -2671,7 +3473,8 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_valid_token(&signing_key, "slack.post_message");
+        let token =
+            generate_valid_token(&signing_key, "slack.post_message", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
@@ -2712,6 +3515,7 @@ mod tests {
             &signing_key,
             "slack.post_message",
             &["slack:channel:C-allowed"],
+            Some(connector.instance_id()),
         );
 
         let err = connector
@@ -2744,6 +3548,7 @@ mod tests {
 
         assert!(op_ids.contains(&"slack.post_message"));
         assert!(op_ids.contains(&"slack.reply_thread"));
+        assert!(op_ids.contains(&"slack.update_progress_draft"));
         assert!(op_ids.contains(&"slack.get_channel_history"));
         assert!(op_ids.contains(&"slack.search_messages"));
         assert!(op_ids.contains(&"slack.list_channels"));
@@ -2752,7 +3557,7 @@ mod tests {
         assert!(op_ids.contains(&"slack.download_file"));
         assert!(op_ids.contains(&"slack.add_reaction"));
         assert!(op_ids.contains(&"slack.set_channel_topic"));
-        assert_eq!(ops.len(), 10);
+        assert_eq!(ops.len(), 11);
     }
 
     // ── Doctor / Provisioning tests ──────────────────────────────
@@ -3105,6 +3910,7 @@ mod tests {
         let write_ops = [
             "slack.post_message",
             "slack.reply_thread",
+            "slack.update_progress_draft",
             "slack.add_reaction",
             "slack.set_channel_topic",
         ];
@@ -3180,6 +3986,7 @@ mod tests {
         let risky_ops = [
             "slack.post_message",
             "slack.reply_thread",
+            "slack.update_progress_draft",
             "slack.upload_file",
             "slack.set_channel_topic",
         ];
@@ -3243,6 +4050,7 @@ mod tests {
         let medium_ops = [
             "slack.post_message",
             "slack.reply_thread",
+            "slack.update_progress_draft",
             "slack.upload_file",
             "slack.set_channel_topic",
         ];
@@ -3325,7 +4133,10 @@ mod tests {
 
         for op in ops {
             let id = op["id"].as_str().unwrap();
-            if id == "slack.add_reaction" || id == "slack.set_channel_topic" {
+            if id == "slack.add_reaction"
+                || id == "slack.set_channel_topic"
+                || id == "slack.update_progress_draft"
+            {
                 assert_eq!(
                     op["idempotency"].as_str().unwrap(),
                     "best_effort",
@@ -3346,6 +4157,7 @@ mod tests {
         let checks: &[(&str, &[&str])] = &[
             ("slack.post_message", &["channel", "text"]),
             ("slack.reply_thread", &["channel", "text", "thread_ts"]),
+            ("slack.update_progress_draft", &["draft_id", "channel"]),
             ("slack.get_channel_history", &["channel"]),
             ("slack.search_messages", &["query"]),
             ("slack.get_user_info", &["user"]),

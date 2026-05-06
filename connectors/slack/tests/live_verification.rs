@@ -41,7 +41,11 @@ macro_rules! skip_without_token {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(
+    signing_key: &Ed25519SigningKey,
+    op: &str,
+    instance_id: &str,
+) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -59,6 +63,7 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("test constraints CBOR should be valid")
+        .target_instance(instance_id)
         .sign(signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
@@ -101,7 +106,8 @@ async fn live_conversations_list() {
 
     let mut connector = SlackConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token = generate_read_token(&signing_key, "slack.list_channels");
+    let cap_token =
+        generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
@@ -163,7 +169,8 @@ async fn live_error_mapping_invalid_token() {
         .await
         .expect("handshake should succeed");
 
-    let cap_token = generate_read_token(&signing_key, "slack.list_channels");
+    let cap_token =
+        generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
 
     let err = connector
         .handle_invoke(json!({

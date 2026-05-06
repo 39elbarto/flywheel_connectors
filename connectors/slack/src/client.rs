@@ -9,6 +9,7 @@ use fcp_async_core::time;
 use fcp_sdk::migration::{
     AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
 };
+use serde_json::Value;
 use tracing::{debug, instrument};
 
 use crate::{
@@ -195,6 +196,19 @@ impl SlackClient {
         text: &str,
         thread_ts: Option<&str>,
     ) -> SlackResult<Message> {
+        self.post_message_with_blocks(channel, text, thread_ts, None)
+            .await
+    }
+
+    /// Post a message to a channel with optional Block Kit blocks.
+    #[instrument(skip(self, blocks))]
+    pub async fn post_message_with_blocks(
+        &self,
+        channel: &str,
+        text: &str,
+        thread_ts: Option<&str>,
+        blocks: Option<&[Value]>,
+    ) -> SlackResult<Message> {
         let mut body = serde_json::json!({
             "channel": channel,
             "text": text,
@@ -202,11 +216,50 @@ impl SlackClient {
         if let Some(ts) = thread_ts {
             body["thread_ts"] = serde_json::Value::String(ts.to_string());
         }
+        if let Some(blocks) = blocks {
+            body["blocks"] = serde_json::Value::Array(blocks.to_vec());
+        }
 
         let resp: SlackApiResponse<PostMessageData> =
             self.post_json("chat.postMessage", &body).await?;
         Self::check_response(&resp)?;
         Ok(Self::expect_data(resp.data, "chat.postMessage")?.message)
+    }
+
+    /// Edit an existing Slack message with optional Block Kit blocks.
+    #[instrument(skip(self, blocks))]
+    pub async fn update_message(
+        &self,
+        channel: &str,
+        timestamp: &str,
+        text: &str,
+        blocks: Option<&[Value]>,
+    ) -> SlackResult<Message> {
+        let mut body = serde_json::json!({
+            "channel": channel,
+            "ts": timestamp,
+            "text": text,
+        });
+        if let Some(blocks) = blocks {
+            body["blocks"] = serde_json::Value::Array(blocks.to_vec());
+        }
+
+        let resp: SlackApiResponse<PostMessageData> = self.post_json("chat.update", &body).await?;
+        Self::check_response(&resp)?;
+        Ok(Self::expect_data(resp.data, "chat.update")?.message)
+    }
+
+    /// Delete an existing Slack message.
+    #[instrument(skip(self))]
+    pub async fn delete_message(&self, channel: &str, timestamp: &str) -> SlackResult<bool> {
+        let body = serde_json::json!({
+            "channel": channel,
+            "ts": timestamp,
+        });
+        let resp: SlackApiResponse<serde_json::Value> =
+            self.post_json("chat.delete", &body).await?;
+        Self::check_response(&resp)?;
+        Ok(true)
     }
 
     /// Get channel conversation history.

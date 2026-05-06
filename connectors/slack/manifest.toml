@@ -134,6 +134,80 @@ related = ["slack.post_message", "slack.get_channel_history"]
 
 # ────────────────────────────────────────────────────────────────
 
+[provides.operations."slack.update_progress_draft"]
+description = "Send, edit, or clear a Slack progress draft message with plain-text fallback and optional Block Kit preview"
+capability = "slack.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+revocation_freshness = "risky"
+
+[provides.operations."slack.update_progress_draft".input_schema]
+required = ["draft_id", "channel"]
+type = "object"
+[provides.operations."slack.update_progress_draft".input_schema.properties.draft_id]
+type = "string"
+[provides.operations."slack.update_progress_draft".input_schema.properties.channel]
+type = "string"
+[provides.operations."slack.update_progress_draft".input_schema.properties.thread_ts]
+type = "string"
+[provides.operations."slack.update_progress_draft".input_schema.properties.action]
+type = "string"
+enum = ["update", "clear", "discard", "seal", "force_new_message"]
+[provides.operations."slack.update_progress_draft".input_schema.properties.text]
+type = "string"
+[provides.operations."slack.update_progress_draft".input_schema.properties.blocks]
+type = "array"
+[provides.operations."slack.update_progress_draft".input_schema.properties.progress_lines]
+type = "array"
+[provides.operations."slack.update_progress_draft".input_schema.properties.label]
+type = "string"
+[provides.operations."slack.update_progress_draft".input_schema.properties.render_mode]
+type = "string"
+enum = ["text", "rich"]
+[provides.operations."slack.update_progress_draft".input_schema.properties.max_chars]
+type = "integer"
+[provides.operations."slack.update_progress_draft".input_schema.properties.throttle_ms]
+type = "integer"
+[provides.operations."slack.update_progress_draft".input_schema.properties.flush]
+type = "boolean"
+
+[provides.operations."slack.update_progress_draft".output_schema]
+required = ["status", "draft"]
+type = "object"
+[provides.operations."slack.update_progress_draft".output_schema.properties.status]
+type = "string"
+[provides.operations."slack.update_progress_draft".output_schema.properties.draft]
+type = "object"
+[provides.operations."slack.update_progress_draft".output_schema.properties.message]
+type = "object"
+[provides.operations."slack.update_progress_draft".output_schema.properties.receipt]
+type = "object"
+
+[provides.operations."slack.update_progress_draft".network_constraints]
+host_allow = ["slack.com", "*.slack.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."slack.update_progress_draft".ai_hints]
+when_to_use = "Show long-running tool progress in Slack as a draft that sends once, edits later, and can be cleared."
+common_mistakes = ["Omitting fallback text when using blocks", "Reusing a draft_id across different channels"]
+examples = ['{"draft_id":"turn-123","channel":"C01234567","label":"Working","progress_lines":[{"kind":"tool","label":"Cargo","detail":"cargo test -p fcp-slack","status":"running"}],"render_mode":"rich"}']
+related = ["slack.post_message", "slack.reply_thread"]
+
+# ────────────────────────────────────────────────────────────────
+
 [provides.operations."slack.get_channel_history"]
 description = "Fetch recent messages from a channel"
 capability = "slack.read"
@@ -594,6 +668,7 @@ scope = "instance"
 [rate_limits.operation_pools]
 "slack.post_message" = ["slack.write"]
 "slack.reply_thread" = ["slack.write"]
+"slack.update_progress_draft" = ["slack.write"]
 "slack.get_channel_history" = ["slack.read"]
 "slack.search_messages" = ["slack.search"]
 "slack.list_channels" = ["slack.read"]

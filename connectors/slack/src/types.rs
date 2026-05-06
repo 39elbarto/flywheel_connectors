@@ -1,6 +1,7 @@
 //! Slack API types.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Slack message.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,6 +22,8 @@ pub struct Message {
     pub files: Option<Vec<SlackFile>>,
     #[serde(default)]
     pub bot_id: Option<String>,
+    #[serde(default)]
+    pub blocks: Option<Vec<Value>>,
 }
 
 /// Slack reaction.
@@ -270,6 +273,7 @@ mod tests {
             reactions: None,
             files: None,
             bot_id: None,
+            blocks: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -447,6 +451,7 @@ mod tests {
                     reactions: None,
                     files: None,
                     bot_id: None,
+                    blocks: None,
                 }],
             },
         };
@@ -537,6 +542,7 @@ mod tests {
                 url_private_download: None,
             }]),
             bot_id: Some("B999".to_string()),
+            blocks: None,
         };
         let json = serde_json::to_string(&msg).unwrap();
         let back: Message = serde_json::from_str(&json).unwrap();
@@ -559,6 +565,7 @@ mod tests {
             reactions: None,
             files: None,
             bot_id: None,
+            blocks: None,
         };
         let cloned = msg.clone();
         assert_eq!(cloned.text, msg.text);
@@ -577,6 +584,7 @@ mod tests {
             reactions: None,
             files: None,
             bot_id: None,
+            blocks: None,
         };
         let dbg = format!("{msg:?}");
         assert!(dbg.contains("Message"));
@@ -1327,6 +1335,7 @@ mod tests {
             reactions: Some(vec![]),
             files: Some(vec![]),
             bot_id: None,
+            blocks: None,
         };
         let cloned = msg.clone();
         assert_eq!(cloned.text, "test");

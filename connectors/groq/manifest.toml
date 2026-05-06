@@ -1,0 +1,144 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:groq-oai-compat"
+
+[connector]
+id = "fcp.groq"
+name = "Groq"
+version = "0.1.0"
+description = "Groq LPU inference connector using the OpenAI-compatible chat, streaming, model, and legacy completions API"
+archetypes = ["request-response", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default_model, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["groq.chat", "groq.models.read", "groq.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 120000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."groq.chat.completions"]
+description = "Create a bounded non-streaming Groq chat completion through POST /openai/v1/chat/completions."
+capability = "groq.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama-3.1-8b-instant" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.chat.completions".ai_hints]
+when_to_use = "Use for direct first-party Groq chat completions when avoiding an aggregator hop matters."
+common_mistakes = ["Do not log prompts, completions, or tool-call arguments.", "Do not pass unsupported OpenAI fields such as logprobs, logit_bias, top_logprobs, messages[].name, or n values other than 1."]
+examples = ['{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}]}']
+related = ["groq.chat.completions_stream", "groq.models.list"]
+
+[provides.operations."groq.chat.completions_stream"]
+description = "Open a Groq SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "groq.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama-3.1-8b-instant" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters and the caller can consume incremental chunk metadata."
+common_mistakes = ["Do not expect embeddings or audio endpoints from this connector.", "Handle finish_reason and tool_call deltas from the returned chunks."]
+examples = ['{"model":"llama-3.1-8b-instant","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["groq.chat.completions"]
+
+[provides.operations."groq.models.list"]
+description = "List Groq models from GET /openai/v1/models using the shared model-cache path."
+capability = "groq.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.models.list".ai_hints]
+when_to_use = "Use to discover currently active Groq model IDs before sending chat or streaming requests."
+common_mistakes = ["Do not assume every Groq model supports every operation."]
+examples = ["{}"]
+related = ["groq.chat.completions"]
+
+[provides.operations."groq.health"]
+description = "Probe Groq model listing with a short timeout and return connector health metadata."
+capability = "groq.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible Groq operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["groq.models.list"]
+
+[provides.operations."groq.embeddings.create"]
+description = "Declared for introspection honesty. Groq does not currently expose embeddings through the first-party Groq API."
+capability = "groq.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+availability = "not_supported"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.embeddings.create".ai_hints]
+when_to_use = "Do not invoke; use this metadata to explain that embeddings are intentionally unavailable for Groq."
+common_mistakes = ["Do not proxy embeddings through OpenRouter or OpenAI from this connector."]
+examples = ["{}"]
+related = ["groq.models.list"]
+
+[provides.operations."groq.completions.legacy"]
+description = "Minimal deprecated legacy /completions support for older OpenAI-compatible clients."
+capability = "groq.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+availability = "deprecated"
+input_schema = { type = "object", required = ["prompt"], properties = { model = { type = "string", default = "llama-3.1-8b-instant" }, prompt = {}, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.groq.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."groq.completions.legacy".ai_hints]
+when_to_use = "Use only for older callers that cannot send chat messages."
+common_mistakes = ["Prefer groq.chat.completions for all new work."]
+examples = ['{"model":"llama-3.1-8b-instant","prompt":"One sentence about FCP."}']
+related = ["groq.chat.completions"]

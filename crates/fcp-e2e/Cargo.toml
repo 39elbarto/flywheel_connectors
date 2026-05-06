@@ -15,6 +15,7 @@ e2e-full = [
     "discord",
     "google_ai",
     "gcp",
+    "groq",
     "qdrant",
     "telegram",
     "pinecone",
@@ -103,6 +104,7 @@ slack = ["dep:fcp-slack"]
 discord = ["dep:fcp-discord"]
 google_ai = ["dep:fcp-google-ai"]
 gcp = ["dep:fcp-gcp"]
+groq = ["dep:fcp-groq"]
 qdrant = ["dep:fcp-qdrant"]
 telegram = ["dep:fcp-telegram"]
 pinecone = ["dep:fcp-pinecone"]
@@ -143,7 +145,7 @@ pulumi = ["dep:fcp-pulumi"]
 pandadoc = ["dep:fcp-pandadoc"]
 bitwarden = ["dep:fcp-bitwarden"]
 intercom = ["dep:fcp-intercom"]
-onepassword = ["dep:fcp-onepassword"]
+onepassword = ["dep:fcp-onepassword"] # ubs:ignore - feature name, not a credential
 algolia = ["dep:fcp-algolia"]
 amplitude = ["dep:fcp-amplitude"]
 annas_archive = ["dep:fcp-annas-archive"]
@@ -208,6 +210,7 @@ fcp-slack = { path = "../../connectors/slack", optional = true }
 fcp-discord = { path = "../../connectors/discord", features = ["testing"], optional = true }
 fcp-google-ai = { path = "../../connectors/google-ai", optional = true }
 fcp-gcp = { path = "../../connectors/gcp", optional = true }
+fcp-groq = { path = "../../connectors/groq", optional = true }
 fcp-qdrant = { path = "../../connectors/qdrant", optional = true }
 fcp-telegram = { path = "../../connectors/telegram", optional = true }
 fcp-pinecone = { path = "../../connectors/pinecone", optional = true }
@@ -248,7 +251,7 @@ fcp-pulumi = { path = "../../connectors/pulumi", optional = true }
 fcp-pandadoc = { path = "../../connectors/pandadoc", optional = true }
 fcp-bitwarden = { path = "../../connectors/bitwarden", optional = true }
 fcp-intercom = { path = "../../connectors/intercom", optional = true }
-fcp-onepassword = { path = "../../connectors/1password", optional = true }
+fcp-onepassword = { path = "../../connectors/1password", optional = true } # ubs:ignore - dependency name, not a credential
 fcp-algolia = { path = "../../connectors/algolia", optional = true }
 fcp-amplitude = { path = "../../connectors/amplitude", optional = true }
 fcp-annas-archive = { path = "../../connectors/annas-archive", optional = true }

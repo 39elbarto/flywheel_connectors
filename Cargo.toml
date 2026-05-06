@@ -56,7 +56,6 @@ members = [
     "connectors/qwen",
     "connectors/searxng",
     "connectors/lm-studio",
-    "connectors/moonshot",
     "connectors/ollama",
     "connectors/together",
     "connectors/telegram",
@@ -350,7 +349,6 @@ fcp-nvidia-nim = { path = "connectors/nvidia-nim" }
 fcp-qwen = { path = "connectors/qwen" }
 fcp-searxng = { path = "connectors/searxng" }
 fcp-lm-studio = { path = "connectors/lm-studio" }
-fcp-moonshot = { path = "connectors/moonshot" }
 fcp-ollama = { path = "connectors/ollama" }
 fcp-together = { path = "connectors/together" }
 fcp-voyage = { path = "connectors/voyage" }

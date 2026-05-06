@@ -5,20 +5,20 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:brave-search-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:brave-search-web-llm-context"
 
 [connector]
 id = "fcp.brave-search"
 name = "Brave Search"
 version = "0.1.0"
-description = "Brave Search web query connector"
+description = "Brave Search web and LLM-context query connector"
 archetypes = ["request-response"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: web search only."
+migration_hint = "Stateless request-response search; no listener surface."
 
 [zones]
 home = "z:public"
@@ -37,4 +37,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

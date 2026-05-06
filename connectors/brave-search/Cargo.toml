@@ -26,6 +26,7 @@ fcp-prelude = { path = "../../crates/fcp-prelude" }
 fcp-sdk = { path = "../../crates/fcp-sdk" }
 
 anyhow.workspace = true
+chrono.workspace = true
 thiserror.workspace = true
 reqwest = { workspace = true, features = ["json"] }
 serde.workspace = true

@@ -2677,6 +2677,7 @@ name = "fcp-brave-search"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "fcp-async-core",
  "fcp-core",
  "fcp-prelude",

@@ -2,26 +2,69 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use chrono::{NaiveDate, Utc};
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
-use reqwest::{Client, Method, RequestBuilder, StatusCode};
-use serde_json::{Value, json};
+use reqwest::{
+    Client, Method, RequestBuilder, StatusCode,
+    header::{ACCEPT, HeaderMap, HeaderName, HeaderValue},
+};
+use serde_json::{Map, Value, json};
 use url::Url;
 
 const CONNECTOR_ID: &str = "fcp.brave-search";
 const CONNECTOR_VERSION: &str = "0.1.0";
-const BOUNDARY: &str = "This first slice exposes web search only.";
-const DEFAULT_BASE_URL: &str = "https://api.search.brave.com/res/v1";
+const BOUNDARY: &str =
+    "Exposes Brave web search and LLM context request-response operations; no listener surface.";
+const DEFAULT_BASE_URL: &str = "https://api.search.brave.com";
+const DEFAULT_SEARCH_COUNT: u64 = 5;
+const MAX_SEARCH_COUNT: u64 = 10;
+const WEB_SEARCH_ENDPOINT_PATH: &str = "/res/v1/web/search";
+const LLM_CONTEXT_ENDPOINT_PATH: &str = "/res/v1/llm/context";
+const BRAVE_SUBSCRIPTION_TOKEN_HEADER: &str = "x-subscription-token";
+const BRAVE_COUNTRY_CODES: &[&str] = &[
+    "AR", "AU", "AT", "BE", "BR", "CA", "CL", "DK", "FI", "FR", "DE", "GR", "HK", "IN", "ID", "IT",
+    "JP", "KR", "MY", "MX", "NL", "NZ", "NO", "CN", "PL", "PT", "PH", "RU", "SA", "ZA", "ES", "SE",
+    "CH", "TW", "TR", "GB", "US", "ALL",
+];
+const BRAVE_SEARCH_LANG_CODES: &[&str] = &[
+    "ar", "eu", "bn", "bg", "ca", "zh-hans", "zh-hant", "hr", "cs", "da", "nl", "en", "en-gb",
+    "et", "fi", "fr", "gl", "de", "el", "gu", "he", "hi", "hu", "is", "it", "jp", "kn", "ko", "lv",
+    "lt", "ms", "ml", "mr", "nb", "pl", "pt-br", "pt-pt", "pa", "ro", "ru", "sr", "sk", "sl", "es",
+    "sv", "ta", "te", "th", "tr", "uk", "vi",
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BraveSearchMode {
+    Web,
+    LlmContext,
+}
+
+impl BraveSearchMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Web => "web",
+            Self::LlmContext => "llm-context",
+        }
+    }
+
+    const fn endpoint_path(self) -> &'static str {
+        match self {
+            Self::Web => WEB_SEARCH_ENDPOINT_PATH,
+            Self::LlmContext => LLM_CONTEXT_ENDPOINT_PATH,
+        }
+    }
+}
 
 #[derive(Clone)]
 enum Auth {
-    ApiKey(String),
+    HeaderCredential(HeaderValue),
     CredentialId { _id: String },
 }
 
 impl std::fmt::Debug for Auth {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
+            Self::HeaderCredential(_) => f.debug_tuple("ApiKey").field(&"[REDACTED]").finish(),
             Self::CredentialId { _id: id } => {
                 f.debug_struct("CredentialId").field("_id", id).finish()
             }
@@ -32,7 +75,7 @@ impl std::fmt::Debug for Auth {
 impl Auth {
     const fn redacted_label(&self) -> &'static str {
         match self {
-            Self::ApiKey(_) => "api_key",
+            Self::HeaderCredential(_) => "api_key",
             Self::CredentialId { .. } => "credential_id",
         }
     }
@@ -41,10 +84,12 @@ impl Auth {
         matches!(self, Self::CredentialId { .. })
     }
 
-    fn apply(&self, request: RequestBuilder) -> RequestBuilder {
-        match self {
-            Self::ApiKey(key) => request.header("X-Subscription-Token", key),
-            Self::CredentialId { .. } => request,
+    fn apply_headers(&self, headers: &mut HeaderMap) {
+        if let Self::HeaderCredential(value) = self {
+            headers.insert(
+                HeaderName::from_static(BRAVE_SUBSCRIPTION_TOKEN_HEADER),
+                value.clone(),
+            );
         }
     }
 }
@@ -68,12 +113,13 @@ impl std::fmt::Debug for BraveConfig {
 
 impl BraveConfig {
     fn from_params(params: &Value) -> FcpResult<Self> {
-        let api_key = params
+        let header_credential = params
             .get("api_key")
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned);
+            .map(validated_header_credential)
+            .transpose()?;
         let credential_id = params
             .get("credential_id")
             .and_then(Value::as_str)
@@ -81,8 +127,8 @@ impl BraveConfig {
             .filter(|value| !value.is_empty())
             .map(ToOwned::to_owned);
 
-        let auth = match (api_key, credential_id) {
-            (Some(key), None) => Auth::ApiKey(key),
+        let auth = match (header_credential, credential_id) {
+            (Some(header_value), None) => Auth::HeaderCredential(header_value),
             (None, Some(credential_id)) => Auth::CredentialId { _id: credential_id },
             (Some(_), Some(_)) => {
                 return Err(FcpError::InvalidRequest {
@@ -151,48 +197,41 @@ impl BraveClient {
         })
     }
 
-    fn request(&self, method: Method, path: &str) -> RequestBuilder {
-        self.auth
-            .apply(
-                self.http
-                    .request(method, format!("{}{}", self.base_url, path)),
-            )
-            .header("Accept", "application/json")
+    fn request(&self, method: Method, mode: BraveSearchMode) -> FcpResult<RequestBuilder> {
+        let url = build_endpoint_url(&self.base_url, mode.endpoint_path())?;
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        self.auth.apply_headers(&mut headers);
+        Ok(self.http.request(method, url).headers(headers))
     }
 
     async fn web_search(&self, input: &Value) -> FcpResult<Value> {
-        let query = input
-            .get("query")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "query must be a non-empty string".into(),
-            })?;
+        let query = required_non_empty_string(input, "query")?;
+        let options = BraveSearchOptions::from_input(input, BraveSearchMode::Web)?;
+        let mut params = options.query_params(query, BraveSearchMode::Web);
+        params.push(("count", options.count.to_string()));
 
-        let mut params: Vec<(&str, String)> = vec![("q", query.to_string())];
-        if let Some(count) = input.get("count").and_then(Value::as_u64) {
-            params.push(("count", count.to_string()));
-        }
-        if let Some(country) = input.get("country").and_then(Value::as_str) {
-            params.push(("country", country.to_string()));
-        }
-        if let Some(search_lang) = input.get("search_lang").and_then(Value::as_str) {
-            params.push(("search_lang", search_lang.to_string()));
-        }
-        if let Some(safesearch) = input.get("safesearch").and_then(Value::as_str) {
-            params.push(("safesearch", safesearch.to_string()));
-        }
-        if let Some(freshness) = input.get("freshness").and_then(Value::as_str) {
-            params.push(("freshness", freshness.to_string()));
-        }
-
-        send_json(
-            self.request(Method::GET, "/web/search").query(&params),
+        let payload = send_json(
+            self.request(Method::GET, BraveSearchMode::Web)?
+                .query(&params),
             "brave-search",
         )
-        .await
+        .await?;
+        Ok(normalize_web_search_payload(query, &payload))
+    }
+
+    async fn llm_context_search(&self, input: &Value) -> FcpResult<Value> {
+        let query = required_non_empty_string(input, "query")?;
+        let options = BraveSearchOptions::from_input(input, BraveSearchMode::LlmContext)?;
+        let params = options.query_params(query, BraveSearchMode::LlmContext);
+
+        let payload = send_json(
+            self.request(Method::GET, BraveSearchMode::LlmContext)?
+                .query(&params),
+            "brave-search",
+        )
+        .await?;
+        Ok(normalize_llm_context_payload(query, &payload))
     }
 }
 
@@ -243,7 +282,7 @@ impl BraveSearchConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["brave-search.web"]
+            "capabilities": ["brave-search.web", "brave-search.llm-context"]
         }))
     }
 
@@ -341,7 +380,8 @@ impl BraveSearchConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "brave-search.web.search", "summary": "Execute a Brave Search web query", "capability": "brave-search.web", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" }
+                { "id": "brave-search.web.search", "summary": "Execute a Brave Search web query", "capability": "brave-search.web", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" },
+                { "id": "brave-search.llm-context.search", "summary": "Execute a Brave Search LLM Context query", "capability": "brave-search.llm-context", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict" }
             ],
             "events": [],
             "resource_types": []
@@ -377,6 +417,7 @@ impl BraveSearchConnector {
 
         let result = match operation {
             "brave-search.web.search" => client.web_search(&input).await,
+            "brave-search.llm-context.search" => client.llm_context_search(&input).await,
             _ => Err(FcpError::InvalidRequest {
                 code: 1002,
                 message: format!("Unknown operation: {operation}"),
@@ -395,7 +436,8 @@ impl BraveSearchConnector {
             .or_else(|| params.get("operation"))
             .and_then(Value::as_str)
             .unwrap_or("");
-        let supported = operation == "brave-search.web.search";
+        let supported = operation == "brave-search.web.search"
+            || operation == "brave-search.llm-context.search";
         let blocked_by_secretless_auth = supported
             && self
                 .config
@@ -430,6 +472,14 @@ impl Default for BraveSearchConnector {
     }
 }
 
+fn validated_header_credential(value: &str) -> FcpResult<HeaderValue> {
+    let mut header_value = HeaderValue::from_str(value).map_err(|_| {
+        invalid_request("api_key must be a valid HTTP header value without control characters")
+    })?;
+    header_value.set_sensitive(true);
+    Ok(header_value)
+}
+
 fn normalize_base_url(
     override_value: Option<&str>,
     default_value: &str,
@@ -462,6 +512,424 @@ fn normalize_base_url(
         });
     }
     Ok(parsed.to_string().trim_end_matches('/').to_string())
+}
+
+fn build_endpoint_url(base_url: &str, endpoint_path: &str) -> FcpResult<String> {
+    let mut parsed = Url::parse(base_url).map_err(|error| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Invalid base_url: {error}"),
+    })?;
+    let base_path = parsed.path().trim_end_matches('/');
+    let next_path = if base_path.is_empty() {
+        endpoint_path.to_string()
+    } else {
+        format!("{base_path}{endpoint_path}")
+    };
+    parsed.set_path(&next_path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+#[derive(Debug)]
+struct BraveSearchOptions {
+    count: u64,
+    country: Option<String>,
+    search_lang: Option<String>,
+    ui_lang: Option<String>,
+    safesearch: Option<String>,
+    freshness: Option<String>,
+}
+
+impl BraveSearchOptions {
+    fn from_input(input: &Value, mode: BraveSearchMode) -> FcpResult<Self> {
+        let language = optional_string(input, "language");
+        let requested_search_lang = optional_string(input, "search_lang").or(language);
+        let mut search_lang = normalize_search_lang(requested_search_lang.as_deref())?;
+        let mut ui_lang = normalize_ui_lang(optional_string(input, "ui_lang").as_deref())?;
+
+        if search_lang.is_none() {
+            if let Some(candidate) = optional_string(input, "ui_lang") {
+                search_lang = normalize_search_lang(Some(&candidate)).ok().flatten();
+            }
+        }
+        if ui_lang.is_none() {
+            if let Some(candidate) = requested_search_lang {
+                ui_lang = normalize_ui_lang(Some(&candidate)).ok().flatten();
+            }
+        }
+        if ui_lang.is_some() && mode == BraveSearchMode::LlmContext {
+            return Err(invalid_request(
+                "ui_lang is not supported by brave-search.llm-context.search",
+            ));
+        }
+
+        let raw_freshness = optional_string(input, "freshness");
+        let date_after = parse_iso_date_field(input, "date_after")?;
+        let date_before = parse_iso_date_field(input, "date_before")?;
+        if raw_freshness.is_some() && (date_after.is_some() || date_before.is_some()) {
+            return Err(invalid_request(
+                "freshness and date_after/date_before cannot be used together",
+            ));
+        }
+        if let (Some(after), Some(before)) = (&date_after, &date_before) {
+            if after > before {
+                return Err(invalid_request("date_after must be before date_before"));
+            }
+        }
+        let freshness = if let Some(raw) = raw_freshness {
+            Some(normalize_freshness(&raw)?)
+        } else {
+            build_date_freshness(date_after.as_deref(), date_before.as_deref(), mode)?
+        };
+
+        Ok(Self {
+            count: normalize_count(input.get("count")),
+            country: normalize_country(optional_string(input, "country").as_deref()),
+            search_lang,
+            ui_lang,
+            safesearch: optional_string(input, "safesearch"),
+            freshness,
+        })
+    }
+
+    fn query_params(&self, query: &str, mode: BraveSearchMode) -> Vec<(&'static str, String)> {
+        let mut params = vec![("q", query.to_string())];
+        if let Some(country) = &self.country {
+            params.push(("country", country.clone()));
+        }
+        if let Some(search_lang) = &self.search_lang {
+            params.push(("search_lang", search_lang.clone()));
+        }
+        if mode == BraveSearchMode::Web {
+            if let Some(ui_lang) = &self.ui_lang {
+                params.push(("ui_lang", ui_lang.clone()));
+            }
+            if let Some(safesearch) = &self.safesearch {
+                params.push(("safesearch", safesearch.clone()));
+            }
+        }
+        if let Some(freshness) = &self.freshness {
+            params.push(("freshness", freshness.clone()));
+        }
+        params
+    }
+}
+
+fn required_non_empty_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| invalid_request(format!("{field} must be a non-empty string")))
+}
+
+fn optional_string(input: &Value, field: &str) -> Option<String> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn normalize_count(value: Option<&Value>) -> u64 {
+    let Some(Value::Number(number)) = value else {
+        return DEFAULT_SEARCH_COUNT;
+    };
+    if let Some(count) = number.as_u64() {
+        return count.clamp(1, MAX_SEARCH_COUNT);
+    }
+    if let Some(count) = number.as_i64() {
+        return u64::try_from(count).map_or(1, |count| count.clamp(1, MAX_SEARCH_COUNT));
+    }
+    DEFAULT_SEARCH_COUNT
+}
+
+fn normalize_country(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            let canonical = value.to_ascii_uppercase();
+            if BRAVE_COUNTRY_CODES.contains(&canonical.as_str()) {
+                canonical
+            } else {
+                "ALL".to_string()
+            }
+        })
+}
+
+fn normalize_search_lang(value: Option<&str>) -> FcpResult<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let lower = value.to_ascii_lowercase();
+    let canonical = match lower.as_str() {
+        "ja" => "jp",
+        "zh" | "zh-cn" | "zh-sg" => "zh-hans",
+        "zh-hk" | "zh-tw" => "zh-hant",
+        _ => lower.as_str(),
+    };
+    if BRAVE_SEARCH_LANG_CODES.contains(&canonical) {
+        Ok(Some(canonical.to_string()))
+    } else {
+        Err(invalid_request(
+            "search_lang must be a Brave-supported language code",
+        ))
+    }
+}
+
+fn normalize_ui_lang(value: Option<&str>) -> FcpResult<Option<String>> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let Some((language, region)) = value.split_once('-') else {
+        return Err(invalid_request(
+            "ui_lang must be a language-region locale like en-US",
+        ));
+    };
+    if language.len() != 2
+        || region.len() != 2
+        || !language.chars().all(|ch| ch.is_ascii_alphabetic())
+        || !region.chars().all(|ch| ch.is_ascii_alphabetic())
+    {
+        return Err(invalid_request(
+            "ui_lang must be a language-region locale like en-US",
+        ));
+    }
+    Ok(Some(format!(
+        "{}-{}",
+        language.to_ascii_lowercase(),
+        region.to_ascii_uppercase()
+    )))
+}
+
+fn normalize_freshness(value: &str) -> FcpResult<String> {
+    let trimmed = value.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    match lower.as_str() {
+        "day" | "pd" => Ok("pd".to_string()),
+        "week" | "pw" => Ok("pw".to_string()),
+        "month" | "pm" => Ok("pm".to_string()),
+        "year" | "py" => Ok("py".to_string()),
+        _ => {
+            if let Some((start, end)) = trimmed.split_once("to") {
+                parse_iso_date(start, "freshness start")?;
+                parse_iso_date(end, "freshness end")?;
+                if start > end {
+                    return Err(invalid_request(
+                        "freshness date range start must be before end",
+                    ));
+                }
+                Ok(format!("{start}to{end}"))
+            } else {
+                Err(invalid_request(
+                    "freshness must be day, week, month, or year",
+                ))
+            }
+        }
+    }
+}
+
+fn parse_iso_date_field(input: &Value, field: &str) -> FcpResult<Option<String>> {
+    let Some(value) = optional_string(input, field) else {
+        return Ok(None);
+    };
+    parse_iso_date(&value, field)?;
+    Ok(Some(value))
+}
+
+fn parse_iso_date(value: &str, field: &str) -> FcpResult<NaiveDate> {
+    if value.len() != 10
+        || value.as_bytes().get(4) != Some(&b'-')
+        || value.as_bytes().get(7) != Some(&b'-')
+    {
+        return Err(invalid_request(format!(
+            "{field} must be YYYY-MM-DD format"
+        )));
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| invalid_request(format!("{field} must be a valid YYYY-MM-DD date")))
+}
+
+fn build_date_freshness(
+    date_after: Option<&str>,
+    date_before: Option<&str>,
+    mode: BraveSearchMode,
+) -> FcpResult<Option<String>> {
+    match (date_after, date_before, mode) {
+        (None, None, _) => Ok(None),
+        (Some(after), Some(before), _) => Ok(Some(format!("{after}to{before}"))),
+        (Some(after), None, BraveSearchMode::Web) => Ok(Some(format!("{after}to{}", today_iso()))),
+        (None, Some(before), BraveSearchMode::Web) => Ok(Some(format!("1970-01-01to{before}"))),
+        (Some(after), None, BraveSearchMode::LlmContext) => {
+            let today = today_iso();
+            if after > today.as_str() {
+                Err(invalid_request(
+                    "date_after cannot be in the future for brave-search.llm-context.search",
+                ))
+            } else {
+                Ok(Some(format!("{after}to{today}")))
+            }
+        }
+        (None, Some(_), BraveSearchMode::LlmContext) => Err(invalid_request(
+            "brave-search.llm-context.search requires date_after when date_before is set",
+        )),
+    }
+}
+
+fn today_iso() -> String {
+    Utc::now().date_naive().format("%Y-%m-%d").to_string()
+}
+
+fn normalize_web_search_payload(query: &str, payload: &Value) -> Value {
+    let results = payload
+        .get("web")
+        .and_then(|web| web.get("results"))
+        .and_then(Value::as_array)
+        .map(|results| {
+            results
+                .iter()
+                .map(normalize_web_result)
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "query": query,
+        "provider": "brave",
+        "mode": BraveSearchMode::Web.as_str(),
+        "count": results.len(),
+        "external_content": external_content_metadata("search_results"),
+        "results": results,
+    })
+}
+
+fn normalize_web_result(entry: &Value) -> Value {
+    let mut result = Map::new();
+    let title = string_field(entry, "title").unwrap_or_default();
+    let description = string_field(entry, "description").unwrap_or_default();
+    let url = string_field(entry, "url").unwrap_or_default();
+    result.insert("title".into(), json!(wrap_web_search_content(title)));
+    result.insert("url".into(), json!(url));
+    result.insert(
+        "description".into(),
+        json!(wrap_web_search_content(description)),
+    );
+    if let Some(age) = string_field(entry, "age") {
+        result.insert("published".into(), json!(age));
+    }
+    if let Some(site_name) = resolve_site_name(url) {
+        result.insert("site_name".into(), json!(site_name));
+    }
+    Value::Object(result)
+}
+
+fn normalize_llm_context_payload(query: &str, payload: &Value) -> Value {
+    let results = payload
+        .get("grounding")
+        .and_then(|grounding| grounding.get("generic"))
+        .and_then(Value::as_array)
+        .map(|results| {
+            results
+                .iter()
+                .map(normalize_llm_context_result)
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default();
+    let sources = payload
+        .get("sources")
+        .and_then(Value::as_array)
+        .map(|sources| {
+            sources
+                .iter()
+                .map(normalize_llm_context_source)
+                .collect::<Vec<Value>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "query": query,
+        "provider": "brave",
+        "mode": BraveSearchMode::LlmContext.as_str(),
+        "count": results.len(),
+        "external_content": external_content_metadata("llm_context_results"),
+        "results": results,
+        "sources": sources,
+    })
+}
+
+fn normalize_llm_context_result(entry: &Value) -> Value {
+    let url = string_field(entry, "url").unwrap_or_default();
+    let snippets = entry
+        .get("snippets")
+        .and_then(Value::as_array)
+        .map(|snippets| {
+            snippets
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|snippet| !snippet.is_empty())
+                .map(wrap_web_search_content)
+                .collect::<Vec<String>>()
+        })
+        .unwrap_or_default();
+    json!({
+        "title": wrap_web_search_content(string_field(entry, "title").unwrap_or_default()),
+        "url": url,
+        "snippets": snippets,
+        "site_name": resolve_site_name(url),
+    })
+}
+
+fn normalize_llm_context_source(entry: &Value) -> Value {
+    let url = string_field(entry, "url").unwrap_or_default();
+    let hostname = string_field(entry, "hostname")
+        .map(ToOwned::to_owned)
+        .or_else(|| resolve_site_name(url));
+    json!({
+        "url": url,
+        "hostname": hostname,
+        "date": string_field(entry, "date"),
+    })
+}
+
+fn external_content_metadata(kind: &'static str) -> Value {
+    json!({
+        "untrusted": true,
+        "source": "web_search",
+        "provider": "brave",
+        "kind": kind,
+        "taint": "tainted",
+        "origin_zone": "z:public",
+        "wrapped": true,
+    })
+}
+
+fn string_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value.get(field).and_then(Value::as_str)
+}
+
+fn resolve_site_name(url: &str) -> Option<String> {
+    Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToOwned::to_owned))
+}
+
+fn wrap_web_search_content(content: &str) -> String {
+    if content.is_empty() {
+        return String::new();
+    }
+    let sanitized = content.replace("<<<", "<< <").replace(">>>", ">> >");
+    format!(
+        "<<<EXTERNAL_UNTRUSTED_CONTENT source=\"web_search\">>>\nSource: Web Search\n{sanitized}\n<<<END_EXTERNAL_UNTRUSTED_CONTENT>>>"
+    )
+}
+
+fn invalid_request(message: impl Into<String>) -> FcpError {
+    FcpError::InvalidRequest {
+        code: 1003,
+        message: message.into(),
+    }
 }
 
 fn parse_retry_after(headers: &reqwest::header::HeaderMap) -> Option<Duration> {

@@ -7,40 +7,44 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::io::Write;
+use std::time::Duration;
 
 use chrono::Utc;
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOperationPriority,
     BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchScheduleWaitPercentiles,
-    BatchSchedulerMode, BatchSchedulerOptions, OperationResultStatus, ResourceLedgerInput,
-    ResourceLedgerOutcome, ResourceLedgerRecord, ResourceLedgerRecordKind, ResourceLedgerSamples,
-    ResourceTelemetryState,
+    BatchSchedulerMode, BatchSchedulerOptions, ConnectorPrewarmConfig, OperationResultStatus,
+    PrewarmCheckoutDecision, PrewarmCheckoutObservation, PrewarmCredentialState,
+    PrewarmHealthState, PrewarmManifestState, PrewarmPoolState, PrewarmSandboxState,
+    PrewarmStrategy, PrewarmZoneBinding, ProcessExit, ResourceLedgerInput, ResourceLedgerOutcome,
+    ResourceLedgerRecord, ResourceLedgerRecordKind, ResourceLedgerSamples, ResourceTelemetryState,
 };
 use fcp_testkit::evidence_helpers::{
     LatencyBreakdown, SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION,
     SWARM_BASELINE_PROMOTION_SCHEMA_VERSION, SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION,
-    SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION, SwarmAdversarialAdmissionOutcome,
-    SwarmAdversarialBackpressureAction, SwarmAdversarialCleanupOutcome,
-    SwarmAdversarialLatencyPercentiles, SwarmAdversarialRevocationEvent,
-    SwarmAdversarialRevocationEventInput, SwarmAdversarialRevocationOutcome,
-    SwarmAdversarialRevocationReport, SwarmAdversarialRevocationThresholds,
-    SwarmBaselineArtifactDigests, SwarmBaselinePathKind, SwarmBaselinePromotionManifest,
-    SwarmBatchFairnessBucket, SwarmBatchMorselizationEvidence, SwarmBatchResourceSample,
-    SwarmBatchWaitPercentiles, SwarmCalibrationStatus, SwarmControllerInteractionScenario,
-    SwarmControllerMode, SwarmControllerModeEvidence, SwarmControllerModeMetrics,
-    SwarmControllerSafetyOutcome, SwarmControllerSafetyReport, SwarmControllerSafetyThresholds,
-    SwarmDecisionAction, SwarmDecisionCard, SwarmDecisionCounterfactual, SwarmDecisionDomain,
-    SwarmDecisionEvidencePointer, SwarmDecisionFallback, SwarmDecisionLossTerm,
-    SwarmEvidenceArtifact, SwarmEvidenceArtifactKind, SwarmEvidenceArtifactManifest,
-    SwarmEvidenceExecutionMode, SwarmEvidenceRedactionPolicy, SwarmEvidenceSourceKind,
-    SwarmGauntletCounters, SwarmGauntletEvidenceBundle, SwarmGauntletManifest, SwarmGauntletPhase,
-    SwarmGauntletPhaseEvidence, SwarmLatencyEvidenceBundle, SwarmLatencySample,
-    SwarmLatencyScenario, SwarmPromotionEnvelope, SwarmPromotionQualification,
-    SwarmPromotionSkipArtifact, SwarmPromotionTopology, SwarmRegressionGateThresholds,
-    SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics, SwarmRunEnvironment,
-    SwarmStatisticalGateInput, SwarmStatisticalGateOutcome, SwarmStatisticalGateReasonKind,
-    SwarmStatisticalGateReport, SwarmStatisticalGateTuning, SwarmStatisticalTraceQuality,
-    SwarmWorkloadKind,
+    SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION, SWARM_PREWARM_COLD_START_SCHEMA_VERSION,
+    SwarmAdversarialAdmissionOutcome, SwarmAdversarialBackpressureAction,
+    SwarmAdversarialCleanupOutcome, SwarmAdversarialLatencyPercentiles,
+    SwarmAdversarialRevocationEvent, SwarmAdversarialRevocationEventInput,
+    SwarmAdversarialRevocationOutcome, SwarmAdversarialRevocationReport,
+    SwarmAdversarialRevocationThresholds, SwarmBaselineArtifactDigests, SwarmBaselinePathKind,
+    SwarmBaselinePromotionManifest, SwarmBatchFairnessBucket, SwarmBatchMorselizationEvidence,
+    SwarmBatchResourceSample, SwarmBatchWaitPercentiles, SwarmCalibrationStatus,
+    SwarmControllerInteractionScenario, SwarmControllerMode, SwarmControllerModeEvidence,
+    SwarmControllerModeMetrics, SwarmControllerSafetyOutcome, SwarmControllerSafetyReport,
+    SwarmControllerSafetyThresholds, SwarmDecisionAction, SwarmDecisionCard,
+    SwarmDecisionCounterfactual, SwarmDecisionDomain, SwarmDecisionEvidencePointer,
+    SwarmDecisionFallback, SwarmDecisionLossTerm, SwarmEvidenceArtifact, SwarmEvidenceArtifactKind,
+    SwarmEvidenceArtifactManifest, SwarmEvidenceExecutionMode, SwarmEvidenceRedactionPolicy,
+    SwarmEvidenceSourceKind, SwarmGauntletCounters, SwarmGauntletEvidenceBundle,
+    SwarmGauntletManifest, SwarmGauntletPhase, SwarmGauntletPhaseEvidence,
+    SwarmLatencyEvidenceBundle, SwarmLatencySample, SwarmLatencyScenario,
+    SwarmPrewarmColdStartEvidence, SwarmPrewarmLatencyPercentiles, SwarmPromotionEnvelope,
+    SwarmPromotionQualification, SwarmPromotionSkipArtifact, SwarmPromotionTopology,
+    SwarmRegressionGateThresholds, SwarmRegressionMetricSnapshot, SwarmRegressionResourceMetrics,
+    SwarmRunEnvironment, SwarmStatisticalGateInput, SwarmStatisticalGateOutcome,
+    SwarmStatisticalGateReasonKind, SwarmStatisticalGateReport, SwarmStatisticalGateTuning,
+    SwarmStatisticalTraceQuality, SwarmWorkloadKind,
 };
 use serde_json::{Value, json};
 
@@ -846,6 +850,137 @@ fn maybe_write_batch_morselization_jsonl_artifact(jsonl: &str) -> std::io::Resul
     Ok(())
 }
 
+fn prewarm_command_line() -> Vec<String> {
+    vec![
+        "rch".to_string(),
+        "exec".to_string(),
+        "--".to_string(),
+        "cargo".to_string(),
+        "test".to_string(),
+        "-p".to_string(),
+        "fcp-e2e".to_string(),
+        "--no-default-features".to_string(),
+        "--test".to_string(),
+        "swarm_gauntlet_e2e".to_string(),
+        "prewarm_cold_start".to_string(),
+        "--".to_string(),
+        "--nocapture".to_string(),
+    ]
+}
+
+fn serde_label<T: serde::Serialize>(value: &T) -> Result<String, Box<dyn Error>> {
+    let value = serde_json::to_value(value)?;
+    value
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "serialized enum label should be a string".into())
+}
+
+fn prewarm_observation(
+    pool_state: PrewarmPoolState,
+    manifest: PrewarmManifestState,
+    health: PrewarmHealthState,
+    previous_exit: Option<ProcessExit>,
+) -> PrewarmCheckoutObservation {
+    PrewarmCheckoutObservation {
+        pool_state,
+        manifest,
+        zone_binding: PrewarmZoneBinding::Bound,
+        sandbox: PrewarmSandboxState::LimitsActive,
+        credential: PrewarmCredentialState::Deferred,
+        health,
+        entry_age: Duration::from_millis(20),
+        previous_exit,
+    }
+}
+
+fn prewarm_latency(
+    p50_ms: u64,
+    p95_ms: u64,
+    p99_ms: u64,
+    p999_ms: u64,
+    max_ms: u64,
+    mean_ms: u64,
+) -> SwarmPrewarmLatencyPercentiles {
+    SwarmPrewarmLatencyPercentiles {
+        p50_ms,
+        p95_ms,
+        p99_ms,
+        p999_ms,
+        max_ms,
+        mean_ms,
+    }
+}
+
+fn prewarm_decision_reasons(
+    decision: &PrewarmCheckoutDecision,
+) -> Result<(Option<String>, Option<String>), Box<dyn Error>> {
+    match decision {
+        PrewarmCheckoutDecision::AdmitWarm { .. } => Ok((None, None)),
+        PrewarmCheckoutDecision::FallbackOnDemand { reason } => {
+            Ok((Some(serde_label(reason)?), None))
+        }
+        PrewarmCheckoutDecision::RejectUnsafe { reason } => Ok((None, Some(serde_label(reason)?))),
+    }
+}
+
+fn prewarm_evidence(
+    scenario_id: &str,
+    config: &ConnectorPrewarmConfig,
+    observation: PrewarmCheckoutObservation,
+    activation_latency_ms: u64,
+    baseline_on_demand_latency_ms: u64,
+    latency: SwarmPrewarmLatencyPercentiles,
+    process_count: u32,
+    concurrent_startups: u32,
+    restart_reason: Option<&str>,
+    skip_reason: Option<&str>,
+    shutdown_cleanup_verified: bool,
+) -> Result<SwarmPrewarmColdStartEvidence, Box<dyn Error>> {
+    let decision = config.decide_checkout(&observation);
+    let (fallback_reason, unsafe_rejection_reason) = prewarm_decision_reasons(&decision)?;
+
+    Ok(SwarmPrewarmColdStartEvidence {
+        schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+        scenario_id: scenario_id.to_string(),
+        connector_id: "fcp.github:utility:1.0.0".to_string(),
+        command_line: prewarm_command_line(),
+        git_revision: "e2e-smoke-revision".to_string(),
+        worker_id: "offline-e2e-runner".to_string(),
+        manifest_hash: "blake3:prewarm-manifest".to_string(),
+        zone: "z:project:swarm-prewarm".to_string(),
+        strategy: serde_label(&config.strategy)?,
+        pool_state: serde_label(&observation.pool_state)?,
+        activation_latency_ms,
+        baseline_on_demand_latency_ms,
+        latency,
+        sandbox_layer: serde_label(&observation.sandbox)?,
+        credential_mode: serde_label(&observation.credential)?,
+        rss_bytes: 96 * 1024 * 1024 + u64::from(concurrent_startups).saturating_mul(4096),
+        process_count,
+        concurrent_startups,
+        restart_reason: restart_reason.map(str::to_string),
+        fallback_reason,
+        unsafe_rejection_reason,
+        skip_reason: skip_reason.map(str::to_string),
+        shutdown_cleanup_verified,
+    })
+}
+
+fn maybe_write_prewarm_jsonl_artifact(jsonl: &str) -> std::io::Result<()> {
+    let Some(path) = std::env::var_os("FCP_PREWARM_COLD_START_JSONL_OUT") else {
+        return Ok(());
+    };
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)?;
+    file.write_all(jsonl.as_bytes())?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
 fn statistical_baseline_snapshot() -> SwarmRegressionMetricSnapshot {
     SwarmRegressionMetricSnapshot {
         scenario_id: "host_batch_invoke_10000".to_string(),
@@ -1081,6 +1216,241 @@ fn batch_morselization_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>
     );
     assert_eq!(tenk_record["cancellation_reason"], "timeout:BATCH_TIMEOUT");
     assert_eq!(tenk_record["skip_reason"], "dependency_failed:DEP_FAILED");
+    for line in jsonl.lines() {
+        serde_json::from_str::<Value>(line)?;
+    }
+    assert!(!jsonl.contains("sk-live-"));
+    assert!(!jsonl.contains("Bearer test-token"));
+    assert!(!jsonl.contains("super-secret-value"));
+    Ok(())
+}
+
+#[test]
+fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>> {
+    let config = ConnectorPrewarmConfig::warm_pool(
+        1,
+        256,
+        Duration::from_secs(30),
+        Duration::from_millis(25),
+    );
+    let zygote_config = ConnectorPrewarmConfig {
+        strategy: PrewarmStrategy::Zygote,
+        min_idle: 1,
+        max_idle: 1,
+        max_age: Duration::from_secs(30),
+        checkout_timeout: Duration::from_millis(25),
+    };
+    let evidence = vec![
+        prewarm_evidence(
+            "prewarm_empty_pool",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::Empty,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            96,
+            96,
+            prewarm_latency(96, 96, 96, 96, 96, 96),
+            1,
+            1,
+            None,
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_warm_hit",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            18,
+            96,
+            prewarm_latency(18, 22, 26, 29, 30, 20),
+            1,
+            1,
+            None,
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_stale_entry",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::Stale,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            96,
+            96,
+            prewarm_latency(96, 96, 96, 96, 96, 96),
+            1,
+            1,
+            None,
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_crash_before_checkout",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::CrashBeforeCheckout,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                Some(ProcessExit::with_code(1)),
+            ),
+            96,
+            96,
+            prewarm_latency(96, 96, 96, 96, 96, 96),
+            1,
+            1,
+            Some("exit_code_1"),
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_shutdown_cleanup",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            21,
+            96,
+            prewarm_latency(21, 24, 28, 31, 32, 23),
+            1,
+            1,
+            None,
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_concurrent_swarm_startup",
+            &config,
+            prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            24,
+            112,
+            prewarm_latency(24, 31, 42, 50, 55, 28),
+            256,
+            10_000,
+            None,
+            None,
+            true,
+        )?,
+        prewarm_evidence(
+            "prewarm_zygote_rejected_without_security_proof",
+            &zygote_config,
+            prewarm_observation(
+                PrewarmPoolState::WarmHit,
+                PrewarmManifestState::Current,
+                PrewarmHealthState::Ready,
+                None,
+            ),
+            96,
+            96,
+            prewarm_latency(96, 96, 96, 96, 96, 96),
+            1,
+            1,
+            None,
+            None,
+            true,
+        )?,
+    ];
+
+    let records = evidence
+        .into_iter()
+        .map(|record| -> Result<Value, Box<dyn Error>> {
+            record.validate()?;
+            Ok(record.to_jsonl_value()?)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    maybe_write_prewarm_jsonl_artifact(&jsonl)?;
+    let types = record_types(&records);
+    let warm_hit = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_warm_hit")
+        .ok_or("warm-hit prewarm record should be present")?;
+    let empty_pool = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_empty_pool")
+        .ok_or("empty-pool prewarm record should be present")?;
+    let stale_entry = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_stale_entry")
+        .ok_or("stale-entry prewarm record should be present")?;
+    let crash = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_crash_before_checkout")
+        .ok_or("crash-before-checkout prewarm record should be present")?;
+    let cleanup = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_shutdown_cleanup")
+        .ok_or("shutdown-cleanup prewarm record should be present")?;
+    let concurrent = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_concurrent_swarm_startup")
+        .ok_or("concurrent-swarm prewarm record should be present")?;
+    let zygote = records
+        .iter()
+        .find(|record| record["scenario_id"] == "prewarm_zygote_rejected_without_security_proof")
+        .ok_or("zygote-rejection prewarm record should be present")?;
+
+    assert!(types.contains("swarm_prewarm_cold_start_evidence"));
+    assert_eq!(
+        warm_hit["schema_version"],
+        SWARM_PREWARM_COLD_START_SCHEMA_VERSION
+    );
+    assert_eq!(warm_hit["connector_id"], "fcp.github:utility:1.0.0");
+    assert_eq!(warm_hit["manifest_hash"], "blake3:prewarm-manifest");
+    assert_eq!(warm_hit["zone"], "z:project:swarm-prewarm");
+    assert_eq!(warm_hit["strategy"], "warm_pool");
+    assert_eq!(warm_hit["pool_state"], "warm_hit");
+    assert_eq!(warm_hit["sandbox_layer"], "limits_active");
+    assert_eq!(warm_hit["credential_mode"], "deferred");
+    assert!(
+        warm_hit["p99_activation_latency_ms"]
+            .as_u64()
+            .zip(warm_hit["baseline_on_demand_latency_ms"].as_u64())
+            .is_some_and(|(p99, baseline)| p99 < baseline)
+    );
+    assert_eq!(empty_pool["fallback_reason"], "empty_pool");
+    assert_eq!(stale_entry["fallback_reason"], "warm_entry_stale");
+    assert_eq!(crash["fallback_reason"], "crash_before_checkout");
+    assert_eq!(crash["restart_reason"], "exit_code_1");
+    assert_eq!(
+        zygote["unsafe_rejection_reason"],
+        "zygote_without_security_proof"
+    );
+    assert!(
+        cleanup["shutdown_cleanup_verified"]
+            .as_bool()
+            .unwrap_or(false)
+    );
+    assert_eq!(concurrent["concurrent_startups"], 10_000);
+    assert_eq!(concurrent["process_count"], 256);
+    assert!(
+        concurrent["p99_activation_latency_ms"]
+            .as_u64()
+            .zip(concurrent["baseline_on_demand_latency_ms"].as_u64())
+            .is_some_and(|(p99, baseline)| p99 < baseline)
+    );
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }

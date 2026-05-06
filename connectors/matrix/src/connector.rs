@@ -21,7 +21,7 @@ use fcp_prelude::{
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
 use fcp_sdk::runtime::SupervisorConfig;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
@@ -320,8 +320,129 @@ fn doctor_check(
     })
 }
 
+fn default_matrix_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_matrix_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn matrix_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
+
 /// Matrix connector.
-#[derive(Debug)]
 pub struct MatrixConnector {
     base: BaseConnector,
     config: Option<MatrixConfig>,
@@ -336,6 +457,30 @@ pub struct MatrixConnector {
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     next_event_seq: Arc<AtomicU64>,
     subscribed_topics: Arc<RwLock<Vec<String>>>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
+}
+
+impl std::fmt::Debug for MatrixConnector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MatrixConnector")
+            .field("base", &self.base)
+            .field("config", &self.config)
+            .field("client", &self.client)
+            .field("runtime", &self.runtime)
+            .field("retry_config", &self.retry_config)
+            .field("started_at", &self.started_at)
+            .field("verifier", &self.verifier)
+            .field("sync_state", &self.sync_state)
+            .field("supervised_sync_status", &self.supervised_sync_status)
+            .field("supervised_sync_control", &self.supervised_sync_control)
+            .field("event_tx", &self.event_tx)
+            .field("next_event_seq", &self.next_event_seq)
+            .field("subscribed_topics", &self.subscribed_topics)
+            .field("chat_coordination_config", &self.chat_coordination_config)
+            .field("thread_ownership_checker", &"<thread-ownership-checker>")
+            .finish()
+    }
 }
 
 impl MatrixConnector {
@@ -357,7 +502,21 @@ impl MatrixConnector {
             event_tx,
             next_event_seq: Arc::new(AtomicU64::new(1)),
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
+            chat_coordination_config: default_matrix_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     /// Subscribe to Matrix event envelopes emitted by persisted manual sync calls.
@@ -1429,12 +1588,16 @@ pub fn operations_info() -> Vec<OperationInfo> {
                 "properties": {
                     "room_id": { "type": "string" },
                     "body": { "type": "string" },
-                    "msgtype": { "type": "string", "default": "m.text", "description": "m.text, m.notice, m.emote" }
+                    "msgtype": { "type": "string", "default": "m.text", "description": "m.text, m.notice, m.emote" },
+                    "thread_root_event_id": { "type": "string", "description": "Existing Matrix thread root event ID used as the chat-coordination ownership key when supplied" }
                 }
             }),
             output_schema: json!({
                 "type": "object",
-                "properties": { "event_id": { "type": "string" } }
+                "properties": {
+                    "event_id": { "type": "string" },
+                    "coordination": { "type": "array" }
+                }
             }),
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::Medium,
@@ -1686,6 +1849,10 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a s
             code: 1005,
             message: format!("Missing '{field}' field"),
         })
+}
+
+fn matrix_send_thread_id(input: &Value) -> FcpResult<Option<String>> {
+    optional_str(input, "thread_root_event_id")
 }
 
 fn optional_str(input: &serde_json::Value, field: &str) -> FcpResult<Option<String>> {
@@ -3388,6 +3555,10 @@ impl FcpConnector for MatrixConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_matrix_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: MatrixConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
@@ -3437,6 +3608,7 @@ impl FcpConnector for MatrixConnector {
 
         self.client = Some(client);
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         *self
             .sync_state
             .write()
@@ -3751,11 +3923,36 @@ impl MatrixConnector {
                 let body = require_str(&req.input, "body")?;
                 let msgtype =
                     optional_str(&req.input, "msgtype")?.unwrap_or_else(|| "m.text".to_string());
+                let thread_root_event_id = matrix_send_thread_id(&req.input)?;
+                let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+                let coordination = self
+                    .claim_before_matrix_send(
+                        zone_id,
+                        room_id,
+                        thread_root_event_id.as_deref(),
+                        claimant_agent_id.clone(),
+                    )
+                    .await;
+                if let Some(error) = coordination.denial_error() {
+                    warn!(
+                        event = "matrix.chat_coordination.denied",
+                        operation = OP_SEND_MESSAGE,
+                        "Matrix send_message denied by chat coordination"
+                    );
+                    return Err(error.clone());
+                }
                 let resp = client
                     .send_message(room_id, body, &msgtype)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                json!({ "event_id": resp.event_id })
+                json!({
+                    "event_id": resp.event_id,
+                    "coordination": matrix_coordination_audit_records(
+                        &coordination,
+                        self.chat_coordination_config.backend(),
+                        &claimant_agent_id
+                    ),
+                })
             }
             OP_GET_MESSAGES => {
                 let room_id = require_str(&req.input, "room_id")?;
@@ -3986,6 +4183,43 @@ impl MatrixConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_matrix_send(
+        &self,
+        zone_id: ZoneId,
+        room_id: &str,
+        thread_root_event_id: Option<&str>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(room_id.trim().to_owned());
+        let thread_id = thread_root_event_id
+            .map(str::trim)
+            .filter(|event_id| !event_id.is_empty())
+            .map(|event_id| ThreadId::new(event_id.to_owned()));
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 #[cfg(test)]
@@ -4016,6 +4250,32 @@ mod tests {
         resource_allow: &[&str],
         instance_id: &fcp_core::InstanceId,
     ) -> CapabilityToken {
+        test_token_for_key_with_capability_and_resources(
+            signing_key,
+            CAP_READ,
+            resource_allow,
+            instance_id,
+        )
+    }
+
+    fn test_write_token_for_key(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &fcp_core::InstanceId,
+    ) -> CapabilityToken {
+        test_token_for_key_with_capability_and_resources(
+            signing_key,
+            CAP_WRITE,
+            &["*"],
+            instance_id,
+        )
+    }
+
+    fn test_token_for_key_with_capability_and_resources(
+        signing_key: &Ed25519SigningKey,
+        capability_id: &str,
+        resource_allow: &[&str],
+        instance_id: &fcp_core::InstanceId,
+    ) -> CapabilityToken {
         let constraints = fcp_core::CapabilityConstraints {
             resource_allow: resource_allow
                 .iter()
@@ -4028,7 +4288,7 @@ mod tests {
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);
         let cose_token = CapabilityTokenBuilder::new()
-            .capability_id(CAP_READ)
+            .capability_id(capability_id)
             .zone_id("z:work")
             .principal("test-principal")
             .issuer("node:test")
@@ -4052,6 +4312,22 @@ mod tests {
             .sign(signing_key)
             .expect("Failed to create test token");
         CapabilityToken::from_raw(cose_token)
+    }
+
+    struct IndeterminateThreadOwnershipChecker {
+        reason: &'static str,
+    }
+
+    #[async_trait]
+    impl ThreadOwnershipChecker for IndeterminateThreadOwnershipChecker {
+        async fn claim(
+            &self,
+            _cx: &fcp_async_core::Cx,
+            _key: ClaimKey,
+            _agent_id: AgentId,
+        ) -> ClaimOutcome {
+            ClaimOutcome::Indeterminate(self.reason.to_string())
+        }
     }
 
     /// Configure and handshake with a real key pair so invoke token verification succeeds.
@@ -4080,6 +4356,30 @@ mod tests {
         })
         .await
         .unwrap();
+    }
+
+    fn send_message_invoke_request_with_key(
+        connector: &MatrixConnector,
+        input: serde_json::Value,
+        signing_key: &Ed25519SigningKey,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("req_send"),
+            connector_id: connector.id().clone(),
+            operation: OperationId::from_static(OP_SEND_MESSAGE),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token: test_write_token_for_key(signing_key, &connector.base.instance_id),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
     }
 
     fn sync_invoke_request_with_key(
@@ -6199,6 +6499,339 @@ mod tests {
             err,
             FcpError::ResourceNotAllowed { resource }
                 if resource == "matrix:room:!denied:matrix.org"
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_granted_claim_sends_with_coordination_audit() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path_regex(
+                r"^/_matrix/client/v3/rooms/%21room%3Amatrix\.org/send/m\.room\.message/.+$",
+            ))
+            .and(wiremock::matchers::body_json(json!({
+                "msgtype": "m.notice",
+                "body": "hello from Matrix"
+            })))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$sent_event"
+                })),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut connector = MatrixConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = test_signing_key();
+        connector
+            .configure(json!({
+                "homeserver_url": mock.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "chat_coordination": { "backend": "in_memory" }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_WRITE)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+
+        let response = connector
+            .invoke(send_message_invoke_request_with_key(
+                &connector,
+                json!({
+                    "room_id": "!room:matrix.org",
+                    "body": "hello from Matrix",
+                    "msgtype": "m.notice",
+                    "thread_root_event_id": "$root_event"
+                }),
+                &signing_key,
+            ))
+            .await
+            .unwrap();
+        let result = response.result.expect("send_message should return result");
+        assert_eq!(result["event_id"].as_str(), Some("$sent_event"));
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit should be an array");
+        let events = coordination
+            .iter()
+            .filter_map(|record| record.get("event").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            events,
+            vec!["claim_attempt", "claim_outcome", "send_executed"]
+        );
+        assert_eq!(coordination[1]["outcome"].as_str(), Some("granted"));
+        assert_eq!(coordination[2]["backend"].as_str(), Some("in_memory"));
+        let coordination_text = Value::Array(coordination.clone()).to_string();
+        assert!(!coordination_text.contains("!room:matrix.org"));
+        assert!(!coordination_text.contains("$root_event"));
+        assert!(!coordination_text.contains("hello from Matrix"));
+        assert!(!coordination_text.contains(connector.base.instance_id.as_str()));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_denies_duplicate_owner_before_http_send() {
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let key = ClaimKey::for_chat_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.matrix"),
+            ChannelId::new("!room:matrix.org"),
+            Some(ThreadId::new("$root_event")),
+            DmMode::TreatAsThread,
+        )
+        .expect("threaded Matrix send should produce a claim key");
+        assert!(matches!(
+            checker.claim_now(key, AgentId::new("agent:alpha"), Instant::now()),
+            ClaimOutcome::Granted(_)
+        ));
+
+        let mut connector = MatrixConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = test_signing_key();
+        connector
+            .configure(json!({
+                "homeserver_url": "http://127.0.0.1:9",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "timeout_ms": 100,
+                "chat_coordination": { "backend": "in_memory" }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_WRITE)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+
+        let error = connector
+            .invoke(send_message_invoke_request_with_key(
+                &connector,
+                json!({
+                    "room_id": "!room:matrix.org",
+                    "body": "must not reach Matrix",
+                    "thread_root_event_id": "$root_event"
+                }),
+                &signing_key,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(error, FcpError::Unauthorized { code: 4090, .. }));
+        assert!(
+            error
+                .to_string()
+                .contains("thread_owned_by_peer:agent:alpha")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_fail_open_sends_with_degraded_coordination_audit() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path_regex(
+                r"^/_matrix/client/v3/rooms/%21room%3Amatrix\.org/send/m\.room\.message/.+$",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "event_id": "$degraded_event"
+                })),
+            )
+            .expect(1)
+            .mount(&mock)
+            .await;
+
+        let mut connector = MatrixConnector::new().with_thread_ownership_checker(
+            Arc::new(IndeterminateThreadOwnershipChecker {
+                reason: "agent_mail_unavailable",
+            }),
+            ChatCoordinationBackend::AgentMail,
+        );
+        let signing_key = test_signing_key();
+        connector
+            .configure(json!({
+                "homeserver_url": mock.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "chat_coordination": {
+                    "backend": "agent_mail",
+                    "fail_open": true
+                }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_WRITE)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+
+        let response = connector
+            .invoke(send_message_invoke_request_with_key(
+                &connector,
+                json!({
+                    "room_id": "!room:matrix.org",
+                    "body": "degraded send"
+                }),
+                &signing_key,
+            ))
+            .await
+            .unwrap();
+        let result = response.result.expect("send_message should return result");
+        assert_eq!(result["event_id"].as_str(), Some("$degraded_event"));
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit should be an array");
+        assert_eq!(coordination[1]["outcome"].as_str(), Some("indeterminate"));
+        assert_eq!(
+            coordination[1]["reason"].as_str(),
+            Some("agent_mail_unavailable")
+        );
+        assert_eq!(coordination[2]["event"].as_str(), Some("send_executed"));
+        assert_eq!(
+            coordination[2]["reason"].as_str(),
+            Some("agent_mail_unavailable")
+        );
+        assert_eq!(coordination[2]["backend"].as_str(), Some("agent_mail"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_fail_closed_denies_indeterminate_before_http_send() {
+        let mut connector = MatrixConnector::new().with_thread_ownership_checker(
+            Arc::new(IndeterminateThreadOwnershipChecker {
+                reason: "agent_mail_unavailable",
+            }),
+            ChatCoordinationBackend::AgentMail,
+        );
+        let signing_key = test_signing_key();
+        connector
+            .configure(json!({
+                "homeserver_url": "http://127.0.0.1:9",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "timeout_ms": 100,
+                "chat_coordination": {
+                    "backend": "agent_mail",
+                    "fail_open": false
+                }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: signing_key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_WRITE)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+
+        let error = connector
+            .invoke(send_message_invoke_request_with_key(
+                &connector,
+                json!({
+                    "room_id": "!room:matrix.org",
+                    "body": "must not reach Matrix"
+                }),
+                &signing_key,
+            ))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            FcpError::ConnectorUnavailable { code: 5090, .. }
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("thread_ownership_indeterminate:agent_mail_unavailable")
+        );
+    }
+
+    #[test]
+    fn matrix_send_claim_key_derives_room_thread_and_dm_mode() {
+        let config = default_matrix_chat_coordination_config();
+        let action = config.action_for_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.matrix"),
+            ChannelId::new("!room:matrix.org"),
+            Some(ThreadId::new("$root_event")),
+        );
+        let threaded_key = match action {
+            ChatCoordinationAction::Claim { key } => Some(key),
+            ChatCoordinationAction::Skip { .. } => None,
+        };
+        assert!(
+            threaded_key.is_some(),
+            "threaded Matrix send should produce a coordination claim"
+        );
+        let threaded_key = threaded_key.expect("claim asserted");
+        assert_eq!(threaded_key.channel_id().as_str(), "!room:matrix.org");
+        assert_eq!(threaded_key.thread_id().as_str(), "$root_event");
+
+        let threadless = config.action_for_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.matrix"),
+            ChannelId::new("!room:matrix.org"),
+            None,
+        );
+        let threadless_key = match threadless {
+            ChatCoordinationAction::Claim { key } => Some(key),
+            ChatCoordinationAction::Skip { .. } => None,
+        };
+        assert!(
+            threadless_key.is_some(),
+            "default Matrix dm_mode should claim threadless sends"
+        );
+        let threadless_key = threadless_key.expect("claim asserted");
+        assert_eq!(threadless_key.thread_id().as_str(), "!room:matrix.org");
+
+        let skipped = config.with_dm_mode(DmMode::Skip).action_for_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.matrix"),
+            ChannelId::new("!room:matrix.org"),
+            None,
+        );
+        assert!(matches!(
+            skipped,
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ThreadlessDmSkipped
+            }
         ));
     }
 

@@ -1218,6 +1218,15 @@ mod tests {
         capability: &str,
         operation: &'static str,
     ) -> CapabilityToken {
+        generate_capability_for_instance(signing_key, capability, operation, None)
+    }
+
+    fn generate_capability_for_instance(
+        signing_key: &Ed25519SigningKey,
+        capability: &str,
+        operation: &'static str,
+        instance_id: Option<&fcp_prelude::InstanceId>,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -1225,7 +1234,7 @@ mod tests {
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        let cose = CapabilityTokenBuilder::new()
+        let mut builder = CapabilityTokenBuilder::new()
             .capability_id(capability)
             .zone_id("z:work")
             .principal("user:test")
@@ -1233,9 +1242,11 @@ mod tests {
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
-            .expect("constraints CBOR should validate")
-            .sign(signing_key)
-            .unwrap();
+            .expect("constraints CBOR should validate");
+        if let Some(instance_id) = instance_id {
+            builder = builder.target_instance(instance_id.as_str());
+        }
+        let cose = builder.sign(signing_key).unwrap();
         CapabilityToken::from_raw(cose)
     }
 
@@ -1499,7 +1510,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn simulate_wrong_capability_denied() {
         let (connector, signing_key) = handshaken_connector().await;
-        let capability = generate_capability(&signing_key, USAGE_CAPABILITY, LIST_ACTIVITIES);
+        let capability = generate_capability_for_instance(
+            &signing_key,
+            USAGE_CAPABILITY,
+            LIST_ACTIVITIES,
+            Some(&connector.base.instance_id),
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(
@@ -1520,7 +1536,12 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn simulate_known_operation_allowed() {
         let (connector, signing_key) = handshaken_connector().await;
-        let capability = generate_capability(&signing_key, AUDIT_CAPABILITY, LIST_ACTIVITIES);
+        let capability = generate_capability_for_instance(
+            &signing_key,
+            AUDIT_CAPABILITY,
+            LIST_ACTIVITIES,
+            Some(&connector.base.instance_id),
+        );
         let response = parse_simulate_response(
             connector
                 .handle_simulate(simulate_request(

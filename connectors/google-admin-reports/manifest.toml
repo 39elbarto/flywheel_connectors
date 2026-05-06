@@ -36,9 +36,9 @@ forbidden = ["system.exec", "network.listen"]
 [provides.operations."admin.list_activities"]
 description = "List admin audit activity events"
 capability = "admin.reports.audit.read"
-risk_level = "low"
+risk_level = "high"
 safety_tier = "safe"
-requires_approval = "none"
+requires_approval = "policy"
 idempotency = "strict"
 
 [provides.operations."admin.list_activities".input_schema]
@@ -85,9 +85,9 @@ related = ["admin.list_user_usage"]
 [provides.operations."admin.list_user_usage"]
 description = "List per-user usage reports"
 capability = "admin.reports.usage.read"
-risk_level = "low"
+risk_level = "high"
 safety_tier = "safe"
-requires_approval = "none"
+requires_approval = "policy"
 idempotency = "strict"
 
 [provides.operations."admin.list_user_usage".input_schema]
@@ -132,9 +132,9 @@ related = ["admin.list_customer_usage"]
 [provides.operations."admin.list_customer_usage"]
 description = "List customer-level usage reports"
 capability = "admin.reports.usage.read"
-risk_level = "low"
+risk_level = "high"
 safety_tier = "safe"
-requires_approval = "none"
+requires_approval = "policy"
 idempotency = "strict"
 
 [provides.operations."admin.list_customer_usage".input_schema]
@@ -177,9 +177,9 @@ related = ["admin.list_user_usage"]
 [provides.operations."admin.list_entity_usage"]
 description = "List entity-level usage reports"
 capability = "admin.reports.usage.read"
-risk_level = "low"
+risk_level = "high"
 safety_tier = "safe"
-requires_approval = "none"
+requires_approval = "policy"
 idempotency = "strict"
 
 [provides.operations."admin.list_entity_usage".input_schema]

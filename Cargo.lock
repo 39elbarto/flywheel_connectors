@@ -3500,6 +3500,7 @@ name = "fcp-e2e"
 version = "0.1.0"
 dependencies = [
  "asupersync",
+ "async-trait",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -3595,6 +3596,7 @@ dependencies = [
  "fcp-s3",
  "fcp-salesforce",
  "fcp-sandbox",
+ "fcp-sdk",
  "fcp-searxng",
  "fcp-segment",
  "fcp-semanticscholar",

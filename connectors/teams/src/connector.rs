@@ -27,6 +27,7 @@ use crate::client::TeamsClient;
 use crate::error::TeamsError;
 use crate::types::{
     Activity, ActivityAccount, TeamsAuth, TeamsConversationScope, TeamsConversationState,
+    TeamsIngressPolicy,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -611,6 +612,213 @@ impl TeamsConnector {
         }
     }
 
+    fn allowlist_allows(allowed: &[String], candidate: Option<&str>) -> bool {
+        allowed.is_empty()
+            || candidate.is_some_and(|candidate| allowed.iter().any(|item| item == candidate))
+    }
+
+    fn ingress_policy(&self) -> TeamsIngressPolicy {
+        self.config
+            .as_ref()
+            .map(|config| config.ingress_policy.clone())
+            .unwrap_or_default()
+    }
+
+    fn activity_team_id(activity: &Activity) -> Option<&str> {
+        activity
+            .channel_data
+            .as_ref()
+            .and_then(|channel_data| channel_data.team.as_ref())
+            .map(|team| team.id.as_str())
+    }
+
+    fn activity_channel_id<'a>(
+        activity: &'a Activity,
+        conversation: &'a crate::types::ConversationAccount,
+    ) -> Option<&'a str> {
+        activity
+            .channel_data
+            .as_ref()
+            .and_then(|channel_data| {
+                channel_data
+                    .channel
+                    .as_ref()
+                    .map(|channel| channel.id.as_str())
+                    .or_else(|| {
+                        channel_data
+                            .settings
+                            .as_ref()
+                            .and_then(|settings| settings.selected_channel.as_ref())
+                            .map(|channel| channel.id.as_str())
+                    })
+            })
+            .or(Some(conversation.id.as_str()))
+    }
+
+    fn activity_tenant_id(activity: &Activity) -> Option<&str> {
+        activity
+            .conversation
+            .as_ref()
+            .and_then(|conversation| conversation.tenant_id.as_deref())
+            .or_else(|| {
+                activity
+                    .channel_data
+                    .as_ref()
+                    .and_then(|channel_data| channel_data.tenant.as_ref())
+                    .map(|tenant| tenant.id.as_str())
+            })
+    }
+
+    fn diagnostic(code: &str, message: &str) -> Value {
+        json!({
+            "code": code,
+            "message": message,
+        })
+    }
+
+    fn ingress_skip_diagnostic(
+        &self,
+        activity: &Activity,
+        conversation: &crate::types::ConversationAccount,
+    ) -> Option<Value> {
+        let policy = self.ingress_policy();
+        let from = activity.from.as_ref();
+        let sender_id = from.map(|from| from.id.as_str());
+        let aad_object_id = from.and_then(|from| from.aad_object_id.as_deref());
+
+        if policy
+            .bot_user_id
+            .as_deref()
+            .is_some_and(|bot_id| Some(bot_id) == sender_id || Some(bot_id) == aad_object_id)
+        {
+            return Some(Self::diagnostic(
+                "bot_self_message",
+                "Teams activity sender matched the configured bot user ID",
+            ));
+        }
+
+        let sender_lists_configured =
+            !policy.allowed_sender_ids.is_empty() || !policy.allowed_aad_object_ids.is_empty();
+        let sender_allowed = !sender_lists_configured
+            || Self::allowlist_allows(&policy.allowed_sender_ids, sender_id)
+            || Self::allowlist_allows(&policy.allowed_aad_object_ids, aad_object_id);
+        if !sender_allowed {
+            return Some(Self::diagnostic(
+                "sender_not_allowed",
+                "Teams activity sender is outside the configured allowlist",
+            ));
+        }
+
+        if !Self::allowlist_allows(&policy.allowed_team_ids, Self::activity_team_id(activity)) {
+            return Some(Self::diagnostic(
+                "team_not_allowed",
+                "Teams activity team is outside the configured allowlist",
+            ));
+        }
+
+        if !Self::allowlist_allows(
+            &policy.allowed_channel_ids,
+            Self::activity_channel_id(activity, conversation),
+        ) {
+            return Some(Self::diagnostic(
+                "channel_not_allowed",
+                "Teams activity channel is outside the configured allowlist",
+            ));
+        }
+
+        if Self::is_file_consent_activity(activity) && !policy.accept_file_consent {
+            return Some(Self::diagnostic(
+                "file_consent_denied",
+                "Teams file consent upload is not accepted by this host-forwarded connector policy",
+            ));
+        }
+
+        None
+    }
+
+    fn is_file_consent_activity(activity: &Activity) -> bool {
+        activity.r#type == "invoke" && activity.name.as_deref() == Some("fileConsent/invoke")
+    }
+
+    fn file_consent_diagnostic(&self, activity: &Activity) -> Option<Value> {
+        if !Self::is_file_consent_activity(activity) {
+            return None;
+        }
+        let policy = self.ingress_policy();
+        let action = activity
+            .value
+            .as_ref()
+            .and_then(|value| value.get("action"))
+            .and_then(Value::as_str)
+            .unwrap_or("decline");
+        Some(json!({
+            "kind": "file_consent",
+            "accepted_by_policy": policy.accept_file_consent,
+            "action": if action == "accept" { "accept" } else { "decline" },
+            "upload_info_present": activity
+                .value
+                .as_ref()
+                .and_then(|value| value.get("uploadInfo"))
+                .is_some(),
+        }))
+    }
+
+    fn attachment_diagnostics(activity: &Activity) -> Vec<Value> {
+        activity
+            .attachments
+            .iter()
+            .map(|attachment| {
+                let content_type = attachment.content_type.as_deref().unwrap_or("unknown");
+                let disposition = if content_type
+                    == "application/vnd.microsoft.teams.card.file.consent"
+                {
+                    "file_consent_card"
+                } else if content_type.starts_with("image/") && attachment.content_url.is_some() {
+                    "image_reference"
+                } else if attachment.content_url.is_some() {
+                    "metadata_reference"
+                } else {
+                    "inline_content"
+                };
+                json!({
+                    "content_type": content_type,
+                    "name": attachment.name.as_deref(),
+                    "content_url_present": attachment.content_url.is_some(),
+                    "content_present": attachment.content.is_some(),
+                    "disposition": disposition,
+                })
+            })
+            .collect()
+    }
+
+    fn conversation_reference(activity: &Activity, state: &TeamsConversationState) -> Value {
+        json!({
+            "conversation_id": state.conversation_id.as_str(),
+            "service_url": activity.service_url.as_deref(),
+            "bot_id": activity.recipient.as_ref().map(|recipient| recipient.id.as_str()),
+            "user_id": activity.from.as_ref().map(|from| from.id.as_str()),
+            "aad_object_id": activity
+                .from
+                .as_ref()
+                .and_then(|from| from.aad_object_id.as_deref()),
+            "tenant_id": Self::activity_tenant_id(activity),
+            "reply_to_id": activity.reply_to_id.as_deref(),
+        })
+    }
+
+    fn skipped_ingress_output(activity: &Activity, diagnostic: Value) -> Value {
+        json!({
+            "accepted": false,
+            "duplicate": false,
+            "diagnostic": diagnostic,
+            "event": Value::Null,
+            "conversation_state": Value::Null,
+            "conversation_reference": Value::Null,
+            "attachments": Self::attachment_diagnostics(activity),
+            "file_consent": Value::Null,
+        })
+    }
+
     fn validate_activity_service_url(&self, activity: &Activity) -> FcpResult<()> {
         let Some(service_url) = activity.service_url.as_deref() else {
             return Ok(());
@@ -817,6 +1025,13 @@ impl TeamsConnector {
                     code: 1005,
                     message: "Teams activity is missing conversation metadata".into(),
                 })?;
+        if let Some(diagnostic) = self.ingress_skip_diagnostic(activity, conversation) {
+            let mut output = Self::skipped_ingress_output(activity, diagnostic);
+            if let Some(file_consent) = self.file_consent_diagnostic(activity) {
+                output["file_consent"] = file_consent;
+            }
+            return Ok(output);
+        }
         let conversation_id = conversation.id.clone();
         let scope = Self::conversation_scope(activity);
 
@@ -943,10 +1158,23 @@ impl TeamsConnector {
         drop(states);
 
         let event = self.build_event_from_activity(req, activity, &state_snapshot)?;
+        let diagnostic = if duplicate {
+            Self::diagnostic(
+                "duplicate_activity",
+                "Teams activity ID was already ingested; state sequence was not advanced",
+            )
+        } else {
+            Value::Null
+        };
         Ok(json!({
+            "accepted": true,
             "duplicate": duplicate,
+            "diagnostic": diagnostic,
             "event": event,
             "conversation_state": state_snapshot,
+            "conversation_reference": Self::conversation_reference(activity, &state_snapshot),
+            "attachments": Self::attachment_diagnostics(activity),
+            "file_consent": self.file_consent_diagnostic(activity),
         }))
     }
 
@@ -1178,6 +1406,12 @@ impl TeamsConnector {
             idempotent_results: Mutex::new(BoundedJsonCache::new(IDEMPOTENT_RESPONSE_LIMIT)),
             seen_activity_ids: Mutex::new(BoundedKeySet::new(ACTIVITY_DEDUP_LIMIT)),
         }
+    }
+
+    /// Return this connector instance identifier for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     fn manifest_hash() -> String {
@@ -1796,9 +2030,14 @@ pub fn operations_info() -> Vec<OperationInfo> {
             output_schema: json!({
                 "type": "object",
                 "properties": {
+                    "accepted": { "type": "boolean" },
                     "duplicate": { "type": "boolean" },
+                    "diagnostic": { "type": ["object", "null"] },
                     "event": { "type": "object" },
-                    "conversation_state": { "type": "object" }
+                    "conversation_state": { "type": ["object", "null"] },
+                    "conversation_reference": { "type": ["object", "null"] },
+                    "attachments": { "type": "array", "items": { "type": "object" } },
+                    "file_consent": { "type": ["object", "null"] }
                 }
             }),
             capability: CapabilityId::from_static(CAP_WRITE),
@@ -2376,6 +2615,7 @@ mod tests {
             bot_service_url: "https://smba.trafficmanager.net/amer".into(),
             auth,
             tenant_id: None,
+            ingress_policy: TeamsIngressPolicy::default(),
             retry: HttpRetryConfig::default(),
             timeout_ms: 1_000,
         });

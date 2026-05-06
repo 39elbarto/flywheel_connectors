@@ -26,6 +26,10 @@ pub struct TeamsConfig {
     #[serde(default)]
     pub tenant_id: Option<String>,
 
+    /// Host-forwarded activity ingress policy.
+    #[serde(default)]
+    pub ingress_policy: TeamsIngressPolicy,
+
     /// HTTP retry configuration.
     #[serde(default)]
     pub retry: fcp_sdk::migration::HttpRetryConfig,
@@ -33,6 +37,37 @@ pub struct TeamsConfig {
     /// Request timeout in milliseconds.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
+}
+
+/// Policy for host-forwarded Bot Framework activity ingress.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct TeamsIngressPolicy {
+    /// Allowed Bot Framework sender IDs. Empty means any sender ID is allowed.
+    #[serde(default)]
+    pub allowed_sender_ids: Vec<String>,
+
+    /// Allowed Azure AD object IDs. Empty means any AAD object ID is allowed.
+    #[serde(default)]
+    pub allowed_aad_object_ids: Vec<String>,
+
+    /// Allowed Teams team IDs for channel-scoped activities.
+    #[serde(default)]
+    pub allowed_team_ids: Vec<String>,
+
+    /// Allowed Teams channel/conversation IDs for channel-scoped activities.
+    #[serde(default)]
+    pub allowed_channel_ids: Vec<String>,
+
+    /// Bot account ID used to drop self-sent activities before state mutation.
+    #[serde(default)]
+    pub bot_user_id: Option<String>,
+
+    /// Whether this connector may accept fileConsent/invoke uploads.
+    ///
+    /// The current FCP Teams architecture is host-forwarded and does not upload
+    /// to Teams consent URLs, so the secure default is an explicit denial.
+    #[serde(default)]
+    pub accept_file_consent: bool,
 }
 
 /// Authentication mode for Teams.
@@ -314,6 +349,8 @@ pub struct GraphErrorDetail {
 #[serde(rename_all = "camelCase")]
 pub struct Activity {
     pub r#type: String,
+    #[serde(default)]
+    pub name: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]

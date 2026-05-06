@@ -19,14 +19,14 @@ It supports room creation and membership mutations, message send, timeline and r
 - The connector maintains an in-memory sync cursor and tracked room summaries by default. Durable resume is host-managed: persist the redaction-safe `tracked_state` returned by `matrix.sync` outside the connector and pass it back through `state_persistence` on the next configure.
 - Manual `matrix.sync` remains the fallback path. Operators may call it explicitly to advance the cursor, inspect deltas, and drive event delivery.
 - `supervised_sync.enabled` is disabled by default. When enabled, a validated FCP `subscribe` call starts a bounded background sync worker that shares the same in-memory cursor, inbound-policy projection, event fanout, retry/backoff budget, and shutdown path as manual sync.
-- FCP `subscribe` is supported for manual and supervised fanout. Matching policy-projected deltas are emitted as `EventEnvelope` items on `matrix.message.authorized`, `matrix.event.dropped`, `matrix.reaction`, and `matrix.encrypted`.
+- FCP `subscribe` is supported for manual and supervised fanout. Matching policy-projected deltas are emitted as `EventEnvelope` items on `matrix.message.authorized`, `matrix.message.decrypted`, `matrix.event.dropped`, `matrix.reaction`, and `matrix.encrypted`.
 - Event fanout is de-duplicated by Matrix event identity at the connector boundary so repeated sync responses do not re-emit the same event.
-- `matrix.sync` preserves raw room deltas and also returns the same inbound-policy projection: authorized messages, dropped-event metadata, reaction events, and encrypted-event metadata.
+- `matrix.sync` preserves raw room deltas and also returns the same inbound-policy projection: authorized messages, trust-gated decrypted messages, dropped-event metadata, reaction events, and encrypted-event metadata.
 - Authorized message projections now carry workflow context: mention presence, stripped delivery body, free-response/direct-message/thread reasons, dynamic DM detection, and bounded media metadata. Raw Matrix body and media bytes are not required for routing decisions.
 - Reaction projections are sender-policy gated and include approval classification based on configured approval reaction keys. Unauthorized reaction approvals are dropped before agent delivery.
 - Reconfiguring the connector resets the in-memory cursor, dynamic DM classifications, participated thread roots, and emitted-event dedupe set unless `state_persistence.enabled=true` restores a host-managed snapshot scoped to zone/account/device metadata.
-- Encrypted Matrix timeline events fail closed by default for agent delivery until verified E2EE/device verification is implemented. Operators may choose metadata-only projection, but ciphertext is not emitted.
-- `e2ee.verified_decryption_requested=true` is accepted as an explicit readiness request, but it is denied at health/self_check time until an audited Rust Matrix crypto path verifies account identity, stable device ID, device trust, cross-signing, room-key backup, recovery state, and redaction rules. This keeps setup intent visible without silently downgrading to unsafe decrypted or ciphertext delivery.
+- Encrypted Matrix timeline events fail closed by default for agent delivery. Operators may choose metadata-only projection, but ciphertext is not emitted.
+- `e2ee.verified_decryption_requested=true` is accepted as an explicit readiness request. The connector now has a trust-gated decrypted projection boundary that can emit `matrix.message.decrypted` only from a verified crypto result after account identity, stable device ID, own-device trust, sender-device trust, cross-signing, room/session binding, room-key backup, recovery state, redaction, and replay/duplicate checks pass. Current live sync paths still pass no plaintext candidate until the audited Matrix crypto decrypt result is wired in, so they surface precise metadata denials instead of silently downgrading to unsafe decrypted or ciphertext delivery.
 - Secret material stays in memory. Diagnostics should use room IDs, event IDs, status codes, and retry metadata rather than raw tokens or media bytes.
 
 ## Operation Inventory
@@ -55,9 +55,9 @@ The current connector exposes:
 - state-persistence mode, host-managed restore counts, scoped identifier hashes, and the explicit no-connector-local-disk-write posture
 - sync delivery model guidance
 - supervised sync configuration and worker status when enabled
-- E2EE readiness state, including verified-decryption availability, account/device ID shape checks, secretless device-key import status, device-list freshness, own-device verification, cross-signing readiness, recovery and room-key backup status, outgoing crypto maintenance driver state, undecrypted retry/final-failure classification, recovery guidance, and structured skip reasons for crypto-only cases
+- E2EE readiness state, including verified-decryption availability, account/device ID shape checks, secretless device-key import status, device-list freshness, own-device verification, cross-signing readiness, recovery and room-key backup status, outgoing crypto maintenance driver state, trust-gated decrypted projection status, undecrypted retry/final-failure classification, recovery guidance, and structured skip reasons for crypto-only cases
 - sync telemetry including success/failure counts, last duration, last error, and the last tracked token
-- inbound-policy telemetry for the most recent sync projection, including authorized, dropped, reaction, encrypted, and emitted event counts
+- inbound-policy telemetry for the most recent sync projection, including authorized, decrypted, dropped, reaction, encrypted, and emitted event counts
 - event stream state, including buffer capacity and currently subscribed topics
 
 `health()` is intentionally truthful:
@@ -77,7 +77,7 @@ The current connector exposes:
 - To preserve sync resume state across connector restarts, configure `state_persistence.enabled=true`, `backend="host_managed_snapshot"`, a non-secret `zone_id`, `account_user_id`, `device_id`, and a `restore` snapshot containing the prior `last_sync_token`, dynamic DM rooms, and participated thread roots. The connector validates scope consistency with E2EE account/device hints, restores those values into memory at configure time, and redacts account/device/sync-token values from doctor state-persistence diagnostics.
 - Subscribe to the Matrix event topics before calling `matrix.sync` if the host needs streaming delivery. `persist=false` returns a preview only and does not emit events.
 - To use supervised sync, set `supervised_sync.enabled=true` and configure `poll_interval_ms`, `timeout_ms`, and `supervisor` retry/shutdown limits. The worker starts only after subscription succeeds with a valid `matrix.read` capability token.
-- To request future verified E2EE delivery, set `e2ee.verified_decryption_requested=true` with `account_user_id`, `device_id`, `trust_state.own_device`, `trust_state.device_keys`, `trust_state.device_list`, `trust_state.cross_signing`, tracked user/room scope, recovery status, room-key backup status, and undecrypted retry policy. Current builds expose a secretless `matrix-sdk-crypto` adapter boundary in doctor/health output, report `e2ee_verified_decryption_unavailable`, and keep encrypted events fail-closed or metadata-only until the later decrypt projection bead lands. The optional `matrix-sdk-crypto-backend` feature compiles the pinned Rust-1.85-compatible `matrix-sdk-crypto` dependency, but this slice still refuses decrypted delivery.
+- To request verified E2EE delivery, set `e2ee.verified_decryption_requested=true` with `account_user_id`, `device_id`, `trust_state.own_device`, `trust_state.device_keys`, `trust_state.device_list`, `trust_state.cross_signing`, tracked user/room scope, recovery status, room-key backup status, and undecrypted retry policy. Current builds expose a secretless `matrix-sdk-crypto` adapter boundary in doctor/health output and keep live encrypted events fail-closed or metadata-only unless a verified crypto result is supplied to the projection boundary. The optional `matrix-sdk-crypto-backend` feature compiles the pinned Rust-1.85-compatible `matrix-sdk-crypto` dependency, but raw homeserver JSON is never treated as decrypted plaintext.
 - E2EE outgoing maintenance is now modeled explicitly without storing secrets: `MatrixClient` has dedicated transport methods for `/keys/upload`, `/keys/query`, `/keys/claim`, `/sendToDevice`, `/room_keys/version`, room-key upload, and stale room-key delete. The crypto boundary records mark-sent semantics, retry-budget transitions, non-retryable auth failure, backup-version mismatch denial, stale-key reupload/delete decisions, and key-share-after-initial-sync gating as redaction-safe JSON.
 - Use the no-mock loopback harness for detailed JSONL evidence of initial sync, incremental sync, duplicate suppression, policy drops, reaction/encrypted metadata, rate-limit retry, auth-stop, cursor state, and shutdown:
 
@@ -109,6 +109,12 @@ rch exec -- cargo test -p fcp-matrix --test e2ee_device_trust_state_e2e -- --noc
 rch exec -- cargo test -p fcp-matrix --test e2ee_outgoing_requests_retry_e2e -- --nocapture
 ```
 
+- Use the E2EE decrypted-projection harness for JSONL evidence of verified plaintext projection, wrong room, wrong sender device, missing cross-signing, backup mismatch, redaction, unsupported algorithm, replay/duplicate suppression, undecrypted final failure, policy fallback, manual/supervised parity, event topics, structured external-crypto skip, and shutdown:
+
+```bash
+rch exec -- cargo test -p fcp-matrix --test e2ee_decrypted_projection_e2e -- --nocapture
+```
+
 - Use the setup/doctor/state harness for JSONL evidence of direct-token readiness, credential-injection degraded readiness, invalid homeserver transport, state persistence disabled/enabled restore, E2EE recovery warnings, structured crypto skip, and shutdown:
 
 ```bash
@@ -128,6 +134,6 @@ This slice does not provide:
 
 - homeserver administration or provisioning
 - end-to-end encryption device management
-- decrypted E2EE event delivery before account/device/cross-signing/backup/recovery trust is mechanically verified
+- decrypted E2EE event delivery from raw homeserver JSON or before account/device/sender-device/cross-signing/backup/recovery/redaction/replay trust is mechanically verified
 - connector-local durable storage writes; durable resume is explicitly host-managed snapshot restore
 - automatic credential discovery outside host-managed `credential_id` injection

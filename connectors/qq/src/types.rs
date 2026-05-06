@@ -252,7 +252,7 @@ pub struct QqGatewayRuntimeSnapshot {
     pub stale_sequence_events: u64,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
 pub struct QqGatewayEventProjection {
     pub accepted: bool,
     pub topic: &'static str,

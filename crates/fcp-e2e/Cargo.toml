@@ -18,6 +18,7 @@ e2e-full = [
     "cerebras",
     "deepgram",
     "duckduckgo",
+    "searxng",
     "elevenlabs",
     "glm",
     "groq",
@@ -113,6 +114,7 @@ gcp = ["dep:fcp-gcp"]
 cerebras = ["dep:fcp-cerebras"]
 deepgram = ["dep:fcp-deepgram"]
 duckduckgo = ["dep:fcp-duckduckgo"]
+searxng = ["dep:fcp-searxng"]
 elevenlabs = ["dep:fcp-elevenlabs"]
 glm = ["dep:fcp-glm"]
 groq = ["dep:fcp-groq"]
@@ -225,6 +227,7 @@ fcp-gcp = { path = "../../connectors/gcp", optional = true }
 fcp-cerebras = { path = "../../connectors/cerebras", optional = true }
 fcp-deepgram = { path = "../../connectors/deepgram", optional = true }
 fcp-duckduckgo = { path = "../../connectors/duckduckgo", optional = true }
+fcp-searxng = { path = "../../connectors/searxng", optional = true }
 fcp-elevenlabs = { path = "../../connectors/elevenlabs", optional = true }
 fcp-glm = { path = "../../connectors/glm", optional = true }
 fcp-groq = { path = "../../connectors/groq", optional = true }

@@ -1,0 +1,54 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:searxng-self-hosted-privacy-search"
+
+[connector]
+id = "fcp.searxng"
+name = "SearXNG"
+version = "0.1.0"
+description = "Self-hosted SearXNG privacy meta-search connector with operator-configured host policy, no commercial fallback, and redacted query/result evidence"
+archetypes = ["request-response"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stateless self-hosted search. Operators must configure base_url and explicit loopback/private/tailnet allowances; query text, snippets, and full result URLs must not be logged."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:public", "z:work"]
+forbidden = ["z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress"]
+optional = ["network.tls.sni"]
+forbidden = ["network.listen", "system.exec"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 20000
+deny_exec = true
+deny_ptrace = true
+
+[network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [80, 443, 8080, 8888]
+tls_required = false
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+deny_ip_literals = false
+require_host_canonicalization = true
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 20000
+max_response_bytes = 2097152

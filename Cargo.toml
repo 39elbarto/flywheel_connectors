@@ -45,6 +45,7 @@ members = [
     "connectors/glm",
     "connectors/openai",
     "connectors/openrouter",
+    "connectors/searxng",
     "connectors/telegram",
     "connectors/voyage",
     "connectors/twitter",
@@ -325,6 +326,7 @@ fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
 fcp-host = { path = "crates/fcp-host" }
+fcp-searxng = { path = "connectors/searxng" }
 fcp-voyage = { path = "connectors/voyage" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }

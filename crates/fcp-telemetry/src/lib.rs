@@ -46,7 +46,10 @@ pub use tracing_layer::{
 // Export the legacy string-based TraceContext under a distinct name
 pub use tracing_layer::TraceContext as LegacyTraceContext;
 
-use std::sync::{Mutex, OnceLock};
+use std::{
+    fmt,
+    sync::{Mutex, OnceLock},
+};
 
 /// Global telemetry state.
 static TELEMETRY: OnceLock<TelemetryState> = OnceLock::new();
@@ -72,6 +75,42 @@ pub const PROMETHEUS_PORT_ENV_VARS: [&str; 4] = [
 /// Maximum accepted OTLP endpoint length.
 pub const MAX_OTLP_ENDPOINT_LEN: usize = 2048;
 
+/// Maximum accepted OTLP header count.
+pub const MAX_OTLP_HEADER_COUNT: usize = 32;
+
+/// Maximum accepted OTLP header name length.
+pub const MAX_OTLP_HEADER_NAME_LEN: usize = 128;
+
+/// Maximum accepted OTLP header value length.
+pub const MAX_OTLP_HEADER_VALUE_LEN: usize = 4096;
+
+/// Maximum accepted OTLP resource attribute count.
+pub const MAX_OTLP_RESOURCE_ATTRIBUTE_COUNT: usize = 64;
+
+/// Maximum accepted OTLP resource attribute key length.
+pub const MAX_OTLP_RESOURCE_ATTRIBUTE_KEY_LEN: usize = 128;
+
+/// Maximum accepted OTLP resource attribute value length.
+pub const MAX_OTLP_RESOURCE_ATTRIBUTE_VALUE_LEN: usize = 4096;
+
+/// OpenTelemetry service name environment variable.
+pub const OTEL_SERVICE_NAME_ENV_VAR: &str = "OTEL_SERVICE_NAME";
+
+/// OpenTelemetry resource attributes environment variable.
+pub const OTEL_RESOURCE_ATTRIBUTES_ENV_VAR: &str = "OTEL_RESOURCE_ATTRIBUTES";
+
+/// OTLP endpoint environment variables, in precedence order.
+pub const OTLP_ENDPOINT_ENV_VARS: [&str; 2] = [
+    "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
+    "OTEL_EXPORTER_OTLP_ENDPOINT",
+];
+
+/// OTLP header environment variables, in merge order. Signal-specific values override generic ones.
+pub const OTLP_HEADERS_ENV_VARS: [&str; 2] = [
+    "OTEL_EXPORTER_OTLP_HEADERS",
+    "OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+];
+
 fn resolve_prometheus_port() -> u16 {
     resolve_prometheus_port_with(|key| std::env::var(key).ok())
 }
@@ -93,6 +132,85 @@ where
         }
     }
     DEFAULT_PROMETHEUS_PORT
+}
+
+/// Validated OTLP collector header.
+///
+/// Header values are intentionally redacted from [`Debug`] so bearer tokens and
+/// API keys cannot leak through config diagnostics.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpHeader {
+    /// Lowercase header/metadata name.
+    pub name: String,
+
+    /// Header/metadata value.
+    pub value: String,
+}
+
+impl OtlpHeader {
+    /// Build a validated OTLP collector header.
+    ///
+    /// Header names are normalized to lowercase because OTLP over gRPC uses
+    /// HTTP/2 metadata names.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::Config`] when the header name or value cannot
+    /// be represented safely as OTLP collector metadata.
+    pub fn new(name: impl Into<String>, value: impl Into<String>) -> Result<Self, TelemetryError> {
+        let name = name.into();
+        let value = value.into();
+        let name = normalize_otlp_header_name(&name)?;
+        let value = normalize_otlp_header_value(&value)?;
+        Ok(Self { name, value })
+    }
+}
+
+impl fmt::Debug for OtlpHeader {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtlpHeader")
+            .field("name", &self.name)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Validated OTLP resource attribute.
+///
+/// Attribute values are redacted from [`Debug`] because operators can source
+/// them from environment variables, and not every deployment keeps resource
+/// labels free of hostnames, account IDs, or other sensitive material.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OtlpResourceAttribute {
+    /// Resource attribute key.
+    pub key: String,
+
+    /// Resource attribute value.
+    pub value: String,
+}
+
+impl OtlpResourceAttribute {
+    /// Build a validated OTLP resource attribute.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::Config`] when the key or value is malformed.
+    pub fn new(key: impl Into<String>, value: impl Into<String>) -> Result<Self, TelemetryError> {
+        let key = key.into();
+        let value = value.into();
+        let key = normalize_otlp_resource_key(&key)?;
+        let value = normalize_otlp_resource_value(&value)?;
+        Ok(Self { key, value })
+    }
+}
+
+impl fmt::Debug for OtlpResourceAttribute {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OtlpResourceAttribute")
+            .field("key", &self.key)
+            .field("value", &"[REDACTED]")
+            .finish()
+    }
 }
 
 /// Configuration for telemetry initialization.
@@ -123,6 +241,12 @@ pub struct TelemetryConfig {
     /// OTLP endpoint URL.
     pub otlp_endpoint: Option<String>,
 
+    /// OTLP collector headers/metadata.
+    pub otlp_headers: Vec<OtlpHeader>,
+
+    /// OTLP resource attributes attached to exported telemetry.
+    pub otlp_resource_attributes: Vec<OtlpResourceAttribute>,
+
     /// Sample rate for tracing (0.0 to 1.0).
     pub trace_sample_rate: f64,
 
@@ -140,6 +264,8 @@ impl Default for TelemetryConfig {
             prometheus_port: resolve_prometheus_port(),
             otlp_enabled: false,
             otlp_endpoint: None,
+            otlp_headers: Vec::new(),
+            otlp_resource_attributes: Vec::new(),
             trace_sample_rate: 1.0,
             redact_fields: vec![
                 "password".to_string(),
@@ -166,6 +292,55 @@ impl TelemetryConfig {
             service_name: service_name.into(),
             ..Default::default()
         }
+    }
+
+    /// Build telemetry configuration from the standard OpenTelemetry environment variables.
+    ///
+    /// Recognized variables include `OTEL_SERVICE_NAME`,
+    /// `OTEL_RESOURCE_ATTRIBUTES`, `OTEL_EXPORTER_OTLP_ENDPOINT`,
+    /// `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`, `OTEL_EXPORTER_OTLP_HEADERS`, and
+    /// `OTEL_EXPORTER_OTLP_TRACES_HEADERS`. Trace-specific endpoint/header
+    /// variables take precedence over generic OTLP variables.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::Config`] when any operator-provided OTLP value
+    /// is malformed.
+    pub fn from_env() -> Result<Self, TelemetryError> {
+        Self::from_env_with(|key| std::env::var(key).ok())
+    }
+
+    fn from_env_with<F>(mut get_env: F) -> Result<Self, TelemetryError>
+    where
+        F: FnMut(&str) -> Option<String>,
+    {
+        let prometheus_port = resolve_prometheus_port_with(&mut get_env);
+        let resource_attributes = parse_otlp_resource_attributes_env(
+            get_env(OTEL_RESOURCE_ATTRIBUTES_ENV_VAR).as_deref(),
+        )?;
+        let service_name = get_env(OTEL_SERVICE_NAME_ENV_VAR)
+            .and_then(|value| non_empty_trimmed(&value))
+            .or_else(|| {
+                resource_attributes
+                    .iter()
+                    .find(|attr| attr.key == "service.name")
+                    .map(|attr| attr.value.clone())
+            })
+            .unwrap_or_else(|| "fcp-connector".to_string());
+
+        let mut config = Self::new(service_name);
+        config.prometheus_port = prometheus_port;
+        config.otlp_resource_attributes = resource_attributes;
+
+        if let Some(endpoint) =
+            first_non_empty_env_value(&mut get_env, OTLP_ENDPOINT_ENV_VARS.iter().copied())
+        {
+            config = config.with_otlp(endpoint);
+        }
+
+        config.otlp_headers = parse_otlp_headers_env(&mut get_env)?;
+
+        Ok(config)
     }
 
     /// Set the log level.
@@ -211,6 +386,363 @@ impl TelemetryConfig {
         self.redact_fields.extend(fields);
         self
     }
+
+    /// Attach validated OTLP collector headers.
+    #[must_use]
+    pub fn with_otlp_headers(mut self, headers: Vec<OtlpHeader>) -> Self {
+        self.otlp_headers = headers;
+        self
+    }
+
+    /// Parse and attach OTLP collector headers from a comma-separated
+    /// `key=value,key2=value2` string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::Config`] when the header string is malformed
+    /// or contains metadata that cannot safely be sent to the collector.
+    pub fn try_with_otlp_headers(mut self, headers: &str) -> Result<Self, TelemetryError> {
+        self.otlp_headers = parse_otlp_headers(headers)?;
+        Ok(self)
+    }
+
+    /// Attach validated OTLP resource attributes.
+    #[must_use]
+    pub fn with_otlp_resource_attributes(mut self, attributes: Vec<OtlpResourceAttribute>) -> Self {
+        self.otlp_resource_attributes = attributes;
+        self
+    }
+
+    /// Parse and attach OTLP resource attributes from a comma-separated
+    /// `key=value,key2=value2` string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TelemetryError::Config`] when the attribute string is
+    /// malformed.
+    pub fn try_with_otlp_resource_attributes(
+        mut self,
+        attributes: &str,
+    ) -> Result<Self, TelemetryError> {
+        self.otlp_resource_attributes = parse_otlp_resource_attributes(attributes)?;
+        Ok(self)
+    }
+}
+
+fn non_empty_trimmed(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn first_non_empty_env_value<'a, F, I>(get_env: &mut F, keys: I) -> Option<String>
+where
+    F: FnMut(&str) -> Option<String>,
+    I: IntoIterator<Item = &'a str>,
+{
+    keys.into_iter()
+        .find_map(|key| get_env(key).and_then(|value| non_empty_trimmed(&value)))
+}
+
+const fn is_valid_otlp_name_char(ch: char) -> bool {
+    matches!(ch, 'a'..='z' | '0'..='9' | '-' | '_' | '.')
+}
+
+fn normalize_otlp_header_name(name: &str) -> Result<String, TelemetryError> {
+    let normalized = name.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(TelemetryError::Config(
+            "OTLP header name must not be empty".to_string(),
+        ));
+    }
+    if normalized.len() > MAX_OTLP_HEADER_NAME_LEN {
+        return Err(TelemetryError::Config(format!(
+            "OTLP header name length must not exceed {MAX_OTLP_HEADER_NAME_LEN} bytes"
+        )));
+    }
+    if normalized
+        .chars()
+        .any(|ch| !ch.is_ascii() || !is_valid_otlp_name_char(ch))
+    {
+        return Err(TelemetryError::Config(
+            "OTLP header names may only contain lowercase ASCII letters, digits, '-', '_' and '.'"
+                .to_string(),
+        ));
+    }
+    if normalized.ends_with("-bin") {
+        return Err(TelemetryError::Config(
+            "OTLP binary metadata headers are not supported".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_otlp_header_value(value: &str) -> Result<String, TelemetryError> {
+    let normalized = value.trim().to_string();
+    if normalized.is_empty() {
+        return Err(TelemetryError::Config(
+            "OTLP header value must not be empty".to_string(),
+        ));
+    }
+    if normalized.len() > MAX_OTLP_HEADER_VALUE_LEN {
+        return Err(TelemetryError::Config(format!(
+            "OTLP header value length must not exceed {MAX_OTLP_HEADER_VALUE_LEN} bytes"
+        )));
+    }
+    if normalized
+        .chars()
+        .any(|ch| !ch.is_ascii() || ch.is_control())
+    {
+        return Err(TelemetryError::Config(
+            "OTLP header values must be printable ASCII".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_otlp_resource_key(key: &str) -> Result<String, TelemetryError> {
+    let normalized = key.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(TelemetryError::Config(
+            "OTLP resource attribute key must not be empty".to_string(),
+        ));
+    }
+    if normalized.len() > MAX_OTLP_RESOURCE_ATTRIBUTE_KEY_LEN {
+        return Err(TelemetryError::Config(format!(
+            "OTLP resource attribute key length must not exceed {MAX_OTLP_RESOURCE_ATTRIBUTE_KEY_LEN} bytes"
+        )));
+    }
+    if normalized
+        .chars()
+        .any(|ch| !ch.is_ascii() || !is_valid_otlp_name_char(ch))
+    {
+        return Err(TelemetryError::Config(
+            "OTLP resource attribute keys may only contain ASCII letters, digits, '-', '_' and '.'"
+                .to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn normalize_otlp_resource_value(value: &str) -> Result<String, TelemetryError> {
+    let normalized = value.trim().to_string();
+    if normalized.is_empty() {
+        return Err(TelemetryError::Config(
+            "OTLP resource attribute value must not be empty".to_string(),
+        ));
+    }
+    if normalized.len() > MAX_OTLP_RESOURCE_ATTRIBUTE_VALUE_LEN {
+        return Err(TelemetryError::Config(format!(
+            "OTLP resource attribute value length must not exceed {MAX_OTLP_RESOURCE_ATTRIBUTE_VALUE_LEN} bytes"
+        )));
+    }
+    if normalized.chars().any(char::is_control) {
+        return Err(TelemetryError::Config(
+            "OTLP resource attribute values must not contain control characters".to_string(),
+        ));
+    }
+    Ok(normalized)
+}
+
+fn percent_decode_otlp_value(value: &str) -> Result<String, TelemetryError> {
+    let mut decoded = Vec::with_capacity(value.len());
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while let Some(byte) = bytes.get(index).copied() {
+        if byte == b'%' {
+            let Some(first) = bytes.get(index + 1).copied() else {
+                return Err(TelemetryError::Config(
+                    "OTLP percent-encoded value is truncated".to_string(),
+                ));
+            };
+            let Some(second) = bytes.get(index + 2).copied() else {
+                return Err(TelemetryError::Config(
+                    "OTLP percent-encoded value is truncated".to_string(),
+                ));
+            };
+            let high = hex_digit(first).ok_or_else(|| {
+                TelemetryError::Config("OTLP percent-encoded value is invalid".to_string())
+            })?;
+            let low = hex_digit(second).ok_or_else(|| {
+                TelemetryError::Config("OTLP percent-encoded value is invalid".to_string())
+            })?;
+            decoded.push((high << 4) | low);
+            index += 3;
+        } else {
+            decoded.push(byte);
+            index += 1;
+        }
+    }
+    String::from_utf8(decoded)
+        .map_err(|_| TelemetryError::Config("OTLP percent-encoded value is not UTF-8".to_string()))
+}
+
+const fn hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Parse OTLP collector headers from a comma-separated environment string.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Config`] when any pair is malformed or invalid.
+pub fn parse_otlp_headers(headers: &str) -> Result<Vec<OtlpHeader>, TelemetryError> {
+    let mut parsed = Vec::new();
+    for pair in headers.split_terminator(',').map(str::trim) {
+        if pair.is_empty() {
+            continue;
+        }
+        let (name, value) = pair.split_once('=').ok_or_else(|| {
+            TelemetryError::Config("OTLP header entries must use key=value syntax".to_string())
+        })?;
+        upsert_otlp_header(
+            &mut parsed,
+            OtlpHeader::new(name, percent_decode_otlp_value(value.trim())?)?,
+        );
+        if parsed.len() > MAX_OTLP_HEADER_COUNT {
+            return Err(TelemetryError::Config(format!(
+                "OTLP header count must not exceed {MAX_OTLP_HEADER_COUNT}"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn upsert_otlp_header(headers: &mut Vec<OtlpHeader>, header: OtlpHeader) {
+    if let Some(existing) = headers
+        .iter_mut()
+        .find(|existing| existing.name == header.name)
+    {
+        *existing = header;
+    } else {
+        headers.push(header);
+    }
+}
+
+fn parse_otlp_headers_env<F>(get_env: &mut F) -> Result<Vec<OtlpHeader>, TelemetryError>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let mut headers = Vec::new();
+    for key in OTLP_HEADERS_ENV_VARS {
+        let Some(value) = get_env(key).and_then(|value| non_empty_trimmed(&value)) else {
+            continue;
+        };
+        for header in parse_otlp_headers(&value)? {
+            upsert_otlp_header(&mut headers, header);
+        }
+    }
+    validate_otlp_headers(&headers)?;
+    Ok(headers)
+}
+
+/// Parse OTLP resource attributes from a comma-separated environment string.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Config`] when any pair is malformed or invalid.
+pub fn parse_otlp_resource_attributes(
+    attributes: &str,
+) -> Result<Vec<OtlpResourceAttribute>, TelemetryError> {
+    let mut parsed = Vec::new();
+    for pair in attributes.split_terminator(',').map(str::trim) {
+        if pair.is_empty() {
+            continue;
+        }
+        let (key, value) = pair.split_once('=').ok_or_else(|| {
+            TelemetryError::Config("OTLP resource attributes must use key=value syntax".to_string())
+        })?;
+        upsert_otlp_resource_attribute(
+            &mut parsed,
+            OtlpResourceAttribute::new(key, percent_decode_otlp_value(value.trim())?)?,
+        );
+        if parsed.len() > MAX_OTLP_RESOURCE_ATTRIBUTE_COUNT {
+            return Err(TelemetryError::Config(format!(
+                "OTLP resource attribute count must not exceed {MAX_OTLP_RESOURCE_ATTRIBUTE_COUNT}"
+            )));
+        }
+    }
+    Ok(parsed)
+}
+
+fn upsert_otlp_resource_attribute(
+    attributes: &mut Vec<OtlpResourceAttribute>,
+    attribute: OtlpResourceAttribute,
+) {
+    if let Some(existing) = attributes
+        .iter_mut()
+        .find(|existing| existing.key == attribute.key)
+    {
+        *existing = attribute;
+    } else {
+        attributes.push(attribute);
+    }
+}
+
+fn parse_otlp_resource_attributes_env(
+    value: Option<&str>,
+) -> Result<Vec<OtlpResourceAttribute>, TelemetryError> {
+    let Some(value) = value.and_then(non_empty_trimmed) else {
+        return Ok(Vec::new());
+    };
+    let attributes = parse_otlp_resource_attributes(&value)?;
+    validate_otlp_resource_attributes(&attributes)?;
+    Ok(attributes)
+}
+
+/// Validate OTLP collector headers.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Config`] when the header set is malformed.
+pub fn validate_otlp_headers(headers: &[OtlpHeader]) -> Result<(), TelemetryError> {
+    if headers.len() > MAX_OTLP_HEADER_COUNT {
+        return Err(TelemetryError::Config(format!(
+            "OTLP header count must not exceed {MAX_OTLP_HEADER_COUNT}"
+        )));
+    }
+    for header in headers {
+        let normalized = OtlpHeader::new(header.name.as_str(), header.value.as_str())?;
+        if normalized != *header {
+            return Err(TelemetryError::Config(
+                "OTLP headers must be stored in normalized form".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Validate OTLP resource attributes.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Config`] when the attribute set is malformed.
+pub fn validate_otlp_resource_attributes(
+    attributes: &[OtlpResourceAttribute],
+) -> Result<(), TelemetryError> {
+    if attributes.len() > MAX_OTLP_RESOURCE_ATTRIBUTE_COUNT {
+        return Err(TelemetryError::Config(format!(
+            "OTLP resource attribute count must not exceed {MAX_OTLP_RESOURCE_ATTRIBUTE_COUNT}"
+        )));
+    }
+    for attribute in attributes {
+        let normalized =
+            OtlpResourceAttribute::new(attribute.key.as_str(), attribute.value.as_str())?;
+        if normalized != *attribute {
+            return Err(TelemetryError::Config(
+                "OTLP resource attributes must be stored in normalized form".to_string(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn is_valid_otlp_port(port: &str) -> bool {
@@ -284,9 +816,7 @@ pub fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
         .ok_or_else(|| {
             TelemetryError::Config("OTLP endpoint must use http:// or https://".to_string())
         })?;
-    let authority_end = rest
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
 
     if !validate_otlp_authority(authority) {
@@ -319,7 +849,7 @@ fn init_telemetry_with<L, P, O>(
 where
     L: Fn(&TelemetryConfig) -> Result<(), TelemetryError>,
     P: Fn(u16) -> Result<(), TelemetryError>,
-    O: Fn(&str, &str, f64) -> Result<(), TelemetryError>,
+    O: Fn(&str, &str, f64, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
 {
     if state.get().is_some() {
         return Ok(());
@@ -341,6 +871,8 @@ where
     if let Some(endpoint) = otlp_endpoint {
         validate_otlp_endpoint(endpoint)?;
     }
+    validate_otlp_headers(&config.otlp_headers)?;
+    validate_otlp_resource_attributes(&config.otlp_resource_attributes)?;
 
     init_logging_fn(&config)?;
 
@@ -354,7 +886,13 @@ where
         // sampling rate rather than silently exporting 100% of
         // spans. Prior behavior silently dropped the rate on the
         // floor and used Sampler::AlwaysOn unconditionally.
-        init_otlp_fn(&config.service_name, endpoint, config.trace_sample_rate)?;
+        init_otlp_fn(
+            &config.service_name,
+            endpoint,
+            config.trace_sample_rate,
+            &config.otlp_headers,
+            &config.otlp_resource_attributes,
+        )?;
     }
 
     let _ = state.set(TelemetryState { config });
@@ -376,7 +914,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
         true,
         init_logging,
         init_prometheus_exporter,
-        init_otlp_tracer_with_sample_rate,
+        init_otlp_tracer_with_sample_rate_and_options,
     )
 }
 
@@ -392,7 +930,7 @@ pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError
         false,
         init_logging,
         init_prometheus_exporter,
-        init_otlp_tracer_with_sample_rate,
+        init_otlp_tracer_with_sample_rate_and_options,
     )
 }
 
@@ -443,6 +981,8 @@ mod tests {
         assert_eq!(config.prometheus_port, DEFAULT_PROMETHEUS_PORT);
         assert!(!config.otlp_enabled);
         assert!(config.otlp_endpoint.is_none());
+        assert!(config.otlp_headers.is_empty());
+        assert!(config.otlp_resource_attributes.is_empty());
         assert_eq!(config.trace_sample_rate, 1.0);
         assert!(!config.redact_fields.is_empty());
     }
@@ -571,6 +1111,158 @@ mod tests {
         );
         assert_eq!(config.trace_sample_rate, 0.1);
         assert!(config.redact_fields.contains(&"api_secret".to_string()));
+    }
+
+    #[test]
+    fn test_otlp_header_parse_normalizes_overrides_and_redacts_debug() -> Result<(), TelemetryError>
+    {
+        let headers = parse_otlp_headers(
+            "Authorization=Bearer%20token,x-tenant=alpha,authorization=Basic%20token",
+        )?;
+
+        assert_eq!(headers.len(), 2);
+        assert_eq!(
+            headers.first().map(|header| header.name.as_str()),
+            Some("authorization")
+        );
+        assert_eq!(
+            headers.first().map(|header| header.value.as_str()),
+            Some("Basic token")
+        );
+        assert_eq!(
+            headers.get(1).map(|header| header.name.as_str()),
+            Some("x-tenant")
+        );
+        assert_eq!(
+            headers.get(1).map(|header| header.value.as_str()),
+            Some("alpha")
+        );
+
+        let debug = format!(
+            "{:?}",
+            headers.first().ok_or_else(|| TelemetryError::Config(
+                "expected authorization header".to_string()
+            ))?
+        );
+        assert!(debug.contains("authorization"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("Basic token"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_otlp_header_parse_rejects_malformed_or_unsafe_values() {
+        for headers in [
+            "authorization",
+            "authorization=",
+            "x-trace-bin=abc",
+            "bad:name=value",
+            "authorization=Bearer%ZZ",
+            "authorization=Bearer%0Atoken",
+            "authorization=tokén",
+        ] {
+            assert!(
+                matches!(parse_otlp_headers(headers), Err(TelemetryError::Config(_))),
+                "{headers:?} should be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn test_otlp_resource_attribute_parse_overrides_and_redacts_debug() -> Result<(), TelemetryError>
+    {
+        let attributes = parse_otlp_resource_attributes(
+            "service.version=1.2.3,deployment.environment=prod,service.version=1.2.4",
+        )?;
+
+        assert_eq!(attributes.len(), 2);
+        assert_eq!(
+            attributes.first().map(|attribute| attribute.key.as_str()),
+            Some("service.version"),
+        );
+        assert_eq!(
+            attributes.first().map(|attribute| attribute.value.as_str()),
+            Some("1.2.4"),
+        );
+        assert_eq!(
+            attributes.get(1).map(|attribute| attribute.key.as_str()),
+            Some("deployment.environment"),
+        );
+
+        let debug = format!(
+            "{:?}",
+            attributes.first().ok_or_else(|| TelemetryError::Config(
+                "expected service.version attribute".to_string()
+            ))?
+        );
+        assert!(debug.contains("service.version"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("1.2.4"));
+        Ok(())
+    }
+
+    #[test]
+    fn test_telemetry_config_from_env_uses_otel_precedence() -> Result<(), TelemetryError> {
+        let config = TelemetryConfig::from_env_with(|key| match key {
+            "OTEL_SERVICE_NAME" => Some("env-service".to_string()),
+            "OTEL_RESOURCE_ATTRIBUTES" => {
+                Some("service.name=resource-service,service.version=1.0.0".to_string())
+            }
+            "OTEL_EXPORTER_OTLP_ENDPOINT" => Some("http://generic:4317".to_string()),
+            "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT" => Some("https://traces:4317".to_string()),
+            "OTEL_EXPORTER_OTLP_HEADERS" => Some("authorization=Bearer%20generic".to_string()),
+            "OTEL_EXPORTER_OTLP_TRACES_HEADERS" => {
+                Some("authorization=Bearer%20trace,x-tenant=prod".to_string())
+            }
+            _ => None,
+        })?;
+
+        assert_eq!(config.service_name, "env-service");
+        assert!(config.otlp_enabled);
+        assert_eq!(
+            config.otlp_endpoint,
+            Some("https://traces:4317".to_string())
+        );
+        assert_eq!(config.otlp_headers.len(), 2);
+        assert_eq!(
+            config
+                .otlp_headers
+                .first()
+                .map(|header| header.name.as_str()),
+            Some("authorization"),
+        );
+        assert_eq!(
+            config
+                .otlp_headers
+                .first()
+                .map(|header| header.value.as_str()),
+            Some("Bearer trace"),
+        );
+        assert_eq!(
+            config
+                .otlp_headers
+                .get(1)
+                .map(|header| header.name.as_str()),
+            Some("x-tenant"),
+        );
+        assert_eq!(config.otlp_resource_attributes.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn test_telemetry_config_debug_redacts_otlp_secrets() -> Result<(), TelemetryError> {
+        let config = TelemetryConfig::new("svc")
+            .with_otlp("http://otel:4317")
+            .try_with_otlp_headers("authorization=Bearer%20secret-token")?
+            .try_with_otlp_resource_attributes("cloud.account.id=123456789")?;
+
+        let debug = format!("{config:?}");
+        assert!(debug.contains("authorization"));
+        assert!(debug.contains("cloud.account.id"));
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("secret-token"));
+        assert!(!debug.contains("123456789"));
+        Ok(())
     }
 
     #[test]
@@ -777,7 +1469,7 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _| {
+            |_, _, _, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -796,7 +1488,7 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _| {
+            |_, _, _, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -826,7 +1518,7 @@ mod tests {
                 Err(TelemetryError::LoggingInit("boom".to_string()))
             },
             |_| Ok(()),
-            |_, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         );
 
         assert!(matches!(first, Err(TelemetryError::LoggingInit(_))));
@@ -841,7 +1533,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
-            |_, _, _| Ok(()),
+            |_, _, _, _, _| Ok(()),
         )
         .unwrap();
 
@@ -871,7 +1563,7 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _, rate| {
+            |_, _, rate, _, _| {
                 *captured_rate.lock().expect("lock") = Some(rate);
                 Ok(())
             },
@@ -886,6 +1578,62 @@ mod tests {
     }
 
     #[test]
+    fn test_init_telemetry_threads_otlp_headers_and_resource_attributes()
+    -> Result<(), TelemetryError> {
+        let state = OnceLock::new();
+        let captured: std::sync::Mutex<Option<(usize, usize, String, String)>> =
+            std::sync::Mutex::new(None);
+        let headers = vec![OtlpHeader::new("authorization", "Bearer secret")?];
+        let attributes = vec![OtlpResourceAttribute::new(
+            "deployment.environment",
+            "test",
+        )?];
+
+        init_telemetry_with(
+            &state,
+            TelemetryConfig::new("config-threading")
+                .with_otlp("http://collector:4317")
+                .with_otlp_headers(headers)
+                .with_otlp_resource_attributes(attributes),
+            true,
+            |_| Ok(()),
+            |_| Ok(()),
+            |_, _, _, headers, attributes| {
+                let header_name = headers
+                    .first()
+                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
+                    .name
+                    .clone();
+                let attribute_key = attributes
+                    .first()
+                    .ok_or_else(|| {
+                        TelemetryError::Config("expected OTLP resource attribute".to_string())
+                    })?
+                    .key
+                    .clone();
+                *captured.lock().map_err(|_| {
+                    TelemetryError::Config("captured OTLP config lock poisoned".to_string())
+                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
+                Ok(())
+            },
+        )?;
+
+        let captured = captured.into_inner().map_err(|_| {
+            TelemetryError::Config("captured OTLP config lock poisoned".to_string())
+        })?;
+        assert_eq!(
+            captured,
+            Some((
+                1,
+                1,
+                "authorization".to_string(),
+                "deployment.environment".to_string(),
+            )),
+        );
+        Ok(())
+    }
+
+    #[test]
     fn test_init_telemetry_sync_skips_otlp_side_effects() {
         let state = OnceLock::new();
         let otlp_calls = AtomicUsize::new(0);
@@ -896,7 +1644,7 @@ mod tests {
             false,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _, _| {
+            |_, _, _, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1015,7 +1763,7 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _| {
+            |_, _, _, _, _| {
                 otlp_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1026,6 +1774,33 @@ mod tests {
         assert_eq!(logging_calls.load(Ordering::SeqCst), 0);
         assert_eq!(prometheus_calls.load(Ordering::SeqCst), 0);
         assert_eq!(otlp_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn test_init_telemetry_rejects_invalid_otlp_headers_before_side_effects() {
+        let state = OnceLock::new();
+        let logging_calls = AtomicUsize::new(0);
+        let mut config = TelemetryConfig::new("bad-header").with_otlp("http://collector:4317");
+        config.otlp_headers.push(OtlpHeader {
+            name: "bad:name".to_string(),
+            value: "secret".to_string(),
+        });
+
+        let result = init_telemetry_with(
+            &state,
+            config,
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| Ok(()),
+            |_, _, _, _, _| Ok(()),
+        );
+
+        assert!(matches!(result, Err(TelemetryError::Config(_))));
+        assert!(state.get().is_none());
+        assert_eq!(logging_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

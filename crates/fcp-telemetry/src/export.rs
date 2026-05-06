@@ -13,14 +13,17 @@ use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 #[cfg(feature = "otlp")]
 use opentelemetry::KeyValue;
 #[cfg(feature = "otlp")]
-use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 #[cfg(feature = "otlp")]
 use opentelemetry_sdk::{
     Resource,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 
-use crate::{TelemetryError, validate_otlp_endpoint};
+use crate::{
+    OtlpHeader, OtlpResourceAttribute, TelemetryError, validate_otlp_endpoint,
+    validate_otlp_headers, validate_otlp_resource_attributes,
+};
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
@@ -102,8 +105,34 @@ pub fn init_otlp_tracer_with_sample_rate(
     endpoint: &str,
     sample_rate: f64,
 ) -> Result<(), TelemetryError> {
+    init_otlp_tracer_with_sample_rate_and_options(service_name, endpoint, sample_rate, &[], &[])
+}
+
+/// Initialize the OTLP trace exporter with collector headers and resource attributes.
+///
+/// Header values are only used to configure the exporter and are never emitted
+/// in diagnostics from this crate.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::TracingInit`] if the exporter cannot be initialized.
+pub fn init_otlp_tracer_with_sample_rate_and_options(
+    service_name: &str,
+    endpoint: &str,
+    sample_rate: f64,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+) -> Result<(), TelemetryError> {
     validate_otlp_endpoint(endpoint)?;
-    init_otlp_tracer_with_sample_rate_impl(service_name, endpoint, sample_rate)
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    init_otlp_tracer_with_sample_rate_impl(
+        service_name,
+        endpoint,
+        sample_rate,
+        headers,
+        resource_attributes,
+    )
 }
 
 #[cfg(feature = "otlp")]
@@ -111,15 +140,32 @@ fn init_otlp_tracer_with_sample_rate_impl(
     service_name: &str,
     endpoint: &str,
     sample_rate: f64,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
 ) -> Result<(), TelemetryError> {
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
+    let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(endpoint)
+        .with_endpoint(endpoint);
+
+    if !headers.is_empty() {
+        exporter_builder = exporter_builder.with_metadata(otlp_metadata_from_headers(headers)?);
+    }
+
+    let exporter = exporter_builder
         .build()
         .map_err(|e| TelemetryError::TracingInit(e.to_string()))?;
 
+    let mut resource_values = Vec::with_capacity(resource_attributes.len() + 1);
+    resource_values.push(KeyValue::new("service.name", service_name.to_string()));
+    resource_values.extend(
+        resource_attributes
+            .iter()
+            .filter(|attribute| attribute.key != "service.name")
+            .map(|attribute| KeyValue::new(attribute.key.clone(), attribute.value.clone())),
+    );
+
     let resource = Resource::builder_empty()
-        .with_attributes([KeyValue::new("service.name", service_name.to_string())])
+        .with_attributes(resource_values)
         .build();
 
     // NaN maps to AlwaysOff (clamp + compare: NaN != NaN so both
@@ -150,6 +196,8 @@ fn init_otlp_tracer_with_sample_rate_impl(
     tracing::info!(
         endpoint = %otlp_endpoint_log_label(endpoint),
         sample_rate = clamped,
+        collector_header_count = headers.len(),
+        resource_attribute_count = resource_attributes.len(),
         "OTLP trace exporter initialized"
     );
 
@@ -161,12 +209,42 @@ fn init_otlp_tracer_with_sample_rate_impl(
     _service_name: &str,
     _endpoint: &str,
     _sample_rate: f64,
+    _headers: &[OtlpHeader],
+    _resource_attributes: &[OtlpResourceAttribute],
 ) -> Result<(), TelemetryError> {
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
     ))
 }
 
+#[cfg(feature = "otlp")]
+fn otlp_metadata_from_headers(
+    headers: &[OtlpHeader],
+) -> Result<tonic::metadata::MetadataMap, TelemetryError> {
+    let mut metadata = tonic::metadata::MetadataMap::with_capacity(headers.len());
+    for header in headers {
+        let key = header
+            .name
+            .parse::<tonic::metadata::MetadataKey<tonic::metadata::Ascii>>()
+            .map_err(|_| {
+                TelemetryError::Config(format!(
+                    "OTLP header `{}` is invalid for gRPC metadata",
+                    header.name
+                ))
+            })?;
+        let value =
+            tonic::metadata::MetadataValue::try_from(header.value.as_str()).map_err(|_| {
+                TelemetryError::Config(format!(
+                    "OTLP header `{}` value is invalid for gRPC metadata",
+                    header.name
+                ))
+            })?;
+        metadata.insert(key, value);
+    }
+    Ok(metadata)
+}
+
+#[cfg(any(feature = "otlp", test))]
 fn otlp_endpoint_log_label(endpoint: &str) -> String {
     let Some((scheme, rest)) = endpoint
         .strip_prefix("http://")
@@ -179,9 +257,7 @@ fn otlp_endpoint_log_label(endpoint: &str) -> String {
     else {
         return "[invalid-otlp-endpoint]".to_string();
     };
-    let authority_end = rest
-        .find(|ch| matches!(ch, '/' | '?' | '#'))
-        .unwrap_or(rest.len());
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
     let authority = &rest[..authority_end];
     let redacted_authority = authority.rsplit('@').next().unwrap_or(authority);
     if redacted_authority.is_empty() {
@@ -402,6 +478,34 @@ mod tests {
         assert!(
             matches!(result, Err(TelemetryError::Config(message)) if message.contains("`otlp` feature"))
         );
+    }
+
+    #[cfg(feature = "otlp")]
+    #[test]
+    fn test_otlp_metadata_from_headers_builds_grpc_metadata() -> Result<(), TelemetryError> {
+        let headers = vec![
+            OtlpHeader::new("Authorization", "Bearer secret")?,
+            OtlpHeader::new("x-tenant", "prod")?,
+        ];
+
+        let metadata = otlp_metadata_from_headers(&headers)?;
+        let authorization = metadata.get("authorization").ok_or_else(|| {
+            TelemetryError::Config("authorization metadata was not populated".to_string())
+        })?;
+        let tenant = metadata.get("x-tenant").ok_or_else(|| {
+            TelemetryError::Config("x-tenant metadata was not populated".to_string())
+        })?;
+        let expected_authorization = tonic::metadata::MetadataValue::try_from("Bearer secret")
+            .map_err(|_| {
+                TelemetryError::Config("expected authorization metadata is invalid".to_string())
+            })?;
+        let expected_tenant = tonic::metadata::MetadataValue::try_from("prod").map_err(|_| {
+            TelemetryError::Config("expected tenant metadata is invalid".to_string())
+        })?;
+
+        assert_eq!(authorization, &expected_authorization);
+        assert_eq!(tenant, &expected_tenant);
+        Ok(())
     }
 
     #[test]
@@ -698,7 +802,7 @@ mod tests {
         }
     }
 
-    /// br-87yi2: an oversized request line (> MAX_REQUEST_LINE_BYTES)
+    /// br-87yi2: an oversized request line (> `MAX_REQUEST_LINE_BYTES`)
     /// must be rejected with `414 URI Too Long` instead of allocating
     /// proportionally on the scrape thread. The serve handler MUST
     /// stop reading at the cap so a hostile peer that streams

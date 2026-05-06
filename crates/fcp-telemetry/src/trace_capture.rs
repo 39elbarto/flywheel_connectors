@@ -209,21 +209,16 @@ const MESH_SENSITIVE_REDACTION_FIELDS: &[&str] = &[
 ];
 
 /// Redaction level for exported mesh traces.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MeshTraceRedactionLevel {
     /// Export raw trace contents. Intended only for local deterministic replay.
     None,
     /// Redact node/object identifiers and known sensitive capture fields.
+    #[default]
     Identifiers,
     /// Redact all known sensitive fields, hashing redacted values for correlation.
     Full,
-}
-
-impl Default for MeshTraceRedactionLevel {
-    fn default() -> Self {
-        Self::Identifiers
-    }
 }
 
 impl MeshTraceRedactionLevel {
@@ -279,11 +274,9 @@ fn redact_string_field(policy: &RedactionPolicy, field_name: &str, value: &str) 
 fn redact_option_string_field(
     policy: &RedactionPolicy,
     field_name: &str,
-    value: &Option<String>,
+    value: Option<&str>,
 ) -> Option<String> {
-    value
-        .as_ref()
-        .map(|inner| redact_string_field(policy, field_name, inner))
+    value.map(|inner| redact_string_field(policy, field_name, inner))
 }
 
 fn redact_vec_string_field(
@@ -391,11 +384,15 @@ impl RoutingDecision {
             timestamp: self.timestamp,
             trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
             source_node: redact_string_field(policy, "source_node", &self.source_node),
-            target_node: redact_option_string_field(policy, "target_node", &self.target_node),
+            target_node: redact_option_string_field(
+                policy,
+                "target_node",
+                self.target_node.as_deref(),
+            ),
             object_id: redact_string_field(policy, "object_id", &self.object_id),
             path_type: self.path_type.clone(),
             decision: self.decision.clone(),
-            reason: redact_option_string_field(policy, "reason", &self.reason),
+            reason: redact_option_string_field(policy, "reason", self.reason.as_deref()),
         }
     }
 }
@@ -460,7 +457,7 @@ impl GossipEvent {
             trace_id: redact_string_field(policy, "trace_id", &self.trace_id),
             gossip_type: self.gossip_type.clone(),
             object_count: self.object_count,
-            peer_node: redact_option_string_field(policy, "peer_node", &self.peer_node),
+            peer_node: redact_option_string_field(policy, "peer_node", self.peer_node.as_deref()),
             success: self.success,
         }
     }
@@ -500,7 +497,7 @@ impl LeaseEvent {
             conflict_holder: redact_option_string_field(
                 policy,
                 "conflict_holder",
-                &self.conflict_holder,
+                self.conflict_holder.as_deref(),
             ),
         }
     }
@@ -537,7 +534,7 @@ impl SessionEvent {
             failure_reason: redact_option_string_field(
                 policy,
                 "failure_reason",
-                &self.failure_reason,
+                self.failure_reason.as_deref(),
             ),
         }
     }
@@ -666,7 +663,7 @@ impl CapturedTrace {
             capturing_node: redact_option_string_field(
                 policy,
                 "capturing_node",
-                &self.capturing_node,
+                self.capturing_node.as_deref(),
             ),
             events: self
                 .events
@@ -833,7 +830,9 @@ impl TraceCaptureConfig {
                         .redact_prefixes
                         .extend(self.redaction_policy.redact_prefixes.iter().cloned());
                     effective.hash_redacted |= self.redaction_policy.hash_redacted;
-                    effective.redaction_marker = self.redaction_policy.redaction_marker.clone();
+                    effective
+                        .redaction_marker
+                        .clone_from(&self.redaction_policy.redaction_marker);
                 }
                 None => policy = Some(self.redaction_policy.clone()),
             }

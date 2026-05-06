@@ -15,7 +15,7 @@ use wiremock::{
 const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
 const CAP_MESSAGES_WRITE: &str = "qq.messages.write";
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(host_public_key: [u8; 32], instance_id: InstanceId) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -25,11 +25,11 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(instance_id),
     }
 }
 
-fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn build_token(signing_key: &Ed25519SigningKey, instance_id: &InstanceId) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -47,6 +47,7 @@ fn build_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .validity(now, now + Duration::hours(1))
         .try_constraints_cbor(&cbor)
         .expect("valid constraints cbor")
+        .target_instance(instance_id.as_str())
         .sign(signing_key)
         .expect("capability token");
     CapabilityToken::from_raw(raw)
@@ -86,7 +87,8 @@ async fn connector_suite_happy_path_sends_channel_message() {
         .await;
 
     let signing_key = Ed25519SigningKey::generate();
-    let handshake = handshake_request(signing_key.verifying_key().to_bytes());
+    let instance_id = InstanceId::new();
+    let handshake = handshake_request(signing_key.verifying_key().to_bytes(), instance_id.clone());
     let invoke = InvokeRequest {
         r#type: "invoke".into(),
         id: RequestId::new("qq-connector-suite"),
@@ -97,7 +99,7 @@ async fn connector_suite_happy_path_sends_channel_message() {
             "channel_id": "channel-1",
             "content": "hello from connector suite"
         }),
-        capability_token: build_token(&signing_key),
+        capability_token: build_token(&signing_key, &instance_id),
         holder_proof: None,
         context: None,
         idempotency_key: None,

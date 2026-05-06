@@ -5,17 +5,17 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fcp_async_core::sync::Mutex;
-use fcp_sdk::runtime::{InMemoryStreamingSession, StreamingSession};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
+use fcp_sdk::runtime::{InMemoryStreamingSession, StreamingSession};
 use reqwest::{Url, header::HeaderMap};
 use serde_json::{Value, json};
 
 use crate::error::{QqError, QqResult};
 use crate::types::{
     AccessTokenResponse, EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, NormalizedQqEvent,
-    QqAccessPolicyMode, QqConfig, QqGatewayEvent, QqGatewayEventProjection,
-    QqGatewayRuntimeConfig, QqGatewayRuntimeSnapshot, QqInboundPolicyConfig,
-    QqInboundPolicyDecision, QqMessageEvent, QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+    QqAccessPolicyMode, QqConfig, QqGatewayEvent, QqGatewayEventProjection, QqGatewayRuntimeConfig,
+    QqGatewayRuntimeSnapshot, QqInboundPolicyConfig, QqInboundPolicyDecision, QqMessageEvent,
+    QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
@@ -330,7 +330,7 @@ impl QqGatewayRuntime {
     /// message payload is malformed or exceeds parser bounds.
     pub fn project_event(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
         match event.op {
-            0 => self.project_dispatch(event),
+            0 => self.project_dispatch(&event),
             1 => {
                 self.session.record_heartbeat_sent(Instant::now());
                 self.heartbeat_sent_count = self.heartbeat_sent_count.saturating_add(1);
@@ -357,17 +357,8 @@ impl QqGatewayRuntime {
         }
     }
 
-    fn project_dispatch(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
-        if let Some(sequence) = event.s {
-            let current = self.session.sequence();
-            if current != 0 && sequence <= current {
-                self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
-                return Ok(self.dropped_projection(event.s, event.id, "stale_sequence"));
-            }
-            self.session.set_sequence(sequence);
-        }
-
-        let event_id = gateway_event_id(&event);
+    fn project_dispatch(&mut self, event: &QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
+        let event_id = gateway_event_id(event);
         if let Some(id) = event_id.as_deref()
             && self.seen_event_ids.iter().any(|seen| seen == id)
         {
@@ -375,7 +366,16 @@ impl QqGatewayRuntime {
             return Ok(self.dropped_projection(event.s, event_id, "duplicate_event"));
         }
 
-        let normalized = match normalize_message_event(&event) {
+        if let Some(sequence) = event.s {
+            let current = self.session.sequence();
+            if current != 0 && sequence <= current {
+                self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
+                return Ok(self.dropped_projection(event.s, event_id, "stale_sequence"));
+            }
+            self.session.set_sequence(sequence);
+        }
+
+        let normalized = match normalize_message_event(event) {
             Ok(normalized) => normalized,
             Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => {
                 return Ok(self.dropped_projection(event.s, event_id, "not_normalizable"));
@@ -513,7 +513,11 @@ fn evaluate_c2c_policy(
     policy: &QqInboundPolicyConfig,
 ) -> QqInboundPolicyDecision {
     let sender_id = event.sender_id.clone();
-    let allowed = mode_allows(policy.dm_policy, sender_id.as_deref(), &policy.dm_allow_from);
+    let allowed = mode_allows(
+        policy.dm_policy,
+        sender_id.as_deref(),
+        &policy.dm_allow_from,
+    );
     QqInboundPolicyDecision {
         allowed,
         reason_code: if allowed {
@@ -582,13 +586,13 @@ fn mode_allows(mode: QqAccessPolicyMode, candidate: Option<&str>, allowlist: &[S
     match mode {
         QqAccessPolicyMode::Open => true,
         QqAccessPolicyMode::Disabled => false,
-        QqAccessPolicyMode::Allowlist => candidate.is_some_and(|candidate| {
-            allowlist.iter().any(|allowed| allowed == candidate)
-        }),
+        QqAccessPolicyMode::Allowlist => {
+            candidate.is_some_and(|candidate| allowlist.iter().any(|allowed| allowed == candidate))
+        }
     }
 }
 
-const fn denied_reason(mode: QqAccessPolicyMode, prefix: &'static str) -> &'static str {
+fn denied_reason(mode: QqAccessPolicyMode, prefix: &'static str) -> &'static str {
     match (mode, prefix) {
         (QqAccessPolicyMode::Disabled, "c2c") => "c2c_disabled",
         (QqAccessPolicyMode::Disabled, "group") => "group_disabled",
@@ -908,6 +912,7 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         }
     }
 
@@ -918,6 +923,7 @@ mod tests {
             app_id: "app-1".into(),
             client_secret: "secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         }
     }
 
@@ -950,6 +956,7 @@ mod tests {
             app_id: " test-app ".into(),
             client_secret: " test-secret ".into(),
             request_timeout_ms: DEFAULT_TIMEOUT_MS,
+            gateway: QqGatewayRuntimeConfig::default(),
         };
         let client = QqClient::new(config).unwrap();
         assert_eq!(client.config().base_url, "http://localhost:9999");
@@ -966,6 +973,7 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         };
         assert!(QqClient::new(config).is_err());
     }
@@ -978,6 +986,7 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         };
         assert!(QqClient::new(config).is_err());
     }
@@ -990,6 +999,7 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         };
         assert!(QqClient::new(config).is_err());
 
@@ -999,6 +1009,7 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: QqGatewayRuntimeConfig::default(),
         };
         assert!(QqClient::new(config).is_err());
     }
@@ -1624,5 +1635,158 @@ mod tests {
         let normalized = normalize_message_event(&event).unwrap();
         assert_eq!(normalized.raw["extra_field"], "preserved");
         assert_eq!(normalized.raw["id"], "msg-raw");
+    }
+
+    #[test]
+    fn gateway_runtime_projects_group_mentions_and_drops_duplicates() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            dedupe_window_size: 2,
+            max_queue_depth: 2,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.bot_user_id = Some("bot-openid".into());
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let hello = runtime
+            .project_event(QqGatewayEvent {
+                op: 10,
+                s: None,
+                t: None,
+                d: Some(json!({"session_id": "session-1"})),
+                id: Some("hello-1".into()),
+            })
+            .unwrap();
+        assert_eq!(hello.reason_code, "hello");
+        assert_eq!(
+            hello.runtime.session_id.as_deref(),
+            Some("session-1"),
+            "hello should restore session token"
+        );
+
+        let event = QqGatewayEvent {
+            op: 0,
+            s: Some(1),
+            t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+            d: Some(json!({
+                "id": "msg-1",
+                "content": "bot-openid please check",
+                "group_openid": "group-1",
+                "group_member_openid": "member-1",
+                "author": {"id": "author-1", "username": "Alice"}
+            })),
+            id: Some("evt-1".into()),
+        };
+        let projected = runtime.project_event(event.clone()).unwrap();
+        assert!(projected.accepted);
+        assert_eq!(projected.topic, EVENT_QQ_MESSAGE_AUTHORIZED);
+        assert_eq!(projected.reason_code, "accepted");
+        assert_eq!(projected.runtime.last_sequence, 1);
+        assert_eq!(projected.runtime.accepted_events, 1);
+        assert_eq!(
+            projected.policy.as_ref().map(|policy| policy.reason_code),
+            Some("group_allowed")
+        );
+
+        let duplicate = runtime.project_event(event).unwrap();
+        assert!(!duplicate.accepted);
+        assert_eq!(duplicate.reason_code, "duplicate_event");
+        assert_eq!(duplicate.runtime.duplicate_events, 1);
+    }
+
+    #[test]
+    fn gateway_runtime_enforces_group_policy_and_queue_bounds() {
+        let mut config = QqGatewayRuntimeConfig {
+            enabled: true,
+            max_queue_depth: 1,
+            ..QqGatewayRuntimeConfig::default()
+        };
+        config.policy.bot_user_id = Some("bot-openid".into());
+        config.policy.group_policy = QqAccessPolicyMode::Allowlist;
+        config.policy.group_allow_from = vec!["group-allowed".into()];
+        let mut runtime = QqGatewayRuntime::new(config);
+
+        let denied = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(1),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-denied",
+                    "content": "bot-openid denied",
+                    "group_openid": "group-denied",
+                    "group_member_openid": "member-1"
+                })),
+                id: Some("evt-denied".into()),
+            })
+            .unwrap();
+        assert!(!denied.accepted);
+        assert_eq!(denied.reason_code, "group_not_allowed");
+
+        let allowed = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(2),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-allowed",
+                    "content": "bot-openid allowed",
+                    "group_openid": "group-allowed",
+                    "group_member_openid": "member-2"
+                })),
+                id: Some("evt-allowed".into()),
+            })
+            .unwrap();
+        assert!(allowed.accepted);
+
+        let overflow = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(3),
+                t: Some("GROUP_AT_MESSAGE_CREATE".into()),
+                d: Some(json!({
+                    "id": "msg-overflow",
+                    "content": "bot-openid overflow",
+                    "group_openid": "group-allowed",
+                    "group_member_openid": "member-3"
+                })),
+                id: Some("evt-overflow".into()),
+            })
+            .unwrap();
+        assert!(!overflow.accepted);
+        assert_eq!(overflow.reason_code, "queue_full");
+    }
+
+    #[test]
+    fn gateway_runtime_classifies_control_and_stale_frames() {
+        let mut runtime = QqGatewayRuntime::new(QqGatewayRuntimeConfig {
+            enabled: true,
+            restore_sequence: Some(10),
+            ..QqGatewayRuntimeConfig::default()
+        });
+
+        let stale = runtime
+            .project_event(QqGatewayEvent {
+                op: 0,
+                s: Some(10),
+                t: Some("C2C_MESSAGE_CREATE".into()),
+                d: Some(json!({"id": "msg-stale", "author": {"id": "user-1"}})),
+                id: Some("evt-stale".into()),
+            })
+            .unwrap();
+        assert_eq!(stale.reason_code, "stale_sequence");
+        assert_eq!(stale.runtime.stale_sequence_events, 1);
+
+        let heartbeat = runtime
+            .project_event(QqGatewayEvent {
+                op: 11,
+                s: None,
+                t: None,
+                d: None,
+                id: None,
+            })
+            .unwrap();
+        assert_eq!(heartbeat.reason_code, "heartbeat_ack");
+        assert_eq!(heartbeat.runtime.heartbeat_ack_count, 1);
     }
 }

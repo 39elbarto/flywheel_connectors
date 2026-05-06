@@ -20,10 +20,9 @@ use crate::client::{
     sanitize_path_segment,
 };
 use crate::types::{
-    CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE,
-    EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE,
-    OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL,
-    OP_SEND_GROUP, QqConfig, QqGatewayEvent,
+    CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, EVENT_QQ_EVENT_DROPPED,
+    EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE, OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY,
+    OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig, QqGatewayEvent,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -336,44 +335,18 @@ impl QqConnector {
                 })
             }
             OP_EVENTS_NORMALIZE => {
-                let event_value =
-                    req.input
-                        .get("event")
-                        .ok_or_else(|| FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "event is required".into(),
-                        })?;
-                let gateway_event: QqGatewayEvent = serde_json::from_value(event_value.clone())
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: format!("invalid gateway event: {e}"),
-                    })?;
+                let gateway_event = parse_gateway_event(&req.input)?;
                 let normalized =
                     normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&normalized).map_err(|e| FcpError::Internal {
-                    message: format!("failed to serialize normalized event: {e}"),
-                })?
+                serialize_output(&normalized, "normalized event")?
             }
             OP_GATEWAY_PROJECT_EVENT => {
-                let event_value =
-                    req.input
-                        .get("event")
-                        .ok_or_else(|| FcpError::InvalidRequest {
-                            code: 1005,
-                            message: "event is required".into(),
-                        })?;
-                let gateway_event: QqGatewayEvent = serde_json::from_value(event_value.clone())
-                    .map_err(|e| FcpError::InvalidRequest {
-                        code: 1005,
-                        message: format!("invalid gateway event: {e}"),
-                    })?;
+                let gateway_event = parse_gateway_event(&req.input)?;
                 let projection = client
                     .project_gateway_event(gateway_event)
                     .await
                     .map_err(|e| e.to_fcp_error())?;
-                serde_json::to_value(&projection).map_err(|e| FcpError::Internal {
-                    message: format!("failed to serialize projected gateway event: {e}"),
-                })?
+                serialize_output(&projection, "projected gateway event")?
             }
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -415,6 +388,9 @@ impl FcpConnector for QqConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -575,7 +551,7 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         OP_SEND_CHANNEL | OP_SEND_GROUP | OP_SEND_C2C => CAP_MESSAGES_WRITE,
         OP_GET_GATEWAY => CAP_GATEWAY_READ,
         OP_HEALTH => CAP_HEALTH_READ,
-        OP_EVENTS_NORMALIZE => CAP_EVENTS_READ,
+        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT => CAP_EVENTS_READ,
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -607,7 +583,7 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
             optional_string(input, "msg_id")?;
         }
         OP_GET_GATEWAY | OP_HEALTH => {}
-        OP_EVENTS_NORMALIZE => {
+        OP_EVENTS_NORMALIZE | OP_GATEWAY_PROJECT_EVENT => {
             let event_value = input.get("event").ok_or_else(|| FcpError::InvalidRequest {
                 code: 1005,
                 message: "event is required".into(),
@@ -627,6 +603,23 @@ fn validate_simulate_input(operation: &str, input: &Value) -> FcpResult<()> {
         }
     }
     Ok(())
+}
+
+fn parse_gateway_event(input: &Value) -> FcpResult<QqGatewayEvent> {
+    let event_value = input.get("event").ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: "event is required".into(),
+    })?;
+    serde_json::from_value(event_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("invalid gateway event: {e}"),
+    })
+}
+
+fn serialize_output<T: serde::Serialize>(value: &T, name: &str) -> FcpResult<Value> {
+    serde_json::to_value(value).map_err(|e| FcpError::Internal {
+        message: format!("failed to serialize {name}: {e}"),
+    })
 }
 
 fn granted_capabilities(requested: Vec<CapabilityId>) -> Vec<CapabilityGrant> {
@@ -679,6 +672,40 @@ fn message_path(prefix: &str, target_id: &str, field: &str) -> FcpResult<String>
     Ok(format!("{prefix}{safe_id}/messages"))
 }
 
+fn qq_events_info() -> Vec<EventInfo> {
+    vec![
+        EventInfo {
+            topic: EVENT_QQ_MESSAGE_AUTHORIZED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["accepted", "topic", "normalized", "policy", "runtime"],
+                "properties": {
+                    "accepted": { "const": true },
+                    "topic": { "const": EVENT_QQ_MESSAGE_AUTHORIZED },
+                    "normalized": { "type": "object" },
+                    "policy": { "type": "object" },
+                    "runtime": { "type": "object" }
+                }
+            }),
+            requires_ack: false,
+        },
+        EventInfo {
+            topic: EVENT_QQ_EVENT_DROPPED.into(),
+            schema: json!({
+                "type": "object",
+                "required": ["accepted", "topic", "reason_code", "runtime"],
+                "properties": {
+                    "accepted": { "const": false },
+                    "topic": { "const": EVENT_QQ_EVENT_DROPPED },
+                    "reason_code": { "type": "string" },
+                    "runtime": { "type": "object" }
+                }
+            }),
+            requires_ack: false,
+        },
+    ]
+}
+
 // This factory mirrors the OperationInfo fields to keep each catalog entry explicit.
 #[allow(clippy::too_many_arguments)]
 fn operation(
@@ -720,9 +747,14 @@ mod tests {
     use super::*;
     use chrono::{Duration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, ZoneId};
+    use fcp_prelude::{CapabilityConstraints, CapabilityToken, InstanceId, ZoneId};
 
-    fn build_token(signing_key: &Ed25519SigningKey, cap: &str, operation: &str) -> CapabilityToken {
+    fn build_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &InstanceId,
+        cap: &str,
+        operation: &str,
+    ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
@@ -740,6 +772,7 @@ mod tests {
             .validity(now, now + Duration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("valid constraints cbor")
+            .target_instance(instance_id.as_str())
             .sign(signing_key)
             .expect("capability token");
         CapabilityToken::from_raw(raw)
@@ -747,6 +780,7 @@ mod tests {
 
     fn simulate_request(
         signing_key: &Ed25519SigningKey,
+        instance_id: &InstanceId,
         cap: &str,
         operation: &'static str,
         input: Value,
@@ -756,11 +790,12 @@ mod tests {
             OperationId::from_static(operation),
             ZoneId::work(),
             input,
-            build_token(signing_key, cap, operation),
+            build_token(signing_key, instance_id, cap, operation),
         )
     }
 
     async fn ready_connector(signing_key: &Ed25519SigningKey) -> QqConnector {
+        let instance_id = InstanceId::new();
         let mut connector = QqConnector::new();
         connector
             .configure(json!({
@@ -781,7 +816,7 @@ mod tests {
                 capabilities_requested: vec![CapabilityId::from_static(CAP_MESSAGES_WRITE)],
                 host: None,
                 transport_caps: None,
-                requested_instance_id: None,
+                requested_instance_id: Some(instance_id),
             })
             .await
             .unwrap();
@@ -795,10 +830,11 @@ mod tests {
     }
 
     #[test]
-    fn introspect_returns_six_operations() {
+    fn introspect_returns_seven_operations() {
         let connector = QqConnector::new();
         let introspection = connector.introspect();
-        assert_eq!(introspection.operations.len(), 6);
+        assert_eq!(introspection.operations.len(), 7);
+        assert_eq!(introspection.events.len(), 2);
     }
 
     #[test]
@@ -816,6 +852,7 @@ mod tests {
         assert!(ids.contains(&"qq.gateway.get"));
         assert!(ids.contains(&"qq.health"));
         assert!(ids.contains(&"qq.events.normalize"));
+        assert!(ids.contains(&"qq.gateway.project_event"));
     }
 
     #[test]
@@ -831,7 +868,7 @@ mod tests {
         let connector = QqConnector::new();
         let result = connector.doctor();
         assert!(!result.passed);
-        assert_eq!(result.checks.len(), 3);
+        assert_eq!(result.checks.len(), 4);
         // configuration is critical, should fail
         assert!(!result.checks[0].passed);
         assert!(result.checks[0].critical);
@@ -965,13 +1002,14 @@ mod tests {
             app_id: "test-app".into(),
             client_secret: "test-secret".into(),
             request_timeout_ms: 30_000,
+            gateway: crate::types::QqGatewayRuntimeConfig::default(),
         };
         connector.client = Some(QqClient::new(config).unwrap());
         let result = connector.doctor();
         assert!(result.passed);
         // handshake check is non-critical, so overall passes
-        assert!(!result.checks[2].passed);
-        assert!(!result.checks[2].critical);
+        assert!(!result.checks[3].passed);
+        assert!(!result.checks[3].critical);
     }
 
     #[test]
@@ -982,6 +1020,7 @@ mod tests {
         assert!(required_capability(OP_GET_GATEWAY).is_ok());
         assert!(required_capability(OP_HEALTH).is_ok());
         assert!(required_capability(OP_EVENTS_NORMALIZE).is_ok());
+        assert!(required_capability(OP_GATEWAY_PROJECT_EVENT).is_ok());
     }
 
     #[test]
@@ -997,6 +1036,7 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 &signing_key,
+                &connector.base.instance_id,
                 CAP_MESSAGES_WRITE,
                 OP_SEND_CHANNEL,
                 json!({"channel_id": "channel-1"}),
@@ -1022,6 +1062,7 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 &signing_key,
+                &connector.base.instance_id,
                 CAP_MESSAGES_WRITE,
                 OP_SEND_GROUP,
                 json!({"group_openid": "../admin", "content": "hello"}),
@@ -1040,6 +1081,7 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 &signing_key,
+                &connector.base.instance_id,
                 CAP_MESSAGES_WRITE,
                 OP_SEND_CHANNEL,
                 json!({"channel_id": "channel-1", "content": "hello"}),
@@ -1057,6 +1099,7 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 &signing_key,
+                &connector.base.instance_id,
                 CAP_EVENTS_READ,
                 OP_EVENTS_NORMALIZE,
                 json!({}),

@@ -6,7 +6,7 @@ schema_version = "2.1"
 id = "fcp.qq"
 name = "QQ Bot"
 version = "0.1.0"
-description = "Tencent QQ bot connector for channel, group, and C2C sends plus gateway discovery and health verification"
+description = "Tencent QQ bot connector for channel, group, and C2C sends plus gateway discovery, stateful gateway event projection, and health verification"
 archetype = "operational"
 homepage = "https://bot.q.qq.com/wiki/"
 
@@ -51,6 +51,13 @@ idempotency = "strict"
 
 [provides.operations.events_normalize]
 summary = "Normalize a QQ gateway message event"
+capability = "qq.events.read"
+risk = "low"
+safety_tier = "safe"
+idempotency = "strict"
+
+[provides.operations.gateway_project_event]
+summary = "Project a QQ gateway event through sequence, replay, and inbound policy state"
 capability = "qq.events.read"
 risk = "low"
 safety_tier = "safe"

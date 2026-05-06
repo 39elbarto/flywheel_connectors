@@ -121,9 +121,10 @@ impl std::fmt::Debug for AccessTokenResponse {
 // Gateway runtime and inbound policy configuration
 // ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum QqAccessPolicyMode {
+    #[default]
     Open,
     Allowlist,
     Disabled,
@@ -137,12 +138,6 @@ impl QqAccessPolicyMode {
             Self::Allowlist => "allowlist",
             Self::Disabled => "disabled",
         }
-    }
-}
-
-impl Default for QqAccessPolicyMode {
-    fn default() -> Self {
-        Self::Open
     }
 }
 
@@ -478,12 +473,15 @@ mod tests {
         assert_eq!(OP_SEND_GROUP, "qq.messages.send_group");
         assert_eq!(OP_SEND_C2C, "qq.messages.send_c2c");
         assert_eq!(OP_GET_GATEWAY, "qq.gateway.get");
+        assert_eq!(OP_GATEWAY_PROJECT_EVENT, "qq.gateway.project_event");
         assert_eq!(OP_HEALTH, "qq.health");
         assert_eq!(OP_EVENTS_NORMALIZE, "qq.events.normalize");
         assert_eq!(CAP_MESSAGES_WRITE, "qq.messages.write");
         assert_eq!(CAP_GATEWAY_READ, "qq.gateway.read");
         assert_eq!(CAP_HEALTH_READ, "qq.health.read");
         assert_eq!(CAP_EVENTS_READ, "qq.events.read");
+        assert_eq!(EVENT_QQ_MESSAGE_AUTHORIZED, "qq.message.authorized");
+        assert_eq!(EVENT_QQ_EVENT_DROPPED, "qq.event.dropped");
     }
 
     // ─── Gateway event type tests ───────────────────────────────

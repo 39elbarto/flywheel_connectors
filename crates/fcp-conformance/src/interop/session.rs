@@ -3,7 +3,7 @@
 //! Pre-br-t6wmw this file maintained a parallel set of local helpers
 //! (`negotiate_suite(&[&str], &[&str])`, a 3-field local `TransportLimits`,
 //! a HashSet-based `is_nonce_fresh`, a custom `build_retry_hello` binary
-//! format) that DRIFTED from the production fcp_protocol::session::*
+//! format) that DRIFTED from the production `fcp_protocol::session::*`
 //! surface — most visibly: production `TransportLimits` is a single `u16`
 //! `max_datagram_bytes` wrapper, while the local copy carried three u32
 //! fields. The session interop suite reported "all green" while never
@@ -184,7 +184,7 @@ fn test_transcript_determinism() -> Result<(), String> {
 /// Test: Suite negotiation uses production `negotiate_suite` (br-t6wmw).
 ///
 /// Pre-fix this called a local `&[&str]`-typed helper that bypassed the
-/// production responder-picks invariant + MINIMUM_SUITE floor. The
+/// production responder-picks invariant + `MINIMUM_SUITE` floor. The
 /// production function uses real `SessionCryptoSuite` enum values and
 /// rejects below-floor offerings.
 fn test_suite_negotiation() -> Result<(), String> {
@@ -219,7 +219,7 @@ fn test_suite_negotiation() -> Result<(), String> {
     Ok(())
 }
 
-/// Test: HelloRetry cookie flow uses production `MeshSessionHelloRetry`
+/// Test: `HelloRetry` cookie flow uses production `MeshSessionHelloRetry`
 /// (br-t6wmw).
 ///
 /// Pre-fix this asserted on a custom binary layout (`build_retry_hello`)
@@ -262,7 +262,7 @@ fn test_hello_retry_cookie() -> Result<(), String> {
     Ok(())
 }
 
-/// Test: TransportLimits negotiation uses production `TransportLimits`
+/// Test: `TransportLimits` negotiation uses production `TransportLimits`
 /// (br-t6wmw).
 ///
 /// Pre-fix this used a local 3-field `{max_datagram_bytes: u32,
@@ -306,7 +306,7 @@ fn test_transport_limits_negotiation() -> Result<(), String> {
     Ok(())
 }
 
-/// Test: TransportLimits enforcement at the FCPS datagram boundary
+/// Test: `TransportLimits` enforcement at the FCPS datagram boundary
 /// (br-t6wmw).
 ///
 /// Pre-fix this checked a local `is_datagram_valid` helper that was

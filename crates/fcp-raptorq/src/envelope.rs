@@ -56,7 +56,7 @@ pub struct RaptorQSymbolFrame {
 impl RaptorQSymbolFrame {
     /// Build a raw symbol frame.
     #[must_use]
-    pub fn new(
+    pub const fn new(
         object_id: ObjectId,
         oti: crate::ObjectTransmissionInformation,
         esi: u32,

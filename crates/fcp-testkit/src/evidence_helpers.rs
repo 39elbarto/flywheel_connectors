@@ -1991,8 +1991,7 @@ fn validate_resource_ledger_records(records: &[Value]) -> Result<(), SwarmGauntl
             if ledger
                 .get(field)
                 .and_then(Value::as_str)
-                .filter(|value| !value.is_empty())
-                .is_none()
+                .is_none_or(str::is_empty)
             {
                 return Err(reason(&format!(
                     "ledger.{field} must be a non-empty string"
@@ -2013,8 +2012,7 @@ fn validate_resource_ledger_records(records: &[Value]) -> Result<(), SwarmGauntl
             .get("samples")
             .and_then(|samples| samples.get("state"))
             .and_then(Value::as_str)
-            .filter(|state| !state.is_empty())
-            .is_none()
+            .is_none_or(str::is_empty)
         {
             return Err(reason("ledger.samples.state must be a non-empty string"));
         }

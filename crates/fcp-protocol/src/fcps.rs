@@ -839,11 +839,12 @@ impl SymbolAck {
 /// Default maximum symbols for authenticated requests (NORMATIVE).
 pub const DEFAULT_MAX_SYMBOLS_AUTHENTICATED: u32 = 1000;
 
-/// Absolute hard cap on `SymbolRequest::max_symbols`, above which NO request
-/// (authenticated or not, regardless of zone policy) should be accepted at
-/// the wire boundary (NORMATIVE; br-7p8rd anti-amplification floor).
+/// Absolute hard cap on `SymbolRequest::max_symbols`.
 ///
-/// Sized to the RaptorQ decode-buffer headroom of one source-symbol plus
+/// Requests above this value should be rejected at the wire boundary regardless
+/// of authentication or zone policy (NORMATIVE; br-7p8rd anti-amplification floor).
+///
+/// Sized to the `RaptorQ` decode-buffer headroom of one source-symbol plus
 /// roughly the repair-tail capacity — see `max_symbols_with_headroom` in
 /// fcp-raptorq's decoder. A request asking for more than this many symbols
 /// cannot be satisfied by a single legitimate decode budget on the responder

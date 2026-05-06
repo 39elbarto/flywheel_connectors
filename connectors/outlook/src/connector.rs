@@ -685,6 +685,16 @@ mod tests {
     }
 
     #[test]
+    fn graph_subscription_ingress_stays_in_microsoft365_connector() {
+        let ops = OutlookConnector::operations_info();
+        let ids: Vec<&str> = ops.iter().map(|op| op.id.as_str()).collect();
+        assert!(!ids.contains(&"m365.notifications.ingest"));
+        assert!(!ids.contains(&"m365.subscriptions.create"));
+        assert!(!ids.contains(&"outlook.notifications.ingest"));
+        assert!(!ids.contains(&"outlook.subscriptions.create"));
+    }
+
+    #[test]
     fn send_message_is_risky() {
         let ops = OutlookConnector::operations_info();
         let send = ops

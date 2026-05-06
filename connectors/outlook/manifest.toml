@@ -17,7 +17,7 @@ format = "native"
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores Graph API delta tokens for incremental mail sync and calendar subscription IDs."
+migration_hint = "Legacy Outlook stays request-response only; Microsoft Graph subscriptions, notification ingress, and delta handoff are owned by fcp.microsoft365."
 
 [zones]
 home = "z:work"

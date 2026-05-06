@@ -326,36 +326,26 @@ struct M365GraphNotification {
 
 impl M365NotificationIngestRequest {
     fn parse(input: serde_json::Value) -> FcpResult<Self> {
-        let validation_token = notification_string_field(&input, &[
-            "validation_token",
-            "validationToken",
-        ])
-        .or_else(|| {
-            input
-                .get("query")
-                .and_then(|query| notification_string_field(query, &[
-                    "validationToken",
-                    "validation_token",
-                ]))
-        })
-        .map(normalize_validation_token)
-        .transpose()?;
+        let validation_token =
+            notification_string_field(&input, &["validation_token", "validationToken"])
+                .or_else(|| {
+                    input.get("query").and_then(|query| {
+                        notification_string_field(query, &["validationToken", "validation_token"])
+                    })
+                })
+                .map(normalize_validation_token)
+                .transpose()?;
 
-        let payload = input
-            .get("payload")
-            .or_else(|| input.get("body"))
-            .cloned();
+        let payload = input.get("payload").or_else(|| input.get("body")).cloned();
         if validation_token.is_some() == payload.is_some() {
             return Err(invalid_request(
                 "m365.notifications.ingest requires exactly one of validation_token or payload",
             ));
         }
 
-        let expected_client_state = notification_string_field(&input, &[
-            "expected_client_state",
-            "expectedClientState",
-        ])
-        .map(|value| value.to_string());
+        let expected_client_state =
+            notification_string_field(&input, &["expected_client_state", "expectedClientState"])
+                .map(|value| value.to_string());
         let retry_after_seconds = retry_after_seconds_from_input(&input)?;
         let ack_timeout_ms = input
             .get("ack_timeout_ms")
@@ -385,9 +375,9 @@ impl M365GraphNotification {
         state: &M365SyncState,
         expected_client_state: Option<&str>,
     ) -> FcpResult<Self> {
-        let object = value.as_object().ok_or_else(|| {
-            invalid_request("Graph notification entries must be JSON objects")
-        })?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| invalid_request("Graph notification entries must be JSON objects"))?;
         let subscription_id = object
             .get("subscriptionId")
             .and_then(serde_json::Value::as_str)
@@ -422,13 +412,11 @@ impl M365GraphNotification {
         let client_state = object
             .get("clientState")
             .and_then(serde_json::Value::as_str)
-            .ok_or_else(|| {
-                FcpError::Unauthorized {
-                    code: 2001,
-                    message: format!(
-                        "Graph notification for subscription '{subscription_id}' missing clientState"
-                    ),
-                }
+            .ok_or_else(|| FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "Graph notification for subscription '{subscription_id}' missing clientState"
+                ),
             })?;
         if client_state != expected {
             return Err(FcpError::Unauthorized {
@@ -495,10 +483,7 @@ impl M365GraphNotification {
     }
 }
 
-fn notification_string_field<'a>(
-    value: &'a serde_json::Value,
-    fields: &[&str],
-) -> Option<&'a str> {
+fn notification_string_field<'a>(value: &'a serde_json::Value, fields: &[&str]) -> Option<&'a str> {
     fields
         .iter()
         .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
@@ -528,9 +513,10 @@ fn retry_after_seconds_from_input(input: &serde_json::Value) -> FcpResult<Option
         .get("retry_after_seconds")
         .or_else(|| input.get("retryAfterSeconds"))
     {
-        return retry_after.as_u64().map(Some).ok_or_else(|| {
-            invalid_request("retry_after_seconds must be an unsigned integer")
-        });
+        return retry_after
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| invalid_request("retry_after_seconds must be an unsigned integer"));
     }
 
     let Some(headers) = input.get("headers").and_then(serde_json::Value::as_object) else {

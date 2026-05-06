@@ -23,7 +23,7 @@ format = "wasi"
 [connector.state]
 model = "singleton_writer"
 state_schema_version = "1"
-migration_hint = "Stores Graph API delta tokens for incremental sync, webhook subscription IDs with expiry timestamps, and per-resource change cursors."
+migration_hint = "Stores Graph API delta tokens for incremental sync, webhook subscription IDs with clientState/expiry metadata, replay keys, and per-resource change cursors."
 
 [zones]
 home = "z:work"

@@ -17,7 +17,7 @@ The current crate already exposes the first-slice Outlook/Exchange operations in
 
 - Mail: `m365.mail.list_messages`, `m365.mail.get_message`, `m365.mail.search_messages`, `m365.mail.list_threads`, `m365.mail.send_message`, `m365.mail.create_draft`, `m365.mail.reply_message`, `m365.mail.forward_message`, `m365.mail.list_attachments`, and `m365.mail.add_attachment`
 - Calendar: `m365.calendar.list_events`, `m365.calendar.get_event`, `m365.calendar.create_event`, `m365.calendar.update_event`, `m365.calendar.delete_event`, and `m365.calendar.get_freebusy`
-- Adjacent but broader-than-this-contract surfaces also exist: `m365.subscriptions.create`, `m365.subscriptions.renew`, `m365.subscriptions.delete`, and `m365.delta.sync`
+- Adjacent but broader-than-this-contract surfaces also exist: `m365.subscriptions.create`, `m365.subscriptions.renew`, `m365.subscriptions.delete`, `m365.notifications.ingest`, and `m365.delta.sync`
 
 Important runtime truths that the contract must preserve:
 
@@ -52,7 +52,7 @@ The first slice is mailbox-oriented rather than admin-oriented. It is not a gene
 | Search | In scope | `m365.mail.search_messages` uses Microsoft Graph `$search` with `ConsistencyLevel: eventual`. |
 | Rules | Out of scope | No inbox rule or message rule operations exist today. |
 | Calendar | In scope | Primary-calendar event list/get/create/update/delete plus free/busy are implemented. |
-| Subscriptions and delta | Deferred from this contract | The broader connector already exposes change-notification and delta-sync operations, but they are not part of the Outlook/Exchange first-slice contract being stabilized here. |
+| Subscriptions, notification ingress, and delta | Deferred from this contract | The broader connector owns Graph subscription creation/renewal/deletion, host-forwarded notification validation/deduplication, and delta-sync handoff; they are not part of the Outlook/Exchange first-slice contract being stabilized here. |
 
 ## Auth And Scope Boundary
 
@@ -124,6 +124,7 @@ The first Outlook/Exchange slice does not include these surfaces:
 - mailbox delegation provisioning, tenant administration, or compliance/governance APIs
 - multi-tenant aggregation inside one connector instance
 - a new dedicated `fcp.outlook` crate or identifier in this bead
+- Microsoft Graph webhook notification ingress in the legacy `fcp.outlook` connector; ownership stays in `fcp.microsoft365` so subscription state, `clientState` validation, replay suppression, and delta handoff share one state file
 
 These are excluded on purpose:
 

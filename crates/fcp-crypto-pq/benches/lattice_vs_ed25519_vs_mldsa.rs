@@ -9,7 +9,7 @@
 //! - **Ed25519** — V3 baseline. Real production primitives via the
 //!   [`fcp_crypto::ed25519`] wrapper (ed25519-dalek under the hood).
 //! - **ML-DSA-65** — V4 owner-key candidate. Real FIPS 204 primitives
-//!   via [`fcp_crypto::ml_dsa`] (RustCrypto `ml-dsa` crate).
+//!   via [`fcp_crypto::ml_dsa`] (`RustCrypto` `ml-dsa` crate).
 //! - **Lattice-trapdoor** — V4 capability-delegation candidate. Calls
 //!   into [`fcp_crypto_pq`] (br-kyopb.1.3.1 stubs). The cryptographic
 //!   bodies of `sample_pre` / `verify` currently return
@@ -21,8 +21,8 @@
 //!
 //! Because `sample_pre` and `verify` are stubs, the lattice-trapdoor
 //! group reflects **the cost of the stub primitives, NOT the cost the
-//! real Micciancio-Peikert TrapGen / Cash-Hofheinz-Kiltz-Peikert
-//! basis-shortening / Gentry-Peikert-Vaikuntanathan SamplePre will
+//! real Micciancio-Peikert `TrapGen` / Cash-Hofheinz-Kiltz-Peikert
+//! basis-shortening / Gentry-Peikert-Vaikuntanathan `SamplePre` will
 //! incur once they land** (kyopb.1.3.1.x or follow-up work).
 //!
 //! This bench's lattice numbers are therefore a **lower bound** on
@@ -30,7 +30,7 @@
 //! work the verifier always pays (parameter checks, period bounds,
 //! hash-input construction). Real `sample_pre` is dominated by
 //! Gaussian-distribution sampling over the lattice (typically 1-10ms
-//! at the V4_REFERENCE profile per the design doc §3.2, ~10⁵× slower
+//! at the `V4_REFERENCE` profile per the design doc §3.2, ~10⁵× slower
 //! than Ed25519 sign); real `verify` is matrix-vector multiplication
 //! plus norm check (~100µs-1ms, ~10²-10³× slower than Ed25519
 //! verify).
@@ -67,7 +67,7 @@ const REQUEST_ZONE: [u8; 32] = [7u8; 32];
 const REQUEST_PRINCIPAL: &[u8] = b"principal:bench-user";
 const REQUEST_OP: &[u8] = b"op:bench.invoke";
 
-fn ref_period() -> DelegationPeriod {
+const fn ref_period() -> DelegationPeriod {
     DelegationPeriod {
         start_secs: 1_000,
         end_secs: 1_000_000_000,
@@ -190,35 +190,31 @@ fn bench_verify(c: &mut Criterion) {
     let mut group = c.benchmark_group("verify");
     group.throughput(Throughput::Elements(1));
 
-    let ed_sk = Ed25519SigningKey::generate();
-    let ed_vk: Ed25519VerifyingKey = ed_sk.verifying_key();
-    let ed_sig = ed_sk.sign(SAMPLE_MESSAGE);
+    let ed25519_signer = Ed25519SigningKey::generate();
+    let ed25519_checker: Ed25519VerifyingKey = ed25519_signer.verifying_key();
+    let ed25519_sig = ed25519_signer.sign(SAMPLE_MESSAGE);
     group.bench_function("ed25519_verify", |b| {
         b.iter(|| {
-            let _ = black_box(
-                ed_vk
-                    .verify(black_box(SAMPLE_MESSAGE), black_box(&ed_sig))
-                    .expect("ed25519 verify succeeds"),
-            );
+            ed25519_checker
+                .verify(black_box(SAMPLE_MESSAGE), black_box(&ed25519_sig))
+                .expect("ed25519 verify succeeds");
         });
     });
 
-    let mldsa_sk = MlDsa65SigningKey::generate().expect("ml-dsa keygen");
-    let mldsa_vk: &MlDsa65VerifyingKey = mldsa_sk.verifying_key();
-    let mldsa_sig = mldsa_sk
+    let mldsa_signer = MlDsa65SigningKey::generate().expect("ml-dsa keygen");
+    let mldsa_checker: &MlDsa65VerifyingKey = mldsa_signer.verifying_key();
+    let mldsa_sig = mldsa_signer
         .sign(SAMPLE_MESSAGE, SIGNING_CONTEXT)
         .expect("ml-dsa sign succeeds");
     group.bench_function("ml_dsa_65_verify", |b| {
         b.iter(|| {
-            let _ = black_box(
-                mldsa_vk
-                    .verify(
-                        black_box(SAMPLE_MESSAGE),
-                        black_box(SIGNING_CONTEXT),
-                        black_box(&mldsa_sig),
-                    )
-                    .expect("ml-dsa verify succeeds"),
-            );
+            mldsa_checker
+                .verify(
+                    black_box(SAMPLE_MESSAGE),
+                    black_box(SIGNING_CONTEXT),
+                    black_box(&mldsa_sig),
+                )
+                .expect("ml-dsa verify succeeds");
         });
     });
 
@@ -262,10 +258,8 @@ fn bench_end_to_end(c: &mut Criterion) {
         let vk = sk.verifying_key();
         b.iter(|| {
             let sig = sk.sign(black_box(SAMPLE_MESSAGE));
-            black_box(
-                vk.verify(black_box(SAMPLE_MESSAGE), black_box(&sig))
-                    .expect("verify succeeds"),
-            );
+            vk.verify(black_box(SAMPLE_MESSAGE), black_box(&sig))
+                .expect("verify succeeds");
         });
     });
 
@@ -276,14 +270,12 @@ fn bench_end_to_end(c: &mut Criterion) {
             let sig = sk
                 .sign(black_box(SAMPLE_MESSAGE), black_box(SIGNING_CONTEXT))
                 .expect("sign succeeds");
-            black_box(
-                vk.verify(
-                    black_box(SAMPLE_MESSAGE),
-                    black_box(SIGNING_CONTEXT),
-                    black_box(&sig),
-                )
-                .expect("verify succeeds"),
-            );
+            vk.verify(
+                black_box(SAMPLE_MESSAGE),
+                black_box(SIGNING_CONTEXT),
+                black_box(&sig),
+            )
+            .expect("verify succeeds");
         });
     });
 

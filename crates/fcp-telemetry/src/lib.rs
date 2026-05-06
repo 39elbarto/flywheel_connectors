@@ -69,6 +69,9 @@ pub const PROMETHEUS_PORT_ENV_VARS: [&str; 4] = [
     "PROMETHEUS_PORT",
 ];
 
+/// Maximum accepted OTLP endpoint length.
+pub const MAX_OTLP_ENDPOINT_LEN: usize = 2048;
+
 fn resolve_prometheus_port() -> u16 {
     resolve_prometheus_port_with(|key| std::env::var(key).ok())
 }
@@ -210,6 +213,101 @@ impl TelemetryConfig {
     }
 }
 
+fn is_valid_otlp_port(port: &str) -> bool {
+    !port.is_empty() && port.parse::<u16>().is_ok()
+}
+
+fn validate_otlp_authority(authority: &str) -> bool {
+    if authority.is_empty() {
+        return false;
+    }
+
+    if authority.starts_with('[') {
+        let Some(close_bracket) = authority.find(']') else {
+            return false;
+        };
+        if close_bracket == 1 {
+            return false;
+        }
+        let after_bracket = &authority[close_bracket + 1..];
+        return after_bracket.is_empty()
+            || after_bracket
+                .strip_prefix(':')
+                .is_some_and(is_valid_otlp_port);
+    }
+
+    let (host, port) = authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(host, port)| (host, Some(port)));
+    !host.is_empty() && !host.contains(':') && port.is_none_or(is_valid_otlp_port)
+}
+
+/// Validate an operator-provided OTLP endpoint before initializing exporters.
+///
+/// The endpoint must be a whitespace-free `http://` or `https://` URL with a
+/// host and optional valid port. User-info, query strings, and fragments are
+/// rejected because they frequently carry API keys or bearer material and would
+/// be too easy to leak through SDK errors or logs.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::Config`] when the endpoint is empty, malformed, or
+/// secret-bearing.
+pub fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
+    if endpoint.trim().is_empty() {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must not be empty".to_string(),
+        ));
+    }
+    if endpoint.trim() != endpoint {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must not contain leading or trailing whitespace".to_string(),
+        ));
+    }
+    if endpoint.len() > MAX_OTLP_ENDPOINT_LEN {
+        return Err(TelemetryError::Config(format!(
+            "OTLP endpoint length must not exceed {MAX_OTLP_ENDPOINT_LEN} bytes"
+        )));
+    }
+    if endpoint
+        .chars()
+        .any(|ch| ch.is_control() || ch.is_whitespace())
+    {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must not contain whitespace or control characters".to_string(),
+        ));
+    }
+
+    let rest = endpoint
+        .strip_prefix("http://")
+        .or_else(|| endpoint.strip_prefix("https://"))
+        .ok_or_else(|| {
+            TelemetryError::Config("OTLP endpoint must use http:// or https://".to_string())
+        })?;
+    let authority_end = rest
+        .find(|ch| matches!(ch, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+
+    if !validate_otlp_authority(authority) {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must include a valid host and optional port".to_string(),
+        ));
+    }
+    if authority.contains('@') {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must not contain user-info credentials".to_string(),
+        ));
+    }
+    if endpoint.contains('?') || endpoint.contains('#') {
+        return Err(TelemetryError::Config(
+            "OTLP endpoint must not contain query strings or fragments".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
 fn init_telemetry_with<L, P, O>(
     state: &OnceLock<TelemetryState>,
     config: TelemetryConfig,
@@ -235,21 +333,28 @@ where
         return Ok(());
     }
 
+    let otlp_endpoint = if otlp_enabled && config.otlp_enabled {
+        config.otlp_endpoint.as_deref()
+    } else {
+        None
+    };
+    if let Some(endpoint) = otlp_endpoint {
+        validate_otlp_endpoint(endpoint)?;
+    }
+
     init_logging_fn(&config)?;
 
     if config.prometheus_enabled {
         init_prometheus_fn(config.prometheus_port)?;
     }
 
-    if otlp_enabled && config.otlp_enabled {
-        if let Some(ref endpoint) = config.otlp_endpoint {
-            // Thread the operator-configured sample rate through to the
-            // SDK so `with_sample_rate(0.01)` actually results in a 1%
-            // sampling rate rather than silently exporting 100% of
-            // spans. Prior behavior silently dropped the rate on the
-            // floor and used Sampler::AlwaysOn unconditionally.
-            init_otlp_fn(&config.service_name, endpoint, config.trace_sample_rate)?;
-        }
+    if let Some(endpoint) = otlp_endpoint {
+        // Thread the operator-configured sample rate through to the
+        // SDK so `with_sample_rate(0.01)` actually results in a 1%
+        // sampling rate rather than silently exporting 100% of
+        // spans. Prior behavior silently dropped the rate on the
+        // floor and used Sampler::AlwaysOn unconditionally.
+        init_otlp_fn(&config.service_name, endpoint, config.trace_sample_rate)?;
     }
 
     let _ = state.set(TelemetryState { config });
@@ -847,6 +952,80 @@ mod tests {
         let config = TelemetryConfig::new("test").with_otlp("");
         assert!(config.otlp_enabled);
         assert_eq!(config.otlp_endpoint, Some(String::new()));
+    }
+
+    #[test]
+    fn test_validate_otlp_endpoint_accepts_safe_http_and_https_urls() {
+        for endpoint in [
+            "http://localhost:4317",
+            "https://collector.example.com:4317",
+            "https://collector.example.com/v1/traces",
+            "http://[::1]:4317",
+        ] {
+            let result = validate_otlp_endpoint(endpoint);
+            assert!(
+                result.is_ok(),
+                "{endpoint} should be a valid OTLP endpoint: {result:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_otlp_endpoint_rejects_invalid_or_secret_bearing_urls() {
+        for endpoint in [
+            "",
+            "   ",
+            " http://localhost:4317",
+            "grpc://localhost:4317",
+            "http://",
+            "http://:4317",
+            "http://collector.example.com:abc",
+            "http://collector.example.com:70000",
+            "http://user:pass@collector.example.com:4317",
+            "https://collector.example.com:4317?label=value",
+            "https://collector.example.com:4317#fragment",
+            "https://collector.example.com/path with space",
+        ] {
+            let result = validate_otlp_endpoint(endpoint);
+            assert!(
+                matches!(result, Err(TelemetryError::Config(_))),
+                "{endpoint:?} should be rejected",
+            );
+        }
+    }
+
+    #[test]
+    fn test_init_telemetry_rejects_invalid_otlp_before_side_effects() {
+        let state = OnceLock::new();
+        let logging_calls = AtomicUsize::new(0);
+        let prometheus_calls = AtomicUsize::new(0);
+        let otlp_calls = AtomicUsize::new(0);
+
+        let result = init_telemetry_with(
+            &state,
+            TelemetryConfig::new("bad-otlp")
+                .with_prometheus(9091)
+                .with_otlp("https://api-key@collector.example.com:4317"),
+            true,
+            |_| {
+                logging_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_| {
+                prometheus_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _| {
+                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+        );
+
+        assert!(matches!(result, Err(TelemetryError::Config(_))));
+        assert!(state.get().is_none());
+        assert_eq!(logging_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(prometheus_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]

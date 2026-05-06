@@ -17,7 +17,7 @@ use opentelemetry_sdk::{
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 
-use crate::TelemetryError;
+use crate::{TelemetryError, validate_otlp_endpoint};
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 
@@ -99,6 +99,8 @@ pub fn init_otlp_tracer_with_sample_rate(
     endpoint: &str,
     sample_rate: f64,
 ) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
@@ -135,12 +137,36 @@ pub fn init_otlp_tracer_with_sample_rate(
     opentelemetry::global::set_tracer_provider(provider);
 
     tracing::info!(
-        endpoint = endpoint,
+        endpoint = %otlp_endpoint_log_label(endpoint),
         sample_rate = clamped,
         "OTLP trace exporter initialized"
     );
 
     Ok(())
+}
+
+fn otlp_endpoint_log_label(endpoint: &str) -> String {
+    let Some((scheme, rest)) = endpoint
+        .strip_prefix("http://")
+        .map(|rest| ("http://", rest))
+        .or_else(|| {
+            endpoint
+                .strip_prefix("https://")
+                .map(|rest| ("https://", rest))
+        })
+    else {
+        return "[invalid-otlp-endpoint]".to_string();
+    };
+    let authority_end = rest
+        .find(|ch| matches!(ch, '/' | '?' | '#'))
+        .unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    let redacted_authority = authority.rsplit('@').next().unwrap_or(authority);
+    if redacted_authority.is_empty() {
+        "[invalid-otlp-endpoint]".to_string()
+    } else {
+        format!("{scheme}{redacted_authority}")
+    }
 }
 
 fn render_prometheus_handle(handle: &PrometheusHandle) -> String {
@@ -325,6 +351,22 @@ mod tests {
 
     static METADATA: metrics::Metadata =
         metrics::Metadata::new(module_path!(), metrics::Level::INFO, Some(module_path!()));
+
+    #[test]
+    fn test_otlp_endpoint_log_label_removes_paths_queries_and_userinfo() {
+        assert_eq!(
+            otlp_endpoint_log_label("https://collector.example.com:4317/v1/traces"),
+            "https://collector.example.com:4317"
+        );
+        assert_eq!(
+            otlp_endpoint_log_label("https://userinfo@collector.example.com:4317?label=value"),
+            "https://collector.example.com:4317"
+        );
+        assert_eq!(
+            otlp_endpoint_log_label("grpc://collector.example.com:4317"),
+            "[invalid-otlp-endpoint]"
+        );
+    }
 
     #[test]
     fn test_health_response_healthy() {
@@ -572,23 +614,11 @@ mod tests {
             .unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
-        let mut response = String::new();
         // ConnectionReset on read is a tolerable outcome here — it
         // means the server flushed its small reject/404 response and
         // closed before the client finished reading. We care about
         // the bytes that DID arrive matching the expected status line.
-        match client.read_to_string(&mut response) {
-            Ok(_) => {}
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::UnexpectedEof
-                ) => {}
-            Err(err) => panic!("unexpected read error: {err:?}"),
-        }
+        let response = read_tolerating_close(&mut client).unwrap();
         server.join().unwrap();
 
         assert!(response.contains("HTTP/1.1 200 OK"));
@@ -601,14 +631,34 @@ mod tests {
     /// server's response is flushed, so a client streaming a large
     /// payload may see `ConnectionReset` or `BrokenPipe` mid-write —
     /// that is the success signal for the cap, not a failure.
-    fn write_tolerating_close(stream: &mut TcpStream, payload: &[u8]) {
-        if let Err(err) = stream.write_all(payload) {
-            match err.kind() {
-                io::ErrorKind::ConnectionReset
+    fn is_tolerable_connection_close(kind: io::ErrorKind) -> bool {
+        matches!(
+            kind,
+            io::ErrorKind::ConnectionReset
                 | io::ErrorKind::BrokenPipe
-                | io::ErrorKind::ConnectionAborted => {}
-                _ => panic!("unexpected write error: {err:?}"),
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::UnexpectedEof
+        )
+    }
+
+    fn read_tolerating_close(stream: &mut TcpStream) -> io::Result<String> {
+        let mut response = String::new();
+        match stream.read_to_string(&mut response) {
+            Ok(_) => Ok(response),
+            Err(err) if is_tolerable_connection_close(err.kind()) => Ok(response),
+            Err(err) => Err(err),
+        }
+    }
+
+    fn write_tolerating_close(stream: &mut TcpStream, payload: &[u8]) -> io::Result<()> {
+        if let Err(err) = stream.write_all(payload) {
+            if is_tolerable_connection_close(err.kind()) {
+                Ok(())
+            } else {
+                Err(err)
             }
+        } else {
+            Ok(())
         }
     }
 
@@ -638,27 +688,15 @@ mod tests {
         let mut payload = b"GET /".to_vec();
         payload.extend(std::iter::repeat_n(b'A', 16 * 1024));
         payload.extend(b" HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
-        write_tolerating_close(&mut client, &payload);
+        write_tolerating_close(&mut client, &payload).unwrap();
         // Best-effort shutdown — may fail if peer already closed.
         let _ = client.shutdown(std::net::Shutdown::Write);
 
-        let mut response = String::new();
         // ConnectionReset on read is a tolerable outcome here — it
         // means the server flushed its small reject/404 response and
         // closed before the client finished reading. We care about
         // the bytes that DID arrive matching the expected status line.
-        match client.read_to_string(&mut response) {
-            Ok(_) => {}
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::UnexpectedEof
-                ) => {}
-            Err(err) => panic!("unexpected read error: {err:?}"),
-        }
+        let response = read_tolerating_close(&mut client).unwrap();
         server.join().unwrap();
 
         // Status-line check is the load-bearing assertion. The body
@@ -693,23 +731,11 @@ mod tests {
             .unwrap();
         client.shutdown(std::net::Shutdown::Write).unwrap();
 
-        let mut response = String::new();
         // ConnectionReset on read is a tolerable outcome here — it
         // means the server flushed its small reject/404 response and
         // closed before the client finished reading. We care about
         // the bytes that DID arrive matching the expected status line.
-        match client.read_to_string(&mut response) {
-            Ok(_) => {}
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::UnexpectedEof
-                ) => {}
-            Err(err) => panic!("unexpected read error: {err:?}"),
-        }
+        let response = read_tolerating_close(&mut client).unwrap();
         server.join().unwrap();
 
         assert!(response.contains("HTTP/1.1 404 Not Found"));
@@ -745,26 +771,14 @@ mod tests {
         assert_eq!(payload.len(), MAX_REQUEST_LINE_BYTES);
         // Add header tail so the connection drains cleanly.
         payload.extend(b"Host: 127.0.0.1\r\n\r\n");
-        write_tolerating_close(&mut client, &payload);
+        write_tolerating_close(&mut client, &payload).unwrap();
         let _ = client.shutdown(std::net::Shutdown::Write);
 
-        let mut response = String::new();
         // ConnectionReset on read is a tolerable outcome here — it
         // means the server flushed its small reject/404 response and
         // closed before the client finished reading. We care about
         // the bytes that DID arrive matching the expected status line.
-        match client.read_to_string(&mut response) {
-            Ok(_) => {}
-            Err(err)
-                if matches!(
-                    err.kind(),
-                    io::ErrorKind::ConnectionReset
-                        | io::ErrorKind::BrokenPipe
-                        | io::ErrorKind::ConnectionAborted
-                        | io::ErrorKind::UnexpectedEof
-                ) => {}
-            Err(err) => panic!("unexpected read error: {err:?}"),
-        }
+        let response = read_tolerating_close(&mut client).unwrap();
         server.join().unwrap();
 
         assert!(

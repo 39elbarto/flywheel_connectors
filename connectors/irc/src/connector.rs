@@ -1,6 +1,9 @@
 //! `IRC` connector -- `FcpConnector` implementation.
 
-use std::time::Instant;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_prelude::{
@@ -14,6 +17,7 @@ use fcp_prelude::{
 use fcp_sdk::prelude::*;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::with_irc_session;
 use crate::types::{
@@ -23,6 +27,128 @@ use crate::types::{
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+fn default_irc_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_irc_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_ascii_lowercase()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn irc_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 // ─────────────────────────────────────────────────────────────────
 // Doctor types (V3 requirement)
@@ -60,11 +186,12 @@ struct IrcState {
     config: IrcConfig,
 }
 
-#[derive(Debug)]
 pub struct IrcConnector {
     base: BaseConnector,
     state: Option<IrcState>,
     verifier: Option<CapabilityVerifier>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     started_at: Instant,
 }
 
@@ -75,8 +202,22 @@ impl IrcConnector {
             base: BaseConnector::new(ConnectorId::from_static("fcp.irc")),
             state: None,
             verifier: None,
+            chat_coordination_config: default_irc_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             started_at: Instant::now(),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     fn manifest_hash() -> String {
@@ -238,21 +379,7 @@ impl IrcConnector {
         verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])?;
 
         let output = match req.operation.as_str() {
-            OP_SEND_MESSAGE => {
-                let target = required_string(&req.input, "target")?;
-                let message = required_string(&req.input, "message")?;
-                let transcript = with_irc_session(&state.config, |mut session| async move {
-                    session.send_privmsg(target, message).await?;
-                    session.quit().await?;
-                    Ok::<_, FcpError>(session.lines)
-                })
-                .await?;
-                json!({
-                    "status": "sent",
-                    "target": target,
-                    "transcript": transcript,
-                })
-            }
+            OP_SEND_MESSAGE => self.send_message_output(state, &req.input).await?,
             OP_JOIN_CHANNEL => {
                 let channel = required_string(&req.input, "channel")?;
                 let channel_key = req.input.get("channel_key").and_then(Value::as_str);
@@ -324,6 +451,71 @@ impl IrcConnector {
 
         Ok(InvokeResponse::ok(req.id, output))
     }
+
+    async fn send_message_output(&self, state: &IrcState, input: &Value) -> FcpResult<Value> {
+        let target = required_string(input, "target")?;
+        let message = required_string(input, "message")?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_irc_send(zone_id, target, claimant_agent_id.clone())
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "IRC send_message denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
+        let transcript = with_irc_session(&state.config, |mut session| async move {
+            session.send_privmsg(target, message).await?;
+            session.quit().await?;
+            Ok::<_, FcpError>(session.lines)
+        })
+        .await?;
+        Ok(json!({
+            "status": "sent",
+            "target": target,
+            "transcript": transcript,
+            "coordination": irc_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            ),
+        }))
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_irc_send(
+        &self,
+        zone_id: ZoneId,
+        target: &str,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(target.trim().to_ascii_lowercase());
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    None,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 impl Default for IrcConnector {
@@ -341,6 +533,10 @@ impl FcpConnector for IrcConnector {
     }
 
     async fn configure(&mut self, config: Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_irc_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config: IrcConfig =
             serde_json::from_value(config).map_err(|error| FcpError::InvalidRequest {
                 code: 1003,
@@ -348,6 +544,7 @@ impl FcpConnector for IrcConnector {
             })?;
         config.validate()?;
         self.state = Some(IrcState { config });
+        self.chat_coordination_config = chat_coordination_config;
         self.base.set_configured(true);
         self.base.set_handshaken(false);
         self.verifier = None;
@@ -659,7 +856,15 @@ mod tests {
     use crate::types::{DEFAULT_PORT_PLAIN, DEFAULT_PORT_TLS};
     use chrono::{Duration as ChronoDuration, Utc};
     use fcp_crypto::{cose::CapabilityTokenBuilder, ed25519::Ed25519SigningKey};
-    use fcp_prelude::{CapabilityConstraints, CapabilityToken, RequestId, SelfCheckStatus, ZoneId};
+    use fcp_prelude::{
+        CapabilityConstraints, CapabilityToken, InstanceId, RequestId, SelfCheckStatus, ZoneId,
+    };
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener as StdTcpListener,
+        sync::Mutex,
+        thread,
+    };
 
     fn handshake_request_for(host_public_key: [u8; 32]) -> HandshakeRequest {
         HandshakeRequest {
@@ -683,6 +888,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &InstanceId,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -696,6 +902,7 @@ mod tests {
             .zone_id("z:work")
             .principal("user:test")
             .operations(&[operation])
+            .target_instance(instance_id.as_str())
             .issuer("node:test")
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
@@ -703,6 +910,138 @@ mod tests {
             .sign(signing_key)
             .expect("token should sign");
         CapabilityToken::from_raw(raw)
+    }
+
+    fn invoke_request(
+        operation: &'static str,
+        input: Value,
+        capability_token: CapabilityToken,
+    ) -> InvokeRequest {
+        InvokeRequest {
+            r#type: "invoke".into(),
+            id: RequestId::new("irc-invoke"),
+            connector_id: ConnectorId::from_static("fcp.irc"),
+            operation: OperationId::from_static(operation),
+            zone_id: ZoneId::work(),
+            input,
+            capability_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    async fn configure_handshaken_connector(
+        connector: &mut IrcConnector,
+        config: Value,
+        signing_key: &Ed25519SigningKey,
+        capability: &'static str,
+        operation: &'static str,
+    ) -> CapabilityToken {
+        connector
+            .configure(config)
+            .await
+            .expect("configure should succeed");
+        connector
+            .handshake(handshake_request_for(
+                signing_key.verifying_key().to_bytes(),
+            ))
+            .await
+            .expect("handshake should succeed");
+        capability_token(
+            signing_key,
+            capability,
+            operation,
+            &connector.base.instance_id,
+        )
+    }
+
+    struct IrcTestServer {
+        port: u16,
+        lines: Arc<Mutex<Vec<String>>>,
+        handle: thread::JoinHandle<()>,
+    }
+
+    impl IrcTestServer {
+        fn spawn() -> Self {
+            let listener =
+                StdTcpListener::bind("127.0.0.1:0").expect("loopback IRC listener should bind");
+            let port = listener
+                .local_addr()
+                .expect("loopback listener should expose local addr")
+                .port();
+            let lines = Arc::new(Mutex::new(Vec::new()));
+            let captured_lines = Arc::clone(&lines);
+            let handle = thread::spawn(move || {
+                let (mut stream, _) = listener
+                    .accept()
+                    .expect("loopback IRC server should accept one client");
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .expect("set read timeout");
+                let mut reader = BufReader::new(
+                    stream
+                        .try_clone()
+                        .expect("loopback IRC stream should be cloneable"),
+                );
+                let mut welcomed = false;
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => break,
+                        Ok(_) => {
+                            let trimmed = line.trim_end_matches(['\r', '\n']).to_string();
+                            captured_lines
+                                .lock()
+                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .push(trimmed.clone());
+                            if trimmed.starts_with("USER ") && !welcomed {
+                                welcomed = true;
+                                stream
+                                    .write_all(b":irc.test 001 testbot :welcome\r\n")
+                                    .expect("write welcome");
+                                stream.flush().expect("flush welcome");
+                            }
+                            if trimmed.starts_with("QUIT ") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+            Self {
+                port,
+                lines,
+                handle,
+            }
+        }
+
+        fn config(&self) -> Value {
+            json!({
+                "server": "127.0.0.1",
+                "port": self.port,
+                "nick": "testbot",
+                "tls": false,
+                "request_timeout_ms": 1000
+            })
+        }
+
+        fn received_lines(&self) -> Vec<String> {
+            self.lines
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone()
+        }
+
+        fn join(self) {
+            self.handle.join().expect("loopback IRC server thread");
+        }
     }
 
     fn simulate_request(
@@ -929,7 +1268,12 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 OP_SEND_MESSAGE,
-                capability_token(&signing_key, CAP_MESSAGES_READ, OP_SEND_MESSAGE),
+                capability_token(
+                    &signing_key,
+                    CAP_MESSAGES_READ,
+                    OP_SEND_MESSAGE,
+                    &connector.base.instance_id,
+                ),
             ))
             .await
             .expect("simulate should return a policy result");
@@ -937,6 +1281,105 @@ mod tests {
         assert!(!response.would_succeed);
         assert_eq!(response.denial_code.as_deref(), Some("FCP-3003"));
         assert!(response.missing_capabilities.is_empty());
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_granted_includes_coordination_audit() {
+        let server = IrcTestServer::spawn();
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut connector = IrcConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = Ed25519SigningKey::generate();
+        let authorization = configure_handshaken_connector(
+            &mut connector,
+            server.config(),
+            &signing_key,
+            CAP_MESSAGES_WRITE,
+            OP_SEND_MESSAGE,
+        )
+        .await;
+
+        let response = connector
+            .invoke(invoke_request(
+                OP_SEND_MESSAGE,
+                json!({
+                    "target": "#Ops",
+                    "message": "hello from coordination"
+                }),
+                authorization,
+            ))
+            .await
+            .expect("send should claim and execute");
+
+        let result = response.result.expect("invoke should include result");
+        assert_eq!(result["status"], "sent");
+        assert_eq!(result["target"], "#Ops");
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit records");
+        assert_eq!(coordination[0]["event"], "claim_attempt");
+        assert_eq!(coordination[1]["event"], "claim_outcome");
+        assert_eq!(coordination[1]["outcome"], "granted");
+        assert_eq!(coordination[2]["event"], "send_executed");
+
+        let lines = server.received_lines();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line == "PRIVMSG #Ops :hello from coordination"),
+            "loopback server should observe IRC PRIVMSG, got {lines:?}"
+        );
+        server.join();
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_denies_duplicate_owner_before_irc_session() {
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let claim_key = ClaimKey::for_chat_message(
+            ZoneId::work(),
+            ConnectorId::from_static("fcp.irc"),
+            ChannelId::new("#ops"),
+            None,
+            DmMode::TreatAsThread,
+        )
+        .expect("IRC target should become a coordination thread");
+        assert!(
+            checker
+                .claim_now(claim_key, AgentId::new("peer-agent"), Instant::now())
+                .is_granted()
+        );
+
+        let mut connector = IrcConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = Ed25519SigningKey::generate();
+        let authorization = configure_handshaken_connector(
+            &mut connector,
+            json!({
+                "server": "127.0.0.1",
+                "port": 1,
+                "nick": "testbot",
+                "tls": false,
+                "request_timeout_ms": 50
+            }),
+            &signing_key,
+            CAP_MESSAGES_WRITE,
+            OP_SEND_MESSAGE,
+        )
+        .await;
+
+        let denied = connector
+            .invoke(invoke_request(
+                OP_SEND_MESSAGE,
+                json!({
+                    "target": "#Ops",
+                    "message": "blocked duplicate"
+                }),
+                authorization,
+            ))
+            .await
+            .expect_err("duplicate owner should be denied before TCP connect");
+
+        assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
     }
 
     #[fcp_async_core::runtime::test]

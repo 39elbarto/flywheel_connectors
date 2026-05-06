@@ -14,13 +14,16 @@ use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::sync::RwLock;
 use fcp_core::*;
 use fcp_sdk::{
-    ErrorClass, FormatMode, Formatter, Limits, classify_error_message,
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    ErrorClass, FormatMode, Formatter, InMemoryThreadOwnershipChecker, Limits, ThreadId,
+    ThreadOwnershipChecker, classify_error_message,
     runtime::{PollResult, PollingCursor, PollingSupervisor, SupervisorConfig},
     validate_input_with_limits, validate_output_with_limits,
 };
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tracing::{info, warn};
@@ -37,6 +40,128 @@ const TELEGRAM_BOT_SECRET_MAX_CHARS: usize = 128;
 const MAX_TELEGRAM_WEBHOOK_PAYLOAD_BYTES: usize = 1024 * 1024;
 const TELEGRAM_WEBHOOK_REPLAY_CACHE_ENTRIES: usize = 2048;
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+
+fn default_telegram_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_telegram_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_owned()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn telegram_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 fn current_unix_timestamp_secs() -> u64 {
     SystemTime::now()
@@ -351,6 +476,8 @@ pub struct TelegramConnector {
     // Event broadcast
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
     webhook_replay_cache: Arc<RwLock<TelegramWebhookReplayCache>>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 
     // Metrics
     start_time: Instant,
@@ -447,6 +574,8 @@ impl TelegramConnector {
             poll_shutdown_tx: None,
             event_tx,
             webhook_replay_cache: Arc::new(RwLock::new(TelegramWebhookReplayCache::default())),
+            chat_coordination_config: default_telegram_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             start_time: Instant::now(),
         }
     }
@@ -464,6 +593,18 @@ impl TelegramConnector {
         self.event_tx.subscribe()
     }
 
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -476,7 +617,7 @@ impl TelegramConnector {
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
         let mut config: TelegramConfig =
-            serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
+            serde_json::from_value(params.clone()).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid configuration: {e}"),
             })?;
@@ -485,6 +626,10 @@ impl TelegramConnector {
         let auth_mode = config.resolve_auth_mode()?;
         let normalized_base_url = config.normalize_base_url()?;
         config.base_url = Some(normalized_base_url.clone());
+        let chat_coordination_config = parse_telegram_chat_coordination_config(
+            params.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
 
         let mut status = "configured";
         let mut details = json!({});
@@ -541,6 +686,7 @@ impl TelegramConnector {
         }
 
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         self.webhook_replay_cache.write().await.clear();
         self.base.set_configured(true);
 
@@ -1530,6 +1676,23 @@ impl TelegramConnector {
         }
         options.message_thread_id = Self::message_thread_id_from_input(&input)?;
 
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_telegram_send(
+                zone_id,
+                &chat_id,
+                options.message_thread_id,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Telegram send_message denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
         let map_external = |err: TelegramError| err.to_fcp_error();
 
         let message = match client
@@ -1555,7 +1718,12 @@ impl TelegramConnector {
                                 .map(|msg| {
                                     json!({
                                         "message_id": msg.message_id,
-                                        "chat_id": msg.chat.id
+                                        "chat_id": msg.chat.id,
+                                        "coordination": telegram_coordination_audit_records(
+                                            &coordination,
+                                            self.chat_coordination_config.backend(),
+                                            &claimant_agent_id,
+                                        )
                                     })
                                 })
                                 .map_err(map_external);
@@ -1569,7 +1737,12 @@ impl TelegramConnector {
 
         let response = json!({
             "message_id": message.message_id,
-            "chat_id": message.chat.id
+            "chat_id": message.chat.id,
+            "coordination": telegram_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            )
         });
 
         if let Some(schema) = Self::output_schema_for("telegram.send_message") {
@@ -1635,6 +1808,23 @@ impl TelegramConnector {
         }
         options.message_thread_id = Self::message_thread_id_from_input(&input)?;
 
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_telegram_send(
+                zone_id,
+                &chat_id,
+                options.message_thread_id,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Telegram send_media denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
         let map_external = |err: TelegramError| err.to_fcp_error();
 
         let message: Message = match media_type {
@@ -1670,7 +1860,12 @@ impl TelegramConnector {
 
         let response = json!({
             "message_id": message.message_id,
-            "chat_id": message.chat.id
+            "chat_id": message.chat.id,
+            "coordination": telegram_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            )
         });
 
         if let Some(schema) = Self::output_schema_for("telegram.send_media") {
@@ -1868,6 +2063,41 @@ impl TelegramConnector {
             validate_output_with_limits(&schema, &response, &Limits::default())?;
         }
         Ok(response)
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_telegram_send(
+        &self,
+        zone_id: ZoneId,
+        chat_id: &str,
+        message_thread_id: Option<i64>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(chat_id.trim().to_owned());
+        let thread_id = message_thread_id
+            .map(|thread_id| ThreadId::new(format!("message_thread_id:{thread_id}")));
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 
     /// Handle subscribe method.
@@ -3072,6 +3302,68 @@ mod tests {
 
         let capability = generate_valid_token(&signing_key, cap, &connector.base.instance_id);
         (connector, capability, mock_server)
+    }
+
+    async fn mount_telegram_setup_mocks(mock_server: &MockServer) {
+        Mock::given(method("GET"))
+            .and(path(token_path("getMe")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "id": 123456789,
+                    "is_bot": true,
+                    "first_name": "Test Bot",
+                    "username": "test_bot"
+                }
+            })))
+            .mount(mock_server)
+            .await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("getUpdates")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": []
+            })))
+            .mount(mock_server)
+            .await;
+    }
+
+    async fn configure_handshaken_connector(
+        connector: &mut TelegramConnector,
+        mock_server: &MockServer,
+        signing_key: &Ed25519SigningKey,
+        cap: &str,
+        zone_label: &str,
+    ) -> fcp_core::CapabilityToken {
+        connector
+            .handle_configure(serde_json::json!({
+                "credential": test_bot_credential(),
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .expect("configure connector");
+
+        connector
+            .handle_handshake(serde_json::json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "zone_dir": unique_zone_dir(zone_label),
+                "host_public_key": signing_key.verifying_key().to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": [cap]
+            }))
+            .await
+            .expect("handshake connector");
+
+        generate_valid_token(signing_key, cap, &connector.base.instance_id)
+    }
+
+    fn count_requests_for_path(requests: &[wiremock::Request], expected_path: &str) -> usize {
+        requests
+            .iter()
+            .filter(|request| request.url.path() == expected_path)
+            .count()
     }
 
     #[test]
@@ -4878,6 +5170,182 @@ mod tests {
             .expect("send_message invoke should succeed");
 
         assert_eq!(result.get("message_id").and_then(|v| v.as_i64()), Some(56));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_message_denies_duplicate_owner_before_http_send() {
+        let server = MockServer::start().await;
+        mount_telegram_setup_mocks(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("sendMessage")))
+            .and(body_json(serde_json::json!({
+                "chat_id": "208214988",
+                "text": "owner topic reply",
+                "message_thread_id": 17585
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 56,
+                    "chat": { "id": 208214988, "type": "supergroup", "title": "Topic" },
+                    "date": 1234567890,
+                    "text": "owner topic reply"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut owner = TelegramConnector::new()
+            .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+        let mut peer = TelegramConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_authorization = configure_handshaken_connector(
+            &mut owner,
+            &server,
+            &signing_key,
+            "telegram.send_message",
+            "telegram-owner",
+        )
+        .await;
+        let peer_authorization = configure_handshaken_connector(
+            &mut peer,
+            &server,
+            &signing_key,
+            "telegram.send_message",
+            "telegram-peer",
+        )
+        .await;
+
+        let owner_response = owner
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": {
+                    "chat_id": "208214988",
+                    "text": "owner topic reply",
+                    "message_thread_id": 17585
+                },
+                "capability_token": owner_authorization
+            }))
+            .await
+            .expect("owner send should claim and execute");
+        let records = owner_response
+            .get("coordination")
+            .and_then(serde_json::Value::as_array)
+            .expect("coordination audit records");
+        assert!(
+            records.iter().any(
+                |record| record.get("event").and_then(serde_json::Value::as_str)
+                    == Some("send_executed")
+            ),
+            "successful send should include send_executed audit record"
+        );
+
+        let denied = peer
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": {
+                    "chat_id": "208214988",
+                    "text": "peer topic reply",
+                    "message_thread_id": 17585
+                },
+                "capability_token": peer_authorization
+            }))
+            .await
+            .expect_err("peer should be denied before HTTP send");
+        assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(
+            count_requests_for_path(&requests, token_path("sendMessage").as_str()),
+            1
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn send_media_denies_duplicate_owner_before_http_send() {
+        let server = MockServer::start().await;
+        mount_telegram_setup_mocks(&server).await;
+
+        Mock::given(method("POST"))
+            .and(path(token_path("sendMessage")))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "ok": true,
+                "result": {
+                    "message_id": 57,
+                    "chat": { "id": 208214988, "type": "supergroup", "title": "Topic" },
+                    "date": 1234567890,
+                    "text": "owner topic reply"
+                }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut owner = TelegramConnector::new()
+            .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+        let mut peer = TelegramConnector::new()
+            .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+        let signing_key = Ed25519SigningKey::generate();
+        let owner_authorization = configure_handshaken_connector(
+            &mut owner,
+            &server,
+            &signing_key,
+            "telegram.send_message",
+            "telegram-media-owner",
+        )
+        .await;
+        let peer_authorization = configure_handshaken_connector(
+            &mut peer,
+            &server,
+            &signing_key,
+            "telegram.send_media",
+            "telegram-media-peer",
+        )
+        .await;
+
+        owner
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_message",
+                "input": {
+                    "chat_id": "208214988",
+                    "text": "owner topic reply",
+                    "message_thread_id": 17585
+                },
+                "capability_token": owner_authorization
+            }))
+            .await
+            .expect("owner send should claim and execute");
+
+        let denied = peer
+            .handle_invoke(serde_json::json!({
+                "operation": "telegram.send_media",
+                "input": {
+                    "chat_id": "208214988",
+                    "media_type": "photo",
+                    "media": "https://example.com/photo.jpg",
+                    "caption": "blocked peer media",
+                    "message_thread_id": 17585
+                },
+                "capability_token": peer_authorization
+            }))
+            .await
+            .expect_err("peer media send should be denied before HTTP send");
+        assert!(matches!(denied, FcpError::Unauthorized { code: 4090, .. }));
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert_eq!(
+            count_requests_for_path(&requests, token_path("sendMessage").as_str()),
+            1
+        );
+        assert_eq!(
+            count_requests_for_path(&requests, token_path("sendPhoto").as_str()),
+            0
+        );
     }
 
     #[fcp_async_core::runtime::test]

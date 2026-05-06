@@ -58,6 +58,12 @@ impl ShopifyClient {
         &self.base_url
     }
 
+    #[must_use]
+    pub fn with_base_url(mut self, base_url: &str) -> Self {
+        self.base_url = base_url.trim().trim_end_matches('/').to_string();
+        self
+    }
+
     pub fn is_secretless(&self) -> bool {
         self.auth.is_secretless()
     }

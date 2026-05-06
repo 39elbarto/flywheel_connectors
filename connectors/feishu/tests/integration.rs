@@ -20,7 +20,7 @@ use fcp_prelude::{
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -132,6 +132,223 @@ fn signed_webhook_input(raw_body: String, policy: serde_json::Value) -> serde_js
     })
 }
 
+fn configured_ingress_webhook_input(raw_body: String, policy: Value) -> Value {
+    let mut input = signed_webhook_input(raw_body, policy);
+    let input_object = input.as_object_mut().expect("webhook input object");
+    input_object.remove("verification_token");
+    input_object.remove("encrypt_key");
+    input_object.insert("path".to_owned(), json!("/feishu/webhook"));
+    input
+        .get_mut("headers")
+        .and_then(Value::as_object_mut)
+        .expect("headers object")
+        .insert(
+            "content-type".to_owned(),
+            json!("application/json; charset=utf-8"),
+        );
+    input
+}
+
+fn feishu_event_body(event_id: &str, event_type: &str, event: Value) -> String {
+    serde_json::to_string(&json!({
+        "schema": "2.0",
+        "header": {
+            "event_id": event_id,
+            "event_type": event_type,
+            "token": "integration-token",
+        },
+        "event": event,
+    }))
+    .expect("serialize Feishu event body")
+}
+
+fn feishu_message_event(event_id: &str, sender: &str, chat: &str, mention_bot: bool) -> String {
+    let mentions = if mention_bot {
+        json!([{ "id": { "open_id": "ou_bot" } }])
+    } else {
+        json!([])
+    };
+    feishu_event_body(
+        event_id,
+        "im.message.receive_v1",
+        json!({
+            "sender": { "sender_id": { "open_id": sender } },
+            "message": {
+                "message_id": format!("om_{event_id}"),
+                "chat_id": chat,
+                "chat_type": "group",
+                "message_type": "text",
+                "content": "{\"text\":\"sensitive loopback text\"}",
+                "mentions": mentions,
+            }
+        }),
+    )
+}
+
+fn feishu_read_event(event_id: &str, reader: &str, chat: &str) -> String {
+    feishu_event_body(
+        event_id,
+        "im.message.message_read_v1",
+        json!({
+            "reader": { "reader_id": { "open_id": reader } },
+            "message_id": format!("om_{event_id}"),
+            "chat_id": chat,
+        }),
+    )
+}
+
+fn feishu_reaction_event(event_id: &str, event_type: &str, operator: &str, chat: &str) -> String {
+    feishu_event_body(
+        event_id,
+        event_type,
+        json!({
+            "operator": { "operator_id": { "open_id": operator } },
+            "message_id": format!("om_{event_id}"),
+            "chat_id": chat,
+            "reaction": { "emoji_type": "OK" },
+        }),
+    )
+}
+
+fn feishu_comment_event(event_id: &str, actor: &str, mentioned: bool) -> String {
+    feishu_event_body(
+        event_id,
+        "drive.notice.comment_add_v1",
+        json!({
+            "file_token": "doc_fixture_token",
+            "file_type": "docx",
+            "comment_id": "comment_fixture_card",
+            "reply_id": "reply_fixture_card",
+            "notice_type": "add_reply",
+            "is_mentioned": mentioned,
+            "user_id": { "open_id": actor },
+        }),
+    )
+}
+
+fn short_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hex::encode(hasher.finalize());
+    format!("sha256:{}", &digest[..16])
+}
+
+fn string_path<'a>(value: &'a Value, path: &[&str]) -> Option<&'a str> {
+    let mut current = value;
+    for segment in path {
+        current = current.get(*segment)?;
+    }
+    current.as_str()
+}
+
+fn hashed_or_null(value: Option<&str>) -> Value {
+    value.map_or(Value::Null, |item| json!(short_hash(item)))
+}
+
+fn jsonl_command() -> &'static str {
+    "cargo test -p fcp-feishu --test integration feishu_webhook_comment_loopback_evidence_bundle -- --nocapture"
+}
+
+fn webhook_loopback_evidence_line(scenario: &str, response: &Value) -> Value {
+    let normalized = &response["normalized_event"];
+    let policy = &response["policy_decision"];
+    let actor = string_path(normalized, &["sender_open_id"])
+        .or_else(|| string_path(normalized, &["reader_open_id"]))
+        .or_else(|| string_path(normalized, &["operator_open_id"]))
+        .or_else(|| string_path(normalized, &["actor_open_id"]))
+        .or_else(|| string_path(policy, &["actor_open_id"]));
+    let status_code = response["status_code"].as_u64().unwrap_or_default();
+    let reason_code = response["reason_code"].as_str().unwrap_or("unknown");
+    let signature_verified = response["request_region"]["signature_verified"]
+        .as_bool()
+        .unwrap_or(false);
+    let retry_decision = match reason_code {
+        "rate_limited" => "host_rate_limit_rejected_before_connector_retry",
+        "body_timeout" => "request_cancelled_before_dispatch",
+        _ => "not_applicable",
+    };
+
+    json!({
+        "event": "feishu_loopback_webhook_result",
+        "schema": "feishu.loopback.evidence.v1",
+        "command_line": jsonl_command(),
+        "git_revision": option_env!("FCP_TEST_GIT_REVISION").unwrap_or("test-runtime"),
+        "fixture_id": "feishu-webhook-comment-loopback-v1",
+        "scenario": scenario,
+        "tenant_app_id_hash": short_hash(APP_ID),
+        "tenant_id_hash": short_hash("tenant-loopback"),
+        "user_id_hash": hashed_or_null(actor),
+        "comment_id_hash": hashed_or_null(string_path(normalized, &["comment_id"])),
+        "event_id_hash": hashed_or_null(response["event_id"].as_str()),
+        "dedupe_key_hash": hashed_or_null(response["dedupe_key"].as_str()),
+        "request_region": {
+            "transport": response["request_region"]["transport"],
+            "route": response["request_region"]["path"],
+            "configured_ingress": response["request_region"]["configured_ingress"],
+            "route_checked": response["request_region"]["route_checked"],
+            "content_type_checked": response["request_region"]["content_type_checked"],
+            "listener_socket_opened": response["request_region"]["listener_socket_opened"],
+            "event_fanout": response["request_region"]["event_fanout"],
+        },
+        "signature_result": if signature_verified { "verified" } else { reason_code },
+        "sender_policy_decision": policy.get("reason_code").and_then(Value::as_str).unwrap_or(reason_code),
+        "capability_decision": "invoke_capability_token_accepted",
+        "retry_backoff": retry_decision,
+        "http_status": status_code,
+        "event_topic": string_path(normalized, &["topic"]),
+        "event_emitted": response["event_emitted"],
+        "fcp_error_mapping": reason_code,
+        "cleanup_result": "connector_drop_no_external_state",
+        "artifact_paths": ["stdout:feishu_webhook_comment_loopback_jsonl"],
+        "redaction": {
+            "raw_message_content_included": false,
+            "raw_comment_content_included": false,
+            "display_names_included": false,
+            "tokens_included": false,
+        },
+    })
+}
+
+fn operation_loopback_evidence_line(scenario: &str, operation: &str, result: &Value) -> Value {
+    json!({
+        "event": "feishu_loopback_operation_result",
+        "schema": "feishu.loopback.evidence.v1",
+        "command_line": jsonl_command(),
+        "git_revision": option_env!("FCP_TEST_GIT_REVISION").unwrap_or("test-runtime"),
+        "fixture_id": "feishu-webhook-comment-loopback-v1",
+        "scenario": scenario,
+        "operation": operation,
+        "tenant_app_id_hash": short_hash(APP_ID),
+        "user_id_hash": hashed_or_null(
+            result.get("actor_open_id").and_then(Value::as_str)
+                .or_else(|| result.get("paired_open_ids").and_then(Value::as_array).and_then(|ids| ids.first()).and_then(Value::as_str))
+        ),
+        "comment_id_hash": short_hash("comment_fixture_card"),
+        "capability_decision": "invoke_capability_token_accepted",
+        "http_status": 200,
+        "retry_backoff": "not_applicable",
+        "fcp_error_mapping": "ok",
+        "operation_summary": {
+            "changed": result.get("changed").cloned().unwrap_or(Value::Null),
+            "paired_user_count": result.get("paired_open_ids").and_then(Value::as_array).map_or(0, Vec::len),
+            "delivered": result.get("delivered").cloned().unwrap_or(Value::Null),
+            "delivery_mode": result.get("delivery_mode").cloned().unwrap_or(Value::Null),
+            "fallback_used": result.get("fallback_used").cloned().unwrap_or(Value::Null),
+            "action": result.get("action").cloned().unwrap_or(Value::Null),
+            "reaction_type": result.get("reaction_type").cloned().unwrap_or(Value::Null),
+            "raw_content_logged": result.get("raw_content_logged").cloned().unwrap_or(Value::Null),
+        },
+        "cleanup_result": if scenario.contains("cleanup") { "reaction_removed" } else { "not_applicable" },
+        "artifact_paths": ["stdout:feishu_webhook_comment_loopback_jsonl"],
+        "redaction": {
+            "raw_message_content_included": false,
+            "raw_comment_content_included": false,
+            "display_names_included": false,
+            "tokens_included": false,
+        },
+    })
+}
+
 fn invoke_req(
     op: &'static str,
     input: serde_json::Value,
@@ -211,6 +428,24 @@ async fn setup_connector_with_extra_config(
 
 async fn setup_connector(server: &MockServer) -> (FeishuConnector, Ed25519SigningKey) {
     setup_connector_with_extra_config(server, json!({})).await
+}
+
+async fn invoke_ok_result(
+    connector: &FeishuConnector,
+    signing_key: &Ed25519SigningKey,
+    op: &'static str,
+    input: Value,
+) -> Value {
+    let response = connector
+        .invoke(invoke_req(
+            op,
+            input,
+            generate_valid_token(signing_key, op, connector.instance_id()),
+        ))
+        .await
+        .expect("operation should invoke");
+    assert_eq!(response.status, InvokeStatus::Ok);
+    response.result.expect("operation result")
 }
 
 #[fcp_async_core::runtime::test]
@@ -588,6 +823,443 @@ async fn invoke_webhook_ingest_configured_host_ingress_emits_fanout_contract() {
         "feishu_configured_webhook_ingress_evidence={}",
         serde_json::to_string_pretty(&result).unwrap()
     );
+}
+
+#[fcp_async_core::runtime::test]
+async fn feishu_webhook_comment_loopback_evidence_bundle() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/open-apis/drive/v1/files/doc_fixture_token/comments/comment_fixture_card/replies",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": { "reply_id": "reply_fixture_created" }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/open-apis/drive/v2/files/doc_fixture_token/comments/reaction",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": { "reaction_id": "reaction_loopback_ok" }
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector_with_extra_config(
+        &server,
+        json!({
+            "webhook_ingress": {
+                "enabled": true,
+                "path": "/feishu/webhook",
+                "verification_token": "integration-token",
+                "encrypt_key": "integration-encrypt-key",
+                "max_body_bytes": 4096
+            }
+        }),
+    )
+    .await;
+
+    let message_policy = json!({
+        "allowed_sender_open_ids": ["ou_allowed"],
+        "allowed_chat_ids": ["oc_allowed"],
+        "require_mention": true,
+        "bot_open_id": "ou_bot",
+    });
+    let comment_policy = json!({
+        "comment": {
+            "enabled": true,
+            "policy": "pairing",
+            "require_mention": true,
+            "document_allowlist": ["doc_fixture_token"]
+        }
+    });
+    let mut transcript = Vec::new();
+
+    let mut invalid_signature = configured_ingress_webhook_input(
+        feishu_message_event(
+            "evt-loopback-invalid-signature",
+            "ou_allowed",
+            "oc_allowed",
+            true,
+        ),
+        message_policy.clone(),
+    );
+    invalid_signature["headers"]["x-lark-signature"] = json!("00");
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        invalid_signature,
+    )
+    .await;
+    assert_eq!(result["status_code"], 401);
+    assert_eq!(result["reason_code"], "invalid_signature");
+    transcript.push(webhook_loopback_evidence_line("invalid_signature", &result));
+
+    let mut missing_signature = configured_ingress_webhook_input(
+        feishu_message_event(
+            "evt-loopback-missing-signature",
+            "ou_allowed",
+            "oc_allowed",
+            true,
+        ),
+        message_policy.clone(),
+    );
+    missing_signature["headers"]
+        .as_object_mut()
+        .expect("headers object")
+        .remove("x-lark-signature");
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        missing_signature,
+    )
+    .await;
+    assert_eq!(result["status_code"], 401);
+    assert_eq!(result["reason_code"], "missing_signature");
+    transcript.push(webhook_loopback_evidence_line("missing_signature", &result));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input("{not-json".into(), json!({})),
+    )
+    .await;
+    assert_eq!(result["status_code"], 400);
+    assert_eq!(result["reason_code"], "malformed_json");
+    transcript.push(webhook_loopback_evidence_line(
+        "signed_invalid_json",
+        &result,
+    ));
+
+    let challenge_body = serde_json::to_string(&json!({
+        "type": "url_verification",
+        "token": "integration-token",
+        "challenge": "loopback-challenge",
+    }))
+    .expect("serialize challenge");
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(challenge_body, json!({})),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "challenge_response");
+    assert_eq!(result["response_body"]["challenge"], "loopback-challenge");
+    transcript.push(webhook_loopback_evidence_line(
+        "challenge_response",
+        &result,
+    ));
+
+    let mut rate_limited = configured_ingress_webhook_input(
+        feishu_message_event(
+            "evt-loopback-rate-limited",
+            "ou_allowed",
+            "oc_allowed",
+            true,
+        ),
+        message_policy.clone(),
+    );
+    rate_limited["rate_limited"] = json!(true);
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        rate_limited,
+    )
+    .await;
+    assert_eq!(result["status_code"], 429);
+    assert_eq!(result["reason_code"], "rate_limited");
+    transcript.push(webhook_loopback_evidence_line(
+        "request_region_rate_limit",
+        &result,
+    ));
+
+    let mut timed_out = configured_ingress_webhook_input(
+        feishu_message_event("evt-loopback-timeout", "ou_allowed", "oc_allowed", true),
+        message_policy.clone(),
+    );
+    timed_out["deadline_exceeded"] = json!(true);
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        timed_out,
+    )
+    .await;
+    assert_eq!(result["status_code"], 408);
+    assert_eq!(result["reason_code"], "body_timeout");
+    transcript.push(webhook_loopback_evidence_line(
+        "request_region_cancellation",
+        &result,
+    ));
+
+    let accepted_message = configured_ingress_webhook_input(
+        feishu_message_event("evt-loopback-message", "ou_allowed", "oc_allowed", true),
+        message_policy.clone(),
+    );
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        accepted_message.clone(),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "event_accepted");
+    assert_eq!(
+        result["normalized_event"]["topic"],
+        "feishu.webhook.message_received"
+    );
+    transcript.push(webhook_loopback_evidence_line(
+        "authorized_message",
+        &result,
+    ));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        accepted_message,
+    )
+    .await;
+    assert_eq!(result["reason_code"], "duplicate_event");
+    assert_eq!(result["event_emitted"], false);
+    transcript.push(webhook_loopback_evidence_line("duplicate_replay", &result));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(
+            feishu_message_event(
+                "evt-loopback-denied-sender",
+                "ou_intruder",
+                "oc_allowed",
+                true,
+            ),
+            message_policy.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "sender_not_allowed");
+    assert_eq!(result["event_emitted"], false);
+    transcript.push(webhook_loopback_evidence_line("denied_sender", &result));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(
+            feishu_message_event("evt-loopback-denied-chat", "ou_allowed", "oc_denied", true),
+            message_policy.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "chat_not_allowed");
+    assert_eq!(result["event_emitted"], false);
+    transcript.push(webhook_loopback_evidence_line("denied_group", &result));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(
+            feishu_read_event("evt-loopback-read", "ou_reader", "oc_allowed"),
+            json!({ "allowed_chat_ids": ["oc_allowed"] }),
+        ),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "event_accepted");
+    assert_eq!(
+        result["normalized_event"]["topic"],
+        "feishu.webhook.message_read"
+    );
+    transcript.push(webhook_loopback_evidence_line("read_event", &result));
+
+    for (scenario, event_type, expected_topic) in [
+        (
+            "reaction_created",
+            "im.message.reaction.created_v1",
+            "feishu.webhook.reaction_created",
+        ),
+        (
+            "reaction_deleted",
+            "im.message.reaction.deleted_v1",
+            "feishu.webhook.reaction_deleted",
+        ),
+    ] {
+        let result = invoke_ok_result(
+            &connector,
+            &signing_key,
+            OP_WEBHOOK_INGEST_REQUEST,
+            configured_ingress_webhook_input(
+                feishu_reaction_event(
+                    &format!("evt-loopback-{scenario}"),
+                    event_type,
+                    "ou_reactor",
+                    "oc_allowed",
+                ),
+                json!({
+                    "allowed_sender_open_ids": ["ou_reactor"],
+                    "allowed_chat_ids": ["oc_allowed"]
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(result["reason_code"], "event_accepted");
+        assert_eq!(result["normalized_event"]["topic"], expected_topic);
+        transcript.push(webhook_loopback_evidence_line(scenario, &result));
+    }
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(
+            feishu_comment_event("evt-loopback-comment-denied", "ou_commenter", true),
+            comment_policy.clone(),
+        ),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "comment_actor_not_allowed");
+    assert_eq!(result["event_emitted"], false);
+    transcript.push(webhook_loopback_evidence_line("denied_comment", &result));
+
+    let pairing = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_COMMENTS_PAIRINGS_MANAGE,
+        json!({
+            "action": "add",
+            "actor_open_id": "ou_commenter"
+        }),
+    )
+    .await;
+    assert_eq!(pairing["changed"], true);
+    transcript.push(operation_loopback_evidence_line(
+        "policy_reload_pairing_add",
+        OP_COMMENTS_PAIRINGS_MANAGE,
+        &pairing,
+    ));
+
+    let result = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_WEBHOOK_INGEST_REQUEST,
+        configured_ingress_webhook_input(
+            feishu_comment_event("evt-loopback-comment-authorized", "ou_commenter", true),
+            comment_policy,
+        ),
+    )
+    .await;
+    assert_eq!(result["reason_code"], "event_accepted");
+    assert_eq!(
+        result["policy_decision"]["reason_code"],
+        "comment_pairing_match"
+    );
+    assert_eq!(
+        result["normalized_event"]["topic"],
+        "feishu.webhook.document_comment_added"
+    );
+    transcript.push(webhook_loopback_evidence_line(
+        "authorized_comment",
+        &result,
+    ));
+
+    let reply = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_COMMENTS_REPLY,
+        json!({
+            "file_token": "doc_fixture_token",
+            "file_type": "docx",
+            "comment_id": "comment_fixture_card",
+            "content": "sensitive reply text",
+            "fallback_to_whole_comment": false
+        }),
+    )
+    .await;
+    assert_eq!(reply["delivered"], true);
+    assert_eq!(reply["delivery_mode"], "thread_reply");
+    assert_eq!(reply["raw_content_logged"], false);
+    transcript.push(operation_loopback_evidence_line(
+        "comment_reply_delivery",
+        OP_COMMENTS_REPLY,
+        &reply,
+    ));
+
+    let cleanup = invoke_ok_result(
+        &connector,
+        &signing_key,
+        OP_COMMENTS_REACTION,
+        json!({
+            "file_token": "doc_fixture_token",
+            "file_type": "docx",
+            "reply_id": "reply_fixture_card",
+            "action": "delete",
+            "reaction_type": "OK"
+        }),
+    )
+    .await;
+    assert_eq!(cleanup["action"], "delete");
+    assert_eq!(cleanup["reaction_type"], "OK");
+    assert_eq!(cleanup["raw_content_logged"], false);
+    transcript.push(operation_loopback_evidence_line(
+        "comment_reaction_cleanup",
+        OP_COMMENTS_REACTION,
+        &cleanup,
+    ));
+
+    let jsonl = transcript
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("serialize JSONL")
+        .join("\n");
+    assert_eq!(transcript.len(), 18);
+    for line in jsonl.lines() {
+        let parsed: Value = serde_json::from_str(line).expect("JSONL line should parse");
+        assert_eq!(parsed["schema"], "feishu.loopback.evidence.v1");
+        assert_eq!(parsed["fixture_id"], "feishu-webhook-comment-loopback-v1");
+        assert_eq!(parsed["redaction"]["raw_message_content_included"], false);
+        assert_eq!(parsed["redaction"]["raw_comment_content_included"], false);
+        assert_eq!(parsed["redaction"]["tokens_included"], false);
+    }
+    for forbidden in [
+        "integration-token",
+        "integration-encrypt-key",
+        APP_SECRET,
+        TENANT_TOKEN,
+        "sensitive loopback text",
+        "sensitive reply text",
+        "ou_allowed",
+        "ou_intruder",
+        "ou_commenter",
+        "oc_allowed",
+        "doc_fixture_token",
+        "comment_fixture_card",
+        "reply_fixture_card",
+    ] {
+        assert!(
+            !jsonl.contains(forbidden),
+            "loopback evidence JSONL leaked `{forbidden}`"
+        );
+    }
+
+    println!("feishu_webhook_comment_loopback_jsonl=\n{jsonl}");
 }
 
 #[fcp_async_core::runtime::test]

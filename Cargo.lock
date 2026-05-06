@@ -3391,6 +3391,7 @@ dependencies = [
  "fcp-gcp",
  "fcp-github",
  "fcp-gitlab",
+ "fcp-glm",
  "fcp-gmail",
  "fcp-google-ai",
  "fcp-google-calendar",
@@ -3790,6 +3791,34 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-glm"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-e2e",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "futures-util",
+ "hmac 0.12.1",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 

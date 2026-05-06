@@ -2,7 +2,7 @@
 
 use std::{
     collections::BTreeMap,
-    sync::Mutex,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -21,6 +21,7 @@ use reqwest::Url;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use tracing::warn;
 
 use crate::client::NextcloudTalkClient;
 use crate::config::{NextcloudTalkConfig, NextcloudTalkSecretRef};
@@ -54,6 +55,128 @@ const CAP_MANAGE: &str = "nextcloud_talk.manage";
 const CAP_WEBHOOK: &str = "nextcloud_talk.webhook";
 const EVENT_WEBHOOK_MESSAGE: &str = "nextcloud_talk.webhook.message";
 type HmacSha256 = Hmac<Sha256>;
+
+fn default_nextcloud_talk_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_nextcloud_talk_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds
+            .as_u64()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be an integer".into(),
+            })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist
+            .as_array()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels must be an array".into(),
+            })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = raw.trim();
+            if channel_id.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "chat_coordination.allowlist_channels entries must not be empty"
+                        .into(),
+                });
+            }
+            normalized.push(ChannelId::new(channel_id.to_ascii_lowercase()));
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn nextcloud_talk_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 
 /// Connector doctor response.
 #[derive(Debug, Clone, Serialize)]
@@ -101,7 +224,6 @@ impl DoctorCheck {
 }
 
 /// Nextcloud Talk connector state.
-#[derive(Debug)]
 pub struct NextcloudTalkConnector {
     base: BaseConnector,
     config: Option<NextcloudTalkConfig>,
@@ -110,6 +232,8 @@ pub struct NextcloudTalkConnector {
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
     webhook_replay: Mutex<NextcloudTalkWebhookReplayState>,
     webhook_rate: Mutex<NextcloudTalkWebhookRateState>,
 }
@@ -126,9 +250,21 @@ impl NextcloudTalkConnector {
             retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
+            chat_coordination_config: default_nextcloud_talk_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
             webhook_replay: Mutex::new(NextcloudTalkWebhookReplayState::default()),
             webhook_rate: Mutex::new(NextcloudTalkWebhookRateState::default()),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self
     }
 
     fn manifest_hash() -> String {
@@ -2047,6 +2183,10 @@ impl FcpConnector for NextcloudTalkConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
+        let chat_coordination_config = parse_nextcloud_talk_chat_coordination_config(
+            config.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
         let config = NextcloudTalkConfig::from_value(config)?;
         self.retry_config = config.retry.clone();
         self.runtime = Some(ConnectorRuntime::new(
@@ -2062,6 +2202,7 @@ impl FcpConnector for NextcloudTalkConnector {
         self.webhook_rate = Mutex::new(NextcloudTalkWebhookRateState::default());
         self.client = Some(client);
         self.config = Some(config);
+        self.chat_coordination_config = chat_coordination_config;
         self.base.set_configured(true);
         Ok(())
     }
@@ -2346,15 +2487,7 @@ impl NextcloudTalkConnector {
                 let input: HostForwardedWebhookInput = parse_input(input, operation_name)?;
                 self.ingest_host_forwarded_webhook(&input, config)?
             }
-            OP_SEND_MESSAGE => {
-                let input: SendMessageInput = parse_input(input, operation_name)?;
-                let room_ref = parse_conversation_ref(input.token)?;
-                let message = client
-                    .send_message(runtime, &room_ref, &input.request)
-                    .await
-                    .map_err(|error| error.to_fcp_error())?;
-                json!({ "message": message })
-            }
+            OP_SEND_MESSAGE => self.send_message_output(runtime, client, input).await?,
             OP_DELETE_MESSAGE => {
                 let input: DeleteMessageInput = parse_input(input, operation_name)?;
                 let room_ref = parse_conversation_ref(input.token)?;
@@ -2458,11 +2591,92 @@ impl NextcloudTalkConnector {
 
         Ok(InvokeResponse::ok(id, output))
     }
+
+    async fn send_message_output(
+        &self,
+        runtime: &ConnectorRuntime,
+        client: &NextcloudTalkClient,
+        input: Value,
+    ) -> FcpResult<Value> {
+        let input: SendMessageInput = parse_input(input, OP_SEND_MESSAGE)?;
+        input
+            .request
+            .validate()
+            .map_err(|message| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Invalid input for {OP_SEND_MESSAGE}: {message}"),
+            })?;
+        let room_ref = parse_conversation_ref(input.token)?;
+        let (zone_id, claimant_agent_id) = self.chat_coordination_context();
+        let coordination = self
+            .claim_before_nextcloud_talk_send(
+                zone_id,
+                &room_ref,
+                input.request.reply_to,
+                claimant_agent_id.clone(),
+            )
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Nextcloud Talk send_message denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
+
+        let message = client
+            .send_message(runtime, &room_ref, &input.request)
+            .await
+            .map_err(|error| error.to_fcp_error())?;
+        Ok(json!({
+            "message": message,
+            "coordination": nextcloud_talk_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            ),
+        }))
+    }
+
+    fn chat_coordination_context(&self) -> (ZoneId, AgentId) {
+        let zone_id = self
+            .verifier
+            .as_ref()
+            .map_or_else(ZoneId::work, |verifier| verifier.zone_id.clone());
+        let claimant_agent_id = AgentId::new(self.base.instance_id.as_str().to_owned());
+        (zone_id, claimant_agent_id)
+    }
+
+    async fn claim_before_nextcloud_talk_send(
+        &self,
+        zone_id: ZoneId,
+        room_ref: &ConversationToken,
+        reply_to: Option<MessageId>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id = ChannelId::new(room_ref.as_str().trim().to_ascii_lowercase());
+        let thread_id =
+            reply_to.map(|message_id| ThreadId::new(format!("reply_to:{}", message_id.get())));
+        let cx = fcp_async_core::compatibility_cx();
+        self.chat_coordination_config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::{process::Command, sync::Arc, time::Instant};
 
     use super::*;
     use chrono::{Duration as ChronoDuration, Utc};
@@ -3841,6 +4055,88 @@ mod tests {
         let result = response.result.as_ref().expect("invoke result");
         assert_eq!(result["message"]["id"], 42);
         assert_eq!(result["message"]["message"], "hello world");
+        let coordination = result["coordination"]
+            .as_array()
+            .expect("coordination audit records");
+        assert_eq!(coordination[0]["event"], "claim_attempt");
+        assert_eq!(coordination[1]["event"], "claim_outcome");
+        assert_eq!(coordination[1]["outcome"], "granted");
+        assert_eq!(coordination[2]["event"], "send_executed");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_send_message_denies_duplicate_owner_before_http_post() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/ocs/v2.php/apps/spreed/api/v1/chat/room123"))
+            .and(query_param("format", "json"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "ocs": {
+                    "meta": {
+                        "status": "ok",
+                        "statuscode": 100,
+                        "message": "OK"
+                    },
+                    "data": {}
+                }
+            })))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+        let mut connector =
+            NextcloudTalkConnector::new().with_thread_ownership_checker(checker.clone());
+        connector
+            .configure(json!({
+                "server_url": server.uri(),
+                "auth": {
+                    "mode": "app_password",
+                    "username": "alice",
+                    "app_password": "app-material"
+                },
+                "network": { "allow_private_networks": true }
+            }))
+            .await
+            .expect("configure");
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        let mut handshake = base_handshake();
+        handshake.host_public_key = verifying_key.to_bytes();
+        connector.handshake(handshake).await.expect("handshake");
+
+        let claim_key = ClaimKey::new(
+            ZoneId::work(),
+            connector.base.id.clone(),
+            ChannelId::new("room123"),
+            ThreadId::new("reply_to:41"),
+        );
+        checker.claim_now(claim_key, AgentId::new("peer-agent"), Instant::now());
+
+        let grant = generate_valid_token(
+            &signing_key,
+            CAP_WRITE,
+            &[OP_SEND_MESSAGE],
+            &connector.base.instance_id,
+        );
+        let error = connector
+            .invoke(base_invoke(
+                connector.id(),
+                OP_SEND_MESSAGE,
+                grant,
+                json!({
+                    "token": "room123",
+                    "message": "duplicate owner should block this send",
+                    "reply_to": 41
+                }),
+            ))
+            .await
+            .expect_err("duplicate owner should be denied before HTTP POST");
+
+        assert!(matches!(error, FcpError::Unauthorized { code: 4090, .. }));
+        if let FcpError::Unauthorized { message, .. } = error {
+            assert!(message.contains("thread_owned_by_peer:peer-agent"));
+        }
     }
 
     #[fcp_async_core::runtime::test]

@@ -283,6 +283,9 @@ pub const SWARM_PROMOTION_SCHEMA_VERSION: &str = "swarm-promotion/v1";
 /// Schema tag for batch-invoke morselization evidence records.
 pub const SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION: &str = "swarm-batch-morselization/v1";
 
+/// Schema tag for connector prewarm cold-start evidence records.
+pub const SWARM_PREWARM_COLD_START_SCHEMA_VERSION: &str = "swarm-prewarm-cold-start/v1";
+
 /// Synthetic-but-realistic workload families used for swarm latency baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -2660,6 +2663,302 @@ impl From<SwarmBatchMorselizationEvidenceError> for SwarmBatchMorselizationEvide
 }
 
 impl From<serde_json::Error> for SwarmBatchMorselizationEvidenceJsonError {
+    fn from(value: serde_json::Error) -> Self {
+        Self::Serde(value)
+    }
+}
+
+/// Activation latency percentiles for one prewarm evidence scenario.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(clippy::struct_field_names)]
+pub struct SwarmPrewarmLatencyPercentiles {
+    /// 50th percentile activation latency.
+    pub p50_ms: u64,
+    /// 95th percentile activation latency.
+    pub p95_ms: u64,
+    /// 99th percentile activation latency.
+    pub p99_ms: u64,
+    /// 99.9th percentile activation latency.
+    pub p999_ms: u64,
+    /// Maximum activation latency.
+    pub max_ms: u64,
+    /// Integer mean activation latency.
+    pub mean_ms: u64,
+}
+
+/// Replayable JSONL evidence for connector prewarm cold-start behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmPrewarmColdStartEvidence {
+    /// Evidence schema version.
+    pub schema_version: String,
+    /// Stable scenario identifier.
+    pub scenario_id: String,
+    /// Connector identifier.
+    pub connector_id: String,
+    /// Command line that produced or can reproduce this evidence.
+    pub command_line: Vec<String>,
+    /// Source revision associated with the run.
+    pub git_revision: String,
+    /// Worker that produced the evidence.
+    pub worker_id: String,
+    /// Manifest hash used by the candidate warm entry.
+    pub manifest_hash: String,
+    /// Zone requested by checkout.
+    pub zone: String,
+    /// Startup strategy under evaluation.
+    pub strategy: String,
+    /// Pool state observed for checkout.
+    pub pool_state: String,
+    /// Measured or modeled activation latency for this scenario.
+    pub activation_latency_ms: u64,
+    /// Conservative on-demand baseline used for comparison.
+    pub baseline_on_demand_latency_ms: u64,
+    /// Activation latency percentile summary.
+    pub latency: SwarmPrewarmLatencyPercentiles,
+    /// Sandbox layer active for the connector.
+    pub sandbox_layer: String,
+    /// Redacted credential handling mode.
+    pub credential_mode: String,
+    /// Resident set size observed or bounded for the scenario.
+    pub rss_bytes: u64,
+    /// Connector process count observed for the scenario.
+    pub process_count: u32,
+    /// Number of simultaneous startup requests represented by the scenario.
+    pub concurrent_startups: u32,
+    /// Restart reason when a prior warm entry crashed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart_reason: Option<String>,
+    /// Conservative fallback reason, when on-demand startup was selected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    /// Unsafe rejection reason, when checkout was denied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unsafe_rejection_reason: Option<String>,
+    /// Skip reason when a scenario cannot run on the current host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_reason: Option<String>,
+    /// Whether the scenario verified shutdown cleanup.
+    pub shutdown_cleanup_verified: bool,
+}
+
+impl SwarmPrewarmColdStartEvidence {
+    /// Validate the evidence record before serializing it to JSONL.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SwarmPrewarmColdStartEvidenceError`] when required fields are
+    /// missing, resource measurements are absent, or latency evidence is
+    /// internally inconsistent.
+    pub fn validate(&self) -> Result<(), SwarmPrewarmColdStartEvidenceError> {
+        if self.schema_version != SWARM_PREWARM_COLD_START_SCHEMA_VERSION {
+            return Err(SwarmPrewarmColdStartEvidenceError::SchemaMismatch {
+                expected: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+                actual: self.schema_version.clone(),
+            });
+        }
+        for (field, value) in [
+            ("scenario_id", self.scenario_id.as_str()),
+            ("connector_id", self.connector_id.as_str()),
+            ("git_revision", self.git_revision.as_str()),
+            ("worker_id", self.worker_id.as_str()),
+            ("manifest_hash", self.manifest_hash.as_str()),
+            ("zone", self.zone.as_str()),
+            ("strategy", self.strategy.as_str()),
+            ("pool_state", self.pool_state.as_str()),
+            ("sandbox_layer", self.sandbox_layer.as_str()),
+            ("credential_mode", self.credential_mode.as_str()),
+        ] {
+            if value.trim().is_empty() {
+                return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
+            }
+        }
+        if self.command_line.is_empty()
+            || self.command_line.iter().any(|part| part.trim().is_empty())
+        {
+            return Err(SwarmPrewarmColdStartEvidenceError::EmptyCommandLine);
+        }
+        if self.activation_latency_ms == 0 || self.baseline_on_demand_latency_ms == 0 {
+            return Err(SwarmPrewarmColdStartEvidenceError::MissingLatencyMeasurement);
+        }
+        if self.activation_latency_ms > self.baseline_on_demand_latency_ms {
+            return Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: self.activation_latency_ms,
+                baseline_ms: self.baseline_on_demand_latency_ms,
+            });
+        }
+        let latency = &self.latency;
+        if latency.p50_ms == 0
+            || latency.p50_ms > latency.p95_ms
+            || latency.p95_ms > latency.p99_ms
+            || latency.p99_ms > latency.p999_ms
+            || latency.p999_ms > latency.max_ms
+            || latency.mean_ms == 0
+        {
+            return Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles);
+        }
+        if self.rss_bytes == 0 {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
+                    field: "rss_bytes",
+                },
+            );
+        }
+        if self.process_count == 0 {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
+                    field: "process_count",
+                },
+            );
+        }
+        if self.concurrent_startups == 0 {
+            return Err(SwarmPrewarmColdStartEvidenceError::EmptyConcurrentStartupCount);
+        }
+        Ok(())
+    }
+
+    /// Render this evidence as one structured JSONL value.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error when the evidence record is incomplete, or a
+    /// serde error when the typed evidence cannot be converted into JSON.
+    pub fn to_jsonl_value(&self) -> Result<Value, SwarmPrewarmColdStartEvidenceJsonError> {
+        self.validate()?;
+        Ok(json!({
+            "record_type": "swarm_prewarm_cold_start_evidence",
+            "schema_version": self.schema_version,
+            "scenario_id": self.scenario_id,
+            "connector_id": self.connector_id,
+            "manifest_hash": self.manifest_hash,
+            "zone": self.zone,
+            "strategy": self.strategy,
+            "pool_state": self.pool_state,
+            "activation_latency_ms": self.activation_latency_ms,
+            "baseline_on_demand_latency_ms": self.baseline_on_demand_latency_ms,
+            "p50_activation_latency_ms": self.latency.p50_ms,
+            "p99_activation_latency_ms": self.latency.p99_ms,
+            "sandbox_layer": self.sandbox_layer,
+            "credential_mode": self.credential_mode,
+            "rss_bytes": self.rss_bytes,
+            "process_count": self.process_count,
+            "concurrent_startups": self.concurrent_startups,
+            "restart_reason": self.restart_reason,
+            "fallback_reason": self.fallback_reason,
+            "unsafe_rejection_reason": self.unsafe_rejection_reason,
+            "skip_reason": self.skip_reason,
+            "shutdown_cleanup_verified": self.shutdown_cleanup_verified,
+            "evidence": serde_json::to_value(self)?,
+        }))
+    }
+}
+
+/// Validation error for prewarm cold-start evidence records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SwarmPrewarmColdStartEvidenceError {
+    /// Schema tag was unsupported.
+    SchemaMismatch {
+        /// Supported schema.
+        expected: String,
+        /// Observed schema.
+        actual: String,
+    },
+    /// A required string field was empty.
+    EmptyField {
+        /// Field name.
+        field: &'static str,
+    },
+    /// Reproduction command line was empty or contained an empty part.
+    EmptyCommandLine,
+    /// A latency measurement was absent or zero.
+    MissingLatencyMeasurement,
+    /// Percentiles were absent or out of order.
+    InvalidLatencyPercentiles,
+    /// Warm path was slower than the on-demand baseline.
+    LatencyRegression {
+        /// Observed activation latency.
+        activation_ms: u64,
+        /// Conservative baseline latency.
+        baseline_ms: u64,
+    },
+    /// A required resource field was absent or zero.
+    MissingResourceMeasurement {
+        /// Field name.
+        field: &'static str,
+    },
+    /// Concurrent startup count was zero.
+    EmptyConcurrentStartupCount,
+}
+
+impl fmt::Display for SwarmPrewarmColdStartEvidenceError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::SchemaMismatch { expected, actual } => write!(
+                f,
+                "swarm prewarm schema mismatch: expected '{expected}', got '{actual}'"
+            ),
+            Self::EmptyField { field } => {
+                write!(f, "swarm prewarm field '{field}' is empty")
+            }
+            Self::EmptyCommandLine => write!(f, "swarm prewarm command line is empty"),
+            Self::MissingLatencyMeasurement => {
+                write!(f, "swarm prewarm latency measurement is missing")
+            }
+            Self::InvalidLatencyPercentiles => {
+                write!(f, "swarm prewarm latency percentiles are invalid")
+            }
+            Self::LatencyRegression {
+                activation_ms,
+                baseline_ms,
+            } => write!(
+                f,
+                "swarm prewarm activation latency {activation_ms} exceeds baseline {baseline_ms}"
+            ),
+            Self::MissingResourceMeasurement { field } => {
+                write!(f, "swarm prewarm resource field '{field}' is missing")
+            }
+            Self::EmptyConcurrentStartupCount => {
+                write!(f, "swarm prewarm concurrent startup count is zero")
+            }
+        }
+    }
+}
+
+impl Error for SwarmPrewarmColdStartEvidenceError {}
+
+/// Error raised while rendering prewarm evidence JSONL.
+#[derive(Debug)]
+pub enum SwarmPrewarmColdStartEvidenceJsonError {
+    /// Validation failed.
+    Validation(SwarmPrewarmColdStartEvidenceError),
+    /// JSON serialization failed.
+    Serde(serde_json::Error),
+}
+
+impl fmt::Display for SwarmPrewarmColdStartEvidenceJsonError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Validation(err) => write!(f, "{err}"),
+            Self::Serde(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl Error for SwarmPrewarmColdStartEvidenceJsonError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Validation(err) => Some(err),
+            Self::Serde(err) => Some(err),
+        }
+    }
+}
+
+impl From<SwarmPrewarmColdStartEvidenceError> for SwarmPrewarmColdStartEvidenceJsonError {
+    fn from(value: SwarmPrewarmColdStartEvidenceError) -> Self {
+        Self::Validation(value)
+    }
+}
+
+impl From<serde_json::Error> for SwarmPrewarmColdStartEvidenceJsonError {
     fn from(value: serde_json::Error) -> Self {
         Self::Serde(value)
     }
@@ -8601,6 +8900,121 @@ mod tests {
                     field: "rss_bytes"
                 }
             )
+        );
+    }
+
+    fn prewarm_cold_start_evidence_fixture() -> SwarmPrewarmColdStartEvidence {
+        SwarmPrewarmColdStartEvidence {
+            schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
+            scenario_id: "prewarm_warm_hit".to_string(),
+            connector_id: "fcp.github:utility:1.0.0".to_string(),
+            command_line: vec![
+                "rch".to_string(),
+                "exec".to_string(),
+                "--".to_string(),
+                "cargo".to_string(),
+                "test".to_string(),
+                "-p".to_string(),
+                "fcp-e2e".to_string(),
+                "--test".to_string(),
+                "swarm_gauntlet_e2e".to_string(),
+                "prewarm".to_string(),
+            ],
+            git_revision: "abc123".to_string(),
+            worker_id: "rch-worker-64c".to_string(),
+            manifest_hash: "blake3:manifest".to_string(),
+            zone: "z:project:swarm".to_string(),
+            strategy: "warm_pool".to_string(),
+            pool_state: "warm_hit".to_string(),
+            activation_latency_ms: 18,
+            baseline_on_demand_latency_ms: 96,
+            latency: SwarmPrewarmLatencyPercentiles {
+                p50_ms: 18,
+                p95_ms: 22,
+                p99_ms: 26,
+                p999_ms: 29,
+                max_ms: 30,
+                mean_ms: 20,
+            },
+            sandbox_layer: "wasi".to_string(),
+            credential_mode: "deferred".to_string(),
+            rss_bytes: 96 * 1024 * 1024,
+            process_count: 1,
+            concurrent_startups: 1,
+            restart_reason: None,
+            fallback_reason: None,
+            unsafe_rejection_reason: None,
+            skip_reason: None,
+            shutdown_cleanup_verified: true,
+        }
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_serializes_required_jsonl_fields()
+    -> Result<(), Box<dyn Error>> {
+        let evidence = prewarm_cold_start_evidence_fixture();
+
+        evidence.validate()?;
+        let record = evidence.to_jsonl_value()?;
+        let serialized = serde_json::to_string(&record)?;
+
+        assert_eq!(record["record_type"], "swarm_prewarm_cold_start_evidence");
+        assert_eq!(
+            record["schema_version"],
+            SWARM_PREWARM_COLD_START_SCHEMA_VERSION
+        );
+        assert_eq!(record["connector_id"], "fcp.github:utility:1.0.0");
+        assert_eq!(record["manifest_hash"], "blake3:manifest");
+        assert_eq!(record["zone"], "z:project:swarm");
+        assert_eq!(record["pool_state"], "warm_hit");
+        assert_eq!(record["activation_latency_ms"], 18);
+        assert_eq!(record["baseline_on_demand_latency_ms"], 96);
+        assert_eq!(record["p50_activation_latency_ms"], 18);
+        assert_eq!(record["p99_activation_latency_ms"], 26);
+        assert_eq!(record["sandbox_layer"], "wasi");
+        assert_eq!(record["credential_mode"], "deferred");
+        assert_eq!(record["rss_bytes"], 96 * 1024 * 1024);
+        assert_eq!(record["process_count"], 1);
+        assert_eq!(record["concurrent_startups"], 1);
+        assert!(
+            record["shutdown_cleanup_verified"]
+                .as_bool()
+                .unwrap_or(false)
+        );
+        assert!(!serialized.contains("sk-live-"));
+        assert!(!serialized.contains("Bearer test-token"));
+        assert!(!serialized.contains("super-secret-value"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_prewarm_cold_start_evidence_rejects_incomplete_or_regressed_records() {
+        let mut regressed = prewarm_cold_start_evidence_fixture();
+        regressed.activation_latency_ms = 120;
+        assert_eq!(
+            regressed.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::LatencyRegression {
+                activation_ms: 120,
+                baseline_ms: 96
+            })
+        );
+
+        let mut missing_rss = prewarm_cold_start_evidence_fixture();
+        missing_rss.rss_bytes = 0;
+        assert_eq!(
+            missing_rss.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
+                    field: "rss_bytes"
+                }
+            )
+        );
+
+        let mut bad_percentiles = prewarm_cold_start_evidence_fixture();
+        bad_percentiles.latency.p99_ms = 10;
+        assert_eq!(
+            bad_percentiles.validate(),
+            Err(SwarmPrewarmColdStartEvidenceError::InvalidLatencyPercentiles)
         );
     }
 

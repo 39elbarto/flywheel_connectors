@@ -1,0 +1,44 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:duckduckgo-privacy-search"
+
+[connector]
+id = "fcp.duckduckgo"
+name = "DuckDuckGo"
+version = "0.1.0"
+description = "Privacy-preserving DuckDuckGo search connector using no-key HTML, autocomplete, and vertical search endpoints"
+archetypes = ["request-response"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stateless no-key search. Queries and result URLs must not be logged by the connector."
+
+[zones]
+home = "z:public"
+allowed_sources = ["z:public", "z:work"]
+allowed_targets = ["z:public", "z:work"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["network.listen", "system.exec"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 15000
+deny_exec = true
+deny_ptrace = true
+
+[network_constraints]
+host_allow = ["html.duckduckgo.com", "lite.duckduckgo.com", "duckduckgo.com", "api.duckduckgo.com"]
+port_allow = [443]
+tls_required = true

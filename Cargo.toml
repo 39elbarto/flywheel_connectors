@@ -41,6 +41,7 @@ members = [
     "connectors/cerebras",
     "connectors/groq",
     "connectors/discord",
+    "connectors/duckduckgo",
     "connectors/glm",
     "connectors/openai",
     "connectors/openrouter",
@@ -320,6 +321,7 @@ fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-cerebras = { path = "connectors/cerebras" }
+fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
 fcp-host = { path = "crates/fcp-host" }

@@ -27,10 +27,10 @@ use tracing::{info, warn};
 
 use crate::client::MatrixClient;
 use crate::crypto::{
-    MATRIX_MEGOLM_ALGORITHM, MatrixCryptoEngine, MatrixEncryptedEventProjectionContext,
-    MatrixEncryptedEventRedactionState, MatrixTrustGatedDecryptedProjection,
-    MatrixVerifiedDecryptedMessageEvent, key_share_after_initial_sync_snapshot,
-    maintenance_driver_snapshot, project_trust_gated_decrypted_event, recovery_guidance_snapshot,
+    MatrixCryptoEngine, MatrixEncryptedEventProjectionContext, MatrixEncryptedEventRedactionState,
+    MatrixTrustGatedDecryptedProjection, MatrixVerifiedDecryptedMessageEvent,
+    key_share_after_initial_sync_snapshot, maintenance_driver_snapshot,
+    project_trust_gated_decrypted_event, recovery_guidance_snapshot,
     undecrypted_retry_decision_snapshot,
 };
 use crate::error::MatrixError;
@@ -5644,7 +5644,7 @@ mod tests {
             sender: Some("@alice:matrix.example".into()),
             origin_server_ts: Some(160),
             content: json!({
-                "algorithm": MATRIX_MEGOLM_ALGORITHM,
+                "algorithm": crate::crypto::MATRIX_MEGOLM_ALGORITHM,
                 "session_id": "SESSION1",
                 "ciphertext": "must not leak"
             }),
@@ -5697,7 +5697,7 @@ mod tests {
             session_id: "SESSION1".into(),
             session_room_id: "!room:matrix.example".into(),
             session_trust: crate::crypto::MatrixProjectionVerificationStatus::Verified,
-            algorithm: MATRIX_MEGOLM_ALGORITHM.into(),
+            algorithm: crate::crypto::MATRIX_MEGOLM_ALGORITHM.into(),
             replay_key: "SESSION1:$encrypted:0".into(),
             msgtype: "m.text".into(),
             body: "trusted plaintext".into(),

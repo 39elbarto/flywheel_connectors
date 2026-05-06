@@ -264,10 +264,11 @@ pub fn project_trust_gated_decrypted_event(
             input.retry_attempts_used,
             &e2ee.undecrypted_retry,
         );
-        let outcome = retry
-            .get("outcome")
-            .and_then(Value::as_str)
-            .unwrap_or("retry_scheduled");
+        let outcome = if input.retry_attempts_used >= e2ee.undecrypted_retry.max_attempts {
+            MatrixCryptoMaintenanceOutcome::FinalFailure.label()
+        } else {
+            MatrixCryptoMaintenanceOutcome::RetryScheduled.label()
+        };
         let reason = if outcome == MatrixCryptoMaintenanceOutcome::FinalFailure.label() {
             "undecrypted_retry_budget_exhausted"
         } else {

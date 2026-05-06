@@ -5377,6 +5377,844 @@ impl SwarmControllerSafetyReport {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Adversarial revocation swarm reports
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Schema tag for adversarial admission and emergency revocation swarm reports.
+pub const SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION: &str = "swarm-adversarial-revocation/v1";
+
+/// Admission outcome observed for one adversarial swarm operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdversarialAdmissionOutcome {
+    /// Work was admitted for execution.
+    Admitted,
+    /// Work was intentionally delayed by backpressure.
+    Delayed,
+    /// Work was denied before connector dispatch.
+    Denied,
+    /// Work was skipped because the scenario prerequisites were unavailable.
+    Skipped,
+}
+
+impl SwarmAdversarialAdmissionOutcome {
+    /// Stable machine label for this admission outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admitted => "admitted",
+            Self::Delayed => "delayed",
+            Self::Denied => "denied",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// Backpressure or emergency action observed for one adversarial operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdversarialBackpressureAction {
+    /// No pressure response was required.
+    Admit,
+    /// Work was delayed with an operator-visible backpressure decision.
+    Delay,
+    /// Work was shed before connector dispatch.
+    Shed,
+    /// Conservative fallback path handled the operation.
+    Fallback,
+    /// Emergency revocation propagation was prioritized.
+    EmergencyPropagate,
+}
+
+impl SwarmAdversarialBackpressureAction {
+    /// Stable machine label for this action.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Admit => "admit",
+            Self::Delay => "delay",
+            Self::Shed => "shed",
+            Self::Fallback => "fallback",
+            Self::EmergencyPropagate => "emergency_propagate",
+        }
+    }
+}
+
+/// Teardown result for one adversarial scenario row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdversarialCleanupOutcome {
+    /// All scenario state was torn down.
+    Completed,
+    /// Teardown was not needed because the scenario was skipped.
+    Skipped,
+    /// Teardown failed and requires operator attention.
+    Failed,
+}
+
+impl SwarmAdversarialCleanupOutcome {
+    /// Stable machine label for this cleanup outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Skipped => "skipped",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Machine-readable adversarial revocation report outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdversarialRevocationOutcome {
+    /// The deterministic fail-closed contract held.
+    Pass,
+    /// At least one adversarial invariant failed.
+    Fail,
+    /// The run emitted a structured skip artifact instead of executing.
+    Skipped,
+}
+
+impl SwarmAdversarialRevocationOutcome {
+    /// Stable machine label for this report outcome.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::Fail => "fail",
+            Self::Skipped => "skipped",
+        }
+    }
+}
+
+/// Invariant checked by the adversarial revocation report.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwarmAdversarialRevocationInvariant {
+    /// The run emitted concrete scenario rows or an explicit skip artifact.
+    ScenarioEvidencePresent,
+    /// Revoked principals or tokens never reached connector dispatch.
+    RevokedWorkDenied,
+    /// Emergency revocation propagation was not starved by overload.
+    EmergencyRevocationNotStarved,
+    /// Stale and malformed revocation messages were rejected.
+    StaleMalformedRevocationRejected,
+    /// Backpressure decisions carried visible state, action, and audit linkage.
+    BackpressureActionVisible,
+    /// Every non-skip row retained an audit receipt id.
+    AuditReceiptContinuity,
+    /// Retry and fallback counters were represented in the overload run.
+    RetryFallbackCountersVisible,
+    /// Scenario cleanup completed or the row was explicitly skipped.
+    CleanupCompleted,
+    /// Principal and token identifiers were redacted or hashed.
+    RedactionSafe,
+}
+
+impl SwarmAdversarialRevocationInvariant {
+    /// Stable machine label for this invariant.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::ScenarioEvidencePresent => "scenario_evidence_present",
+            Self::RevokedWorkDenied => "revoked_work_denied",
+            Self::EmergencyRevocationNotStarved => "emergency_revocation_not_starved",
+            Self::StaleMalformedRevocationRejected => "stale_malformed_revocation_rejected",
+            Self::BackpressureActionVisible => "backpressure_action_visible",
+            Self::AuditReceiptContinuity => "audit_receipt_continuity",
+            Self::RetryFallbackCountersVisible => "retry_fallback_counters_visible",
+            Self::CleanupCompleted => "cleanup_completed",
+            Self::RedactionSafe => "redaction_safe",
+        }
+    }
+}
+
+/// Latency percentiles captured for one adversarial scenario row.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialLatencyPercentiles {
+    /// Median latency in milliseconds.
+    pub p50_ms: u64,
+    /// p95 latency in milliseconds.
+    pub p95_ms: u64,
+    /// p99 latency in milliseconds.
+    pub p99_ms: u64,
+}
+
+impl SwarmAdversarialLatencyPercentiles {
+    /// Build a latency percentile summary.
+    #[must_use]
+    pub const fn new(p50_ms: u64, p95_ms: u64, p99_ms: u64) -> Self {
+        Self {
+            p50_ms,
+            p95_ms,
+            p99_ms,
+        }
+    }
+}
+
+/// Thresholds used by adversarial revocation checks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialRevocationThresholds {
+    /// Minimum emergency-revocation witness rows required for a pass.
+    pub min_emergency_revocation_witnesses: u64,
+    /// Maximum p99 propagation latency allowed for deterministic smoke proof.
+    pub max_emergency_propagation_p99_ms: u64,
+}
+
+impl SwarmAdversarialRevocationThresholds {
+    /// Conservative offline smoke thresholds for deterministic proof runs.
+    #[must_use]
+    pub const fn smoke() -> Self {
+        Self {
+            min_emergency_revocation_witnesses: 2,
+            max_emergency_propagation_p99_ms: 250,
+        }
+    }
+}
+
+/// Input used to build one adversarial revocation event.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialRevocationEventInput {
+    /// Scenario id shared by the run and JSONL records.
+    pub scenario_id: String,
+    /// Operation id for this row.
+    pub operation_id: String,
+    /// Number of nodes represented by the scenario.
+    pub node_count: u64,
+    /// Number of requests represented by the scenario.
+    pub request_count: u64,
+    /// Zone exercised by this row.
+    pub zone: String,
+    /// Redacted principal reference.
+    pub principal_ref: String,
+    /// Redacted token reference.
+    pub token_ref: String,
+    /// Admission outcome observed for the operation.
+    pub admission_outcome: SwarmAdversarialAdmissionOutcome,
+    /// Monotonic revocation sequence observed by the operation.
+    pub revocation_seq: u64,
+    /// Redacted revocation-head digest.
+    pub revocation_head: String,
+    /// Backpressure state label.
+    pub backpressure_state: String,
+    /// Backpressure or emergency action label.
+    pub backpressure_action: SwarmAdversarialBackpressureAction,
+    /// Audit receipt id retained for correlation.
+    pub audit_receipt_id: String,
+    /// Latency percentiles captured for this row.
+    pub latency_percentiles: SwarmAdversarialLatencyPercentiles,
+    /// Machine-readable denial reason, when denied.
+    pub denial_reason: Option<String>,
+    /// Scenario cleanup result.
+    pub cleanup_outcome: SwarmAdversarialCleanupOutcome,
+    /// Structured skip reason, when prerequisites were unavailable.
+    pub skip_reason: Option<String>,
+    /// Whether this row proves emergency revocation propagation.
+    pub emergency_revocation_witness: bool,
+    /// Whether this row attempted work with a revoked principal or token.
+    pub revoked_work: bool,
+    /// Whether this row carried a stale revocation message.
+    pub stale_revocation: bool,
+    /// Whether this row carried a malformed revocation message.
+    pub malformed_revocation: bool,
+    /// Retry counter represented by this row.
+    pub retry_count: u64,
+    /// Fallback counter represented by this row.
+    pub fallback_count: u64,
+}
+
+/// One replayable adversarial admission/revocation evidence row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialRevocationEvent {
+    /// Event schema version.
+    pub schema_version: String,
+    /// Scenario id shared by the run and JSONL records.
+    pub scenario_id: String,
+    /// Operation id for this row.
+    pub operation_id: String,
+    /// Number of nodes represented by the scenario.
+    pub node_count: u64,
+    /// Number of requests represented by the scenario.
+    pub request_count: u64,
+    /// Zone exercised by this row.
+    pub zone: String,
+    /// Redacted principal reference.
+    pub principal_ref: String,
+    /// Redacted token reference.
+    pub token_ref: String,
+    /// Admission outcome observed for the operation.
+    pub admission_outcome: SwarmAdversarialAdmissionOutcome,
+    /// Monotonic revocation sequence observed by the operation.
+    pub revocation_seq: u64,
+    /// Redacted revocation-head digest.
+    pub revocation_head: String,
+    /// Backpressure state label.
+    pub backpressure_state: String,
+    /// Backpressure or emergency action label.
+    pub backpressure_action: SwarmAdversarialBackpressureAction,
+    /// Audit receipt id retained for correlation.
+    pub audit_receipt_id: String,
+    /// Latency percentiles captured for this row.
+    pub latency_percentiles: SwarmAdversarialLatencyPercentiles,
+    /// Machine-readable denial reason, when denied.
+    pub denial_reason: Option<String>,
+    /// Scenario cleanup result.
+    pub cleanup_outcome: SwarmAdversarialCleanupOutcome,
+    /// Structured skip reason, when prerequisites were unavailable.
+    pub skip_reason: Option<String>,
+    /// Whether this row proves emergency revocation propagation.
+    pub emergency_revocation_witness: bool,
+    /// Whether this row attempted work with a revoked principal or token.
+    pub revoked_work: bool,
+    /// Whether this row carried a stale revocation message.
+    pub stale_revocation: bool,
+    /// Whether this row carried a malformed revocation message.
+    pub malformed_revocation: bool,
+    /// Retry counter represented by this row.
+    pub retry_count: u64,
+    /// Fallback counter represented by this row.
+    pub fallback_count: u64,
+    /// Event creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmAdversarialRevocationEvent {
+    /// Build one adversarial event from structured input.
+    #[must_use]
+    pub fn new(input: SwarmAdversarialRevocationEventInput) -> Self {
+        Self {
+            schema_version: SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION.to_string(),
+            scenario_id: input.scenario_id,
+            operation_id: input.operation_id,
+            node_count: input.node_count,
+            request_count: input.request_count,
+            zone: input.zone,
+            principal_ref: input.principal_ref,
+            token_ref: input.token_ref,
+            admission_outcome: input.admission_outcome,
+            revocation_seq: input.revocation_seq,
+            revocation_head: input.revocation_head,
+            backpressure_state: input.backpressure_state,
+            backpressure_action: input.backpressure_action,
+            audit_receipt_id: input.audit_receipt_id,
+            latency_percentiles: input.latency_percentiles,
+            denial_reason: input.denial_reason,
+            cleanup_outcome: input.cleanup_outcome,
+            skip_reason: input.skip_reason,
+            emergency_revocation_witness: input.emergency_revocation_witness,
+            revoked_work: input.revoked_work,
+            stale_revocation: input.stale_revocation,
+            malformed_revocation: input.malformed_revocation,
+            retry_count: input.retry_count,
+            fallback_count: input.fallback_count,
+            generated_at: Utc::now(),
+        }
+    }
+
+    fn is_skip(&self) -> bool {
+        self.skip_reason.is_some()
+            || self.admission_outcome == SwarmAdversarialAdmissionOutcome::Skipped
+    }
+}
+
+/// One invariant failure emitted by an adversarial revocation report.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialRevocationFailure {
+    /// Failed invariant.
+    pub invariant: SwarmAdversarialRevocationInvariant,
+    /// Operation id associated with the failure, when row-specific.
+    pub operation_id: Option<String>,
+    /// Machine-readable reason.
+    pub reason: String,
+    /// Observed value.
+    pub observed_value: String,
+    /// Allowed value.
+    pub allowed_value: String,
+}
+
+impl SwarmAdversarialRevocationFailure {
+    fn new(
+        invariant: SwarmAdversarialRevocationInvariant,
+        operation_id: Option<String>,
+        reason: impl Into<String>,
+        observed_value: impl Into<String>,
+        allowed_value: impl Into<String>,
+    ) -> Self {
+        Self {
+            invariant,
+            operation_id,
+            reason: reason.into(),
+            observed_value: observed_value.into(),
+            allowed_value: allowed_value.into(),
+        }
+    }
+}
+
+/// Replayable report proving adversarial admission overload and revocation behavior.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SwarmAdversarialRevocationReport {
+    /// Report schema version.
+    pub schema_version: String,
+    /// Scenario id shared by the run and JSONL records.
+    pub scenario_id: String,
+    /// Thresholds used to evaluate the report.
+    pub thresholds: SwarmAdversarialRevocationThresholds,
+    /// Event rows represented by the report.
+    pub events: Vec<SwarmAdversarialRevocationEvent>,
+    /// Final machine-readable outcome.
+    pub outcome: SwarmAdversarialRevocationOutcome,
+    /// Hard invariant failures.
+    pub failures: Vec<SwarmAdversarialRevocationFailure>,
+    /// Structured skip reasons emitted by the run.
+    pub skip_reasons: Vec<String>,
+    /// Report creation time.
+    pub generated_at: DateTime<Utc>,
+}
+
+impl SwarmAdversarialRevocationReport {
+    /// Evaluate adversarial revocation invariants for one scenario.
+    #[must_use]
+    pub fn evaluate(
+        scenario_id: impl Into<String>,
+        thresholds: SwarmAdversarialRevocationThresholds,
+        events: Vec<SwarmAdversarialRevocationEvent>,
+    ) -> Self {
+        let scenario_id = scenario_id.into();
+        let mut failures = Vec::new();
+        let mut skip_reasons = events
+            .iter()
+            .filter_map(|event| event.skip_reason.clone())
+            .collect::<Vec<_>>();
+        skip_reasons.sort();
+        skip_reasons.dedup();
+
+        if events.is_empty() {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::ScenarioEvidencePresent,
+                None,
+                "no_adversarial_events",
+                "0",
+                ">=1 event or structured skip",
+            ));
+        }
+
+        let run_events = events
+            .iter()
+            .filter(|event| !event.is_skip())
+            .collect::<Vec<_>>();
+        if run_events.is_empty() && !skip_reasons.is_empty() {
+            return Self {
+                schema_version: SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION.to_string(),
+                scenario_id,
+                thresholds,
+                events,
+                outcome: SwarmAdversarialRevocationOutcome::Skipped,
+                failures,
+                skip_reasons,
+                generated_at: Utc::now(),
+            };
+        }
+
+        failures.extend(Self::scenario_shape_failures(&scenario_id, &run_events));
+        failures.extend(Self::revoked_work_failures(&run_events));
+        failures.extend(Self::stale_malformed_failures(&run_events));
+        failures.extend(Self::emergency_propagation_failures(
+            &thresholds,
+            &run_events,
+        ));
+        failures.extend(Self::audit_and_backpressure_failures(&run_events));
+        failures.extend(Self::cleanup_failures(&run_events));
+        failures.extend(Self::redaction_failures(&run_events));
+        failures.extend(Self::retry_fallback_failures(&run_events));
+
+        let outcome = if failures.is_empty() {
+            SwarmAdversarialRevocationOutcome::Pass
+        } else {
+            SwarmAdversarialRevocationOutcome::Fail
+        };
+
+        Self {
+            schema_version: SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION.to_string(),
+            scenario_id,
+            thresholds,
+            events,
+            outcome,
+            failures,
+            skip_reasons,
+            generated_at: Utc::now(),
+        }
+    }
+
+    fn scenario_shape_failures(
+        scenario_id: &str,
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        if events.is_empty() {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::ScenarioEvidencePresent,
+                None,
+                "no_executed_adversarial_events",
+                "0",
+                ">=1 non-skip event",
+            ));
+        }
+        for event in events {
+            if event.scenario_id != scenario_id {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::ScenarioEvidencePresent,
+                    Some(event.operation_id.clone()),
+                    "scenario_mismatch",
+                    event.scenario_id.clone(),
+                    scenario_id.to_string(),
+                ));
+            }
+            if event.node_count == 0 || event.request_count == 0 {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::ScenarioEvidencePresent,
+                    Some(event.operation_id.clone()),
+                    "empty_scenario_dimensions",
+                    format!(
+                        "nodes={},requests={}",
+                        event.node_count, event.request_count
+                    ),
+                    "node_count>0 and request_count>0",
+                ));
+            }
+        }
+        failures
+    }
+
+    fn revoked_work_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        let revoked_events = events
+            .iter()
+            .copied()
+            .filter(|event| event.revoked_work)
+            .collect::<Vec<_>>();
+        if revoked_events.is_empty() {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::RevokedWorkDenied,
+                None,
+                "no_revoked_work_probe",
+                "0",
+                ">=1 revoked operation",
+            ));
+        }
+        for event in revoked_events {
+            if event.admission_outcome != SwarmAdversarialAdmissionOutcome::Denied {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::RevokedWorkDenied,
+                    Some(event.operation_id.clone()),
+                    "revoked_work_not_denied",
+                    event.admission_outcome.as_str(),
+                    SwarmAdversarialAdmissionOutcome::Denied.as_str(),
+                ));
+            }
+            if event.denial_reason.as_deref().is_none_or(str::is_empty) {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::RevokedWorkDenied,
+                    Some(event.operation_id.clone()),
+                    "missing_denial_reason",
+                    "missing",
+                    "revoked_token or revoked_principal",
+                ));
+            }
+        }
+        failures
+    }
+
+    fn stale_malformed_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        if !events.iter().any(|event| event.stale_revocation) {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::StaleMalformedRevocationRejected,
+                None,
+                "missing_stale_revocation_probe",
+                "0",
+                ">=1 stale revocation row",
+            ));
+        }
+        if !events.iter().any(|event| event.malformed_revocation) {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::StaleMalformedRevocationRejected,
+                None,
+                "missing_malformed_revocation_probe",
+                "0",
+                ">=1 malformed revocation row",
+            ));
+        }
+        for event in events
+            .iter()
+            .copied()
+            .filter(|event| event.stale_revocation || event.malformed_revocation)
+        {
+            if event.admission_outcome != SwarmAdversarialAdmissionOutcome::Denied {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::StaleMalformedRevocationRejected,
+                    Some(event.operation_id.clone()),
+                    "revocation_probe_not_rejected",
+                    event.admission_outcome.as_str(),
+                    SwarmAdversarialAdmissionOutcome::Denied.as_str(),
+                ));
+            }
+        }
+        failures
+    }
+
+    fn emergency_propagation_failures(
+        thresholds: &SwarmAdversarialRevocationThresholds,
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        let witness_count = u64::try_from(
+            events
+                .iter()
+                .filter(|event| event.emergency_revocation_witness)
+                .count(),
+        )
+        .unwrap_or(u64::MAX);
+        if witness_count < thresholds.min_emergency_revocation_witnesses {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::EmergencyRevocationNotStarved,
+                None,
+                "insufficient_emergency_revocation_witnesses",
+                witness_count.to_string(),
+                thresholds.min_emergency_revocation_witnesses.to_string(),
+            ));
+        }
+        let max_p99 = events
+            .iter()
+            .filter(|event| event.emergency_revocation_witness)
+            .map(|event| event.latency_percentiles.p99_ms)
+            .max()
+            .unwrap_or(0);
+        if max_p99 > thresholds.max_emergency_propagation_p99_ms {
+            failures.push(SwarmAdversarialRevocationFailure::new(
+                SwarmAdversarialRevocationInvariant::EmergencyRevocationNotStarved,
+                None,
+                "emergency_revocation_p99_exceeded",
+                max_p99.to_string(),
+                thresholds.max_emergency_propagation_p99_ms.to_string(),
+            ));
+        }
+        failures
+    }
+
+    fn audit_and_backpressure_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        for event in events {
+            if !event.audit_receipt_id.starts_with("audit-receipt-") {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::AuditReceiptContinuity,
+                    Some(event.operation_id.clone()),
+                    "missing_audit_receipt",
+                    event.audit_receipt_id.clone(),
+                    "audit-receipt-*",
+                ));
+            }
+            if event.backpressure_state.trim().is_empty() {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::BackpressureActionVisible,
+                    Some(event.operation_id.clone()),
+                    "missing_backpressure_state",
+                    "empty",
+                    "non-empty state label",
+                ));
+            }
+            if event.backpressure_action != SwarmAdversarialBackpressureAction::Admit
+                && event.audit_receipt_id.is_empty()
+            {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::BackpressureActionVisible,
+                    Some(event.operation_id.clone()),
+                    "action_without_audit_link",
+                    event.backpressure_action.as_str(),
+                    "action with audit receipt id",
+                ));
+            }
+        }
+        failures
+    }
+
+    fn cleanup_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        events
+            .iter()
+            .copied()
+            .filter(|event| event.cleanup_outcome != SwarmAdversarialCleanupOutcome::Completed)
+            .map(|event| {
+                SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::CleanupCompleted,
+                    Some(event.operation_id.clone()),
+                    "cleanup_not_completed",
+                    event.cleanup_outcome.as_str(),
+                    SwarmAdversarialCleanupOutcome::Completed.as_str(),
+                )
+            })
+            .collect()
+    }
+
+    fn redaction_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        let mut failures = Vec::new();
+        for event in events {
+            if !event.principal_ref.starts_with("principal:blake3:") {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::RedactionSafe,
+                    Some(event.operation_id.clone()),
+                    "principal_ref_not_hashed",
+                    event.principal_ref.clone(),
+                    "principal:blake3:*",
+                ));
+            }
+            if !event.token_ref.starts_with("token:blake3:") {
+                failures.push(SwarmAdversarialRevocationFailure::new(
+                    SwarmAdversarialRevocationInvariant::RedactionSafe,
+                    Some(event.operation_id.clone()),
+                    "token_ref_not_hashed",
+                    event.token_ref.clone(),
+                    "token:blake3:*",
+                ));
+            }
+            let serialized = serde_json::to_string(event).unwrap_or_default();
+            for marker in [
+                "Bearer ",
+                "sk-live-",
+                "super-secret-value",
+                "principal:raw:",
+                "token:raw:",
+            ] {
+                if serialized.contains(marker) {
+                    failures.push(SwarmAdversarialRevocationFailure::new(
+                        SwarmAdversarialRevocationInvariant::RedactionSafe,
+                        Some(event.operation_id.clone()),
+                        "sensitive_marker_present",
+                        marker,
+                        "redacted evidence",
+                    ));
+                }
+            }
+        }
+        failures
+    }
+
+    fn retry_fallback_failures(
+        events: &[&SwarmAdversarialRevocationEvent],
+    ) -> Vec<SwarmAdversarialRevocationFailure> {
+        if events
+            .iter()
+            .any(|event| event.retry_count > 0 || event.fallback_count > 0)
+        {
+            return Vec::new();
+        }
+
+        vec![SwarmAdversarialRevocationFailure::new(
+            SwarmAdversarialRevocationInvariant::RetryFallbackCountersVisible,
+            None,
+            "missing_retry_or_fallback_counters",
+            "0",
+            "retry_count>0 or fallback_count>0",
+        )]
+    }
+
+    /// Render the report as detailed JSONL-ready records.
+    ///
+    /// # Errors
+    ///
+    /// Returns a serde error if any record cannot be converted to JSON.
+    pub fn to_jsonl_values(&self) -> Result<Vec<Value>, serde_json::Error> {
+        let mut records = Vec::new();
+        for event in &self.events {
+            records.push(json!({
+                "record_type": "swarm_adversarial_revocation_event",
+                "schema_version": event.schema_version,
+                "scenario_id": event.scenario_id,
+                "operation_id": event.operation_id,
+                "node_count": event.node_count,
+                "request_count": event.request_count,
+                "zone": event.zone,
+                "principal_ref": event.principal_ref,
+                "token_ref": event.token_ref,
+                "admission_outcome": event.admission_outcome.as_str(),
+                "revocation_seq": event.revocation_seq,
+                "revocation_head": event.revocation_head,
+                "backpressure_state": event.backpressure_state,
+                "backpressure_action": event.backpressure_action.as_str(),
+                "audit_receipt_id": event.audit_receipt_id,
+                "latency_percentiles": serde_json::to_value(event.latency_percentiles)?,
+                "denial_reason": event.denial_reason,
+                "cleanup_outcome": event.cleanup_outcome.as_str(),
+                "skip_reason": event.skip_reason,
+                "emergency_revocation_witness": event.emergency_revocation_witness,
+                "revoked_work": event.revoked_work,
+                "stale_revocation": event.stale_revocation,
+                "malformed_revocation": event.malformed_revocation,
+                "retry_count": event.retry_count,
+                "fallback_count": event.fallback_count,
+                "generated_at": event.generated_at,
+            }));
+        }
+        for failure in &self.failures {
+            records.push(json!({
+                "record_type": "swarm_adversarial_revocation_failure",
+                "schema_version": self.schema_version,
+                "scenario_id": self.scenario_id,
+                "operation_id": failure.operation_id,
+                "invariant": failure.invariant.as_str(),
+                "reason": failure.reason,
+                "observed_value": failure.observed_value,
+                "allowed_value": failure.allowed_value,
+            }));
+        }
+        records.push(json!({
+            "record_type": "swarm_adversarial_revocation_report",
+            "schema_version": self.schema_version,
+            "scenario_id": self.scenario_id,
+            "outcome": self.outcome.as_str(),
+            "thresholds": serde_json::to_value(self.thresholds)?,
+            "node_count": self.events.iter().map(|event| event.node_count).max().unwrap_or(0),
+            "request_count": self.events.iter().map(|event| event.request_count).max().unwrap_or(0),
+            "event_count": self.events.len(),
+            "revoked_denial_count": self.events.iter().filter(|event| {
+                event.revoked_work
+                    && event.admission_outcome == SwarmAdversarialAdmissionOutcome::Denied
+            }).count(),
+            "emergency_revocation_witness_count": self.events
+                .iter()
+                .filter(|event| event.emergency_revocation_witness)
+                .count(),
+            "stale_rejection_count": self.events.iter().filter(|event| {
+                event.stale_revocation
+                    && event.admission_outcome == SwarmAdversarialAdmissionOutcome::Denied
+            }).count(),
+            "malformed_rejection_count": self.events.iter().filter(|event| {
+                event.malformed_revocation
+                    && event.admission_outcome == SwarmAdversarialAdmissionOutcome::Denied
+            }).count(),
+            "retry_count": self.events.iter().map(|event| event.retry_count).sum::<u64>(),
+            "fallback_count": self.events.iter().map(|event| event.fallback_count).sum::<u64>(),
+            "failure_codes": self.failures
+                .iter()
+                .map(|failure| failure.invariant.as_str())
+                .collect::<Vec<_>>(),
+            "skip_reasons": self.skip_reasons,
+            "generated_at": self.generated_at,
+        }));
+        Ok(records)
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Assertions
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -6806,6 +7644,84 @@ mod tests {
         ]
     }
 
+    fn adversarial_event(
+        operation_id: &str,
+        admission_outcome: SwarmAdversarialAdmissionOutcome,
+        denial_reason: Option<&str>,
+    ) -> SwarmAdversarialRevocationEvent {
+        SwarmAdversarialRevocationEvent::new(SwarmAdversarialRevocationEventInput {
+            scenario_id: "adversarial_revocation_overload_smoke".to_string(),
+            operation_id: operation_id.to_string(),
+            node_count: 8,
+            request_count: 2_048,
+            zone: "z:project:adversarial-swarm".to_string(),
+            principal_ref: "principal:blake3:0123456789abcdef".to_string(),
+            token_ref: "token:blake3:0123456789abcdef".to_string(),
+            admission_outcome,
+            revocation_seq: 42,
+            revocation_head: "revocation-head:blake3:0123456789abcdef".to_string(),
+            backpressure_state: "overloaded_zone".to_string(),
+            backpressure_action: SwarmAdversarialBackpressureAction::Delay,
+            audit_receipt_id: format!("audit-receipt-{operation_id}"),
+            latency_percentiles: SwarmAdversarialLatencyPercentiles::new(12, 45, 120),
+            denial_reason: denial_reason.map(str::to_string),
+            cleanup_outcome: SwarmAdversarialCleanupOutcome::Completed,
+            skip_reason: None,
+            emergency_revocation_witness: false,
+            revoked_work: false,
+            stale_revocation: false,
+            malformed_revocation: false,
+            retry_count: 0,
+            fallback_count: 0,
+        })
+    }
+
+    fn passing_adversarial_events() -> Vec<SwarmAdversarialRevocationEvent> {
+        let mut revoked = adversarial_event(
+            "op-revoked-token",
+            SwarmAdversarialAdmissionOutcome::Denied,
+            Some("revoked_token"),
+        );
+        revoked.revoked_work = true;
+        revoked.retry_count = 3;
+
+        let mut emergency = adversarial_event(
+            "op-emergency-propagation-a",
+            SwarmAdversarialAdmissionOutcome::Delayed,
+            None,
+        );
+        emergency.emergency_revocation_witness = true;
+        emergency.backpressure_action = SwarmAdversarialBackpressureAction::EmergencyPropagate;
+        emergency.latency_percentiles = SwarmAdversarialLatencyPercentiles::new(10, 30, 90);
+
+        let mut emergency_fallback = adversarial_event(
+            "op-emergency-propagation-b",
+            SwarmAdversarialAdmissionOutcome::Delayed,
+            None,
+        );
+        emergency_fallback.emergency_revocation_witness = true;
+        emergency_fallback.backpressure_action = SwarmAdversarialBackpressureAction::Fallback;
+        emergency_fallback.fallback_count = 1;
+        emergency_fallback.latency_percentiles =
+            SwarmAdversarialLatencyPercentiles::new(15, 50, 140);
+
+        let mut stale = adversarial_event(
+            "op-stale-revocation",
+            SwarmAdversarialAdmissionOutcome::Denied,
+            Some("stale_revocation"),
+        );
+        stale.stale_revocation = true;
+
+        let mut malformed = adversarial_event(
+            "op-malformed-revocation",
+            SwarmAdversarialAdmissionOutcome::Denied,
+            Some("malformed_revocation"),
+        );
+        malformed.malformed_revocation = true;
+
+        vec![revoked, emergency, emergency_fallback, stale, malformed]
+    }
+
     #[test]
     fn swarm_controller_safety_report_passes_every_scripted_scenario() {
         for scenario in SwarmControllerInteractionScenario::REQUIRED {
@@ -7014,6 +7930,132 @@ mod tests {
         }
         assert!(!jsonl.contains("Bearer test-token"));
         assert!(!jsonl.contains("super-secret-value"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_adversarial_revocation_report_passes_fail_closed_overload_fixture()
+    -> Result<(), Box<dyn Error>> {
+        let report = SwarmAdversarialRevocationReport::evaluate(
+            "adversarial_revocation_overload_smoke",
+            SwarmAdversarialRevocationThresholds::smoke(),
+            passing_adversarial_events(),
+        );
+        let records = report.to_jsonl_values()?;
+        let summary = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_adversarial_revocation_report")
+            .ok_or("adversarial revocation report should be present")?;
+        let event_types: BTreeSet<_> = records
+            .iter()
+            .filter_map(|record| record["record_type"].as_str())
+            .collect();
+        let jsonl = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        assert_eq!(report.outcome, SwarmAdversarialRevocationOutcome::Pass);
+        assert!(report.failures.is_empty());
+        assert!(event_types.contains("swarm_adversarial_revocation_event"));
+        assert!(event_types.contains("swarm_adversarial_revocation_report"));
+        assert_eq!(
+            summary["schema_version"],
+            SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION
+        );
+        assert_eq!(summary["node_count"], 8);
+        assert_eq!(summary["request_count"], 2_048);
+        assert_eq!(summary["revoked_denial_count"], 1);
+        assert_eq!(summary["stale_rejection_count"], 1);
+        assert_eq!(summary["malformed_rejection_count"], 1);
+        assert_eq!(summary["emergency_revocation_witness_count"], 2);
+        assert_eq!(summary["retry_count"], 3);
+        assert_eq!(summary["fallback_count"], 1);
+        for line in jsonl.lines() {
+            serde_json::from_str::<Value>(line)?;
+        }
+        assert!(!jsonl.contains("Bearer test-token"));
+        assert!(!jsonl.contains("super-secret-value"));
+        assert!(!jsonl.contains("principal:raw:"));
+        assert!(!jsonl.contains("token:raw:"));
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_adversarial_revocation_report_fails_open_admission_stale_and_redaction_regressions() {
+        let mut events = passing_adversarial_events();
+        events[0].admission_outcome = SwarmAdversarialAdmissionOutcome::Admitted;
+        events[0].principal_ref = "principal:raw:owner@example.com".to_string();
+        events[3].admission_outcome = SwarmAdversarialAdmissionOutcome::Admitted;
+        events[4].token_ref = "token:raw:Bearer sk-live-example".to_string();
+
+        let report = SwarmAdversarialRevocationReport::evaluate(
+            "adversarial_revocation_overload_smoke",
+            SwarmAdversarialRevocationThresholds::smoke(),
+            events,
+        );
+        let invariants = report
+            .failures
+            .iter()
+            .map(|failure| failure.invariant)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(report.outcome, SwarmAdversarialRevocationOutcome::Fail);
+        assert!(invariants.contains(&SwarmAdversarialRevocationInvariant::RevokedWorkDenied));
+        assert!(
+            invariants
+                .contains(&SwarmAdversarialRevocationInvariant::StaleMalformedRevocationRejected)
+        );
+        assert!(invariants.contains(&SwarmAdversarialRevocationInvariant::RedactionSafe));
+    }
+
+    #[test]
+    fn swarm_adversarial_revocation_report_emits_structured_skip_artifact()
+    -> Result<(), Box<dyn Error>> {
+        let skip_event =
+            SwarmAdversarialRevocationEvent::new(SwarmAdversarialRevocationEventInput {
+                scenario_id: "adversarial_revocation_tailnet_10000".to_string(),
+                operation_id: "op-skip-tailnet-prereq".to_string(),
+                node_count: 0,
+                request_count: 0,
+                zone: "z:project:adversarial-swarm".to_string(),
+                principal_ref: "principal:blake3:0123456789abcdef".to_string(),
+                token_ref: "token:blake3:0123456789abcdef".to_string(),
+                admission_outcome: SwarmAdversarialAdmissionOutcome::Skipped,
+                revocation_seq: 0,
+                revocation_head: "revocation-head:blake3:skip".to_string(),
+                backpressure_state: "not_executed".to_string(),
+                backpressure_action: SwarmAdversarialBackpressureAction::Admit,
+                audit_receipt_id: "audit-receipt-skip-tailnet-prereq".to_string(),
+                latency_percentiles: SwarmAdversarialLatencyPercentiles::default(),
+                denial_reason: None,
+                cleanup_outcome: SwarmAdversarialCleanupOutcome::Skipped,
+                skip_reason: Some("requires_64_nodes_256gib_tailnet".to_string()),
+                emergency_revocation_witness: false,
+                revoked_work: false,
+                stale_revocation: false,
+                malformed_revocation: false,
+                retry_count: 0,
+                fallback_count: 0,
+            });
+        let report = SwarmAdversarialRevocationReport::evaluate(
+            "adversarial_revocation_tailnet_10000",
+            SwarmAdversarialRevocationThresholds::smoke(),
+            vec![skip_event],
+        );
+        let records = report.to_jsonl_values()?;
+        let jsonl = records
+            .iter()
+            .map(serde_json::to_string)
+            .collect::<Result<Vec<_>, _>>()?
+            .join("\n");
+
+        assert_eq!(report.outcome, SwarmAdversarialRevocationOutcome::Skipped);
+        assert!(report.failures.is_empty());
+        assert!(jsonl.contains("requires_64_nodes_256gib_tailnet"));
+        assert!(jsonl.contains("swarm_adversarial_revocation_event"));
+        assert!(jsonl.contains("swarm_adversarial_revocation_report"));
         Ok(())
     }
 

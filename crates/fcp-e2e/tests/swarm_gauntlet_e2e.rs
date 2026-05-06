@@ -17,8 +17,13 @@ use fcp_host::{
     ResourceTelemetryState,
 };
 use fcp_testkit::evidence_helpers::{
-    LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION,
-    SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION, SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION,
+    LatencyBreakdown, SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION,
+    SWARM_BASELINE_PROMOTION_SCHEMA_VERSION, SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION,
+    SWARM_CONTROLLER_SAFETY_SCHEMA_VERSION, SwarmAdversarialAdmissionOutcome,
+    SwarmAdversarialBackpressureAction, SwarmAdversarialCleanupOutcome,
+    SwarmAdversarialLatencyPercentiles, SwarmAdversarialRevocationEvent,
+    SwarmAdversarialRevocationEventInput, SwarmAdversarialRevocationOutcome,
+    SwarmAdversarialRevocationReport, SwarmAdversarialRevocationThresholds,
     SwarmBaselineArtifactDigests, SwarmBaselinePathKind, SwarmBaselinePromotionManifest,
     SwarmBatchFairnessBucket, SwarmBatchMorselizationEvidence, SwarmBatchResourceSample,
     SwarmBatchWaitPercentiles, SwarmCalibrationStatus, SwarmControllerInteractionScenario,
@@ -335,6 +340,83 @@ fn controller_safety_modes(
             vec!["e2e-card:fallback-safety".to_string()],
         ),
     ]
+}
+
+fn adversarial_revocation_event(
+    operation_id: &str,
+    admission_outcome: SwarmAdversarialAdmissionOutcome,
+    denial_reason: Option<&str>,
+) -> SwarmAdversarialRevocationEvent {
+    SwarmAdversarialRevocationEvent::new(SwarmAdversarialRevocationEventInput {
+        scenario_id: "adversarial_revocation_overload_e2e_smoke".to_string(),
+        operation_id: operation_id.to_string(),
+        node_count: 8,
+        request_count: 2_048,
+        zone: "z:project:adversarial-swarm".to_string(),
+        principal_ref: "principal:blake3:e2e0123456789abcdef".to_string(),
+        token_ref: "token:blake3:e2e0123456789abcdef".to_string(),
+        admission_outcome,
+        revocation_seq: 99,
+        revocation_head: "revocation-head:blake3:e2e0123456789abcdef".to_string(),
+        backpressure_state: "overloaded_zone".to_string(),
+        backpressure_action: SwarmAdversarialBackpressureAction::Delay,
+        audit_receipt_id: format!("audit-receipt-{operation_id}"),
+        latency_percentiles: SwarmAdversarialLatencyPercentiles::new(14, 52, 144),
+        denial_reason: denial_reason.map(str::to_string),
+        cleanup_outcome: SwarmAdversarialCleanupOutcome::Completed,
+        skip_reason: None,
+        emergency_revocation_witness: false,
+        revoked_work: false,
+        stale_revocation: false,
+        malformed_revocation: false,
+        retry_count: 0,
+        fallback_count: 0,
+    })
+}
+
+fn adversarial_revocation_events() -> Vec<SwarmAdversarialRevocationEvent> {
+    let mut revoked = adversarial_revocation_event(
+        "op-e2e-revoked-token",
+        SwarmAdversarialAdmissionOutcome::Denied,
+        Some("revoked_token"),
+    );
+    revoked.revoked_work = true;
+    revoked.retry_count = 4;
+
+    let mut emergency_a = adversarial_revocation_event(
+        "op-e2e-emergency-revocation-a",
+        SwarmAdversarialAdmissionOutcome::Delayed,
+        None,
+    );
+    emergency_a.emergency_revocation_witness = true;
+    emergency_a.backpressure_action = SwarmAdversarialBackpressureAction::EmergencyPropagate;
+    emergency_a.latency_percentiles = SwarmAdversarialLatencyPercentiles::new(8, 24, 81);
+
+    let mut emergency_b = adversarial_revocation_event(
+        "op-e2e-emergency-revocation-b",
+        SwarmAdversarialAdmissionOutcome::Delayed,
+        None,
+    );
+    emergency_b.emergency_revocation_witness = true;
+    emergency_b.backpressure_action = SwarmAdversarialBackpressureAction::Fallback;
+    emergency_b.fallback_count = 1;
+    emergency_b.latency_percentiles = SwarmAdversarialLatencyPercentiles::new(12, 38, 112);
+
+    let mut stale = adversarial_revocation_event(
+        "op-e2e-stale-revocation",
+        SwarmAdversarialAdmissionOutcome::Denied,
+        Some("stale_revocation"),
+    );
+    stale.stale_revocation = true;
+
+    let mut malformed = adversarial_revocation_event(
+        "op-e2e-malformed-revocation",
+        SwarmAdversarialAdmissionOutcome::Denied,
+        Some("malformed_revocation"),
+    );
+    malformed.malformed_revocation = true;
+
+    vec![revoked, emergency_a, emergency_b, stale, malformed]
 }
 
 fn latency_bundle() -> Result<SwarmLatencyEvidenceBundle, Box<dyn Error>> {
@@ -1258,6 +1340,64 @@ fn swarm_controller_safety_e2e_emits_pass_fail_and_fallback_logs() -> Result<(),
     assert!(!jsonl.contains("sk-live-"));
     assert!(!jsonl.contains("Bearer test-token"));
     assert!(!jsonl.contains("super-secret-value"));
+    Ok(())
+}
+
+#[test]
+fn adversarial_revocation_swarm_e2e_emits_fail_closed_jsonl() -> Result<(), Box<dyn Error>> {
+    let report = SwarmAdversarialRevocationReport::evaluate(
+        "adversarial_revocation_overload_e2e_smoke",
+        SwarmAdversarialRevocationThresholds::smoke(),
+        adversarial_revocation_events(),
+    );
+    let records = report.to_jsonl_values()?;
+    let jsonl = records
+        .iter()
+        .map(serde_json::to_string)
+        .collect::<Result<Vec<_>, _>>()?
+        .join("\n");
+    let report_record = records
+        .iter()
+        .find(|record| record["record_type"] == "swarm_adversarial_revocation_report")
+        .ok_or("adversarial revocation report should be present")?;
+    let revoked_record = records
+        .iter()
+        .find(|record| record["operation_id"] == "op-e2e-revoked-token")
+        .ok_or("revoked token row should be present")?;
+    let stale_record = records
+        .iter()
+        .find(|record| record["operation_id"] == "op-e2e-stale-revocation")
+        .ok_or("stale revocation row should be present")?;
+
+    assert_eq!(report.outcome, SwarmAdversarialRevocationOutcome::Pass);
+    assert!(report.failures.is_empty());
+    assert_eq!(
+        report_record["schema_version"],
+        SWARM_ADVERSARIAL_REVOCATION_SCHEMA_VERSION
+    );
+    assert_eq!(report_record["node_count"], 8);
+    assert_eq!(report_record["request_count"], 2_048);
+    assert_eq!(report_record["revoked_denial_count"], 1);
+    assert_eq!(report_record["emergency_revocation_witness_count"], 2);
+    assert_eq!(report_record["stale_rejection_count"], 1);
+    assert_eq!(report_record["malformed_rejection_count"], 1);
+    assert_eq!(report_record["retry_count"], 4);
+    assert_eq!(report_record["fallback_count"], 1);
+    assert_eq!(revoked_record["admission_outcome"], "denied");
+    assert_eq!(revoked_record["denial_reason"], "revoked_token");
+    assert_eq!(revoked_record["backpressure_state"], "overloaded_zone");
+    assert_eq!(revoked_record["cleanup_outcome"], "completed");
+    assert_eq!(revoked_record["latency_percentiles"]["p99_ms"], 144);
+    assert_eq!(stale_record["denial_reason"], "stale_revocation");
+    assert!(jsonl.contains("swarm_adversarial_revocation_event"));
+    assert!(jsonl.contains("swarm_adversarial_revocation_report"));
+    for line in jsonl.lines() {
+        serde_json::from_str::<Value>(line)?;
+    }
+    assert!(!jsonl.contains("Bearer test-token"));
+    assert!(!jsonl.contains("super-secret-value"));
+    assert!(!jsonl.contains("principal:raw:"));
+    assert!(!jsonl.contains("token:raw:"));
     Ok(())
 }
 

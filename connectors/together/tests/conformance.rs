@@ -3,7 +3,7 @@ use fcp_together::TogetherConnector;
 use serde_json::Value;
 
 #[test]
-fn manifest_declares_required_operations_network_policy_and_deferred_images() {
+fn manifest_declares_required_operations_network_policy_and_excludes_images() {
     let manifest: toml::Value =
         toml::from_str(include_str!("../manifest.toml")).expect("manifest should parse");
     let operations = manifest
@@ -53,14 +53,18 @@ fn manifest_declares_required_operations_network_policy_and_deferred_images() {
         operations.get("together.images.generate").is_none(),
         "image generation must remain out of the text-focused operation surface"
     );
-    assert_eq!(
-        manifest
-            .get("metadata")
-            .and_then(|value| value.get("deferred"))
-            .and_then(|value| value.get("images.generate"))
-            .and_then(|value| value.get("availability"))
-            .and_then(toml::Value::as_str),
-        Some("deferred-to-media-generation")
+    let chat_hints = operations
+        .get("together.chat.completions")
+        .and_then(|value| value.get("ai_hints"))
+        .and_then(|value| value.get("common_mistakes"))
+        .and_then(toml::Value::as_array)
+        .expect("chat operation should carry common mistake hints");
+    assert!(
+        chat_hints
+            .iter()
+            .filter_map(toml::Value::as_str)
+            .any(|hint| hint.contains("Do not add image generation")),
+        "image generation deferral should be documented in supported ai_hints"
     );
 }
 

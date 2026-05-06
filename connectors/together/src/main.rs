@@ -88,25 +88,21 @@ async fn handle_message(connector: &mut TogetherConnector, message: &str) -> ser
     };
 
     match result {
-        Ok(value) => {
-            let mut response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "result": value
-            });
-            if let Some(id) = id {
-                response["id"] = id;
-            }
-            response
-        }
-        Err(error) => {
-            let mut response = serde_json::json!({
-                "jsonrpc": "2.0",
-                "error": error.to_response()
-            });
-            if let Some(id) = id {
-                response["id"] = id;
-            }
-            response
-        }
+        Ok(value) => json_rpc_response("result", value, id),
+        Err(error) => json_rpc_response("error", serde_json::json!(error.to_response()), id),
     }
+}
+
+fn json_rpc_response(
+    payload_field: &'static str,
+    payload: serde_json::Value,
+    id: Option<serde_json::Value>,
+) -> serde_json::Value {
+    let mut response = serde_json::Map::new();
+    response.insert("jsonrpc".into(), serde_json::Value::String("2.0".into()));
+    if let Some(id) = id {
+        response.insert("id".into(), id);
+    }
+    response.insert(payload_field.into(), payload);
+    serde_json::Value::Object(response)
 }

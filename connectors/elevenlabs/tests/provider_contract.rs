@@ -63,6 +63,15 @@ async fn elevenlabs_provider_contract_is_advertised() {
                     .with_default_model("eleven_multilingual_v2")
                     .require_default_model(),
             )
+            .with_model_catalog(ProviderModelCatalogContract::new("stt_models").with_model(
+                ProviderModelContract::new("scribe_v2_realtime").with_label("Scribe v2 Realtime"),
+            ))
+            .with_operation(
+                ProviderOperationContract::new("elevenlabs.scribe.realtime.transcribe")
+                    .with_catalog_id("stt_models")
+                    .with_default_model("scribe_v2_realtime")
+                    .require_default_model(),
+            )
             .with_base_url(ProviderBaseUrlContract::new(
                 "api",
                 "https://api.elevenlabs.io/v1",
@@ -84,28 +93,63 @@ async fn elevenlabs_provider_contract_is_advertised() {
             )),
     );
 
-    let realtime = deferred_operation(&introspection, "elevenlabs.scribe.realtime.transcribe");
+    let realtime = operation(&introspection, "elevenlabs.scribe.realtime.transcribe");
+    assert!(
+        realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("anyOf"))
+            .and_then(Value::as_array)
+            .is_some_and(|variants| {
+                variants.iter().any(|variant| {
+                    variant
+                        .get("required")
+                        .and_then(Value::as_array)
+                        .is_some_and(|required| {
+                            required
+                                .iter()
+                                .any(|field| field.as_str() == Some("audio_chunks_base64"))
+                        })
+                })
+            })
+    );
     assert_eq!(
-        realtime.get("default_model_id").and_then(Value::as_str),
+        realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("model_id"))
+            .and_then(|model| model.get("default"))
+            .and_then(Value::as_str),
         Some("scribe_v2_realtime")
     );
     assert_eq!(
-        realtime.get("default_audio_format").and_then(Value::as_str),
+        realtime
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("audio_format"))
+            .and_then(|format| format.get("default"))
+            .and_then(Value::as_str),
         Some("ulaw_8000")
     );
     assert_eq!(
         realtime
-            .get("default_commit_strategy")
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("commit_strategy"))
+            .and_then(|strategy| strategy.get("default"))
             .and_then(Value::as_str),
         Some("vad")
     );
+
+    let long_running = deferred_operation(
+        &introspection,
+        "elevenlabs.scribe.realtime.transcribe.long_running",
+    );
     assert!(
-        realtime
+        long_running
             .get("rationale")
             .and_then(Value::as_str)
-            .is_some_and(
-                |rationale| rationale.contains("asupersync") && rationale.contains("WebSocket")
-            )
+            .is_some_and(|rationale| rationale.contains("host-owned")
+                && rationale.contains("elevenlabs.scribe.realtime.transcribe"))
     );
 
     let streaming_tts = deferred_operation(&introspection, "elevenlabs.tts.stream");
@@ -115,6 +159,16 @@ async fn elevenlabs_provider_contract_is_advertised() {
             .and_then(Value::as_str),
         Some("eleven_multilingual_v2")
     );
+}
+
+fn operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {
+    introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("operations should be advertised")
+        .iter()
+        .find(|operation| operation.get("id").and_then(Value::as_str) == Some(id))
+        .expect("expected operation should be advertised")
 }
 
 fn deferred_operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {

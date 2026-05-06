@@ -3610,12 +3610,14 @@ name = "fcp-elevenlabs"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "asupersync",
  "base64 0.22.1",
  "fcp-async-core",
  "fcp-core",
  "fcp-e2e",
  "fcp-prelude",
  "fcp-sdk",
+ "fcp-streaming",
  "fcp-testkit",
  "reqwest 0.13.2",
  "serde",
@@ -3624,6 +3626,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wiremock",
 ]
 

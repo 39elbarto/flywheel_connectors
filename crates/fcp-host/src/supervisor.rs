@@ -250,6 +250,418 @@ impl Default for SupervisorConfig {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Connector Prewarm Policy
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Startup strategy for supervised connector processes.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmStrategy {
+    /// Spawn connectors only when the live inventory requires them.
+    #[default]
+    OnDemand,
+    /// Keep bounded, already-started connector processes eligible for checkout.
+    WarmPool,
+    /// Reuse a fork/zygote-style parent process.
+    ///
+    /// This is intentionally rejected until there is a separate security proof:
+    /// credential isolation, zone binding, sandbox limits, and manifest freshness
+    /// are harder to prove across forked process state than across a fresh warm
+    /// process.
+    Zygote,
+}
+
+/// Explicit prewarm pool configuration for connector startup.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConnectorPrewarmConfig {
+    /// Which startup strategy to use.
+    pub strategy: PrewarmStrategy,
+    /// Minimum idle warm entries to keep for a connector.
+    pub min_idle: u32,
+    /// Maximum idle warm entries allowed for a connector.
+    pub max_idle: u32,
+    /// Maximum age for a warm entry before checkout falls back to on-demand.
+    pub max_age: Duration,
+    /// Maximum wait while checking out a warm entry.
+    pub checkout_timeout: Duration,
+}
+
+impl Default for ConnectorPrewarmConfig {
+    fn default() -> Self {
+        Self {
+            strategy: PrewarmStrategy::OnDemand,
+            min_idle: 0,
+            max_idle: 0,
+            max_age: Duration::ZERO,
+            checkout_timeout: Duration::ZERO,
+        }
+    }
+}
+
+impl ConnectorPrewarmConfig {
+    /// Build a warm-pool configuration.
+    #[must_use]
+    pub const fn warm_pool(
+        min_idle: u32,
+        max_idle: u32,
+        max_age: Duration,
+        checkout_timeout: Duration,
+    ) -> Self {
+        Self {
+            strategy: PrewarmStrategy::WarmPool,
+            min_idle,
+            max_idle,
+            max_age,
+            checkout_timeout,
+        }
+    }
+
+    /// Validate the prewarm configuration before it can influence startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`PrewarmConfigError`] when the requested strategy would be
+    /// unsafe or internally inconsistent.
+    pub const fn validate(&self) -> Result<(), PrewarmConfigError> {
+        match self.strategy {
+            PrewarmStrategy::OnDemand => Ok(()),
+            PrewarmStrategy::Zygote => Err(PrewarmConfigError::ZygoteRequiresSecurityProof),
+            PrewarmStrategy::WarmPool => {
+                if self.max_idle == 0 {
+                    return Err(PrewarmConfigError::MaxIdleZero);
+                }
+                if self.min_idle > self.max_idle {
+                    return Err(PrewarmConfigError::MinIdleExceedsMaxIdle);
+                }
+                if self.max_age.is_zero() {
+                    return Err(PrewarmConfigError::MaxAgeZero);
+                }
+                if self.checkout_timeout.is_zero() {
+                    return Err(PrewarmConfigError::CheckoutTimeoutZero);
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Decide whether a warm entry can be checked out for an invocation.
+    #[must_use]
+    pub fn decide_checkout(
+        &self,
+        observation: &PrewarmCheckoutObservation,
+    ) -> PrewarmCheckoutDecision {
+        if let Err(error) = self.validate() {
+            return match error {
+                PrewarmConfigError::ZygoteRequiresSecurityProof => {
+                    PrewarmCheckoutDecision::RejectUnsafe {
+                        reason: PrewarmUnsafeReason::ZygoteWithoutSecurityProof,
+                    }
+                }
+                PrewarmConfigError::MaxIdleZero
+                | PrewarmConfigError::MinIdleExceedsMaxIdle
+                | PrewarmConfigError::MaxAgeZero
+                | PrewarmConfigError::CheckoutTimeoutZero => {
+                    PrewarmCheckoutDecision::FallbackOnDemand {
+                        reason: PrewarmFallbackReason::InvalidConfig,
+                    }
+                }
+            };
+        }
+
+        if self.strategy == PrewarmStrategy::OnDemand {
+            return PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::NotConfigured,
+            };
+        }
+
+        match observation.manifest {
+            PrewarmManifestState::Current => {}
+            PrewarmManifestState::Missing => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::MissingManifestHash,
+                };
+            }
+            PrewarmManifestState::Stale => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::StaleManifest,
+                };
+            }
+        }
+
+        if observation.zone_binding == PrewarmZoneBinding::Missing {
+            return PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::MissingZoneBinding,
+            };
+        }
+
+        if observation.sandbox == PrewarmSandboxState::LimitsUnavailable {
+            return PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::SandboxLimitsUnavailable,
+            };
+        }
+
+        if observation.credential == PrewarmCredentialState::MaterialLoaded {
+            return PrewarmCheckoutDecision::RejectUnsafe {
+                reason: PrewarmUnsafeReason::CredentialMaterialLoaded,
+            };
+        }
+
+        match observation.health {
+            PrewarmHealthState::Ready => {}
+            PrewarmHealthState::Starting => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::WarmEntryStillStarting,
+                };
+            }
+            PrewarmHealthState::Failed => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::WarmEntryFailedHealth,
+                };
+            }
+        }
+
+        if observation.entry_age > self.max_age {
+            return PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::WarmEntryStale,
+            };
+        }
+
+        if let Some(exit) = &observation.previous_exit
+            && !exit.is_clean()
+        {
+            return PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::CrashBeforeCheckout,
+            };
+        }
+
+        PrewarmCheckoutDecision::AdmitWarm {
+            pool_state: PrewarmPoolState::WarmHit,
+        }
+    }
+}
+
+/// Why a prewarm configuration is invalid.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmConfigError {
+    /// Fork/zygote style startup lacks the required security proof.
+    ZygoteRequiresSecurityProof,
+    /// Warm-pool mode needs at least one possible idle entry.
+    MaxIdleZero,
+    /// The requested floor is higher than the cap.
+    MinIdleExceedsMaxIdle,
+    /// Warm entries need a bounded lifetime.
+    MaxAgeZero,
+    /// Warm checkout needs a bounded wait.
+    CheckoutTimeoutZero,
+}
+
+impl std::fmt::Display for PrewarmConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ZygoteRequiresSecurityProof => {
+                f.write_str("zygote prewarm requires a security proof")
+            }
+            Self::MaxIdleZero => f.write_str("warm-pool max_idle must be greater than zero"),
+            Self::MinIdleExceedsMaxIdle => {
+                f.write_str("warm-pool min_idle must not exceed max_idle")
+            }
+            Self::MaxAgeZero => f.write_str("warm-pool max_age must be greater than zero"),
+            Self::CheckoutTimeoutZero => {
+                f.write_str("warm-pool checkout_timeout must be greater than zero")
+            }
+        }
+    }
+}
+
+impl std::error::Error for PrewarmConfigError {}
+
+/// Manifest freshness observed for a warm entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmManifestState {
+    /// Warm entry was created from the current manifest hash.
+    Current,
+    /// No manifest hash was captured.
+    Missing,
+    /// Warm entry was created from an older manifest hash.
+    Stale,
+}
+
+/// Zone binding observed for a warm entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmZoneBinding {
+    /// Warm entry is already bound to the requested zone.
+    Bound,
+    /// Warm entry has no usable zone binding.
+    Missing,
+}
+
+/// Sandbox state observed for a warm entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmSandboxState {
+    /// Required sandbox limits are active.
+    LimitsActive,
+    /// Required sandbox limits are unavailable or unverified.
+    LimitsUnavailable,
+}
+
+/// Credential state observed for a warm entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmCredentialState {
+    /// Warm entry has not loaded secret credential material.
+    Deferred,
+    /// Warm entry already loaded credential material and must not be reused.
+    MaterialLoaded,
+}
+
+/// Health state observed for a warm entry.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmHealthState {
+    /// Warm entry passed readiness checks.
+    Ready,
+    /// Warm entry is still starting.
+    Starting,
+    /// Warm entry failed readiness checks.
+    Failed,
+}
+
+/// Pool state recorded in prewarm checkout evidence.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmPoolState {
+    /// No prewarm pool was configured.
+    Disabled,
+    /// No eligible warm process was available.
+    Empty,
+    /// A safe warm entry was admitted.
+    WarmHit,
+    /// A warm entry existed but was too old.
+    Stale,
+    /// A warm entry crashed or failed before checkout.
+    CrashBeforeCheckout,
+    /// A warm entry was rejected as unsafe.
+    Rejected,
+}
+
+/// Live observation used to decide whether a warm entry is safe to checkout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrewarmCheckoutObservation {
+    /// Manifest freshness for the candidate warm entry.
+    pub manifest: PrewarmManifestState,
+    /// Zone binding state for the candidate warm entry.
+    pub zone_binding: PrewarmZoneBinding,
+    /// Sandbox limit state for the candidate warm entry.
+    pub sandbox: PrewarmSandboxState,
+    /// Credential loading state for the candidate warm entry.
+    pub credential: PrewarmCredentialState,
+    /// Readiness state for the candidate warm entry.
+    pub health: PrewarmHealthState,
+    /// Age of the candidate warm entry.
+    pub entry_age: Duration,
+    /// Exit observed before checkout, when any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_exit: Option<ProcessExit>,
+}
+
+/// Decision produced for a warm-entry checkout attempt.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "type")]
+pub enum PrewarmCheckoutDecision {
+    /// Admit the warm entry.
+    AdmitWarm {
+        /// Pool state to record in structured evidence.
+        pool_state: PrewarmPoolState,
+    },
+    /// Fall back to conservative on-demand startup.
+    FallbackOnDemand {
+        /// Why prewarm was not used.
+        reason: PrewarmFallbackReason,
+    },
+    /// Reject the warm entry because it would violate a security invariant.
+    RejectUnsafe {
+        /// Why the warm entry is unsafe.
+        reason: PrewarmUnsafeReason,
+    },
+}
+
+impl PrewarmCheckoutDecision {
+    /// Whether this decision admits a warm process.
+    #[must_use]
+    pub const fn admits_warm_entry(&self) -> bool {
+        matches!(self, Self::AdmitWarm { .. })
+    }
+}
+
+/// Conservative fallback reason for an on-demand connector startup.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmFallbackReason {
+    /// Prewarm is disabled.
+    NotConfigured,
+    /// Configuration is invalid.
+    InvalidConfig,
+    /// No warm entry is available.
+    EmptyPool,
+    /// The warm entry did not capture a manifest hash.
+    MissingManifestHash,
+    /// The warm entry manifest hash does not match the current manifest.
+    StaleManifest,
+    /// The warm entry is not bound to the target zone.
+    MissingZoneBinding,
+    /// Sandbox limits are unavailable or unverified.
+    SandboxLimitsUnavailable,
+    /// The warm entry is still starting.
+    WarmEntryStillStarting,
+    /// The warm entry failed readiness checks.
+    WarmEntryFailedHealth,
+    /// The warm entry exceeded the configured maximum age.
+    WarmEntryStale,
+    /// The warm entry crashed before checkout.
+    CrashBeforeCheckout,
+}
+
+/// Unsafe prewarm rejection reason.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PrewarmUnsafeReason {
+    /// Zygote startup was requested without a security proof.
+    ZygoteWithoutSecurityProof,
+    /// The warm entry already loaded credential material.
+    CredentialMaterialLoaded,
+}
+
+/// Structured prewarm checkout evidence suitable for JSONL proof logs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrewarmCheckoutEvidence {
+    /// Connector identifier.
+    pub connector_id: String,
+    /// Manifest hash used by the candidate warm entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_hash: Option<String>,
+    /// Zone requested by checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
+    /// Pool state recorded for the checkout.
+    pub pool_state: PrewarmPoolState,
+    /// Activation latency in milliseconds, when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub activation_latency_ms: Option<u64>,
+    /// Sandbox layer reported for the warm entry.
+    pub sandbox_layer: String,
+    /// Credential handling mode, redacted to a coarse class.
+    pub credential_state: PrewarmCredentialState,
+    /// Process count observed for the connector sandbox.
+    pub process_count: u32,
+    /// Final checkout decision.
+    pub decision: PrewarmCheckoutDecision,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Restart Event
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1361,6 +1773,257 @@ mod tests {
         assert_eq!(config.graceful_shutdown_timeout, Duration::from_secs(30));
         assert_eq!(config.initial_backoff, Duration::from_millis(500));
         assert_eq!(config.max_backoff, Duration::from_mins(1));
+    }
+
+    // ── ConnectorPrewarmConfig ──
+
+    fn safe_prewarm_observation() -> PrewarmCheckoutObservation {
+        PrewarmCheckoutObservation {
+            manifest: PrewarmManifestState::Current,
+            zone_binding: PrewarmZoneBinding::Bound,
+            sandbox: PrewarmSandboxState::LimitsActive,
+            credential: PrewarmCredentialState::Deferred,
+            health: PrewarmHealthState::Ready,
+            entry_age: Duration::from_secs(5),
+            previous_exit: None,
+        }
+    }
+
+    #[test]
+    fn prewarm_default_preserves_on_demand_startup() {
+        let config = ConnectorPrewarmConfig::default();
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(
+            config.decide_checkout(&safe_prewarm_observation()),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::NotConfigured
+            }
+        );
+    }
+
+    #[test]
+    fn prewarm_rejects_zygote_without_security_proof() {
+        let config = ConnectorPrewarmConfig {
+            strategy: PrewarmStrategy::Zygote,
+            min_idle: 1,
+            max_idle: 1,
+            max_age: Duration::from_secs(30),
+            checkout_timeout: Duration::from_millis(50),
+        };
+        assert_eq!(
+            config.validate(),
+            Err(PrewarmConfigError::ZygoteRequiresSecurityProof)
+        );
+        assert_eq!(
+            config.decide_checkout(&safe_prewarm_observation()),
+            PrewarmCheckoutDecision::RejectUnsafe {
+                reason: PrewarmUnsafeReason::ZygoteWithoutSecurityProof
+            }
+        );
+    }
+
+    #[test]
+    fn prewarm_validates_pool_bounds() {
+        assert_eq!(
+            ConnectorPrewarmConfig::warm_pool(
+                2,
+                1,
+                Duration::from_secs(30),
+                Duration::from_secs(1)
+            )
+            .validate(),
+            Err(PrewarmConfigError::MinIdleExceedsMaxIdle)
+        );
+        assert_eq!(
+            ConnectorPrewarmConfig::warm_pool(
+                0,
+                0,
+                Duration::from_secs(30),
+                Duration::from_secs(1)
+            )
+            .validate(),
+            Err(PrewarmConfigError::MaxIdleZero)
+        );
+        assert_eq!(
+            ConnectorPrewarmConfig::warm_pool(0, 1, Duration::ZERO, Duration::from_secs(1))
+                .validate(),
+            Err(PrewarmConfigError::MaxAgeZero)
+        );
+        assert_eq!(
+            ConnectorPrewarmConfig::warm_pool(0, 1, Duration::from_secs(30), Duration::ZERO)
+                .validate(),
+            Err(PrewarmConfigError::CheckoutTimeoutZero)
+        );
+    }
+
+    #[test]
+    fn prewarm_admits_only_safe_warm_entry() {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            1,
+            4,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        assert_eq!(config.validate(), Ok(()));
+        assert_eq!(
+            config.decide_checkout(&safe_prewarm_observation()),
+            PrewarmCheckoutDecision::AdmitWarm {
+                pool_state: PrewarmPoolState::WarmHit
+            }
+        );
+        assert!(
+            config
+                .decide_checkout(&safe_prewarm_observation())
+                .admits_warm_entry()
+        );
+    }
+
+    #[test]
+    fn prewarm_falls_back_on_manifest_zone_and_sandbox_gaps() {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+
+        let mut missing_manifest = safe_prewarm_observation();
+        missing_manifest.manifest = PrewarmManifestState::Missing;
+        assert_eq!(
+            config.decide_checkout(&missing_manifest),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::MissingManifestHash
+            }
+        );
+
+        let mut stale_manifest = safe_prewarm_observation();
+        stale_manifest.manifest = PrewarmManifestState::Stale;
+        assert_eq!(
+            config.decide_checkout(&stale_manifest),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::StaleManifest
+            }
+        );
+
+        let mut missing_zone = safe_prewarm_observation();
+        missing_zone.zone_binding = PrewarmZoneBinding::Missing;
+        assert_eq!(
+            config.decide_checkout(&missing_zone),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::MissingZoneBinding
+            }
+        );
+
+        let mut sandbox_gap = safe_prewarm_observation();
+        sandbox_gap.sandbox = PrewarmSandboxState::LimitsUnavailable;
+        assert_eq!(
+            config.decide_checkout(&sandbox_gap),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::SandboxLimitsUnavailable
+            }
+        );
+    }
+
+    #[test]
+    fn prewarm_rejects_loaded_credential_material() {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        let mut observation = safe_prewarm_observation();
+        observation.credential = PrewarmCredentialState::MaterialLoaded;
+        assert_eq!(
+            config.decide_checkout(&observation),
+            PrewarmCheckoutDecision::RejectUnsafe {
+                reason: PrewarmUnsafeReason::CredentialMaterialLoaded
+            }
+        );
+    }
+
+    #[test]
+    fn prewarm_falls_back_on_readiness_age_and_crash_history() {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+
+        let mut starting = safe_prewarm_observation();
+        starting.health = PrewarmHealthState::Starting;
+        assert_eq!(
+            config.decide_checkout(&starting),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::WarmEntryStillStarting
+            }
+        );
+
+        let mut failed = safe_prewarm_observation();
+        failed.health = PrewarmHealthState::Failed;
+        assert_eq!(
+            config.decide_checkout(&failed),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::WarmEntryFailedHealth
+            }
+        );
+
+        let mut stale = safe_prewarm_observation();
+        stale.entry_age = Duration::from_secs(31);
+        assert_eq!(
+            config.decide_checkout(&stale),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::WarmEntryStale
+            }
+        );
+
+        let mut crashed = safe_prewarm_observation();
+        crashed.previous_exit = Some(ProcessExit::with_code(1));
+        assert_eq!(
+            config.decide_checkout(&crashed),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::CrashBeforeCheckout
+            }
+        );
+    }
+
+    #[test]
+    fn prewarm_config_serde_roundtrip() -> serde_json::Result<()> {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            2,
+            8,
+            Duration::from_secs(60),
+            Duration::from_secs(2),
+        );
+        let json = serde_json::to_string(&config)?;
+        assert!(json.contains("\"strategy\":\"warm_pool\""));
+        let parsed: ConnectorPrewarmConfig = serde_json::from_str(&json)?;
+        assert_eq!(parsed, config);
+        Ok(())
+    }
+
+    #[test]
+    fn prewarm_checkout_evidence_serializes_redacted_operational_fields() -> serde_json::Result<()>
+    {
+        let evidence = PrewarmCheckoutEvidence {
+            connector_id: "fcp.github:utility:1.0.0".to_string(),
+            manifest_hash: Some("blake3:abc123".to_string()),
+            zone: Some("z:project:alpha".to_string()),
+            pool_state: PrewarmPoolState::WarmHit,
+            activation_latency_ms: Some(17),
+            sandbox_layer: "wasi".to_string(),
+            credential_state: PrewarmCredentialState::Deferred,
+            process_count: 1,
+            decision: PrewarmCheckoutDecision::AdmitWarm {
+                pool_state: PrewarmPoolState::WarmHit,
+            },
+        };
+        let value = serde_json::to_value(&evidence)?;
+        assert_eq!(value["credential_state"], "deferred");
+        assert_eq!(value["activation_latency_ms"], 17);
+        assert!(!value.to_string().contains("secret"));
+        Ok(())
     }
 
     // ── RestartTracker ──

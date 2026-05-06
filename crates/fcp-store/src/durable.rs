@@ -846,7 +846,7 @@ impl ObjectStore for DurableObjectStore {
             .objects
             .get(id)
             .cloned()
-            .ok_or_else(|| ObjectStoreError::NotFound(*id))
+            .ok_or(ObjectStoreError::NotFound(*id))
     }
 
     async fn exists(&self, id: &ObjectId) -> bool {
@@ -865,7 +865,7 @@ impl ObjectStore for DurableObjectStore {
             .objects
             .get(id)
             .map(|object| object.header.clone())
-            .ok_or_else(|| ObjectStoreError::NotFound(*id))
+            .ok_or(ObjectStoreError::NotFound(*id))
     }
 
     async fn get_storage_meta(
@@ -878,7 +878,7 @@ impl ObjectStore for DurableObjectStore {
             .objects
             .get(id)
             .map(|object| object.storage.clone())
-            .ok_or_else(|| ObjectStoreError::NotFound(*id))
+            .ok_or(ObjectStoreError::NotFound(*id))
     }
 
     async fn set_retention(
@@ -1403,6 +1403,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn read_wal_records<T>(
     path: &Path,
     min_seq: u64,

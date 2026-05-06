@@ -118,7 +118,7 @@ pub struct DurableCompatibilityLedgerStore {
 ///
 /// **`sequence` and `published_at_ms` are V2 fields** added under
 /// `flywheel_connectors-iqy2b` to defend against pointer-replay attacks.
-/// VioletPine's audit found that the V1 pointer (just `mesh_id` + `root`)
+/// `VioletPine`'s audit found that the V1 pointer (just `mesh_id` + `root`)
 /// could be silently rolled back on disk to point at an older signed
 /// ledger that was still present, demoting policy from a newer
 /// `V4Required` phase to an earlier `V3-permissive` phase without breaking
@@ -252,8 +252,7 @@ impl DurableCompatibilityLedgerStore {
             published_at_ms: u64::try_from(
                 std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_millis())
-                    .unwrap_or(0),
+                    .map_or(0, |d| d.as_millis()),
             )
             .unwrap_or(0),
         };
@@ -325,12 +324,12 @@ impl CompatibilityLedgerState {
         }
 
         if let Some(latest_root) = self.latest_by_mesh.get(mesh_id).copied() {
-            let latest = self.ledgers.get(&latest_root).ok_or(
+            let latest = self.ledgers.get(&latest_root).ok_or_else(|| {
                 CompatibilityLedgerStoreError::MissingLatestLedger {
                     mesh_id: mesh_id.to_owned(),
                     latest_root: latest_root.to_string(),
-                },
-            )?;
+                }
+            })?;
             if ledger.epoch() <= latest.epoch() {
                 return Err(CompatibilityLedgerStoreError::EpochRollback {
                     mesh_id: mesh_id.to_owned(),
@@ -449,6 +448,7 @@ fn high_water_marks_by_mesh(
 /// pointer; instead we treat `sequence == 0` as "legacy / unset" and
 /// reconstruct using the high-water-mark, then enqueue a V2-pointer
 /// rewrite on disk.
+#[allow(clippy::too_many_lines)]
 fn load_latest_pointers(
     latest_dir: &Path,
     state: &mut CompatibilityLedgerState,
@@ -515,12 +515,12 @@ fn load_latest_pointers(
                 });
             }
         }
-        let target_ledger = state.ledgers.get(&pointer.root).ok_or(
+        let target_ledger = state.ledgers.get(&pointer.root).ok_or_else(|| {
             CompatibilityLedgerStoreError::MissingLatestLedger {
                 mesh_id: pointer.mesh_id.clone(),
                 latest_root: pointer.root.to_string(),
-            },
-        )?;
+            }
+        })?;
 
         // br-iqy2b §1: pointer.sequence must equal the underlying
         // ledger.epoch (which is signed). Tampered sequence → reject.
@@ -627,28 +627,25 @@ impl PointerRepairReason {
     }
 }
 
-/// br-28nms: in-process record of repair reasons observed since the
-/// last reset, scoped to `#[cfg(test)]`. Production code is unaffected
-/// — the structured `tracing::warn!` event is the operator-visible
-/// surface. This sink lets unit tests assert which reason-class fired
-/// without forcing a `tracing-subscriber` test dep.
+// br-28nms: in-process record of repair reasons observed since the
+// last reset, scoped to `#[cfg(test)]`. Production code is unaffected
+// — the structured `tracing::warn!` event is the operator-visible
+// surface. This sink lets unit tests assert which reason-class fired
+// without forcing a `tracing-subscriber` test dep.
 #[cfg(test)]
-static TEST_REPAIR_REASONS: std::sync::LazyLock<std::sync::Mutex<Vec<PointerRepairReason>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(Vec::new()));
+thread_local! {
+    static TEST_REPAIR_REASONS: std::cell::RefCell<Vec<PointerRepairReason>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
 
 #[cfg(test)]
 fn test_record_repair_reason(reason: PointerRepairReason) {
-    if let Ok(mut bag) = TEST_REPAIR_REASONS.lock() {
-        bag.push(reason);
-    }
+    TEST_REPAIR_REASONS.with_borrow_mut(|bag| bag.push(reason));
 }
 
 #[cfg(test)]
 fn test_drain_repair_reasons() -> Vec<PointerRepairReason> {
-    TEST_REPAIR_REASONS
-        .lock()
-        .map(|mut bag| std::mem::take(&mut *bag))
-        .unwrap_or_default()
+    TEST_REPAIR_REASONS.with_borrow_mut(std::mem::take)
 }
 
 /// Rewrite a pointer file in place to the high-water-mark `(root,
@@ -668,8 +665,7 @@ fn repair_replayed_pointer(
         published_at_ms: u64::try_from(
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis())
-                .unwrap_or(0),
+                .map_or(0, |d| d.as_millis()),
         )
         .unwrap_or(0),
     };

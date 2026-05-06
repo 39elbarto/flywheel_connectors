@@ -230,6 +230,7 @@ impl ResumeHandshakeRequest {
     /// Returns [`ResumeHandshakeError`] if the manifest id or canonical
     /// handshake id cannot be derived.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn new(
         source_node: impl Into<String>,
         target_node: impl Into<String>,
@@ -409,6 +410,7 @@ impl ResumeTargetComplete {
     ///
     /// Returns [`ResumeHandshakeError::ReplayConflict`] if duplicate replay ids
     /// carry conflicting effect hashes.
+    #[allow(clippy::needless_pass_by_value)]
     pub fn rehydrated(
         request: &ResumeHandshakeRequest,
         replayed_ops: Vec<ResumeReplayOp>,
@@ -538,15 +540,15 @@ impl ResumeHandshakeTranscript {
         self.validate_symbols()?;
 
         let mut decoder = RaptorQDecoder::new(self.request.raptorq.to_oti(), config);
-        let mut decoded = None;
+        let mut decoded_manifest = None;
         for symbol in &self.symbols {
             if let Some(bytes) = decoder.add_symbol(symbol.frame.esi, symbol.frame.data.clone())? {
-                decoded = Some(bytes);
+                decoded_manifest = Some(bytes);
                 break;
             }
         }
 
-        let bytes = decoded.ok_or(ResumeHandshakeError::IncompleteSnapshotStream)?;
+        let bytes = decoded_manifest.ok_or(ResumeHandshakeError::IncompleteSnapshotStream)?;
         let actual = ObjectId::from_unscoped_bytes(&bytes);
         if actual != self.request.snapshot_manifest_hash {
             return Err(ResumeHandshakeError::SnapshotManifestHashMismatch {
@@ -795,7 +797,7 @@ fn ensure_linkage(
     Ok(())
 }
 
-fn ensure_elapsed_within_timeout(
+const fn ensure_elapsed_within_timeout(
     started_at_ms: u64,
     observed_at_ms: u64,
     timeout_ms: u64,

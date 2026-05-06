@@ -11,6 +11,7 @@ pub const OP_SEND_CHANNEL: &str = "qq.messages.send_channel";
 pub const OP_SEND_GROUP: &str = "qq.messages.send_group";
 pub const OP_SEND_C2C: &str = "qq.messages.send_c2c";
 pub const OP_GET_GATEWAY: &str = "qq.gateway.get";
+pub const OP_GATEWAY_PROJECT_EVENT: &str = "qq.gateway.project_event";
 pub const OP_HEALTH: &str = "qq.health";
 pub const OP_EVENTS_NORMALIZE: &str = "qq.events.normalize";
 
@@ -19,11 +20,32 @@ pub const CAP_GATEWAY_READ: &str = "qq.gateway.read";
 pub const CAP_HEALTH_READ: &str = "qq.health.read";
 pub const CAP_EVENTS_READ: &str = "qq.events.read";
 
+pub const EVENT_QQ_MESSAGE_AUTHORIZED: &str = "qq.message.authorized";
+pub const EVENT_QQ_EVENT_DROPPED: &str = "qq.event.dropped";
+
 fn trim_string(value: &mut String) {
     let trimmed = value.trim();
     if trimmed.len() != value.len() {
         *value = trimmed.to_string();
     }
+}
+
+fn trim_optional_string(value: &mut Option<String>) {
+    if let Some(raw) = value {
+        trim_string(raw);
+        if raw.is_empty() {
+            *value = None;
+        }
+    }
+}
+
+fn normalize_string_vec(values: &mut Vec<String>) {
+    for value in values.iter_mut() {
+        trim_string(value);
+    }
+    values.retain(|value| !value.is_empty());
+    values.sort();
+    values.dedup();
 }
 
 #[derive(Clone, Deserialize)]
@@ -36,6 +58,8 @@ pub struct QqConfig {
     pub client_secret: String,
     #[serde(default = "default_timeout_ms")]
     pub request_timeout_ms: u64,
+    #[serde(default)]
+    pub gateway: QqGatewayRuntimeConfig,
 }
 
 impl QqConfig {
@@ -45,6 +69,7 @@ impl QqConfig {
         trim_string(&mut self.token_base_url);
         trim_string(&mut self.app_id);
         trim_string(&mut self.client_secret);
+        self.gateway = self.gateway.normalized();
         self
     }
 }
@@ -58,6 +83,7 @@ impl std::fmt::Debug for QqConfig {
             .field("app_id", &self.app_id)
             .field("client_secret", &"[REDACTED]")
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("gateway", &self.gateway)
             .finish()
     }
 }
@@ -89,6 +115,153 @@ impl std::fmt::Debug for AccessTokenResponse {
             .field("expires_in", &self.expires_in)
             .finish()
     }
+}
+
+// ─────────────────────────────────────────────────────────────────
+// Gateway runtime and inbound policy configuration
+// ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QqAccessPolicyMode {
+    Open,
+    Allowlist,
+    Disabled,
+}
+
+impl QqAccessPolicyMode {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Allowlist => "allowlist",
+            Self::Disabled => "disabled",
+        }
+    }
+}
+
+impl Default for QqAccessPolicyMode {
+    fn default() -> Self {
+        Self::Open
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QqInboundPolicyConfig {
+    pub dm_policy: QqAccessPolicyMode,
+    pub dm_allow_from: Vec<String>,
+    pub group_policy: QqAccessPolicyMode,
+    pub group_allow_from: Vec<String>,
+    pub group_require_mention: bool,
+    pub bot_user_id: Option<String>,
+    pub max_attachment_bytes: Option<u64>,
+}
+
+impl Default for QqInboundPolicyConfig {
+    fn default() -> Self {
+        Self {
+            dm_policy: QqAccessPolicyMode::Open,
+            dm_allow_from: Vec::new(),
+            group_policy: QqAccessPolicyMode::Open,
+            group_allow_from: Vec::new(),
+            group_require_mention: true,
+            bot_user_id: None,
+            max_attachment_bytes: None,
+        }
+    }
+}
+
+impl QqInboundPolicyConfig {
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        normalize_string_vec(&mut self.dm_allow_from);
+        normalize_string_vec(&mut self.group_allow_from);
+        trim_optional_string(&mut self.bot_user_id);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QqGatewayRuntimeConfig {
+    pub enabled: bool,
+    pub restore_session_id: Option<String>,
+    pub restore_sequence: Option<u64>,
+    pub heartbeat_interval_ms: u64,
+    pub reconnect_backoff_ms: u64,
+    pub max_reconnect_attempts: u32,
+    pub dedupe_window_size: usize,
+    pub max_queue_depth: usize,
+    pub policy: QqInboundPolicyConfig,
+}
+
+impl Default for QqGatewayRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            restore_session_id: None,
+            restore_sequence: None,
+            heartbeat_interval_ms: 45_000,
+            reconnect_backoff_ms: 1_000,
+            max_reconnect_attempts: 5,
+            dedupe_window_size: 1_024,
+            max_queue_depth: 128,
+            policy: QqInboundPolicyConfig::default(),
+        }
+    }
+}
+
+impl QqGatewayRuntimeConfig {
+    #[must_use]
+    pub fn normalized(mut self) -> Self {
+        trim_optional_string(&mut self.restore_session_id);
+        self.policy = self.policy.normalized();
+        self
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QqInboundPolicyDecision {
+    pub allowed: bool,
+    pub reason_code: &'static str,
+    pub routing: QqRouting,
+    pub sender_id: Option<String>,
+    pub target_id: Option<String>,
+    pub mentioned_bot: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QqGatewayRuntimeSnapshot {
+    pub enabled: bool,
+    pub session_id: Option<String>,
+    pub last_sequence: u64,
+    pub heartbeat_interval_ms: u64,
+    pub heartbeat_sent_count: u64,
+    pub heartbeat_ack_count: u64,
+    pub reconnect_attempts: u32,
+    pub max_reconnect_attempts: u32,
+    pub reconnect_backoff_ms: u64,
+    pub queue_depth: usize,
+    pub max_queue_depth: usize,
+    pub dedupe_size: usize,
+    pub dedupe_window_size: usize,
+    pub accepted_events: u64,
+    pub dropped_events: u64,
+    pub duplicate_events: u64,
+    pub stale_sequence_events: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct QqGatewayEventProjection {
+    pub accepted: bool,
+    pub topic: &'static str,
+    pub reason_code: &'static str,
+    pub sequence: Option<u64>,
+    pub event_id: Option<String>,
+    pub normalized: Option<NormalizedQqEvent>,
+    pub policy: Option<QqInboundPolicyDecision>,
+    pub runtime: QqGatewayRuntimeSnapshot,
 }
 
 // ─────────────────────────────────────────────────────────────────

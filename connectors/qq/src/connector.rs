@@ -5,7 +5,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
+    ConnectorId, ConnectorMetrics, EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest,
     HandshakeResponse, HealthSnapshot, HealthState, IdempotencyClass, Introspection, InvokeRequest,
     InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
@@ -20,9 +20,10 @@ use crate::client::{
     sanitize_path_segment,
 };
 use crate::types::{
-    CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE, OP_EVENTS_NORMALIZE,
-    OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL, OP_SEND_GROUP, QqConfig,
-    QqGatewayEvent,
+    CAP_EVENTS_READ, CAP_GATEWAY_READ, CAP_HEALTH_READ, CAP_MESSAGES_WRITE,
+    EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, OP_EVENTS_NORMALIZE,
+    OP_GATEWAY_PROJECT_EVENT, OP_GET_GATEWAY, OP_HEALTH, OP_SEND_C2C, OP_SEND_CHANNEL,
+    OP_SEND_GROUP, QqConfig, QqGatewayEvent,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -100,6 +101,22 @@ impl QqConnector {
                 "Runtime missing - configure first".into()
             }),
             critical: true,
+        });
+
+        checks.push(DoctorCheck {
+            name: "gateway_runtime".into(),
+            passed: self.client.is_some(),
+            message: Some(match self.client.as_ref() {
+                Some(client) if client.config().gateway.enabled => {
+                    "Gateway projection runtime configured; WebSocket ownership remains host-driven"
+                        .into()
+                }
+                Some(_) => {
+                    "Gateway projection runtime available but disabled by configuration".into()
+                }
+                None => "Gateway projection runtime missing - configure first".into(),
+            }),
+            critical: false,
         });
 
         checks.push(DoctorCheck {

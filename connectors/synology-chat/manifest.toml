@@ -75,17 +75,17 @@ output_schema = { type = "object" }
 when_to_use = "When you need advanced webhook payload control for cards or attachments and intentionally accept unchecked provider-specific passthrough"
 
 [provides.operations.ingest_outgoing_webhook]
-description = "Validate and normalize a host-forwarded Synology Chat outgoing-webhook payload"
+description = "Policy-check, verify, and normalize a host-forwarded Synology Chat outgoing-webhook payload"
 capability = "synology_chat.webhook"
 risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
-input_schema = { type = "object", required = ["payload"] }
+input_schema = { type = "object", required = ["payload"], properties = { payload = { type = "object" }, token = { type = "string" }, headers = { type = "object" }, query = { type = "object" }, body_size_bytes = { type = "integer" }, body_read_elapsed_ms = { type = "integer" }, source_id = { type = "string" } } }
 output_schema = { type = "object" }
 
 [provides.operations.ingest_outgoing_webhook.ai_hints]
-when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, and attachment metadata"
+when_to_use = "When fcp-host forwards an outgoing-webhook payload and you need stable channel, thread, sender, attachment, and ingress-policy metadata"
 
 [provides.operations.webhook_normalize]
 description = "Normalize a raw inbound Synology Chat webhook payload into a stable event envelope"

@@ -9,6 +9,11 @@ use url::Url;
 
 pub const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 15_000;
 pub const MAX_REQUEST_TIMEOUT_MS: u64 = 300_000;
+pub const DEFAULT_WEBHOOK_BODY_LIMIT_BYTES: u64 = 64 * 1024;
+pub const MAX_WEBHOOK_BODY_LIMIT_BYTES: u64 = 1024 * 1024;
+pub const DEFAULT_WEBHOOK_BODY_TIMEOUT_MS: u64 = 5_000;
+pub const DEFAULT_WEBHOOK_INVALID_TOKEN_LIMIT_PER_MINUTE: u32 = 10;
+pub const DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE: u32 = 60;
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct SynologyChatConfig {
@@ -21,6 +26,20 @@ pub struct SynologyChatConfig {
     request_timeout_ms: u64,
     #[serde(default)]
     allow_insecure_ssl: bool,
+    #[serde(default)]
+    allowed_webhook_sender_ids: Vec<String>,
+    #[serde(default)]
+    allowed_webhook_dm_sender_ids: Vec<String>,
+    #[serde(default)]
+    webhook_dm_policy: SynologyChatDmPolicy,
+    #[serde(default = "default_webhook_body_limit_bytes")]
+    webhook_body_limit_bytes: u64,
+    #[serde(default = "default_webhook_body_timeout_ms")]
+    webhook_body_timeout_ms: u64,
+    #[serde(default = "default_webhook_invalid_token_limit_per_minute")]
+    webhook_invalid_token_limit_per_minute: u32,
+    #[serde(default = "default_webhook_sender_limit_per_minute")]
+    webhook_sender_limit_per_minute: u32,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -43,6 +62,15 @@ pub enum SynologyChatReplySemantics {
     OutgoingWebhookResponse,
 }
 
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SynologyChatDmPolicy {
+    Disabled,
+    Allowlist,
+    #[default]
+    Open,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SynologyChatDeliveryTarget {
     pub mode: SynologyChatDeliveryMode,
@@ -61,8 +89,23 @@ pub struct SynologyChatStateModel {
     pub allow_insecure_ssl: bool,
     pub outgoing_token_configured: bool,
     pub allowed_file_url_hosts: Vec<String>,
+    pub forwarded_ingress_policy: SynologyChatForwardedIngressPolicyModel,
     pub receive_path: SynologyChatReceivePath,
     pub reply_semantics: SynologyChatReplySemantics,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct SynologyChatForwardedIngressPolicyModel {
+    pub sender_policy: String,
+    pub allowed_sender_ids: Vec<String>,
+    pub dm_policy: SynologyChatDmPolicy,
+    pub allowed_dm_sender_ids: Vec<String>,
+    pub body_limit_bytes: u64,
+    pub body_timeout_ms: u64,
+    pub invalid_token_limit_per_minute: u32,
+    pub sender_limit_per_minute: u32,
+    pub hosted_listener: bool,
+    pub reply_user_id_resolution: String,
 }
 
 impl std::fmt::Debug for SynologyChatConfig {
@@ -76,12 +119,47 @@ impl std::fmt::Debug for SynologyChatConfig {
             .field("allowed_file_url_hosts", &self.allowed_file_url_hosts)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("allow_insecure_ssl", &self.allow_insecure_ssl)
+            .field(
+                "allowed_webhook_sender_ids",
+                &self.allowed_webhook_sender_ids,
+            )
+            .field(
+                "allowed_webhook_dm_sender_ids",
+                &self.allowed_webhook_dm_sender_ids,
+            )
+            .field("webhook_dm_policy", &self.webhook_dm_policy)
+            .field("webhook_body_limit_bytes", &self.webhook_body_limit_bytes)
+            .field("webhook_body_timeout_ms", &self.webhook_body_timeout_ms)
+            .field(
+                "webhook_invalid_token_limit_per_minute",
+                &self.webhook_invalid_token_limit_per_minute,
+            )
+            .field(
+                "webhook_sender_limit_per_minute",
+                &self.webhook_sender_limit_per_minute,
+            )
             .finish()
     }
 }
 
 const fn default_request_timeout_ms() -> u64 {
     DEFAULT_REQUEST_TIMEOUT_MS
+}
+
+const fn default_webhook_body_limit_bytes() -> u64 {
+    DEFAULT_WEBHOOK_BODY_LIMIT_BYTES
+}
+
+const fn default_webhook_body_timeout_ms() -> u64 {
+    DEFAULT_WEBHOOK_BODY_TIMEOUT_MS
+}
+
+const fn default_webhook_invalid_token_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_INVALID_TOKEN_LIMIT_PER_MINUTE
+}
+
+const fn default_webhook_sender_limit_per_minute() -> u32 {
+    DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE
 }
 
 impl SynologyChatConfig {
@@ -109,6 +187,8 @@ impl SynologyChatConfig {
             .collect::<BTreeSet<_>>()
             .into_iter()
             .collect();
+        self.allowed_webhook_sender_ids = normalize_id_list(&self.allowed_webhook_sender_ids);
+        self.allowed_webhook_dm_sender_ids = normalize_id_list(&self.allowed_webhook_dm_sender_ids);
     }
 
     pub fn validate(&self) -> FcpResult<()> {
@@ -143,6 +223,38 @@ impl SynologyChatConfig {
                 message: format!(
                     "request_timeout_ms must be less than or equal to {MAX_REQUEST_TIMEOUT_MS}"
                 ),
+            });
+        }
+        if self.webhook_body_limit_bytes == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook_body_limit_bytes must be greater than zero".into(),
+            });
+        }
+        if self.webhook_body_limit_bytes > MAX_WEBHOOK_BODY_LIMIT_BYTES {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "webhook_body_limit_bytes must be less than or equal to {MAX_WEBHOOK_BODY_LIMIT_BYTES}"
+                ),
+            });
+        }
+        if self.webhook_body_timeout_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook_body_timeout_ms must be greater than zero".into(),
+            });
+        }
+        if self.webhook_invalid_token_limit_per_minute == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook_invalid_token_limit_per_minute must be greater than zero".into(),
+            });
+        }
+        if self.webhook_sender_limit_per_minute == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "webhook_sender_limit_per_minute must be greater than zero".into(),
             });
         }
         for host in &self.allowed_file_url_hosts {
@@ -189,6 +301,26 @@ impl SynologyChatConfig {
     }
 
     #[must_use]
+    pub fn forwarded_ingress_policy(&self) -> SynologyChatForwardedIngressPolicyModel {
+        SynologyChatForwardedIngressPolicyModel {
+            sender_policy: if self.allowed_webhook_sender_ids.is_empty() {
+                "open".to_string()
+            } else {
+                "allowlist".to_string()
+            },
+            allowed_sender_ids: self.allowed_webhook_sender_ids.clone(),
+            dm_policy: self.webhook_dm_policy.clone(),
+            allowed_dm_sender_ids: self.allowed_webhook_dm_sender_ids.clone(),
+            body_limit_bytes: self.webhook_body_limit_bytes,
+            body_timeout_ms: self.webhook_body_timeout_ms,
+            invalid_token_limit_per_minute: self.webhook_invalid_token_limit_per_minute,
+            sender_limit_per_minute: self.webhook_sender_limit_per_minute,
+            hosted_listener: false,
+            reply_user_id_resolution: "webhook_user_id".to_string(),
+        }
+    }
+
+    #[must_use]
     pub fn normalized_incoming_url(&self) -> String {
         self.incoming_url.clone()
     }
@@ -232,6 +364,7 @@ impl SynologyChatConfig {
             allow_insecure_ssl: self.allow_insecure_ssl,
             outgoing_token_configured,
             allowed_file_url_hosts: self.allowed_file_url_hosts.clone(),
+            forwarded_ingress_policy: self.forwarded_ingress_policy(),
             receive_path: if outgoing_token_configured {
                 SynologyChatReceivePath::ForwardedOutgoingWebhook
             } else {
@@ -244,6 +377,22 @@ impl SynologyChatConfig {
             },
         }
     }
+}
+
+fn normalize_id_list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .filter_map(|value| {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 fn normalize_optional_secret(value: &str) -> Option<String> {
@@ -477,6 +626,53 @@ mod tests {
             state_model.allowed_file_url_hosts,
             vec!["::1".to_string(), "localhost".to_string()]
         );
+    }
+
+    #[test]
+    fn config_normalizes_forwarded_ingress_policy() {
+        let config = SynologyChatConfig::from_value(serde_json::json!({
+            "incoming_url": "https://nas.example.com/webhook",
+            "outgoing_token": "shared-secret",
+            "allowed_webhook_sender_ids": [" 4 ", "4", "7"],
+            "allowed_webhook_dm_sender_ids": [" 4 "],
+            "webhook_dm_policy": "allowlist",
+            "webhook_body_limit_bytes": 4096,
+            "webhook_body_timeout_ms": 250,
+            "webhook_invalid_token_limit_per_minute": 2,
+            "webhook_sender_limit_per_minute": 3
+        }))
+        .expect("config should parse");
+        let policy = config.forwarded_ingress_policy();
+        assert_eq!(policy.sender_policy, "allowlist");
+        assert_eq!(
+            policy.allowed_sender_ids,
+            vec!["4".to_string(), "7".to_string()]
+        );
+        assert_eq!(policy.allowed_dm_sender_ids, vec!["4".to_string()]);
+        assert_eq!(policy.dm_policy, SynologyChatDmPolicy::Allowlist);
+        assert_eq!(policy.body_limit_bytes, 4096);
+        assert_eq!(policy.body_timeout_ms, 250);
+        assert_eq!(policy.invalid_token_limit_per_minute, 2);
+        assert_eq!(policy.sender_limit_per_minute, 3);
+        assert!(!policy.hosted_listener);
+    }
+
+    #[test]
+    fn config_rejects_invalid_forwarded_ingress_budgets() {
+        for (field, value) in [
+            ("webhook_body_limit_bytes", 0_u64),
+            ("webhook_body_timeout_ms", 0),
+            ("webhook_invalid_token_limit_per_minute", 0),
+            ("webhook_sender_limit_per_minute", 0),
+        ] {
+            let mut config = serde_json::json!({
+                "incoming_url": "https://nas.example.com/webhook"
+            });
+            config[field] = serde_json::json!(value);
+            let error =
+                SynologyChatConfig::from_value(config).expect_err("invalid budget should fail");
+            assert!(matches!(error, FcpError::InvalidRequest { .. }));
+        }
     }
 
     #[test]

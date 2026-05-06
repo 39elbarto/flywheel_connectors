@@ -32,7 +32,7 @@ The current crate exposes these operations:
 
 Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, and `manifest.toml`:
 
-- Configuration is `incoming_url`, optional `outgoing_token`, optional `allowed_file_url_hosts`, bounded `request_timeout_ms`, and `allow_insecure_ssl`.
+- Configuration is `incoming_url`, optional `outgoing_token`, optional `allowed_file_url_hosts`, bounded `request_timeout_ms`, `allow_insecure_ssl`, and forwarded-ingress policy settings for sender allowlists, DM policy, body budget, body timeout, invalid-token rate limit, and per-sender rate limit.
 - `incoming_url` must be a valid `http://` or `https://` URL and is normalized by trimming surrounding whitespace.
 - One connector instance is bound to one incoming webhook delivery target.
 - `send_message` requires `text` and optionally accepts `user_id`, `user_ids`, and `bot_name`.
@@ -43,10 +43,10 @@ Important implementation truths from `connector.rs`, `client.rs`, `types.rs`, an
 - `send_payload` requires a JSON object and forwards it directly to the webhook endpoint for advanced card or attachment shapes.
 - `send_payload` intentionally remains unchecked raw passthrough for provider-specific payloads; callers that want SSRF-checked media URL dispatch should use `send_file_url`.
 - Delivery is an outbound `POST` with JSON to the configured incoming webhook URL.
-- `ingest_outgoing_webhook` accepts a parsed outgoing-webhook payload forwarded by the host, verifies the configured `outgoing_token`, and emits stable channel, thread, sender, message, and attachment metadata without hosting the listener inside the connector.
+- `ingest_outgoing_webhook` accepts a parsed outgoing-webhook payload forwarded by the host, enforces forwarded body budget and timeout metadata, resolves the token from payload, query, top-level token, or supported header aliases, verifies it with a constant-time comparison, applies sender/DM/rate policy, and emits stable channel, thread, sender, message, reply, attachment, sanitization, and policy metadata without hosting the listener inside the connector.
 - Non-success HTTP status codes are surfaced as API errors with the provider body preserved.
 - Successful empty responses are normalized to `{ "status": "ok" }`; successful non-JSON bodies are wrapped as `{ "status": "ok", "body": "<raw>" }`.
-- `health` reports configured target details, manifest hash, `allow_insecure_ssl`, whether `outgoing_token` is present, and whether the receive path is still disabled or ready for host-forwarded outgoing-webhook ingest, but it does not perform a live delivery probe.
+- `health` reports configured target details, manifest hash, `allow_insecure_ssl`, whether `outgoing_token` is present, forwarded-ingress policy, and whether the receive path is still disabled or ready for host-forwarded outgoing-webhook ingest, but it does not perform a live delivery probe.
 - `self_check()` is also configuration-centric: it reports normalized URL and settings, including whether reply semantics are still outbound-only or upgraded to outgoing-webhook response mode, but it does not call the webhook endpoint.
 - A `doctor()` helper exists internally and reports configuration state plus the normalized incoming URL, but it is not yet exposed as an FCP operation.
 - The connector stores a `ConnectorRuntime`, but it still does not use it for any streaming or inbound server lifecycle.
@@ -94,7 +94,7 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 - Outbound media URL dispatch uses connector-local SSRF checks before the Synology NAS is asked to fetch the URL. Public DNS names must resolve to public IPs; exact `allowed_file_url_hosts` entries are the deliberate escape hatch for private self-hosted media.
 - The connector does not listen on a socket or expose any inbound service surface.
 - `health` and `self_check()` do not currently prove remote webhook reachability; they only prove that configuration was parsed and stored.
-- There is no replay buffer, retry queue, dedupe key, or persistent local state in the current runtime.
+- There is no replay buffer, retry queue, dedupe key, or persistent local state in the current runtime. The connector does keep bounded in-memory fixed-window counters for forwarded invalid-token and per-sender rate decisions.
 - The current implementation is still request-response only: outbound delivery plus explicit host-forwarded ingest, with no connector-hosted listener or event stream.
 
 ## Capability Families
@@ -112,7 +112,7 @@ This slice is intentionally closer to "outbound incoming-webhook sender" than to
 | `synology_chat.send_message` | HTTP `POST` JSON webhook body with `text`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Outbound plain-text message delivery only. The connector does not model inbound reply semantics. |
 | `synology_chat.send_file_url` | HTTP `POST` JSON webhook body with checked `file_url`, optional `user_ids`, optional `username` | `synology_chat.write` | `Risky` | `Medium` | `None` | Validates media URLs before dispatch; exact-host overrides are explicit runtime configuration for private deployments. |
 | `synology_chat.send_payload` | HTTP `POST` arbitrary JSON object | `synology_chat.write` | `Risky` | `Medium` | `None` | Passes a raw webhook payload through directly for richer provider-specific payloads and intentionally does not inspect nested `file_url` values. |
-| `synology_chat.ingest_outgoing_webhook` | local payload normalization for one host-forwarded outgoing webhook request | `synology_chat.webhook` | `Safe` | `Low` | `Strict` | Verifies the configured `outgoing_token`, normalizes channel or thread or sender metadata, and exposes attachment hints without hosting a listener. |
+| `synology_chat.ingest_outgoing_webhook` | local policy and payload normalization for one host-forwarded outgoing webhook request | `synology_chat.webhook` | `Safe` | `Low` | `Strict` | Verifies the configured `outgoing_token` from supported aliases, applies body/sender/DM/rate policy, normalizes channel/thread/sender/reply metadata, and exposes attachment and policy hints without hosting a listener. |
 | `synology_chat.health` | local configuration report | `synology_chat.read` | `Safe` | `Low` | `Strict` | Returns configured URL and settings, but does not perform a live webhook probe. |
 
 ## Explicit Non-Goals

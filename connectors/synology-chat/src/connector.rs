@@ -1,6 +1,10 @@
 //! `Synology Chat` connector implementation.
 
-use std::time::{Duration, Instant};
+use std::{
+    collections::BTreeMap,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
 
 use async_trait::async_trait;
 use fcp_prelude::{
@@ -21,7 +25,8 @@ use crate::client::{
     SynologyChatPayload, normalize_inbound_event,
 };
 use crate::types::{
-    InboundWebhookPayload, SynologyChatConfig, SynologyChatStateModel, TokenVerification,
+    InboundWebhookPayload, SynologyChatConfig, SynologyChatDmPolicy, SynologyChatStateModel,
+    TokenVerification,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -62,6 +67,38 @@ struct SynologyChatState {
     client: SynologyChatClient,
     runtime: ConnectorRuntime,
     outgoing_token: Option<String>,
+    ingress_rate: Mutex<SynologyChatIngressRateState>,
+}
+
+#[derive(Debug, Default)]
+struct SynologyChatIngressRateState {
+    buckets: BTreeMap<String, RateBucket>,
+}
+
+#[derive(Debug, Clone)]
+struct RateBucket {
+    window_started: Instant,
+    count: u32,
+}
+
+impl SynologyChatIngressRateState {
+    fn check(&mut self, key: &str, limit: u32, now: Instant) -> bool {
+        const WINDOW: Duration = Duration::from_secs(60);
+
+        let bucket = self
+            .buckets
+            .entry(key.to_string())
+            .or_insert_with(|| RateBucket {
+                window_started: now,
+                count: 0,
+            });
+        if now.duration_since(bucket.window_started) >= WINDOW {
+            bucket.window_started = now;
+            bucket.count = 0;
+        }
+        bucket.count = bucket.count.saturating_add(1);
+        bucket.count <= limit
+    }
 }
 
 #[derive(Debug)]
@@ -259,10 +296,10 @@ impl SynologyChatConnector {
             },
             OperationInfo {
                 id: OperationId::from_static(OP_INGEST_OUTGOING_WEBHOOK),
-                summary: "Validate and normalize a forwarded Synology Chat outgoing-webhook payload"
+                summary: "Policy-check and normalize a forwarded Synology Chat outgoing-webhook payload"
                     .into(),
                 description: Some(
-                    "Normalize a host-forwarded Synology Chat outgoing-webhook payload into a stable event envelope without pretending this connector hosts the listener.".into(),
+                    "Apply forwarded body budgets, token alias verification, sender/DM/rate policy, and text sanitization before normalizing a host-forwarded Synology Chat outgoing-webhook payload into a stable event envelope without pretending this connector hosts the listener.".into(),
                 ),
                 input_schema: json!({
                     "type": "object",
@@ -271,7 +308,6 @@ impl SynologyChatConnector {
                         "payload": {
                             "type": "object",
                             "required": [
-                                "token",
                                 "channel_id",
                                 "channel_type",
                                 "user_id",
@@ -299,6 +335,12 @@ impl SynologyChatConnector {
                                 "file": {}
                             }
                         },
+                        "token": { "type": "string" },
+                        "headers": { "type": "object" },
+                        "query": { "type": "object" },
+                        "body_size_bytes": { "type": "integer" },
+                        "body_read_elapsed_ms": { "type": "integer" },
+                        "source_id": { "type": "string" },
                         "delivery_id": { "type": "string" }
                     }
                 }),
@@ -314,13 +356,15 @@ impl SynologyChatConnector {
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this when fcp-host forwards a Synology Chat outgoing-webhook payload and you need channel, thread, sender, and attachment metadata in a stable shape.".into(),
+                    when_to_use: "Use this when fcp-host forwards a Synology Chat outgoing-webhook payload and you need channel, thread, sender, attachment, reply, and policy metadata in a stable shape.".into(),
                     common_mistakes: vec![
                         "Passing the raw form-encoded HTTP body instead of the parsed payload object".into(),
                         "Calling this operation without configuring outgoing_token first".into(),
+                        "Logging raw source_id, token, or message text instead of the returned policy hashes and sanitization flags".into(),
                     ],
                     examples: vec![
                         "{\"payload\":{\"token\":\"shared-secret\",\"channel_id\":\"34\",\"channel_type\":\"1\",\"channel_name\":\"Labb\",\"user_id\":\"4\",\"username\":\"mikael\",\"post_id\":\"146028888128\",\"thread_id\":\"0\",\"timestamp\":\"1646827836131\",\"text\":\"Tjena\",\"trigger_word\":\"Tjena\"}}".into(),
+                        "{\"payload\":{\"channel_id\":\"34\",\"channel_type\":\"1\",\"user_id\":\"4\",\"username\":\"mikael\",\"post_id\":\"146028888128\",\"thread_id\":\"0\",\"timestamp\":\"1646827836131\",\"text\":\"Tjena\"},\"headers\":{\"Authorization\":\"Bearer shared-secret\"},\"body_size_bytes\":512}".into(),
                     ],
                     related: vec![
                         CapabilityId::from_static(CAP_READ),
@@ -489,6 +533,7 @@ impl SynologyChatConnector {
                 "allow_insecure_ssl": state.model.allow_insecure_ssl,
                 "outgoing_token_configured": state.model.outgoing_token_configured,
                 "allowed_file_url_hosts": &state.model.allowed_file_url_hosts,
+                "forwarded_ingress_policy": &state.model.forwarded_ingress_policy,
                 "raw_payload_file_url_policy": "unchecked_passthrough",
                 "receive_path": &state.model.receive_path,
                 "reply_semantics": &state.model.reply_semantics,
@@ -565,8 +610,39 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
             message: "payload must be a JSON object".into(),
         })?;
 
-    let presented_webhook_key = required_payload_string(payload, "token")?;
-    if presented_webhook_key != expected_webhook_key {
+    let body_size_bytes = forwarded_body_size_bytes(input, payload)?;
+    let body_read_elapsed_ms = forwarded_body_read_elapsed_ms(input)?;
+    let policy = &state.model.forwarded_ingress_policy;
+    if body_size_bytes > policy.body_limit_bytes {
+        return Err(FcpError::ResourceExhausted {
+            resource: format!(
+                "synology_chat.forwarded_webhook_body:{body_size_bytes}>{}",
+                policy.body_limit_bytes
+            ),
+        });
+    }
+    if body_read_elapsed_ms > policy.body_timeout_ms {
+        return Err(FcpError::UpstreamTimeout {
+            service: "synology_chat.forwarded_webhook_body_read".into(),
+        });
+    }
+
+    let source_key = input
+        .get("source_id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown_forwarder");
+    let presented_webhook_key = resolve_presented_webhook_token(input, payload)?;
+    let Some(presented_webhook_key) = presented_webhook_key else {
+        record_invalid_token_attempt(state, source_key)?;
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Outgoing webhook token is missing".into(),
+        });
+    };
+    if !constant_time_secret_eq(expected_webhook_key, &presented_webhook_key.value) {
+        record_invalid_token_attempt(state, source_key)?;
         return Err(FcpError::Unauthorized {
             code: 2001,
             message: "Outgoing webhook token verification failed".into(),
@@ -582,9 +658,11 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
     let thread_id = required_payload_string_or_integer(payload, "thread_id")?;
     let timestamp_ms = required_payload_i64(payload, "timestamp")?;
     let text = required_payload_string(payload, "text")?;
+    let (sanitized_text, sanitization) = sanitize_ingress_text(&text);
     let trigger_word = optional_payload_string(payload, "trigger_word");
     let attachments = normalize_inbound_attachments(payload);
     let is_threaded = !matches!(thread_id.as_str(), "" | "0");
+    let policy_decision = enforce_forwarded_ingress_policy(state, &user_id, &channel_type)?;
 
     let channel_uri = format!("synology-chat://channels/{channel_id}");
     let sender_uri = format!("synology-chat://users/{user_id}");
@@ -637,6 +715,7 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
             "message": {
                 "post_id": &post_id,
                 "text": &text,
+                "sanitized_text": sanitized_text,
                 "trigger_word": &trigger_word,
                 "timestamp_ms": timestamp_ms,
             },
@@ -645,13 +724,335 @@ fn normalize_outgoing_webhook(input: &Value, state: &SynologyChatState) -> FcpRe
                 "mode": "outgoing_webhook_response",
                 "supports_text": true,
                 "supports_file_url": true,
+                "user_id_resolution": {
+                    "mode": "stable_webhook_user_id",
+                    "dangerous_name_matching": false,
+                    "source": "payload.user_id",
+                },
                 "audience": {
                     "user_id": &user_id,
                     "username": &username,
                 },
             },
+            "ingress_policy": {
+                "mode": "host_forwarded",
+                "hosted_listener": false,
+                "token_source": presented_webhook_key.source,
+                "token_verification": "verified",
+                "body": {
+                    "size_bytes": body_size_bytes,
+                    "limit_bytes": policy.body_limit_bytes,
+                    "read_elapsed_ms": body_read_elapsed_ms,
+                    "timeout_ms": policy.body_timeout_ms,
+                },
+                "sender": policy_decision["sender"].clone(),
+                "dm": policy_decision["dm"].clone(),
+                "rate_limit": policy_decision["rate_limit"].clone(),
+                "sanitization": sanitization,
+                "source_hash": hash_identifier(source_key),
+                "raw_payload_logged": false,
+            },
         }
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PresentedWebhookToken {
+    source: &'static str,
+    value: String,
+}
+
+fn resolve_presented_webhook_token(
+    input: &Value,
+    payload: &Map<String, Value>,
+) -> FcpResult<Option<PresentedWebhookToken>> {
+    if payload.contains_key("token") {
+        return Ok(Some(PresentedWebhookToken {
+            source: "payload.token",
+            value: required_payload_string(payload, "token")?,
+        }));
+    }
+    if let Some(value) = optional_input_string(input, "token")? {
+        return Ok(Some(PresentedWebhookToken {
+            source: "input.token",
+            value,
+        }));
+    }
+    if let Some(value) = nested_input_string(input, "query", "token")? {
+        return Ok(Some(PresentedWebhookToken {
+            source: "query.token",
+            value,
+        }));
+    }
+    if let Some(value) = header_value(input, &["x-synology-chat-token", "x-synology-token"])? {
+        return Ok(Some(PresentedWebhookToken {
+            source: value.0,
+            value: value.1,
+        }));
+    }
+    if let Some(authorization) = header_value(input, &["authorization"])? {
+        let Some(token) = authorization
+            .1
+            .strip_prefix("Bearer ")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "headers.authorization must use Bearer token syntax".into(),
+            });
+        };
+        return Ok(Some(PresentedWebhookToken {
+            source: authorization.0,
+            value: token.to_string(),
+        }));
+    }
+    Ok(None)
+}
+
+fn optional_input_string(input: &Value, field: &str) -> FcpResult<Option<String>> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    string_value(value)
+        .map(Some)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{field} must be a non-empty string"),
+        })
+}
+
+fn nested_input_string(
+    input: &Value,
+    object_field: &str,
+    field: &str,
+) -> FcpResult<Option<String>> {
+    let Some(object) = input.get(object_field) else {
+        return Ok(None);
+    };
+    let object = object.as_object().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1005,
+        message: format!("{object_field} must be a JSON object"),
+    })?;
+    let Some(value) = object.get(field) else {
+        return Ok(None);
+    };
+    string_value(value)
+        .map(Some)
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("{object_field}.{field} must be a non-empty string"),
+        })
+}
+
+fn header_value(
+    input: &Value,
+    candidates: &[&'static str],
+) -> FcpResult<Option<(&'static str, String)>> {
+    let Some(headers) = input.get("headers") else {
+        return Ok(None);
+    };
+    let headers = headers
+        .as_object()
+        .ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "headers must be a JSON object".into(),
+        })?;
+    for candidate in candidates {
+        if let Some((_, value)) = headers
+            .iter()
+            .find(|(header, _)| header.eq_ignore_ascii_case(candidate))
+        {
+            let presented_value = string_value(value).ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("headers.{candidate} must be a non-empty string"),
+            })?;
+            return Ok(Some((candidate, presented_value)));
+        }
+    }
+    Ok(None)
+}
+
+fn forwarded_body_size_bytes(input: &Value, payload: &Map<String, Value>) -> FcpResult<u64> {
+    if let Some(value) = input.get("body_size_bytes") {
+        return value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "body_size_bytes must be a non-negative integer".into(),
+        });
+    }
+    let serialized = serde_json::to_vec(payload).map_err(|error| FcpError::Internal {
+        message: format!("Failed to measure forwarded payload size: {error}"),
+    })?;
+    u64::try_from(serialized.len()).map_err(|_| FcpError::ResourceExhausted {
+        resource: "synology_chat.forwarded_webhook_body".into(),
+    })
+}
+
+fn forwarded_body_read_elapsed_ms(input: &Value) -> FcpResult<u64> {
+    input.get("body_read_elapsed_ms").map_or(Ok(0), |value| {
+        value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: "body_read_elapsed_ms must be a non-negative integer".into(),
+        })
+    })
+}
+
+fn record_invalid_token_attempt(state: &SynologyChatState, source_key: &str) -> FcpResult<()> {
+    let key = format!("invalid_token:{}", hash_identifier(source_key));
+    let limit = state
+        .model
+        .forwarded_ingress_policy
+        .invalid_token_limit_per_minute;
+    if check_rate_limit(state, &key, limit)? {
+        Ok(())
+    } else {
+        Err(FcpError::RateLimited {
+            retry_after_ms: 60_000,
+            violation: None,
+        })
+    }
+}
+
+fn enforce_forwarded_ingress_policy(
+    state: &SynologyChatState,
+    user_id: &str,
+    channel_type: &str,
+) -> FcpResult<Value> {
+    let policy = &state.model.forwarded_ingress_policy;
+    let sender_allowed = policy.allowed_sender_ids.is_empty()
+        || policy
+            .allowed_sender_ids
+            .iter()
+            .any(|allowed| allowed == user_id);
+    if !sender_allowed {
+        return Err(FcpError::Unauthorized {
+            code: 2001,
+            message: "Outgoing webhook sender denied by allowlist policy".into(),
+        });
+    }
+
+    let dm_decision = if is_dm_channel_type(channel_type) {
+        match policy.dm_policy {
+            SynologyChatDmPolicy::Disabled => {
+                return Err(FcpError::Unauthorized {
+                    code: 2001,
+                    message: "Outgoing webhook direct-message events are disabled".into(),
+                });
+            }
+            SynologyChatDmPolicy::Allowlist => {
+                if !policy
+                    .allowed_dm_sender_ids
+                    .iter()
+                    .any(|allowed| allowed == user_id)
+                {
+                    return Err(FcpError::Unauthorized {
+                        code: 2001,
+                        message: "Outgoing webhook DM sender denied by allowlist policy".into(),
+                    });
+                }
+                json!({
+                    "decision": "allowed",
+                    "reason": "dm_allowlist_match",
+                    "sender_id_hash": hash_identifier(user_id),
+                })
+            }
+            SynologyChatDmPolicy::Open => json!({
+                "decision": "allowed",
+                "reason": "dm_open",
+                "sender_id_hash": hash_identifier(user_id),
+            }),
+        }
+    } else {
+        json!({
+            "decision": "not_applicable",
+            "reason": "group_or_channel_message",
+        })
+    };
+
+    let rate_key = format!("sender:{}", hash_identifier(user_id));
+    let sender_rate_allowed = check_rate_limit(state, &rate_key, policy.sender_limit_per_minute)?;
+    if !sender_rate_allowed {
+        return Err(FcpError::RateLimited {
+            retry_after_ms: 60_000,
+            violation: None,
+        });
+    }
+
+    Ok(json!({
+        "sender": {
+            "decision": "allowed",
+            "reason": if policy.allowed_sender_ids.is_empty() { "sender_policy_open" } else { "sender_allowlist_match" },
+            "sender_id_hash": hash_identifier(user_id),
+        },
+        "dm": dm_decision,
+        "rate_limit": {
+            "decision": "allowed",
+            "window_seconds": 60,
+            "limit": policy.sender_limit_per_minute,
+        },
+    }))
+}
+
+fn check_rate_limit(state: &SynologyChatState, key: &str, limit: u32) -> FcpResult<bool> {
+    let mut rate_state = state.ingress_rate.lock().map_err(|_| FcpError::Internal {
+        message: "Synology Chat ingress rate limiter lock poisoned".into(),
+    })?;
+    Ok(rate_state.check(key, limit, Instant::now()))
+}
+
+fn is_dm_channel_type(channel_type: &str) -> bool {
+    matches!(channel_type, "2")
+        || channel_type.eq_ignore_ascii_case("dm")
+        || channel_type.eq_ignore_ascii_case("direct")
+}
+
+fn constant_time_secret_eq(expected: &str, actual: &str) -> bool {
+    let expected = expected.as_bytes();
+    let actual = actual.as_bytes();
+    let max_len = expected.len().max(actual.len());
+    let mut diff = expected.len() ^ actual.len();
+    for index in 0..max_len {
+        let expected_byte = expected.get(index).copied().unwrap_or(0);
+        let actual_byte = actual.get(index).copied().unwrap_or(0);
+        diff |= usize::from(expected_byte ^ actual_byte);
+    }
+    diff == 0
+}
+
+fn sanitize_ingress_text(text: &str) -> (String, Value) {
+    let mut sanitized = String::with_capacity(text.len());
+    let mut replaced_control_chars = 0usize;
+    for ch in text.chars() {
+        if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            sanitized.push(' ');
+            replaced_control_chars += 1;
+        } else {
+            sanitized.push(ch);
+        }
+    }
+    let lower = sanitized.to_ascii_lowercase();
+    let injection_markers_detected = [
+        "ignore previous",
+        "system prompt",
+        "developer message",
+        "jailbreak",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker));
+    (
+        sanitized,
+        json!({
+            "control_chars_replaced": replaced_control_chars,
+            "prompt_injection_markers_detected": injection_markers_detected,
+            "raw_text_logged": false,
+        }),
+    )
+}
+
+fn hash_identifier(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 fn invoke_webhook_normalize(input: &Value, state: &SynologyChatState) -> FcpResult<Value> {
@@ -886,6 +1287,7 @@ impl FcpConnector for SynologyChatConnector {
             client,
             runtime,
             outgoing_token: webhook_auth_value,
+            ingress_rate: Mutex::new(SynologyChatIngressRateState::default()),
         });
         self.base.set_configured(true);
         self.base.set_handshaken(false);
@@ -932,6 +1334,7 @@ impl FcpConnector for SynologyChatConnector {
             "allow_insecure_ssl": self.state.as_ref().map(|state| state.model.allow_insecure_ssl),
             "outgoing_token_configured": self.state.as_ref().map(|state| state.model.outgoing_token_configured),
             "allowed_file_url_hosts": self.state.as_ref().map(|state| &state.model.allowed_file_url_hosts),
+            "forwarded_ingress_policy": self.state.as_ref().map(|state| &state.model.forwarded_ingress_policy),
             "raw_payload_file_url_policy": self.state.as_ref().map(|_| "unchecked_passthrough"),
             "receive_path": self.state.as_ref().map(|state| &state.model.receive_path),
             "reply_semantics": self.state.as_ref().map(|state| &state.model.reply_semantics),
@@ -955,6 +1358,7 @@ impl FcpConnector for SynologyChatConnector {
                 "allow_insecure_ssl": state.model.allow_insecure_ssl,
                 "outgoing_token_configured": state.model.outgoing_token_configured,
                 "allowed_file_url_hosts": &state.model.allowed_file_url_hosts,
+                "forwarded_ingress_policy": &state.model.forwarded_ingress_policy,
                 "raw_payload_file_url_policy": "unchecked_passthrough",
                 "receive_path": &state.model.receive_path,
                 "reply_semantics": &state.model.reply_semantics,
@@ -1172,6 +1576,7 @@ mod tests {
             result["delivery_target"]["incoming_url_redacted"],
             "https://nas.example.com:443/webapi/..."
         );
+        assert_eq!(result["forwarded_ingress_policy"]["hosted_listener"], false);
         assert_eq!(result["reply_semantics"], "outbound_only");
     }
 
@@ -1226,7 +1631,10 @@ mod tests {
                 "request_timeout_ms": 25_000,
                 "allow_insecure_ssl": true,
                 "outgoing_token": "top-secret",
-                "allowed_file_url_hosts": ["media.nas.local"]
+                "allowed_file_url_hosts": ["media.nas.local"],
+                "allowed_webhook_sender_ids": [" 4 ", "4"],
+                "allowed_webhook_dm_sender_ids": [" 4 "],
+                "webhook_dm_policy": "allowlist"
             }))
             .await
             .expect("configure should succeed");
@@ -1244,6 +1652,22 @@ mod tests {
         assert_eq!(details["allow_insecure_ssl"], true);
         assert_eq!(details["outgoing_token_configured"], true);
         assert_eq!(details["allowed_file_url_hosts"][0], "media.nas.local");
+        assert_eq!(
+            details["forwarded_ingress_policy"]["sender_policy"],
+            "allowlist"
+        );
+        assert_eq!(
+            details["forwarded_ingress_policy"]["allowed_sender_ids"][0],
+            "4"
+        );
+        assert_eq!(
+            details["forwarded_ingress_policy"]["dm_policy"],
+            "allowlist"
+        );
+        assert_eq!(
+            details["forwarded_ingress_policy"]["hosted_listener"],
+            false
+        );
         assert_eq!(
             details["raw_payload_file_url_policy"],
             "unchecked_passthrough"
@@ -1290,6 +1714,52 @@ mod tests {
         }))
         .expect("user IDs should parse");
         assert_eq!(user_ids, vec!["one".to_string(), "two".to_string()]);
+    }
+
+    #[test]
+    fn resolves_forwarded_webhook_token_aliases_without_payload_token() {
+        let input = json!({
+            "payload": {
+                "channel_id": "34",
+                "user_id": "4"
+            },
+            "headers": {
+                "X-Synology-Chat-Token": " shared-secret "
+            }
+        });
+        let payload = input["payload"].as_object().expect("payload object");
+        let presented = resolve_presented_webhook_token(&input, payload)
+            .expect("token should resolve")
+            .expect("token should be present");
+        assert_eq!(presented.source, "x-synology-chat-token");
+        assert_eq!(presented.value, "shared-secret");
+
+        let query_input = json!({
+            "payload": {
+                "channel_id": "34",
+                "user_id": "4"
+            },
+            "query": {
+                "token": "query-secret"
+            }
+        });
+        let payload = query_input["payload"].as_object().expect("payload object");
+        let presented = resolve_presented_webhook_token(&query_input, payload)
+            .expect("token should resolve")
+            .expect("token should be present");
+        assert_eq!(presented.source, "query.token");
+        assert_eq!(presented.value, "query-secret");
+    }
+
+    #[test]
+    fn constant_time_secret_eq_handles_mismatch_and_length_mismatch() {
+        assert!(constant_time_secret_eq("shared-secret", "shared-secret"));
+        assert!(!constant_time_secret_eq("shared-secret", "shared-secreu"));
+        assert!(!constant_time_secret_eq(
+            "shared-secret",
+            "shared-secret-extra"
+        ));
+        assert!(!constant_time_secret_eq("shared-secret", ""));
     }
 
     #[fcp_async_core::runtime::test]

@@ -1,5 +1,5 @@
 use asupersync::Cx;
-use asupersync::io::{AsyncRead, ReadBuf};
+use asupersync::io::{AsyncRead, AsyncWriteExt, ReadBuf};
 use asupersync::net::websocket::{
     CloseReason, Message as ServerWsMessage, ServerWebSocket, WebSocketAcceptor,
 };
@@ -321,6 +321,98 @@ async fn connector_suite_voices_happy_path_uses_mock_server() {
 
     assert!(report.passed, "connector suite should pass");
     assert!(!report.logs.is_empty(), "structured logs should be present");
+}
+
+#[fcp_async_core::runtime::test]
+async fn streaming_tts_loopback_http_chunked_response() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind streaming TTS listener");
+    let base_url = format!(
+        "http://{}",
+        listener.local_addr().expect("listener local addr")
+    );
+
+    let server_task = fcp_async_core::task::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept TTS stream client");
+        let request = read_http_headers(&mut stream)
+            .await
+            .expect("read TTS stream request");
+        let headers = String::from_utf8_lossy(&request).into_owned();
+        assert!(
+            headers.starts_with(
+                "POST /text-to-speech/voice-stream/stream?output_format=mp3_44100_128 HTTP/1.1"
+            ),
+            "unexpected TTS stream request: {headers}"
+        );
+        let lower_headers = headers.to_ascii_lowercase();
+        assert!(
+            lower_headers.contains("xi-api-key: test-api-key-xyz"),
+            "missing xi-api-key header: {headers}"
+        );
+        assert!(
+            lower_headers.contains("content-type: application/json"),
+            "missing JSON content type: {headers}"
+        );
+
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n",
+            )
+            .await
+            .expect("write chunked TTS response");
+        Ok::<(), String>(())
+    });
+
+    let mut connector = ElevenlabsConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_key": "test-api-key-xyz",
+            "base_url": base_url
+        }))
+        .await
+        .expect("configure should succeed");
+    connector
+        .handle_handshake(json!({ "session_id": "elevenlabs-tts-stream-session" }))
+        .await
+        .expect("handshake should succeed");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "elevenlabs.tts.stream",
+            "input": {
+                "voice_id": "voice-stream",
+                "text": "hello",
+                "output_format": "mp3_44100_128",
+                "max_audio_bytes": 128,
+                "max_chunks": 16
+            }
+        }))
+        .await
+        .expect("streaming TTS invoke should succeed");
+
+    let chunks = result["audio_chunks_base64"]
+        .as_array()
+        .expect("audio chunks array");
+    let mut decoded = Vec::new();
+    for chunk in chunks {
+        decoded.extend(
+            base64::engine::general_purpose::STANDARD
+                .decode(chunk.as_str().expect("base64 chunk string"))
+                .expect("decode stream chunk"),
+        );
+    }
+    assert_eq!(decoded, b"helloworld");
+    assert_eq!(result["content_type"], "audio/mpeg");
+    assert_eq!(result["audio_size_bytes"], 10);
+    assert_eq!(result["max_audio_bytes"], 128);
+    assert_eq!(result["max_chunks"], 16);
+    assert_eq!(result["provenance"]["source"], "elevenlabs.tts.stream");
+
+    server_task
+        .await
+        .expect("server task")
+        .expect("server proof");
 }
 
 #[fcp_async_core::runtime::test]

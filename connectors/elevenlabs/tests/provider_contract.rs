@@ -63,6 +63,12 @@ async fn elevenlabs_provider_contract_is_advertised() {
                     .with_default_model("eleven_multilingual_v2")
                     .require_default_model(),
             )
+            .with_operation(
+                ProviderOperationContract::new("elevenlabs.tts.stream")
+                    .with_catalog_id("tts_models")
+                    .with_default_model("eleven_multilingual_v2")
+                    .require_default_model(),
+            )
             .with_model_catalog(ProviderModelCatalogContract::new("stt_models").with_model(
                 ProviderModelContract::new("scribe_v2_realtime").with_label("Scribe v2 Realtime"),
             ))
@@ -94,6 +100,25 @@ async fn elevenlabs_provider_contract_is_advertised() {
     );
 
     let realtime = operation(&introspection, "elevenlabs.scribe.realtime.transcribe");
+    let streaming_tts = operation(&introspection, "elevenlabs.tts.stream");
+    assert_eq!(
+        streaming_tts
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("max_audio_bytes"))
+            .and_then(|field| field.get("default"))
+            .and_then(Value::as_u64),
+        Some(8 * 1024 * 1024)
+    );
+    assert_eq!(
+        streaming_tts
+            .get("input_schema")
+            .and_then(|schema| schema.get("properties"))
+            .and_then(|properties| properties.get("max_chunks"))
+            .and_then(|field| field.get("default"))
+            .and_then(Value::as_u64),
+        Some(1024)
+    );
     assert!(
         realtime
             .get("input_schema")
@@ -152,7 +177,7 @@ async fn elevenlabs_provider_contract_is_advertised() {
                 && rationale.contains("elevenlabs.scribe.realtime.transcribe"))
     );
 
-    let streaming_tts = deferred_operation(&introspection, "elevenlabs.tts.stream");
+    let streaming_tts = deferred_operation(&introspection, "elevenlabs.tts.input_stream.websocket");
     assert_eq!(
         streaming_tts
             .get("default_model_id")

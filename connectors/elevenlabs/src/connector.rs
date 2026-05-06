@@ -18,7 +18,7 @@ use url::Url;
 const CONNECTOR_ID: &str = "fcp.elevenlabs";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
-const BOUNDARY: &str = "This slice exposes voice discovery, request-response text-to-speech, and finite Scribe realtime transcription sessions. Long-running stream subscriptions and streaming synthesis remain explicit follow-up surfaces.";
+const BOUNDARY: &str = "This slice exposes voice discovery, request-response text-to-speech, finite HTTP chunked text-to-speech streaming, and finite Scribe realtime transcription sessions. Long-running stream subscriptions and WebSocket input-stream synthesis remain explicit follow-up surfaces.";
 const DEFAULT_TTS_MODEL_ID: &str = "eleven_multilingual_v2";
 const TTS_MODEL_IDS: &[&str] = &[
     "eleven_v3",
@@ -26,6 +26,10 @@ const TTS_MODEL_IDS: &[&str] = &[
     "eleven_turbo_v2_5",
     "eleven_monolingual_v1",
 ];
+const DEFAULT_TTS_STREAM_MAX_AUDIO_BYTES: usize = 8 * 1024 * 1024;
+const MAX_TTS_STREAM_AUDIO_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_TTS_STREAM_MAX_CHUNKS: usize = 1_024;
+const MAX_TTS_STREAM_CHUNKS: usize = 4_096;
 const DEFAULT_STT_MODEL_ID: &str = "scribe_v2_realtime";
 const DEFAULT_STT_AUDIO_FORMAT: &str = "ulaw_8000";
 const DEFAULT_STT_SAMPLE_RATE: u64 = 8_000;
@@ -146,6 +150,89 @@ impl ElevenLabsConfig {
                 Some(timeout_ms) => timeout_ms,
                 None => 60_000,
             },
+        })
+    }
+}
+
+#[derive(Debug)]
+struct TtsRequest {
+    voice_id: String,
+    body: Value,
+    output_format: Option<String>,
+    optimize_streaming_latency: Option<u64>,
+}
+
+impl TtsRequest {
+    fn from_input(input: &Value) -> FcpResult<Self> {
+        let voice_id = input
+            .get("voice_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "voice_id is required".into(),
+            })?;
+        let text = input
+            .get("text")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "text is required".into(),
+            })?;
+
+        let model_id = input
+            .get("model_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_TTS_MODEL_ID);
+        validate_model_id(model_id)?;
+        let mut body = json!({
+            "text": text,
+            "model_id": model_id,
+        });
+        copy_if_present(&mut body, input, "language_code");
+        copy_if_present(&mut body, input, "pronunciation_dictionary_locators");
+        copy_if_present(&mut body, input, "seed");
+        validate_apply_text_normalization(input)?;
+        copy_if_present(&mut body, input, "apply_text_normalization");
+        if let Some(voice_settings) = input.get("voice_settings") {
+            validate_voice_settings(voice_settings)?;
+            if let Some(body_object) = body.as_object_mut() {
+                body_object.insert("voice_settings".to_owned(), voice_settings.clone());
+            }
+        }
+
+        let output_format = input
+            .get("output_format")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(output_format) = output_format {
+            validate_output_format(output_format)?;
+        }
+        let optimize_streaming_latency = input
+            .get("optimize_streaming_latency")
+            .and_then(Value::as_u64);
+        if let Some(latency) = optimize_streaming_latency
+            && latency > MAX_OPTIMIZE_STREAMING_LATENCY
+        {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "optimize_streaming_latency must be between 0 and {MAX_OPTIMIZE_STREAMING_LATENCY}"
+                ),
+            });
+        }
+
+        Ok(Self {
+            voice_id: voice_id.to_owned(),
+            body,
+            output_format: output_format.map(ToOwned::to_owned),
+            optimize_streaming_latency,
         })
     }
 }
@@ -490,23 +577,8 @@ impl ElevenLabsClient {
         send_json(self.request(Method::GET, path)?, "elevenlabs").await
     }
 
-    async fn synthesize(
-        &self,
-        voice_id: &str,
-        body: Value,
-        output_format: Option<&str>,
-        optimize_streaming_latency: Option<u64>,
-    ) -> FcpResult<Value> {
-        let mut url = self.url_for_segments(["text-to-speech", voice_id])?;
-        {
-            let mut query = url.query_pairs_mut();
-            if let Some(output_format) = output_format {
-                query.append_pair("output_format", output_format);
-            }
-            if let Some(latency) = optimize_streaming_latency {
-                query.append_pair("optimize_streaming_latency", &latency.to_string());
-            }
-        }
+    async fn synthesize(&self, request: &TtsRequest) -> FcpResult<Value> {
+        let url = self.tts_url(&["text-to-speech", request.voice_id.as_str()], request)?;
         let response = self
             .auth
             .apply(
@@ -514,7 +586,7 @@ impl ElevenLabsClient {
                     .request(Method::POST, url)
                     .header("Content-Type", "application/json"),
             )
-            .json(&body)
+            .json(&request.body)
             .send()
             .await
             .map_err(|error| map_reqwest_error("elevenlabs", &error))?;
@@ -549,11 +621,133 @@ impl ElevenLabsClient {
         })?;
 
         Ok(json!({
-            "voice_id": voice_id,
+            "voice_id": request.voice_id.as_str(),
             "content_type": content_type,
             "audio_base64": BASE64_STANDARD.encode(audio.as_ref()),
             "audio_size_bytes": audio.len(),
         }))
+    }
+
+    async fn synthesize_stream(
+        &self,
+        request: &TtsRequest,
+        max_audio_bytes: usize,
+        max_chunks: usize,
+    ) -> FcpResult<Value> {
+        let url = self.tts_url(
+            &["text-to-speech", request.voice_id.as_str(), "stream"],
+            request,
+        )?;
+        let mut response = self
+            .auth
+            .apply(
+                self.http
+                    .request(Method::POST, url)
+                    .header("Content-Type", "application/json"),
+            )
+            .json(&request.body)
+            .send()
+            .await
+            .map_err(|error| map_reqwest_error("elevenlabs", &error))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let retry_after = parse_retry_after(response.headers());
+            let body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable response body>".into());
+            return Err(FcpError::External {
+                service: "elevenlabs".into(),
+                message: format!("HTTP {status}: {body}"),
+                status_code: Some(status.as_u16()),
+                retryable: status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error(),
+                retry_after,
+            });
+        }
+
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map_or_else(|| "application/octet-stream".into(), ToOwned::to_owned);
+        let mut audio_chunks_base64 = Vec::new();
+        let mut audio_chunk_sizes = Vec::new();
+        let mut total_audio_bytes = 0usize;
+
+        while let Some(chunk) = response.chunk().await.map_err(|error| FcpError::External {
+            service: "elevenlabs".into(),
+            message: format!("Failed to read TTS stream chunk: {error}"),
+            status_code: Some(status.as_u16()),
+            retryable: false,
+            retry_after: None,
+        })? {
+            if chunk.is_empty() {
+                continue;
+            }
+            if audio_chunks_base64.len() >= max_chunks {
+                return Err(FcpError::External {
+                    service: "elevenlabs".into(),
+                    message: format!("TTS stream exceeded max_chunks limit {max_chunks}"),
+                    status_code: Some(status.as_u16()),
+                    retryable: false,
+                    retry_after: None,
+                });
+            }
+            total_audio_bytes = total_audio_bytes.saturating_add(chunk.len());
+            if total_audio_bytes > max_audio_bytes {
+                return Err(FcpError::External {
+                    service: "elevenlabs".into(),
+                    message: format!("TTS stream exceeded max_audio_bytes limit {max_audio_bytes}"),
+                    status_code: Some(status.as_u16()),
+                    retryable: false,
+                    retry_after: None,
+                });
+            }
+            audio_chunk_sizes.push(chunk.len());
+            audio_chunks_base64.push(BASE64_STANDARD.encode(chunk.as_ref()));
+        }
+
+        if audio_chunks_base64.is_empty() {
+            return Err(FcpError::External {
+                service: "elevenlabs".into(),
+                message: "TTS stream completed without audio chunks".into(),
+                status_code: Some(status.as_u16()),
+                retryable: false,
+                retry_after: None,
+            });
+        }
+
+        Ok(json!({
+            "voice_id": request.voice_id.as_str(),
+            "content_type": content_type,
+            "audio_chunks_base64": audio_chunks_base64,
+            "audio_chunk_sizes": audio_chunk_sizes,
+            "audio_chunk_count": audio_chunk_sizes.len(),
+            "audio_size_bytes": total_audio_bytes,
+            "max_audio_bytes": max_audio_bytes,
+            "max_chunks": max_chunks,
+            "provenance": {
+                "source": "elevenlabs.tts.stream",
+                "derived": true,
+                "scope": "model"
+            },
+            "taint": ["external_input"]
+        }))
+    }
+
+    fn tts_url(&self, segments: &[&str], request: &TtsRequest) -> FcpResult<Url> {
+        let mut url = self.url_for_segments(segments.iter().copied())?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(output_format) = &request.output_format {
+                query.append_pair("output_format", output_format);
+            }
+            if let Some(latency) = request.optimize_streaming_latency {
+                query.append_pair("optimize_streaming_latency", &latency.to_string());
+            }
+        }
+        Ok(url)
     }
 
     async fn realtime_transcribe(&self, input: Value) -> FcpResult<Value> {
@@ -784,7 +978,7 @@ impl ElevenlabsConnector {
             "connector_id": CONNECTOR_ID,
             "connector_version": CONNECTOR_VERSION,
             "protocol_version": "2.0",
-            "capabilities": ["elevenlabs.tts", "elevenlabs.voices", "elevenlabs.stt.streaming"],
+            "capabilities": ["elevenlabs.tts", "elevenlabs.tts.streaming", "elevenlabs.voices", "elevenlabs.stt.streaming"],
             "streaming_supported": true,
             "streaming_session_mode": "finite",
         }))
@@ -886,7 +1080,7 @@ impl ElevenlabsConnector {
         match client.get_json("/voices").await {
             Ok(_) => Ok(json!({
                 "status": "ok",
-                "surface_boundary": "voices.list + text-to-speech",
+                "surface_boundary": "voices.list + text-to-speech + finite TTS stream",
             })),
             Err(error) => Ok(json!({
                 "status": "failed",
@@ -938,6 +1132,7 @@ impl ElevenlabsConnector {
         let result = match operation {
             "elevenlabs.voices.list" => client.get_json("/voices").await,
             "elevenlabs.tts.generate" => self.invoke_tts(client, &input).await,
+            "elevenlabs.tts.stream" => self.invoke_tts_stream(client, &input).await,
             "elevenlabs.scribe.realtime.transcribe" => {
                 Box::pin(client.realtime_transcribe(input)).await
             }
@@ -962,6 +1157,7 @@ impl ElevenlabsConnector {
         let supported = matches!(
             operation,
             "elevenlabs.tts.generate"
+                | "elevenlabs.tts.stream"
                 | "elevenlabs.voices.list"
                 | "elevenlabs.scribe.realtime.transcribe"
         );
@@ -993,72 +1189,33 @@ impl ElevenlabsConnector {
     }
 
     async fn invoke_tts(&self, client: &ElevenLabsClient, input: &Value) -> FcpResult<Value> {
-        let voice_id = input
-            .get("voice_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "voice_id is required".into(),
-            })?;
-        let text = input
-            .get("text")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| FcpError::InvalidRequest {
-                code: 1003,
-                message: "text is required".into(),
-            })?;
+        let request = TtsRequest::from_input(input)?;
+        client.synthesize(&request).await
+    }
 
-        let model_id = input
-            .get("model_id")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_TTS_MODEL_ID);
-        validate_model_id(model_id)?;
-        let mut body = json!({
-            "text": text,
-            "model_id": model_id,
-        });
-        copy_if_present(&mut body, input, "language_code");
-        copy_if_present(&mut body, input, "pronunciation_dictionary_locators");
-        copy_if_present(&mut body, input, "seed");
-        validate_apply_text_normalization(input)?;
-        copy_if_present(&mut body, input, "apply_text_normalization");
-        if let Some(voice_settings) = input.get("voice_settings") {
-            validate_voice_settings(voice_settings)?;
-            if let Some(body_object) = body.as_object_mut() {
-                body_object.insert("voice_settings".to_owned(), voice_settings.clone());
-            }
-        }
-
-        let output_format = input
-            .get("output_format")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-        if let Some(output_format) = output_format {
-            validate_output_format(output_format)?;
-        }
-        let optimize_streaming_latency = input
-            .get("optimize_streaming_latency")
-            .and_then(Value::as_u64);
-        if let Some(latency) = optimize_streaming_latency
-            && latency > MAX_OPTIMIZE_STREAMING_LATENCY
-        {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: format!(
-                    "optimize_streaming_latency must be between 0 and {MAX_OPTIMIZE_STREAMING_LATENCY}"
-                ),
-            });
-        }
+    async fn invoke_tts_stream(
+        &self,
+        client: &ElevenLabsClient,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let request = TtsRequest::from_input(input)?;
+        let max_audio_bytes = bounded_usize(
+            "max_audio_bytes",
+            optional_usize_field(input, "max_audio_bytes")?,
+            DEFAULT_TTS_STREAM_MAX_AUDIO_BYTES,
+            1,
+            MAX_TTS_STREAM_AUDIO_BYTES,
+        )?;
+        let max_chunks = bounded_usize(
+            "max_chunks",
+            optional_usize_field(input, "max_chunks")?,
+            DEFAULT_TTS_STREAM_MAX_CHUNKS,
+            1,
+            MAX_TTS_STREAM_CHUNKS,
+        )?;
 
         client
-            .synthesize(voice_id, body, output_format, optimize_streaming_latency)
+            .synthesize_stream(&request, max_audio_bytes, max_chunks)
             .await
     }
 }
@@ -1071,58 +1228,111 @@ impl Default for ElevenlabsConnector {
 
 fn operations_info() -> Vec<Value> {
     vec![
-        json!({
-            "id": "elevenlabs.voices.list",
-            "summary": "List ElevenLabs voices",
-            "description": "Reads the current voice catalog from GET /voices.",
-            "capability": "elevenlabs.voices",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {"type": "object", "properties": {}},
-            "output_schema": {"type": "object"},
-        }),
-        json!({
-            "id": "elevenlabs.tts.generate",
-            "summary": "Generate speech audio with ElevenLabs",
-            "description": "Runs request-response synthesis against POST /text-to-speech/{voice_id} and returns the encoded audio bytes.",
-            "capability": "elevenlabs.tts",
-            "risk_level": "medium",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["voice_id", "text"],
-                "properties": {
-                    "voice_id": {"type": "string"},
-                    "text": {"type": "string"},
-                    "model_id": {
-                        "type": "string",
-                        "default": DEFAULT_TTS_MODEL_ID,
-                        "enum": TTS_MODEL_IDS
-                    },
-                    "language_code": {"type": "string"},
-                    "voice_settings": {
-                        "type": "object",
-                        "properties": {
-                            "stability": {"type": "number", "minimum": 0, "maximum": 1},
-                            "similarity_boost": {"type": "number", "minimum": 0, "maximum": 1},
-                            "style": {"type": "number", "minimum": 0, "maximum": 1},
-                            "use_speaker_boost": {"type": "boolean"},
-                            "speed": {"type": "number", "minimum": 0.5, "maximum": 2}
-                        }
-                    },
-                    "pronunciation_dictionary_locators": {"type": "array"},
-                    "seed": {"type": "integer"},
-                    "apply_text_normalization": {"type": "string", "enum": ["auto", "on", "off"]},
-                    "output_format": {"type": "string"},
-                    "optimize_streaming_latency": {"type": "integer"}
-                }
-            },
-            "output_schema": {"type": "object"},
-        }),
+        voices_operation_info(),
+        tts_generate_operation_info(),
+        tts_stream_operation_info(),
         realtime_transcription_operation_info(),
     ]
+}
+
+fn voices_operation_info() -> Value {
+    json!({
+        "id": "elevenlabs.voices.list",
+        "summary": "List ElevenLabs voices",
+        "description": "Reads the current voice catalog from GET /voices.",
+        "capability": "elevenlabs.voices",
+        "risk_level": "low",
+        "safety_tier": "safe",
+        "idempotency": "strict",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {"type": "object"},
+    })
+}
+
+fn tts_input_schema(extra_properties: Value) -> Value {
+    let mut properties = json!({
+        "voice_id": {"type": "string"},
+        "text": {"type": "string"},
+        "model_id": {
+            "type": "string",
+            "default": DEFAULT_TTS_MODEL_ID,
+            "enum": TTS_MODEL_IDS
+        },
+        "language_code": {"type": "string"},
+        "voice_settings": {
+            "type": "object",
+            "properties": {
+                "stability": {"type": "number", "minimum": 0, "maximum": 1},
+                "similarity_boost": {"type": "number", "minimum": 0, "maximum": 1},
+                "style": {"type": "number", "minimum": 0, "maximum": 1},
+                "use_speaker_boost": {"type": "boolean"},
+                "speed": {"type": "number", "minimum": 0.5, "maximum": 2}
+            }
+        },
+        "pronunciation_dictionary_locators": {"type": "array"},
+        "seed": {"type": "integer"},
+        "apply_text_normalization": {"type": "string", "enum": ["auto", "on", "off"]},
+        "output_format": {"type": "string"},
+        "optimize_streaming_latency": {"type": "integer"}
+    });
+    if let (Some(properties), Value::Object(extra)) = (properties.as_object_mut(), extra_properties)
+    {
+        for (key, value) in extra {
+            properties.insert(key, value);
+        }
+    }
+    json!({
+        "type": "object",
+        "required": ["voice_id", "text"],
+        "properties": properties
+    })
+}
+
+fn tts_generate_operation_info() -> Value {
+    json!({
+        "id": "elevenlabs.tts.generate",
+        "summary": "Generate speech audio with ElevenLabs",
+        "description": "Runs request-response synthesis against POST /text-to-speech/{voice_id} and returns the encoded audio bytes.",
+        "capability": "elevenlabs.tts",
+        "risk_level": "medium",
+        "safety_tier": "safe",
+        "idempotency": "none",
+        "input_schema": tts_input_schema(json!({})),
+        "output_schema": {"type": "object"},
+    })
+}
+
+fn tts_stream_operation_info() -> Value {
+    json!({
+        "id": "elevenlabs.tts.stream",
+        "summary": "Stream bounded ElevenLabs text-to-speech audio chunks",
+        "description": "Runs POST /text-to-speech/{voice_id}/stream and returns bounded base64 audio chunks plus byte accounting.",
+        "capability": "elevenlabs.tts.streaming",
+        "risk_level": "medium",
+        "safety_tier": "safe",
+        "idempotency": "none",
+        "input_schema": tts_input_schema(json!({
+            "max_audio_bytes": {
+                "type": "integer",
+                "default": DEFAULT_TTS_STREAM_MAX_AUDIO_BYTES,
+                "maximum": MAX_TTS_STREAM_AUDIO_BYTES
+            },
+            "max_chunks": {
+                "type": "integer",
+                "default": DEFAULT_TTS_STREAM_MAX_CHUNKS,
+                "maximum": MAX_TTS_STREAM_CHUNKS
+            }
+        })),
+        "output_schema": {
+            "type": "object",
+            "properties": {
+                "audio_chunks_base64": {"type": "array", "items": {"type": "string"}},
+                "audio_chunk_sizes": {"type": "array", "items": {"type": "integer"}},
+                "audio_chunk_count": {"type": "integer"},
+                "audio_size_bytes": {"type": "integer"}
+            }
+        },
+    })
 }
 
 fn realtime_transcription_operation_info() -> Value {
@@ -1197,15 +1407,15 @@ fn deferred_operations_info() -> Vec<Value> {
             ]
         }),
         json!({
-            "id": "elevenlabs.tts.stream",
-            "summary": "Stream ElevenLabs text-to-speech audio",
+            "id": "elevenlabs.tts.input_stream.websocket",
+            "summary": "Host-supervised ElevenLabs WebSocket input-stream synthesis",
             "capability": "elevenlabs.tts.streaming",
-            "provider_reference": "OpenClaw speech provider streaming synthesis surface",
-            "rationale": "Deferred until FCP models streaming audio chunks separately from request-response TTS and proves supervised cancellation, byte accounting, and redacted evidence.",
+            "provider_reference": "ElevenLabs text-to-speech WebSocket input-stream API",
+            "rationale": "Deferred until FCP host-owned sessions can supervise partial text fan-in, alignment fan-out, and shutdown across connector restarts. The bounded elevenlabs.tts.stream operation covers finite HTTP chunked synthesis.",
             "default_model_id": DEFAULT_TTS_MODEL_ID,
             "required_proof": [
                 "LabRuntime cancellation drains without orphan audio tasks",
-                "loopback streaming e2e covers audio chunk fan-out and timeout",
+                "loopback WebSocket e2e covers text chunk fan-in, audio fan-out, alignment frames, and timeout",
                 "redacted JSONL records audio byte counts without logging audio content"
             ]
         }),
@@ -1759,6 +1969,22 @@ fn bounded_usize(
     }
 }
 
+fn optional_usize_field(input: &Value, name: &str) -> FcpResult<Option<usize>> {
+    let Some(value) = input.get(name) else {
+        return Ok(None);
+    };
+    let raw = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{name} must be an unsigned integer"),
+    })?;
+    usize::try_from(raw)
+        .map(Some)
+        .map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{name} is too large for this platform"),
+        })
+}
+
 fn bounded_f64(name: &str, value: Option<f64>, min: f64, max: f64) -> FcpResult<Option<f64>> {
     value.map_or(Ok(None), |value| {
         if value.is_finite() && (min..=max).contains(&value) {
@@ -1925,6 +2151,35 @@ mod tests {
             url.as_str(),
             "https://api.elevenlabs.io/v1/text-to-speech/voice-id?output_format=mp3_44100_128&optimize_streaming_latency=1"
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn tts_stream_rejects_invalid_chunk_limit_before_network_io() {
+        let mut connector = ElevenlabsConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_key": "test-key"
+            }))
+            .await
+            .expect("expected configure to succeed");
+        connector
+            .handle_handshake(json!({"session_id": "stream-limit-test"}))
+            .await
+            .expect("expected handshake to succeed");
+
+        let error = connector
+            .handle_invoke(json!({
+                "operation_id": "elevenlabs.tts.stream",
+                "input": {
+                    "voice_id": "voice-stream",
+                    "text": "hello",
+                    "max_chunks": 0
+                }
+            }))
+            .await
+            .expect_err("invalid stream chunk limit should fail");
+
+        assert!(error.to_string().contains("max_chunks"));
     }
 
     #[test]

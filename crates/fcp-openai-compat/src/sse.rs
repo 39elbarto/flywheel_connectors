@@ -140,12 +140,23 @@ impl OpenAiSseDecoder {
 /// Accumulate streamed content and tool-call argument deltas for tests and
 /// callers that need whole-message materialization.
 pub fn accumulate_chunks(chunks: &[ChatChunk]) -> (String, Vec<String>) {
+    let (content, _reasoning_content, tool_arguments) = accumulate_chunks_with_reasoning(chunks);
+    (content, tool_arguments)
+}
+
+/// Accumulate streamed final content, reasoning content, and tool-call argument
+/// deltas while preserving the distinction between reasoning and final answer.
+pub fn accumulate_chunks_with_reasoning(chunks: &[ChatChunk]) -> (String, String, Vec<String>) {
     let mut content = String::new();
+    let mut reasoning_content = String::new();
     let mut tool_arguments: VecDeque<String> = VecDeque::new();
     for chunk in chunks {
         for choice in &chunk.choices {
             if let Some(delta) = &choice.delta.content {
                 content.push_str(delta);
+            }
+            if let Some(delta) = &choice.delta.reasoning_content {
+                reasoning_content.push_str(delta);
             }
             if let Some(tool_calls) = &choice.delta.tool_calls {
                 for tool_call in tool_calls {
@@ -164,7 +175,11 @@ pub fn accumulate_chunks(chunks: &[ChatChunk]) -> (String, Vec<String>) {
             }
         }
     }
-    (content, tool_arguments.into_iter().collect())
+    (
+        content,
+        reasoning_content,
+        tool_arguments.into_iter().collect(),
+    )
 }
 
 #[cfg(test)]
@@ -306,5 +321,45 @@ mod tests {
         let (content, tool_args) = accumulate_chunks(&chunks);
         assert_eq!(content, "hello");
         assert_eq!(tool_args, vec!["{\"q\":\"x\"}".to_string()]);
+    }
+
+    #[test]
+    fn accumulates_reasoning_content_separately_from_final_content() {
+        let chunks: Vec<ChatChunk> = [
+            json!({
+                "id": "chunk-1",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"reasoning_content": "think "},
+                    "finish_reason": null
+                }]
+            }),
+            json!({
+                "id": "chunk-2",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "deepseek-v4-pro",
+                "choices": [{
+                    "index": 0,
+                    "delta": {"content": "answer"},
+                    "finish_reason": "stop"
+                }]
+            }),
+        ]
+        .into_iter()
+        .map(|value| serde_json::from_value(value).expect("chunk fixture is valid"))
+        .collect();
+
+        let (content, reasoning_content, tool_args) = accumulate_chunks_with_reasoning(&chunks);
+        assert_eq!(content, "answer");
+        assert_eq!(reasoning_content, "think ");
+        assert!(tool_args.is_empty());
+
+        let (legacy_content, legacy_tool_args) = accumulate_chunks(&chunks);
+        assert_eq!(legacy_content, "answer");
+        assert!(legacy_tool_args.is_empty());
     }
 }

@@ -34,6 +34,8 @@ pub use rate_limit::{
     HeaderList, RateLimitConfig, RateLimitPolicy, RateLimitSnapshot, header_value,
     parse_rate_limit_headers, parse_retry_after, upsert_header,
 };
-pub use sse::{OpenAiSseDecoder, OpenAiStreamEvent, accumulate_chunks};
+pub use sse::{
+    OpenAiSseDecoder, OpenAiStreamEvent, accumulate_chunks, accumulate_chunks_with_reasoning,
+};
 pub use tools::Tools;
 pub use types::*;

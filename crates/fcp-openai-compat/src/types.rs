@@ -119,12 +119,18 @@ pub enum ChatMessage {
         /// Assistant text, absent for pure tool-call responses.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         content: Option<String>,
+        /// Provider reasoning trace, when exposed separately from final content.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         /// Modern tool calls.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ToolCall>>,
         /// Optional participant name.
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        /// Provider-specific message fields flattened into the JSON object.
+        #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
+        provider_extensions: ProviderExtensions,
     },
     /// Tool response.
     Tool {
@@ -373,6 +379,12 @@ pub struct ChatDelta {
     /// Tool-call deltas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCallDelta>>,
+    /// Provider reasoning delta, when exposed separately from final content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
+    /// Provider-specific delta fields flattened into the JSON object.
+    #[serde(default, flatten, skip_serializing_if = "BTreeMap::is_empty")]
+    pub provider_extensions: ProviderExtensions,
 }
 
 /// Tool-call streaming delta.
@@ -617,5 +629,58 @@ mod tests {
         let value = serde_json::to_value(req).expect("embedding request serializes");
         assert!(value.get("dimensions").is_none());
         assert_eq!(value["input"], "hello");
+    }
+
+    #[test]
+    fn assistant_message_preserves_reasoning_content_and_extensions() {
+        let message: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "final answer",
+            "reasoning_content": "private trace",
+            "deepseek_trace_id": "trace-1"
+        }))
+        .expect("assistant response decodes");
+
+        assert!(matches!(message, ChatMessage::Assistant { .. }));
+        if let ChatMessage::Assistant {
+            content,
+            reasoning_content,
+            provider_extensions,
+            ..
+        } = &message
+        {
+            assert_eq!(content.as_deref(), Some("final answer"));
+            assert_eq!(reasoning_content.as_deref(), Some("private trace"));
+            assert_eq!(provider_extensions["deepseek_trace_id"], "trace-1");
+        }
+
+        let value = serde_json::to_value(message).expect("assistant response serializes");
+        assert_eq!(value["reasoning_content"], "private trace");
+        assert_eq!(value["deepseek_trace_id"], "trace-1");
+        assert!(value.get("provider_extensions").is_none());
+    }
+
+    #[test]
+    fn chat_delta_preserves_reasoning_content_and_extensions() {
+        let delta: ChatDelta = serde_json::from_value(json!({
+            "role": "assistant",
+            "reasoning_content": "thinking ",
+            "content": "answer",
+            "provider_specific": {"phase": "reasoning"}
+        }))
+        .expect("delta decodes");
+
+        assert_eq!(delta.role.as_deref(), Some("assistant"));
+        assert_eq!(delta.reasoning_content.as_deref(), Some("thinking "));
+        assert_eq!(delta.content.as_deref(), Some("answer"));
+        assert_eq!(
+            delta.provider_extensions["provider_specific"]["phase"],
+            "reasoning"
+        );
+
+        let value = serde_json::to_value(delta).expect("delta serializes");
+        assert_eq!(value["reasoning_content"], "thinking ");
+        assert_eq!(value["provider_specific"]["phase"], "reasoning");
+        assert!(value.get("provider_extensions").is_none());
     }
 }

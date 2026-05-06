@@ -280,6 +280,7 @@ fn is_sensitive_json_key(key: &str) -> bool {
         || normalized == "prompt"
         || normalized == "completion"
         || normalized == "content"
+        || normalized == "reasoning-content"
         || normalized.contains("token")
         || normalized.contains("secret")
         || normalized.contains("credential")
@@ -329,6 +330,16 @@ mod tests {
     fn redacts_bearer_tokens_in_plain_text() {
         let redacted = redact_sensitive_text("Authorization: Bearer sk-test, failed");
         assert_eq!(redacted, "Authorization: Bearer [REDACTED], failed");
+    }
+
+    #[test]
+    fn redacts_reasoning_content_payloads() {
+        let redacted = redact_sensitive_text(
+            r#"{"choices":[{"message":{"reasoning_content":"private trace","content":"final"}}]}"#,
+        );
+        assert!(!redacted.contains("private trace"));
+        assert!(!redacted.contains("final"));
+        assert!(redacted.contains("[REDACTED]"));
     }
 
     #[test]

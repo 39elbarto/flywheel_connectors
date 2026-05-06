@@ -16,7 +16,7 @@
 
 use std::fs::{File, OpenOptions, create_dir_all};
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use base64::Engine;
@@ -25,6 +25,7 @@ use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::CapabilityConstraints;
 use fcp_testkit::AsyncTestContext;
+use fcp_voice_call::stable_redacted_hash;
 use hmac::{Hmac, Mac};
 use serde_json::json;
 use sha1::Sha1;
@@ -231,7 +232,7 @@ fn twilio_media_start_frame(stream_sid: &str, call_sid: &str) -> serde_json::Val
             "accountSid": TEST_ACCOUNT_SID,
             "callSid": call_sid,
             "tracks": ["inbound"],
-            "customParameters": { "token": "stream-token" },
+            "customParameters": { "token": "AAAAAAAAAAAAAAAAAAAAAA" },
             "mediaFormat": {
                 "encoding": "audio/x-mulaw",
                 "sampleRate": 8000,
@@ -327,6 +328,117 @@ fn log_media_stream_e2e(
         .expect("flush Twilio media stream e2e log line");
 }
 
+fn open_webhook_ingest_e2e_log() -> (File, PathBuf) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "fcp-twilio-webhook-ingest-e2e-{}-{now}",
+        std::process::id()
+    ));
+    create_dir_all(&dir).expect("create Twilio webhook ingest e2e log dir");
+    let path = dir.join("twilio_webhook_ingest_e2e.jsonl");
+    let file = OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(&path)
+        .expect("open Twilio webhook ingest e2e log");
+    (file, path)
+}
+
+fn hashed_event_field(result: &serde_json::Value, field: &str) -> serde_json::Value {
+    let event = result.get("event").unwrap_or(&serde_json::Value::Null);
+    if field == "call_sid"
+        && event
+            .get("resource_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("call")
+    {
+        return event
+            .get("resource_sid")
+            .and_then(serde_json::Value::as_str)
+            .map(stable_redacted_hash)
+            .map_or(serde_json::Value::Null, serde_json::Value::String);
+    }
+    if field == "message_sid"
+        && event
+            .get("resource_type")
+            .and_then(serde_json::Value::as_str)
+            == Some("message")
+    {
+        return event
+            .get("resource_sid")
+            .and_then(serde_json::Value::as_str)
+            .map(stable_redacted_hash)
+            .map_or(serde_json::Value::Null, serde_json::Value::String);
+    }
+    event
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(stable_redacted_hash)
+        .map_or(serde_json::Value::Null, serde_json::Value::String)
+}
+
+fn log_webhook_ingest_e2e(
+    logs: &mut File,
+    scenario: &str,
+    result: &serde_json::Value,
+    fixture_id: &str,
+    artifact_path: &Path,
+) {
+    let command_line = std::env::args().collect::<Vec<_>>().join(" ");
+    let record = json!({
+        "record_type": "twilio_webhook_ingest_connector_boundary_e2e",
+        "command_line": command_line,
+        "git_revision": option_env!("GIT_REVISION").unwrap_or("unknown"),
+        "provider": "twilio",
+        "provider_fixture_id": fixture_id,
+        "scenario": scenario,
+        "webhook_event": result.get("event_type").cloned().unwrap_or(serde_json::Value::Null),
+        "auth_decision": {
+            "signature_valid": result
+                .get("signature")
+                .and_then(|signature| signature.get("valid"))
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false)),
+            "request_key_hash": result
+                .get("signature")
+                .and_then(|signature| signature.get("verified_request_key"))
+                .and_then(serde_json::Value::as_str)
+                .map(stable_redacted_hash)
+                .map_or(serde_json::Value::Null, serde_json::Value::String),
+        },
+        "replay_decision": result
+            .get("signature")
+            .and_then(|signature| signature.get("is_replay"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Bool(false)),
+        "call_id_hash": hashed_event_field(result, "call_sid"),
+        "message_id_hash": hashed_event_field(result, "message_sid"),
+        "from_hash": hashed_event_field(result, "from"),
+        "to_hash": hashed_event_field(result, "to"),
+        "http_status": result.get("status_code").cloned().unwrap_or_else(|| json!(0)),
+        "fcp_error_mapping": result.get("reason_code").cloned().unwrap_or_else(|| json!("missing")),
+        "media": {
+            "frame_count": 0,
+            "byte_count": 0
+        },
+        "retry_decision": "not_retried",
+        "cleanup_result": {
+            "clean_shutdown": result
+                .get("clean_shutdown")
+                .cloned()
+                .unwrap_or(serde_json::Value::Bool(false))
+        },
+        "artifact_path": artifact_path.display().to_string(),
+        "skip_reason": serde_json::Value::Null,
+    });
+    writeln!(logs, "{record}").expect("write Twilio webhook ingest e2e log line");
+    logs.flush()
+        .expect("flush Twilio webhook ingest e2e log line");
+}
+
 async fn invoke_media_stream_process_events(
     connector: &mut TwilioConnector,
     capability: fcp_core::CapabilityToken,
@@ -340,6 +452,21 @@ async fn invoke_media_stream_process_events(
         }))
         .await
         .expect("media stream process_events should return structured output")
+}
+
+async fn invoke_webhook_ingest_request(
+    connector: &mut TwilioConnector,
+    capability: &fcp_core::CapabilityToken,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    connector
+        .handle_invoke(json!({
+            "operation": "twilio.webhook.ingest_request",
+            "input": input,
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("webhook ingest should return structured output")
 }
 
 // ============================================================================
@@ -1200,7 +1327,7 @@ async fn media_stream_process_events_accepts_fake_twilio_session() {
                         "stop": { "accountSid": TEST_ACCOUNT_SID, "callSid": "CAfake001" }
                     }
                 ],
-                "expected_stream_token": "stream-token",
+                "expected_stream_token": "AAAAAAAAAAAAAAAAAAAAAA",
                 "allowed_call_sids": ["CAfake001"],
                 "stream_token_issued_at_ms": 1000,
                 "now_ms": 1200,
@@ -1311,7 +1438,7 @@ async fn media_stream_process_events_rejects_stale_and_suppresses_duplicates() {
             "operation": "twilio.media_stream.process_events",
             "input": {
                 "frames": [twilio_media_start_frame("MZstale001", "CAstale001")],
-                "expected_stream_token": "stream-token",
+                "expected_stream_token": "AAAAAAAAAAAAAAAAAAAAAA",
                 "stream_token_issued_at_ms": 1_000,
                 "now_ms": 60_000,
                 "stream_token_ttl_ms": 30_000
@@ -1432,7 +1559,7 @@ async fn media_stream_process_events_no_mock_e2e_jsonl_covers_callback_edges() {
                         "stop": { "accountSid": TEST_ACCOUNT_SID, "callSid": "CAe2e001" }
                     }
                 ],
-                "expected_stream_token": "stream-token",
+                "expected_stream_token": "AAAAAAAAAAAAAAAAAAAAAA",
                 "allowed_call_sids": ["CAe2e001"],
                 "stream_token_issued_at_ms": 1_000,
                 "now_ms": 1_100,
@@ -1611,7 +1738,7 @@ async fn media_stream_process_events_no_mock_e2e_jsonl_covers_callback_edges() {
 
     let jsonl = std::fs::read_to_string(&log_path).expect("read Twilio media stream e2e JSONL");
     assert!(!jsonl.trim().is_empty());
-    assert!(!jsonl.contains("stream-token"));
+    assert!(!jsonl.contains("AAAAAAAAAAAAAAAAAAAAAA"));
     for scenario in [
         "start_media_mark_stop",
         "duplicate_frame_suppressed",
@@ -3013,6 +3140,331 @@ async fn webhook_ingest_request_reports_timeout_cancellation_and_clean_shutdown(
         timed_out["service_layers"]["layers"][3]["name"],
         "rate_limit"
     );
+}
+
+/// Ingest request — loopback e2e harness emits redaction-safe JSONL for all webhook gates.
+#[fcp_async_core::runtime::test]
+async fn webhook_ingest_request_loopback_e2e_logs_redaction_safe_jsonl() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.webhook.ingest_request.e2e_jsonl");
+    let (mut connector, capability) = setup_webhook_ingest_connector().await;
+    let (mut logs, jsonl_path) = open_webhook_ingest_e2e_log();
+    let fixture_id = "twilio-loopback-hmac-sha1-shared-core-v1";
+
+    let sms_url = "https://example.com/twilio/e2e/sms";
+    let sms_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        sms_url,
+        &[
+            ("Body", "private sms fixture"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMe2esms"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let valid_sms = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": sms_url,
+            "headers": { "X-Twilio-Signature": sms_signature },
+            "body": {
+                "MessageSid": "SMe2esms",
+                "From": "+15551234567",
+                "To": "+15559876543",
+                "Body": "private sms fixture"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "allowlist",
+            "allowed_from": ["+15551234567"],
+            "request_region": { "source": "twilio_loopback_jsonl_harness" }
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(&mut logs, "valid_sms", &valid_sms, fixture_id, &jsonl_path);
+
+    let voice_status_url = "https://example.com/twilio/e2e/voice-status";
+    let voice_status_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        voice_status_url,
+        &[
+            ("CallSid", "CAe2evoice"),
+            ("CallStatus", "completed"),
+            ("Timestamp", "2026-01-15T10:00:00Z"),
+        ],
+    );
+    let valid_voice_status = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": voice_status_url,
+            "headers": { "X-Twilio-Signature": voice_status_signature },
+            "body": {
+                "CallSid": "CAe2evoice",
+                "CallStatus": "completed",
+                "Timestamp": "2026-01-15T10:00:00Z"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "allowlist",
+            "allowed_from": ["+15551234567"]
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "valid_voice_status",
+        &valid_voice_status,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let invalid_signature = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": "https://example.com/twilio/e2e/invalid-signature",
+            "headers": { "X-Twilio-Signature": "not-valid-base64!!!@@@" },
+            "body": {
+                "MessageSid": "SMe2einvalid",
+                "From": "+15551234567",
+                "To": "+15559876543",
+                "Body": "private invalid fixture"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "open"
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "invalid_signature_denial",
+        &invalid_signature,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let replay_url = "https://example.com/twilio/e2e/replay";
+    let replay_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        replay_url,
+        &[
+            ("Body", "private replay fixture"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMe2ereplay"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let replay_request = json!({
+        "method": "POST",
+        "url": replay_url,
+        "headers": { "X-Twilio-Signature": replay_signature },
+        "body": {
+            "MessageSid": "SMe2ereplay",
+            "From": "+15551234567",
+            "To": "+15559876543",
+            "Body": "private replay fixture"
+        },
+        "auth_token": TWILIO_TEST_HMAC_KEY,
+        "inbound_policy": "open"
+    });
+    let replay_first =
+        invoke_webhook_ingest_request(&mut connector, &capability, replay_request.clone()).await;
+    let duplicate_replay =
+        invoke_webhook_ingest_request(&mut connector, &capability, replay_request).await;
+    assert_eq!(replay_first["accepted"], true);
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "duplicate_replay_denial",
+        &duplicate_replay,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let unauthorized_url = "https://example.com/twilio/e2e/unauthorized";
+    let unauthorized_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        unauthorized_url,
+        &[
+            ("Body", "private blocked fixture"),
+            ("From", "+15550000000"),
+            ("MessageSid", "SMe2eblocked"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let unauthorized = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": unauthorized_url,
+            "headers": { "X-Twilio-Signature": unauthorized_signature },
+            "body": {
+                "MessageSid": "SMe2eblocked",
+                "From": "+15550000000",
+                "To": "+15559876543",
+                "Body": "private blocked fixture"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "allowlist",
+            "allowed_from": ["+15551234567"]
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "unauthorized_caller",
+        &unauthorized,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let authorized_url = "https://example.com/twilio/e2e/authorized";
+    let authorized_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        authorized_url,
+        &[
+            ("Body", "private allowed fixture"),
+            ("From", "+15551234567"),
+            ("MessageSid", "SMe2eallowed"),
+            ("To", "+15559876543"),
+        ],
+    );
+    let authorized = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": authorized_url,
+            "headers": { "X-Twilio-Signature": authorized_signature },
+            "body": {
+                "MessageSid": "SMe2eallowed",
+                "From": "+15551234567",
+                "To": "+15559876543",
+                "Body": "private allowed fixture"
+            },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "allowlist",
+            "allowed_from": ["+15551234567"]
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "authorized_caller",
+        &authorized,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let malformed_url = "https://example.com/twilio/e2e/malformed";
+    let malformed_signature = twilio_signature(
+        TWILIO_TEST_HMAC_KEY,
+        malformed_url,
+        &[("Unexpected", "value")],
+    );
+    let malformed = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": malformed_url,
+            "headers": { "X-Twilio-Signature": malformed_signature },
+            "body": { "Unexpected": "value" },
+            "auth_token": TWILIO_TEST_HMAC_KEY,
+            "inbound_policy": "open"
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "malformed_payload",
+        &malformed,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let cancelled = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": "https://example.com/twilio/e2e/cancelled",
+            "headers": {},
+            "body": {},
+            "request_region": {
+                "source": "twilio_loopback_jsonl_harness",
+                "cancelled": true
+            }
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(
+        &mut logs,
+        "cancellation",
+        &cancelled,
+        fixture_id,
+        &jsonl_path,
+    );
+
+    let timed_out = invoke_webhook_ingest_request(
+        &mut connector,
+        &capability,
+        json!({
+            "method": "POST",
+            "url": "https://example.com/twilio/e2e/timeout",
+            "headers": {},
+            "body": {},
+            "request_region": {
+                "source": "twilio_loopback_jsonl_harness",
+                "deadline_exceeded": true
+            },
+            "timeout_ms": 1,
+            "concurrency_limit": 1
+        }),
+    )
+    .await;
+    log_webhook_ingest_e2e(&mut logs, "timeout", &timed_out, fixture_id, &jsonl_path);
+
+    assert_eq!(valid_sms["accepted"], true);
+    assert_eq!(valid_voice_status["accepted"], true);
+    assert_eq!(invalid_signature["reason_code"], "invalid_signature");
+    assert_eq!(duplicate_replay["reason_code"], "replay_suppressed");
+    assert_eq!(unauthorized["reason_code"], "not_allowlisted");
+    assert_eq!(authorized["accepted"], true);
+    assert_eq!(malformed["reason_code"], "malformed_payload");
+    assert_eq!(cancelled["reason_code"], "request_cancelled");
+    assert_eq!(timed_out["reason_code"], "request_timeout");
+
+    let jsonl = std::fs::read_to_string(&jsonl_path).expect("read webhook ingest e2e jsonl");
+    println!("twilio_webhook_ingest_e2e_jsonl={}", jsonl_path.display());
+    for scenario in [
+        "valid_sms",
+        "valid_voice_status",
+        "invalid_signature_denial",
+        "duplicate_replay_denial",
+        "unauthorized_caller",
+        "authorized_caller",
+        "malformed_payload",
+        "cancellation",
+        "timeout",
+    ] {
+        assert!(jsonl.contains(scenario), "missing scenario {scenario}");
+    }
+    assert!(!jsonl.contains("+15551234567"));
+    assert!(!jsonl.contains("+15559876543"));
+    assert!(!jsonl.contains("+15550000000"));
+    assert!(!jsonl.contains(TWILIO_TEST_HMAC_KEY));
+    assert!(!jsonl.contains("private sms fixture"));
+    assert!(!jsonl.contains("private blocked fixture"));
+    assert!(!jsonl.contains("private allowed fixture"));
+    assert!(!jsonl.contains("private replay fixture"));
+    for line in jsonl.lines() {
+        let record: serde_json::Value = serde_json::from_str(line).expect("JSONL record parses");
+        assert_eq!(record["skip_reason"], serde_json::Value::Null);
+        assert_eq!(record["cleanup_result"]["clean_shutdown"], true);
+    }
 }
 
 /// Validate signature — empty signature.

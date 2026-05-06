@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:cc7bdb7c08882376a1fdc05f6fb8827e05b63c27545d15fae63d3bcf9accdec3"
+interface_hash = "blake3-256:fcp.interface.v2:8d9fab69872638b356ca41153a825e357a14e9d37b7ee10179b86a6f216a0b5f"
 
 [connector]
 id = "fcp.twilio"
@@ -950,7 +950,7 @@ type = "array"
 type = "object"
 
 [provides.operations."twilio.media_stream.process_events".input_schema.properties.expected_stream_token]
-description = "Connector-issued stream token expected in start.customParameters.token"
+description = "FCP-issued 16-byte base64url CallAuthToken expected in start.customParameters.token"
 type = "string"
 
 [provides.operations."twilio.media_stream.process_events".input_schema.properties.allowed_call_sids]

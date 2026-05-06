@@ -1,24 +1,22 @@
 //! FCP Twilio Connector implementation.
 
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-    time::{Duration as StdDuration, Instant},
-};
+use std::sync::{Arc, Mutex};
 
 use base64::Engine;
+use chrono::Utc;
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
-use hmac::{Hmac, Mac};
+use fcp_voice_call::{
+    SignatureVerification, TwilioSignatureVerifier, WebhookReplayCache,
+    normalize_public_webhook_url,
+};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha1::{Digest as _, Sha1};
-use subtle::ConstantTimeEq;
 use tracing::{info, instrument};
 
 use crate::client::{DEFAULT_API_BASE, TwilioAuth, TwilioClient};
@@ -30,16 +28,11 @@ struct TwilioConfig {
     base_url: String,
 }
 
-const TWILIO_WEBHOOK_REPLAY_WINDOW: StdDuration = StdDuration::from_secs(10 * 60);
-const TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES: usize = 10_000;
-const TWILIO_WEBHOOK_REPLAY_PRUNE_INTERVAL: u64 = 64;
 const TWILIO_WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 64 * 1024;
 const TWILIO_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
 const TWILIO_WEBHOOK_INGRESS_CONCURRENCY_LIMIT: u64 = 32;
 const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_MAX: u64 = 200;
 const TWILIO_WEBHOOK_INGRESS_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
-
-type HmacSha1 = Hmac<Sha1>;
 
 impl TwilioConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
@@ -173,47 +166,6 @@ fn validate_base_url_for_auth(base_url: &str, auth: &TwilioAuth) -> FcpResult<St
     Ok(trimmed.trim_end_matches('/').to_string())
 }
 
-#[derive(Default)]
-struct TwilioWebhookReplayCache {
-    seen_until: HashMap<String, Instant>,
-    calls: u64,
-}
-
-impl TwilioWebhookReplayCache {
-    fn mark(&mut self, key: String) -> bool {
-        let now = Instant::now();
-        self.calls = self.calls.saturating_add(1);
-        if self.calls % TWILIO_WEBHOOK_REPLAY_PRUNE_INTERVAL == 0 {
-            self.prune(now);
-        }
-
-        if self
-            .seen_until
-            .get(&key)
-            .is_some_and(|expires_at| *expires_at > now)
-        {
-            return true;
-        }
-
-        self.seen_until
-            .insert(key, now + TWILIO_WEBHOOK_REPLAY_WINDOW);
-        if self.seen_until.len() > TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES {
-            self.prune(now);
-        }
-        false
-    }
-
-    fn prune(&mut self, now: Instant) {
-        self.seen_until.retain(|_, expires_at| *expires_at > now);
-        while self.seen_until.len() > TWILIO_WEBHOOK_REPLAY_CACHE_MAX_ENTRIES {
-            let Some(oldest) = self.seen_until.keys().next().cloned() else {
-                break;
-            };
-            self.seen_until.remove(&oldest);
-        }
-    }
-}
-
 fn serialize_result<T: Serialize>(value: T) -> FcpResult<serde_json::Value> {
     serde_json::to_value(value).map_err(|e| FcpError::Internal {
         message: format!("Serialization error: {e}"),
@@ -251,97 +203,9 @@ fn sorted_twilio_params(params: &serde_json::Value) -> FcpResult<Vec<(String, St
     Ok(sorted)
 }
 
-fn build_twilio_data_to_sign(url: &str, sorted_params: &[(String, String)]) -> String {
-    let mut data = String::from(url);
-    for (key, value) in sorted_params {
-        data.push_str(key);
-        data.push_str(value);
-    }
-    data
-}
-
-fn canonical_twilio_param_string(sorted_params: &[(String, String)]) -> String {
-    sorted_params
-        .iter()
-        .map(|(key, value)| format!("{key}={value}"))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-fn twilio_replay_key(
-    verification_url: &str,
-    sorted_params: &[(String, String)],
-    signature: &str,
-) -> String {
-    let canonical_params = canonical_twilio_param_string(sorted_params);
-    let mut hasher = Sha1::new();
-    hasher.update(verification_url.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(canonical_params.as_bytes());
-    hasher.update(b"\n");
-    hasher.update(signature.as_bytes());
-    let digest = hasher.finalize();
-    format!(
-        "twilio:req:{}",
-        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(digest)
-    )
-}
-
-fn validate_twilio_webhook_url(
-    url: &str,
+fn twilio_allowed_hosts(
     allowed_hosts: Option<&serde_json::Value>,
-) -> FcpResult<String> {
-    let trimmed = url.trim();
-    if trimmed.is_empty() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "url must not be empty".into(),
-        });
-    }
-
-    let parsed = Url::parse(trimmed).map_err(|error| FcpError::InvalidRequest {
-        code: 1003,
-        message: format!("Invalid webhook url: {error}"),
-    })?;
-
-    if !matches!(parsed.scheme(), "https" | "http") {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "webhook url must use http or https".into(),
-        });
-    }
-
-    let Some(host) = parsed.host_str() else {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "webhook url must include a host".into(),
-        });
-    };
-
-    if !parsed.username().is_empty() || parsed.password().is_some() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "webhook url must not include userinfo".into(),
-        });
-    }
-
-    if parsed.fragment().is_some() {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "webhook url must not include a fragment".into(),
-        });
-    }
-
-    let local = is_local_test_host(host);
-    if parsed.scheme() == "http" && !local {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message:
-                "webhook url must use https unless targeting localhost/127.0.0.1/::1 for tests"
-                    .into(),
-        });
-    }
-
+) -> FcpResult<Option<Vec<String>>> {
     if let Some(allowed_hosts) = allowed_hosts {
         let hosts = allowed_hosts.as_array().ok_or(FcpError::InvalidRequest {
             code: 1003,
@@ -353,32 +217,44 @@ fn validate_twilio_webhook_url(
                 message: "allowed_hosts must not be empty when provided".into(),
             });
         }
-        let normalized_host = host.to_ascii_lowercase();
-        let allowed = hosts.iter().any(|candidate| {
-            candidate
+        let mut normalized = Vec::with_capacity(hosts.len());
+        for candidate in hosts {
+            let host = candidate
                 .as_str()
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
-                .is_some_and(|value| value.to_ascii_lowercase() == normalized_host)
-        });
-        if !allowed {
-            return Err(FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("webhook url host `{host}` is not in allowed_hosts"),
-            });
+                .ok_or(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "allowed_hosts entries must be non-empty hostnames".into(),
+                })?;
+            normalized.push(host.to_ascii_lowercase());
         }
+        Ok(Some(normalized))
+    } else {
+        Ok(None)
     }
-
-    Ok(trimmed.to_string())
 }
 
-fn compute_twilio_signature_digest(auth_token: &str, data_to_sign: &str) -> FcpResult<Vec<u8>> {
-    let mut mac =
-        HmacSha1::new_from_slice(auth_token.as_bytes()).map_err(|error| FcpError::Internal {
-            message: format!("Failed to initialize Twilio HMAC-SHA1 verifier: {error}"),
-        })?;
-    mac.update(data_to_sign.as_bytes());
-    Ok(mac.finalize().into_bytes().to_vec())
+fn validate_twilio_webhook_url(
+    url: &str,
+    allowed_hosts: Option<&serde_json::Value>,
+) -> FcpResult<String> {
+    let allowed_hosts = twilio_allowed_hosts(allowed_hosts)?;
+    normalize_public_webhook_url(url, allowed_hosts.as_deref())
+        .map_err(|error| error.to_fcp_error())
+}
+
+fn twilio_signature_validation_result(
+    verification: SignatureVerification,
+    verification_url: String,
+) -> crate::types::SignatureValidationResult {
+    crate::types::SignatureValidationResult {
+        valid: verification.valid,
+        reason: verification.reason,
+        is_replay: verification.is_replay,
+        verified_request_key: verification.verified_request_key,
+        verification_url: Some(verification_url),
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -780,7 +656,7 @@ pub struct TwilioConnector {
     config: Option<TwilioConfig>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
-    webhook_replay_cache: Mutex<TwilioWebhookReplayCache>,
+    webhook_replay_cache: Mutex<WebhookReplayCache>,
 }
 
 impl TwilioConnector {
@@ -793,7 +669,7 @@ impl TwilioConnector {
             config: None,
             verifier: None,
             session_id: None,
-            webhook_replay_cache: Mutex::new(TwilioWebhookReplayCache::default()),
+            webhook_replay_cache: Mutex::new(WebhookReplayCache::default()),
         }
     }
 
@@ -1479,7 +1355,10 @@ impl TwilioConnector {
                                 "type": "array",
                                 "description": "Connector-to-Twilio media, mark, and clear actions for bidirectional streams"
                             },
-                            "expected_stream_token": { "type": "string" },
+                            "expected_stream_token": {
+                                "type": "string",
+                                "description": "FCP-issued 16-byte base64url CallAuthToken expected in Twilio customParameters.token"
+                            },
                             "allowed_call_sids": { "type": "array", "items": { "type": "string" } },
                             "stream_token_issued_at_ms": { "type": "integer" },
                             "now_ms": { "type": "integer" },
@@ -3633,45 +3512,28 @@ impl TwilioConnector {
         };
 
         let sorted_params = sorted_twilio_params(params)?;
-        let data_to_sign = build_twilio_data_to_sign(&verification_url, &sorted_params);
-        let expected_signature = compute_twilio_signature_digest(auth_token, &data_to_sign)?;
-
-        if provided_signature
-            .as_slice()
-            .ct_eq(expected_signature.as_slice())
-            .unwrap_u8()
-            != 1
-        {
-            let result = SignatureValidationResult {
-                valid: false,
-                reason: "Invalid Twilio HMAC-SHA1 signature".into(),
-                is_replay: false,
-                verified_request_key: None,
-                verification_url: Some(verification_url),
-            };
-            return serialize_result(result);
+        let mut verifier = TwilioSignatureVerifier::new(auth_token.to_string());
+        if let Some(allowed_hosts) = twilio_allowed_hosts(input.get("allowed_hosts"))? {
+            verifier = verifier.with_allowed_hosts(allowed_hosts);
         }
-
-        let replay_key = twilio_replay_key(&verification_url, &sorted_params, signature);
-        let is_replay = self
-            .webhook_replay_cache
-            .lock()
-            .map_err(|_| FcpError::Internal {
-                message: "Twilio webhook replay cache mutex poisoned".into(),
-            })?
-            .mark(replay_key.clone());
-        let result = SignatureValidationResult {
-            valid: true,
-            reason: if is_replay {
-                "Signature is valid, but this signed webhook was already seen within the replay window"
-                    .into()
-            } else {
-                "Signature is valid".into()
-            },
-            is_replay,
-            verified_request_key: Some(replay_key),
-            verification_url: Some(verification_url),
+        let verification = {
+            let mut replay_cache =
+                self.webhook_replay_cache
+                    .lock()
+                    .map_err(|_| FcpError::Internal {
+                        message: "Twilio webhook replay cache mutex poisoned".into(),
+                    })?;
+            verifier
+                .verify(
+                    &verification_url,
+                    &sorted_params,
+                    signature,
+                    &mut replay_cache,
+                    Utc::now(),
+                )
+                .map_err(|error| error.to_fcp_error())?
         };
+        let result = twilio_signature_validation_result(verification, verification_url);
         serialize_result(result)
     }
 

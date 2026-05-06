@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use base64::Engine;
 use fcp_prelude::{FcpError, FcpResult};
 use fcp_sdk::runtime::SupervisorConfig;
+use fcp_voice_call::CallAuthToken;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -50,7 +51,7 @@ struct MediaStreamConfig {
     max_backoff_ms: u64,
     reconnect_attempts: u32,
     max_reconnect_attempts: u32,
-    expected_stream_token: Option<String>,
+    expected_stream_token: Option<CallAuthToken>,
     stream_token_issued_at_ms: Option<u64>,
     now_ms: Option<u64>,
     allowed_call_sids: HashSet<String>,
@@ -95,7 +96,7 @@ impl MediaStreamConfig {
                 DEFAULT_RECONNECT_ATTEMPTS,
             )?,
             max_reconnect_attempts,
-            expected_stream_token: optional_trimmed_string(input, "expected_stream_token"),
+            expected_stream_token: optional_call_auth_token(input, "expected_stream_token")?,
             stream_token_issued_at_ms: optional_u64_value(input, "stream_token_issued_at_ms")?,
             now_ms: optional_u64_value(input, "now_ms")?,
             allowed_call_sids: string_set(input.get("allowed_call_sids"))?,
@@ -1176,7 +1177,7 @@ fn validate_stream_token(
         .and_then(|params| params.get("token"))
         .and_then(Value::as_str);
     if let Some(expected) = &config.expected_stream_token {
-        if provided_stream_parameter != Some(expected.as_str()) {
+        if !provided_stream_parameter.is_some_and(|provided| expected.verify(provided)) {
             return Err(denial(
                 403,
                 "stream_token_mismatch",
@@ -1669,6 +1670,16 @@ fn optional_trimmed_string(input: &Value, field: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn optional_call_auth_token(input: &Value, field: &str) -> FcpResult<Option<CallAuthToken>> {
+    optional_trimmed_string(input, field)
+        .map(CallAuthToken::from_callback_parameter)
+        .transpose()
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: error.to_string(),
+        })
+}
+
 fn optional_u64(input: &Value, field: &str, default: u64) -> FcpResult<u64> {
     optional_u64_value(input, field).map(|value| value.unwrap_or(default))
 }
@@ -1753,7 +1764,7 @@ mod tests {
                 "accountSid": "AC-test",
                 "callSid": "CA-test",
                 "tracks": ["inbound"],
-                "customParameters": { "token": "stream-token" },
+                "customParameters": { "token": "AAAAAAAAAAAAAAAAAAAAAA" },
                 "mediaFormat": {
                     "encoding": "audio/x-mulaw",
                     "sampleRate": 8000,
@@ -1792,7 +1803,7 @@ mod tests {
                     "stop": { "accountSid": "AC-test", "callSid": "CA-test" }
                 }
             ],
-            "expected_stream_token": "stream-token",
+            "expected_stream_token": "AAAAAAAAAAAAAAAAAAAAAA",
             "stream_token_issued_at_ms": 1000,
             "now_ms": 1200
         }))
@@ -1828,7 +1839,7 @@ mod tests {
     fn rejects_stale_stream_token() {
         let result = process_media_stream_events(&json!({
             "frames": [start_frame()],
-            "expected_stream_token": "stream-token",
+            "expected_stream_token": "AAAAAAAAAAAAAAAAAAAAAA",
             "stream_token_issued_at_ms": 1000,
             "now_ms": 40_000,
             "stream_token_ttl_ms": 30_000

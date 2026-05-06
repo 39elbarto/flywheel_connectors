@@ -27,7 +27,10 @@ fn record_step(steps: &TraceSteps, step: &'static str) {
 }
 
 fn assert_step_order(steps: &TraceSteps, expected: &[&'static str]) {
-    let observed = steps.lock().expect("trace steps lock");
+    let observed = {
+        let guard = steps.lock().expect("trace steps lock");
+        guard.clone()
+    };
     let mut cursor = 0;
     for expected_step in expected {
         let relative = observed[cursor..]
@@ -136,7 +139,7 @@ fn write_status(stream: &mut TcpStream, status: u16, reason: &str) {
 
 fn provider_response(
     state: &WebhookEndpointState,
-    request: ParsedHttpRequest,
+    request: &ParsedHttpRequest,
 ) -> (u16, &'static str) {
     let result = match request.path.as_str() {
         "/github" => state
@@ -175,7 +178,7 @@ fn spawn_webhook_endpoint(
         for _ in 0..requests {
             let (mut stream, _) = listener.accept().expect("accept webhook request");
             let request = read_http_request(&mut stream);
-            let (status, reason) = provider_response(&state, request);
+            let (status, reason) = provider_response(&state, &request);
             write_status(&mut stream, status, reason);
         }
         record_step(&steps, "server_done");

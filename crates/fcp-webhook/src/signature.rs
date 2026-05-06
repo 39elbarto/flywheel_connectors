@@ -28,7 +28,7 @@ fn decode_fixed_hex(signature: &str, expected_hex_len: usize) -> WebhookResult<V
     hex::decode(signature).map_err(|_| WebhookError::InvalidSignature)
 }
 
-fn hex_nibble(byte: u8) -> (u8, bool) {
+const fn hex_nibble(byte: u8) -> (u8, bool) {
     match byte {
         b'0'..=b'9' => (byte - b'0', true),
         b'a'..=b'f' => (byte - b'a' + 10, true),
@@ -118,6 +118,11 @@ pub struct HmacSha256Verifier {
 
 impl HmacSha256Verifier {
     /// Create a new HMAC-SHA256 verifier.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than [`HMAC_SHA256_MIN_SIGNING_SECRET_BYTES`]. Use [`Self::try_new`] to
+    /// handle this as an error.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(secret).expect("HMAC-SHA256 signing secret must meet minimum length")
@@ -194,6 +199,11 @@ pub struct HmacSha1Verifier {
 
 impl HmacSha1Verifier {
     /// Create a new HMAC-SHA1 verifier.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than [`HMAC_SHA1_MIN_SIGNING_SECRET_BYTES`]. Use [`Self::try_new`] to
+    /// handle this as an error.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(secret).expect("HMAC-SHA1 signing secret must meet minimum length")
@@ -1049,7 +1059,7 @@ mod tests {
     #[test]
     fn test_hmac_sha256_binary_secret() {
         let secret: Vec<u8> = (0..HMAC_SHA256_MIN_SIGNING_SECRET_BYTES)
-            .map(|byte| byte as u8)
+            .map(|byte| u8::try_from(byte).expect("test secret byte range fits in u8"))
             .collect();
         let verifier = HmacSha256Verifier::new(&secret);
         let sig = verifier.compute(b"test");
@@ -1059,7 +1069,7 @@ mod tests {
     #[test]
     fn test_hmac_sha1_binary_secret() {
         let secret: Vec<u8> = (0..HMAC_SHA1_MIN_SIGNING_SECRET_BYTES)
-            .map(|byte| byte as u8)
+            .map(|byte| u8::try_from(byte).expect("test secret byte range fits in u8"))
             .collect();
         let verifier = HmacSha1Verifier::new(&secret);
         let sig = verifier.compute(b"test");

@@ -27,17 +27,17 @@
 //!      cumulative delay exhibits geometric growth (catches a
 //!      regression that flattens the schedule to a constant).
 //!
-//!   3. **HOST_BACKPRESSURE_STATUS (503) + Retry-After honored**.
+//!   3. **`HOST_BACKPRESSURE_STATUS` (503) + Retry-After honored**.
 //!      A 503 with the FCP backpressure reason and a custom
 //!      `X-FCP-Backpressure-Retry-After: 30` header surfaces as
 //!      `RetryAfter(d)` where `d ≥ 30s`. The sender's exponential
 //!      backoff stays floored at the host-supplied delay.
 //!
-//!   4. **Budget-exhausted = RefuseRetry, terminal**. The same 503
+//!   4. **Budget-exhausted = `RefuseRetry`, terminal**. The same 503
 //!      with `X-FCP-Backpressure-Reason: budget-exhausted`
 //!      surfaces as `RefuseRetry(signal)`. The sender's loop
 //!      MUST halt and surface the host backpressure signal — no
-//!      retry, no exponential backoff, no DoS amplification.
+//!      retry, no exponential backoff, no `DoS` amplification.
 //!
 //!   5. **Replay rejection is terminal at the application layer**.
 //!      A correctly-signed delivery whose `event.id` was seen
@@ -70,7 +70,7 @@ const MAX_RETRIES: u32 = 5;
 /// Per-request response script. Each step describes what the server
 /// should do for one inbound request, *without* signature
 /// verification; verification-driven responses (401/400/409) are
-/// produced by the WebhookEndpointState path below.
+/// produced by the `WebhookEndpointState` path below.
 #[derive(Debug, Clone)]
 enum DeliveryStep {
     /// Run signature verification + replay claim. Status code is
@@ -192,9 +192,8 @@ fn spawn_scripted_endpoint(script: Vec<DeliveryStep>) -> (SocketAddr, thread::Jo
         loop {
             let next = scripted.lock().expect("script lock").next();
             let Some(step) = next else { break };
-            let (mut stream, _) = match listener.accept() {
-                Ok(pair) => pair,
-                Err(_) => return,
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
             };
             let request = read_http_request(&mut stream);
 
@@ -315,14 +314,14 @@ struct RetryTraceRow {
 ///     deliverer applies, not something fcp-webhook supplies
 fn run_delivery_retry_loop(
     addr: SocketAddr,
-    headers: Vec<(&'static str, String)>,
+    headers: &[(&'static str, String)],
     body: &[u8],
     treat_4xx_as_terminal: bool,
 ) -> Vec<RetryTraceRow> {
     let mut trace = Vec::new();
     let mut cumulative: u64 = 0;
     for attempt in 0..MAX_RETRIES {
-        let outcome = post_signed_webhook(addr, &headers, body);
+        let outcome = post_signed_webhook(addr, headers, body);
         let decision =
             host_retry_decision_from_response(outcome.status, &outcome.headers, DEFAULT_DELAY);
 
@@ -363,6 +362,7 @@ fn run_delivery_retry_loop(
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
     // Phase A: 3× transient 500 then a verified 202. The sender's
     // retry loop should observe the geometric backoff schedule and
@@ -403,7 +403,7 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
     // ── Phase A: 3 retries on 500, success on 4th attempt ────────
     let body_a = br#"{"id":"evt_phase_a","type":"payment_intent.succeeded","data":{"object":{}}}"#;
     let headers_a = build_stripe_request(body_a, now);
-    let trace_a = run_delivery_retry_loop(addr, headers_a, body_a, false);
+    let trace_a = run_delivery_retry_loop(addr, &headers_a, body_a, false);
     assert_eq!(
         trace_a.len(),
         4,
@@ -431,7 +431,7 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
     // ── Phase B: 503 + retry-after-30 floor ─────────────────────
     let body_b = br#"{"id":"evt_phase_b","type":"payment_intent.succeeded","data":{"object":{}}}"#;
     let headers_b = build_stripe_request(body_b, now);
-    let trace_b = run_delivery_retry_loop(addr, headers_b, body_b, false);
+    let trace_b = run_delivery_retry_loop(addr, &headers_b, body_b, false);
     assert_eq!(
         trace_b.len(),
         2,
@@ -447,7 +447,9 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
                  host-supplied Retry-After floor was not honored",
             );
         }
-        other => panic!("phase B first attempt: expected RetryAfter, got {other:?}"),
+        other @ WebhookRetryDecision::RefuseRetry(_) => {
+            panic!("phase B first attempt: expected RetryAfter, got {other:?}");
+        }
     }
     assert_eq!(
         trace_b[1].status, 202,
@@ -457,7 +459,7 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
     // ── Phase C: budget-exhausted = RefuseRetry, terminal ───────
     let body_c = br#"{"id":"evt_phase_c","type":"payment_intent.succeeded","data":{"object":{}}}"#;
     let headers_c = build_stripe_request(body_c, now);
-    let trace_c = run_delivery_retry_loop(addr, headers_c, body_c, false);
+    let trace_c = run_delivery_retry_loop(addr, &headers_c, body_c, false);
     assert_eq!(
         trace_c.len(),
         1,
@@ -470,19 +472,21 @@ fn webhook_delivery_retry_traces_through_signature_and_backpressure_paths() {
                 "phase C: signal MUST report budget-exhausted, got {signal:?}",
             );
         }
-        other => panic!("phase C: budget-exhausted MUST surface as RefuseRetry, got {other:?}"),
+        other @ WebhookRetryDecision::RetryAfter(_) => {
+            panic!("phase C: budget-exhausted MUST surface as RefuseRetry, got {other:?}");
+        }
     }
 
     // ── Phase D: replay rejection terminates at the app layer ───
     let body_d =
         br#"{"id":"evt_phase_d_replay","type":"payment_intent.succeeded","data":{"object":{}}}"#;
     let headers_d_first = build_stripe_request(body_d, now);
-    let trace_d_first = run_delivery_retry_loop(addr, headers_d_first.clone(), body_d, true);
+    let trace_d_first = run_delivery_retry_loop(addr, &headers_d_first, body_d, true);
     assert_eq!(trace_d_first.len(), 1, "phase D first delivery accepted");
     assert_eq!(trace_d_first[0].status, 202);
 
     // Second delivery of the SAME event id — receiver returns 409.
-    let trace_d_replay = run_delivery_retry_loop(addr, headers_d_first, body_d, true);
+    let trace_d_replay = run_delivery_retry_loop(addr, &headers_d_first, body_d, true);
     assert_eq!(
         trace_d_replay.len(),
         1,

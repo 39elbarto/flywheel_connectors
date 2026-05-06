@@ -1,6 +1,7 @@
 //! Webhook error types.
 
 use std::collections::HashMap;
+use std::hash::BuildHasher;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -65,8 +66,8 @@ pub enum WebhookRetryDecision {
     RefuseRetry(HostBackpressureSignal),
 }
 
-fn header_value_case_insensitive<'a>(
-    headers: &'a HashMap<String, String>,
+fn header_value_case_insensitive<'a, S: BuildHasher>(
+    headers: &'a HashMap<String, String, S>,
     name: &str,
 ) -> Option<&'a str> {
     headers
@@ -104,9 +105,9 @@ fn max_retry_after(left: Option<Duration>, right: Option<Duration>) -> Option<Du
 
 /// Extract host backpressure metadata from a response status and headers.
 #[must_use]
-pub fn host_backpressure_signal_from_response(
+pub fn host_backpressure_signal_from_response<S: BuildHasher>(
     status: u16,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, S>,
 ) -> Option<HostBackpressureSignal> {
     if status != HOST_BACKPRESSURE_STATUS {
         return None;
@@ -124,9 +125,9 @@ pub fn host_backpressure_signal_from_response(
 
 /// Decide whether a webhook delivery may retry after a host response.
 #[must_use]
-pub fn host_retry_decision_from_response(
+pub fn host_retry_decision_from_response<S: BuildHasher>(
     status: u16,
-    headers: &HashMap<String, String>,
+    headers: &HashMap<String, String, S>,
     default_delay: Duration,
 ) -> WebhookRetryDecision {
     let Some(signal) = host_backpressure_signal_from_response(status, headers) else {

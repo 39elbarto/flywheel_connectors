@@ -4,12 +4,12 @@
 //! cover behavioral round-trips. `webhook_receiver_compliance.rs`
 //! covers per-provider compliance. None of those tests freeze the
 //! *outcome shape* operators read off the receiver decision: which
-//! WebhookError variant fires for each (provider × signature
+//! `WebhookError` variant fires for each (provider × signature
 //! correctness × timestamp window × replay state) cell.
 //!
 //! This golden walks 12 cells across the three first-class
 //! providers (GitHub, Stripe, Slack) and freezes the verdict for
-//! each. A regression that changes "InvalidSignature" → "BadSignature",
+//! each. A regression that changes "`InvalidSignature`" → "`BadSignature`",
 //! or that swaps which path fires first when both signature and
 //! timestamp are wrong, surfaces here as a per-row diff.
 //!
@@ -17,11 +17,11 @@
 //!
 //!   - GitHub: valid first-attempt, replay, wrong-signature
 //!   - Stripe: valid current, stale (-600s), future (+600s),
-//!             replay, wrong-signature
+//!     replay, wrong-signature
 //!   - Slack: valid current, stale, replay, wrong-signature
 //!
 //! Determinism: signatures are HMAC-SHA256 (deterministic from
-//! secret + body); replay cache uses InMemoryReplayCache. The only
+//! secret + body); replay cache uses `InMemoryReplayCache`. The only
 //! moving part is wall-clock; we offset relative to `Utc::now()` so
 //! cells fall in a stable bucket regardless of when the test runs.
 //! Stale (-600s) and future (+600s) both fall outside the default
@@ -47,7 +47,7 @@ enum Provider {
 }
 
 impl Provider {
-    fn label(self) -> &'static str {
+    const fn label(self) -> &'static str {
         match self {
             Self::GitHub => "github",
             Self::Stripe => "stripe",
@@ -60,7 +60,7 @@ impl Provider {
 enum SignatureSource {
     /// Signed with the provider's correct secret.
     Correct,
-    /// Signed with WRONG_SECRET — verifier holds the correct secret.
+    /// Signed with `WRONG_SECRET` — verifier holds the correct secret.
     WrongSecret,
 }
 
@@ -178,16 +178,15 @@ fn stripe_cell(
     let body_bytes = body.as_bytes();
     let now = Utc::now().timestamp();
     let timestamp = match cell.timestamp {
-        TimestampOffset::Current => now,
+        TimestampOffset::Current | TimestampOffset::NotApplicable => now,
         TimestampOffset::Stale => now - 600,
         TimestampOffset::Future => now + 600,
-        TimestampOffset::NotApplicable => now,
     };
     let secret = match cell.signature {
         SignatureSource::Correct => STRIPE_SECRET,
         SignatureSource::WrongSecret => WRONG_SECRET,
     };
-    let signed_payload = format!("{timestamp}.{}", body);
+    let signed_payload = format!("{timestamp}.{body}");
     let sig = HmacSha256Verifier::new(secret).compute(signed_payload.as_bytes());
     let mut headers = HashMap::new();
     headers.insert(
@@ -226,16 +225,15 @@ fn slack_cell(
     let body_bytes = body.as_bytes();
     let now = Utc::now().timestamp();
     let timestamp = match cell.timestamp {
-        TimestampOffset::Current => now,
+        TimestampOffset::Current | TimestampOffset::NotApplicable => now,
         TimestampOffset::Stale => now - 600,
         TimestampOffset::Future => now + 600,
-        TimestampOffset::NotApplicable => now,
     };
     let secret = match cell.signature {
         SignatureSource::Correct => SLACK_SECRET,
         SignatureSource::WrongSecret => WRONG_SECRET,
     };
-    let signed_payload = format!("v0:{timestamp}:{}", body);
+    let signed_payload = format!("v0:{timestamp}:{body}");
     let sig = HmacSha256Verifier::new(secret).compute(signed_payload.as_bytes());
     let mut headers = HashMap::new();
     headers.insert("X-Slack-Signature".to_string(), format!("v0={sig}"));
@@ -260,6 +258,7 @@ fn slack_cell(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 fn render_golden() -> String {
     let cells = vec![
         // GitHub: no timestamp window, just signature + replay.

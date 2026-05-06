@@ -3,6 +3,7 @@
 //! Provides a unified interface for handling webhooks from any provider.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::hash::BuildHasher;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
@@ -99,10 +100,10 @@ impl WebhookConfig {
 
     /// Decide whether a host response should be retried.
     #[must_use]
-    pub fn retry_decision_for_host_response(
+    pub fn retry_decision_for_host_response<S: BuildHasher>(
         &self,
         status: u16,
-        headers: &HashMap<String, String>,
+        headers: &HashMap<String, String, S>,
     ) -> crate::WebhookRetryDecision {
         crate::host_retry_decision_from_response(status, headers, self.retry_delay)
     }
@@ -417,12 +418,12 @@ pub struct EventRouter {
 
 #[derive(Debug, Default)]
 struct EventRoutingIndex {
-    exact_any_provider: HashMap<String, Vec<usize>>,
-    exact_by_provider: HashMap<String, HashMap<String, Vec<usize>>>,
-    all_any_provider: Vec<usize>,
-    all_by_provider: HashMap<String, Vec<usize>>,
-    prefix_any_provider: Vec<PrefixRoute>,
-    prefix_by_provider: HashMap<String, Vec<PrefixRoute>>,
+    exact_any: HashMap<String, Vec<usize>>,
+    exact_by: HashMap<String, HashMap<String, Vec<usize>>>,
+    all_any: Vec<usize>,
+    all_by: HashMap<String, Vec<usize>>,
+    prefix_any: Vec<PrefixRoute>,
+    prefix_by: HashMap<String, Vec<PrefixRoute>>,
 }
 
 #[derive(Debug, Clone)]
@@ -454,14 +455,14 @@ impl EventRoutingIndex {
 
     fn insert_exact(&mut self, route_index: usize, provider: Option<&str>, event_type: &str) {
         if let Some(provider) = provider {
-            self.exact_by_provider
+            self.exact_by
                 .entry(provider.to_string())
                 .or_default()
                 .entry(event_type.to_string())
                 .or_default()
                 .push(route_index);
         } else {
-            self.exact_any_provider
+            self.exact_any
                 .entry(event_type.to_string())
                 .or_default()
                 .push(route_index);
@@ -470,12 +471,12 @@ impl EventRoutingIndex {
 
     fn insert_all(&mut self, route_index: usize, provider: Option<&str>) {
         if let Some(provider) = provider {
-            self.all_by_provider
+            self.all_by
                 .entry(provider.to_string())
                 .or_default()
                 .push(route_index);
         } else {
-            self.all_any_provider.push(route_index);
+            self.all_any.push(route_index);
         }
     }
 
@@ -485,41 +486,40 @@ impl EventRoutingIndex {
             route_index,
         };
         if let Some(provider) = provider {
-            self.prefix_by_provider
+            self.prefix_by
                 .entry(provider.to_string())
                 .or_default()
                 .push(route);
         } else {
-            self.prefix_any_provider.push(route);
+            self.prefix_any.push(route);
         }
     }
 
     fn collect_candidate_routes(&self, event: &WebhookEvent, candidates: &mut Vec<usize>) {
-        candidates.extend_from_slice(&self.all_any_provider);
+        candidates.extend_from_slice(&self.all_any);
 
-        if let Some(provider_routes) = self.all_by_provider.get(event.provider.as_str()) {
+        if let Some(provider_routes) = self.all_by.get(event.provider.as_str()) {
             candidates.extend_from_slice(provider_routes);
         }
 
-        if let Some(global_exact) = self.exact_any_provider.get(event.event_type.as_str()) {
+        if let Some(global_exact) = self.exact_any.get(event.event_type.as_str()) {
             candidates.extend_from_slice(global_exact);
         }
 
-        if let Some(provider_exact) = self.exact_by_provider.get(event.provider.as_str()) {
+        if let Some(provider_exact) = self.exact_by.get(event.provider.as_str()) {
             if let Some(routes) = provider_exact.get(event.event_type.as_str()) {
                 candidates.extend_from_slice(routes);
             }
         }
 
-        self.collect_prefix_routes(&self.prefix_any_provider, event, candidates);
+        Self::collect_prefix_routes(&self.prefix_any, event, candidates);
 
-        if let Some(provider_prefixes) = self.prefix_by_provider.get(event.provider.as_str()) {
-            self.collect_prefix_routes(provider_prefixes, event, candidates);
+        if let Some(provider_prefixes) = self.prefix_by.get(event.provider.as_str()) {
+            Self::collect_prefix_routes(provider_prefixes, event, candidates);
         }
     }
 
     fn collect_prefix_routes(
-        &self,
         routes: &[PrefixRoute],
         event: &WebhookEvent,
         candidates: &mut Vec<usize>,
@@ -732,18 +732,14 @@ mod tests {
         assert_eq!(
             router
                 .index
-                .exact_by_provider
+                .exact_by
                 .get("github")
                 .and_then(|routes| routes.get("push"))
                 .map(Vec::as_slice),
             Some([0].as_slice())
         );
         assert_eq!(
-            router
-                .index
-                .exact_any_provider
-                .get("push")
-                .map(Vec::as_slice),
+            router.index.exact_any.get("push").map(Vec::as_slice),
             Some([1].as_slice())
         );
 
@@ -1402,9 +1398,12 @@ mod tests {
         handler.next_cleanup_at_millis.store(0, Ordering::Release);
 
         assert!(handler.claim_event("fresh").is_ok());
-        let state = handler.seen_events.read();
-        assert_eq!(state.events.len(), 1);
-        assert!(state.events.contains_key("fresh"));
+        let (event_count, has_fresh) = {
+            let state = handler.seen_events.read();
+            (state.events.len(), state.events.contains_key("fresh"))
+        };
+        assert_eq!(event_count, 1);
+        assert!(has_fresh);
     }
 
     #[test]

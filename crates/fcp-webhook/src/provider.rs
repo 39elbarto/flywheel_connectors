@@ -176,6 +176,11 @@ pub struct GitHubWebhook {
 
 impl GitHubWebhook {
     /// Create a new GitHub webhook handler.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than the HMAC-SHA256 length floor. Use [`Self::try_new`] to handle this
+    /// as an error.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(secret).expect("GitHub webhook signing secret must meet minimum length")
@@ -265,6 +270,11 @@ pub struct StripeWebhook {
 
 impl StripeWebhook {
     /// Create a new Stripe webhook handler.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than the HMAC-SHA256 length floor. Use [`Self::try_new`] to handle this
+    /// as an error.
     #[must_use]
     pub fn new(secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(secret).expect("Stripe webhook signing secret must meet minimum length")
@@ -475,6 +485,11 @@ pub struct SlackWebhook {
 
 impl SlackWebhook {
     /// Create a new Slack webhook handler.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than the HMAC-SHA256 length floor. Use [`Self::try_new`] to handle this
+    /// as an error.
     #[must_use]
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(signing_secret)
@@ -644,6 +659,11 @@ pub struct LinearWebhook {
 
 impl LinearWebhook {
     /// Create a new Linear webhook handler.
+    ///
+    /// # Panics
+    /// Panics when the signing secret is empty, whitespace-only, or shorter
+    /// than the HMAC-SHA256 length floor. Use [`Self::try_new`] to handle this
+    /// as an error.
     #[must_use]
     pub fn new(signing_secret: impl AsRef<[u8]>) -> Self {
         Self::try_new(signing_secret)

@@ -34,6 +34,8 @@ const FEISHU_TENANT_APP_BOUNDARY: &str = "This connector acts as one installed t
 const FEISHU_IMPLEMENTATION_STATUS: &str = "first_slice";
 const FEISHU_BINDING_MODEL: &str = "single_tenant_app";
 const FEISHU_AUTH_MODEL: &str = "tenant_app_credentials";
+const FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED: &str = "host_forwarded_request_region";
+const FEISHU_WEBHOOK_DEFAULT_PATH: &str = "/feishu/webhook";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/feishu_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/feishu_connector/<timestamp>";
 const VERIFY_COMMANDS: [&str; 7] = [
@@ -98,6 +100,8 @@ struct FeishuConfig {
     request_timeout_ms: u64,
     #[serde(default)]
     webhook_state: FeishuWebhookStateConfig,
+    #[serde(default)]
+    webhook_ingress: FeishuWebhookIngressConfig,
 }
 
 impl std::fmt::Debug for FeishuConfig {
@@ -109,8 +113,161 @@ impl std::fmt::Debug for FeishuConfig {
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .field("webhook_state", &self.webhook_state.summary())
+            .field("webhook_ingress", &self.webhook_ingress.summary())
             .finish()
     }
+}
+
+#[derive(Clone, Deserialize)]
+struct FeishuWebhookIngressConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_webhook_ingress_transport")]
+    transport: String,
+    #[serde(default = "default_webhook_ingress_path")]
+    path: String,
+    #[serde(default)]
+    verification_token: Option<String>,
+    #[serde(default)]
+    encrypt_key: Option<String>,
+    #[serde(default = "default_webhook_ingress_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_webhook_ingress_require_json_content_type")]
+    require_json_content_type: bool,
+}
+
+impl std::fmt::Debug for FeishuWebhookIngressConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FeishuWebhookIngressConfig")
+            .field("enabled", &self.enabled)
+            .field("transport", &self.transport)
+            .field("path", &self.path)
+            .field(
+                "verification_token",
+                &self
+                    .verification_token
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("[UNSET]"),
+            )
+            .field(
+                "encrypt_key",
+                &self
+                    .encrypt_key
+                    .as_ref()
+                    .map(|_| "[REDACTED]")
+                    .unwrap_or("[UNSET]"),
+            )
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field(
+                "require_json_content_type",
+                &self.require_json_content_type,
+            )
+            .finish()
+    }
+}
+
+impl Default for FeishuWebhookIngressConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            transport: default_webhook_ingress_transport(),
+            path: default_webhook_ingress_path(),
+            verification_token: None,
+            encrypt_key: None,
+            max_body_bytes: default_webhook_ingress_max_body_bytes(),
+            require_json_content_type: default_webhook_ingress_require_json_content_type(),
+        }
+    }
+}
+
+impl FeishuWebhookIngressConfig {
+    fn validate(mut self) -> FcpResult<Self> {
+        self.transport = self.transport.trim().to_owned();
+        if self.transport.is_empty() {
+            self.transport = default_webhook_ingress_transport();
+        }
+        if self.transport != FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: format!(
+                    "webhook_ingress.transport must be {FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED}; embedded listener sockets are not supported"
+                ),
+            });
+        }
+
+        self.path = self.path.trim().to_owned();
+        if self.path.is_empty() {
+            self.path = default_webhook_ingress_path();
+        }
+        validate_webhook_ingress_path(&self.path)?;
+
+        self.verification_token = self
+            .verification_token
+            .map(|token| token.trim().to_owned())
+            .filter(|token| !token.is_empty());
+        self.encrypt_key = self
+            .encrypt_key
+            .map(|key| key.trim().to_owned())
+            .filter(|key| !key.is_empty());
+
+        if self.max_body_bytes == 0 || self.max_body_bytes > FEISHU_WEBHOOK_MAX_BODY_BYTES {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message: format!(
+                    "webhook_ingress.max_body_bytes must be between 1 and {FEISHU_WEBHOOK_MAX_BODY_BYTES}"
+                ),
+            });
+        }
+
+        if self.enabled && !self.security_material_configured() {
+            return Err(FcpError::InvalidRequest {
+                code: 1001,
+                message:
+                    "webhook_ingress.enabled requires verification_token and encrypt_key".into(),
+            });
+        }
+
+        Ok(self)
+    }
+
+    fn security_material_configured(&self) -> bool {
+        self.verification_token.is_some() && self.encrypt_key.is_some()
+    }
+
+    fn summary(&self) -> FeishuWebhookIngressSummary {
+        FeishuWebhookIngressSummary {
+            enabled: self.enabled,
+            transport: self.transport.clone(),
+            path: self.path.clone(),
+            listener_socket_opened: false,
+            security_material_configured: self.security_material_configured(),
+            max_body_bytes: self.max_body_bytes,
+            require_json_content_type: self.require_json_content_type,
+            host_owned_layers: vec![
+                "request_region",
+                "body_timeout",
+                "body_limit",
+                "load_shed",
+                "concurrency_limit",
+                "rate_limit",
+            ],
+            event_fanout: "host_consumes_returned_event_record",
+        }
+    }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct FeishuWebhookIngressSummary {
+    enabled: bool,
+    transport: String,
+    path: String,
+    listener_socket_opened: bool,
+    security_material_configured: bool,
+    max_body_bytes: usize,
+    require_json_content_type: bool,
+    host_owned_layers: Vec<&'static str>,
+    event_fanout: &'static str,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -190,6 +347,22 @@ const fn default_request_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_webhook_ingress_transport() -> String {
+    FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED.into()
+}
+
+fn default_webhook_ingress_path() -> String {
+    FEISHU_WEBHOOK_DEFAULT_PATH.into()
+}
+
+const fn default_webhook_ingress_max_body_bytes() -> usize {
+    FEISHU_WEBHOOK_MAX_BODY_BYTES
+}
+
+const fn default_webhook_ingress_require_json_content_type() -> bool {
+    true
+}
+
 const fn default_webhook_dedupe_ttl_seconds() -> u64 {
     FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS
 }
@@ -200,6 +373,28 @@ const fn default_webhook_dedupe_max_entries() -> usize {
 
 fn is_local_test_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1")
+}
+
+fn validate_webhook_ingress_path(path: &str) -> FcpResult<()> {
+    if !path.starts_with('/') {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "webhook_ingress.path must start with `/`".into(),
+        });
+    }
+    if path.contains('?') || path.contains('#') {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "webhook_ingress.path must not include query strings or fragments".into(),
+        });
+    }
+    if path.split('/').any(|segment| segment == "..") {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "webhook_ingress.path must not contain parent-directory segments".into(),
+        });
+    }
+    Ok(())
 }
 
 fn parse_base_url(base_url: &str) -> FcpResult<reqwest::Url> {
@@ -285,6 +480,7 @@ fn validate_config(config: &FeishuConfig) -> FcpResult<()> {
         });
     }
     config.webhook_state.clone().validate()?;
+    config.webhook_ingress.clone().validate()?;
 
     let base_url = parse_base_url(&config.base_url)?;
     validate_base_url(&base_url)
@@ -840,10 +1036,11 @@ fn validate_webhook_input(input: &Value) -> FcpResult<()> {
     required_string_input(input, "method")?;
     required_object_input(input, "headers")?;
     required_string_input(input, "raw_body")?;
-    required_string_input(input, "verification_token")?;
-    required_string_input(input, "encrypt_key")?;
     required_object_input(input, "policy")?;
 
+    if let Some(path) = input.get("path").and_then(Value::as_str) {
+        validate_webhook_ingress_path(path)?;
+    }
     if let Some(max_body_bytes) = input.get("max_body_bytes").and_then(Value::as_u64)
         && (max_body_bytes == 0 || max_body_bytes > FEISHU_WEBHOOK_MAX_BODY_BYTES as u64)
     {
@@ -1887,6 +2084,7 @@ struct ProvisioningReadiness {
     auth_mode: &'static str,
     request_timeout_ms: u64,
     retry: RetryReadiness,
+    webhook_ingress: FeishuWebhookIngressSummary,
     network_ok: bool,
     network_message: String,
     credentials_configured: bool,
@@ -1928,6 +2126,7 @@ fn operator_guidance() -> OperatorGuidance {
             "Use a disposable Feishu/Lark tenant app or a localhost mock server before running readiness verification.",
             "Grant the tenant app the scopes needed for the message, chat, directory, docs, sheets, and calendar surfaces you plan to exercise.",
             "Configure exactly one app_id/app_secret pair per connector instance and keep base_url on the CN or global production host unless the verification bundle is pointed at localhost.",
+            "If host-forwarded webhook ingress is enabled, configure webhook_ingress.path, verification_token, encrypt_key, and host-owned request-region body/rate/concurrency guards before accepting Feishu traffic.",
         ],
         dedicated_environment: "Prefer a sandbox tenant or a localhost fixture. feishu.messages.send and feishu.messages.reply are live side effects and should not target production chats during verification.",
         redaction_rules: vec![
@@ -1937,7 +2136,8 @@ fn operator_guidance() -> OperatorGuidance {
         ],
         limitations: vec![
             "This first slice is tenant-app bound and does not impersonate arbitrary users or cross tenant boundaries.",
-            "Webhook ingestion is host-forwarded request processing only; embedded listener lifecycle, websocket event delivery, Drive search/export/write, and calendar mutations remain explicit non-goals.",
+            "Webhook ingestion is host-forwarded request-region processing only; fcp-host owns listener sockets, body admission, and event fanout from the connector-returned event record.",
+            "Embedded connector listener sockets, websocket event delivery, Drive search/export/write, and calendar mutations remain explicit non-goals.",
             "Known-token reads are supported for docs, sheets, and calendar events, but this connector does not discover or enumerate those resources globally.",
         ],
         common_remediation: vec![
@@ -1975,7 +2175,7 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "notes": [
                 "The connector is bound to one installed tenant app and uses the tenant access token internal auth endpoint.",
                 "Read operations cover messages, chats, users, known docs, known spreadsheets, and known calendar event lists.",
-                "Webhook support is a host-forwarded request ingestion operation; this connector does not open a listening socket.",
+                "Webhook support is a configured host-forwarded request-region contract; fcp-host owns listener sockets and consumes returned event records for fanout.",
                 "Document-comment automation is exposed as explicit request/response operations for pairing, context fetch, reply delivery, and typing/OK reaction lifecycle.",
             ],
         },
@@ -1987,9 +2187,14 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "cross_tenant_supported": false,
             "user_impersonation_supported": false,
             "webhook_receiver_included": true,
-            "webhook_transport": "host_forwarded_request_operation",
+            "webhook_transport": FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED,
+            "webhook_ingress": config
+                .map(|cfg| cfg.webhook_ingress.summary())
+                .unwrap_or_else(|| FeishuWebhookIngressConfig::default().summary()),
             "webhook_state": config.map(|cfg| cfg.webhook_state.summary()),
             "websocket_events_included": false,
+            "listener_socket_opened": false,
+            "event_fanout_owner": "host",
         },
         "service_inventory": {
             "messages": [OP_MESSAGES_SEND, OP_MESSAGES_REPLY, OP_MESSAGES_GET],
@@ -2007,7 +2212,7 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "health": [OP_HEALTH],
         },
         "non_goals": [
-            "Embedded webhook listener lifecycle and websocket event delivery",
+            "Connector-owned webhook listener sockets and websocket event delivery",
             "Encrypted Feishu webhook payload decryption",
             "Cross-tenant brokering or arbitrary user impersonation",
             "Drive search, export, folder traversal, and write operations",
@@ -2070,6 +2275,7 @@ impl FeishuConnector {
                     max_delay_ms: config.retry.max_delay_ms,
                     jitter_enabled: config.retry.jitter_enabled,
                 },
+                webhook_ingress: config.webhook_ingress.summary(),
                 network_ok,
                 network_message,
                 credentials_configured: !config.app_id.trim().is_empty()
@@ -2115,6 +2321,11 @@ impl FeishuConnector {
             "verification_script": VERIFICATION_SCRIPT_PATH,
             "artifact_root_hint": ARTIFACT_ROOT_HINT,
             "provisioning": self.provisioning_readiness(),
+            "webhook_ingress": self
+                .config
+                .as_ref()
+                .map(|config| config.webhook_ingress.summary())
+                .unwrap_or_else(|| FeishuWebhookIngressConfig::default().summary()),
             "webhook_state": self.webhook_state.summary().ok(),
             "operator_guidance": operator_guidance(),
             "contract": contract_details(self.config.as_ref()),
@@ -2194,6 +2405,20 @@ impl FeishuConnector {
                     "App ID or secret missing".into()
                 }),
                 critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "webhook_host_ingress".into(),
+                passed: !readiness.webhook_ingress.enabled
+                    || readiness.webhook_ingress.security_material_configured,
+                message: Some(if readiness.webhook_ingress.enabled {
+                    format!(
+                        "Host-forwarded Feishu webhook ingress bound at {} with transport {}",
+                        readiness.webhook_ingress.path, readiness.webhook_ingress.transport
+                    )
+                } else {
+                    "Host-forwarded Feishu webhook ingress binding is disabled; per-request security material is still accepted by feishu.webhook.ingest_request".into()
+                }),
+                critical: readiness.webhook_ingress.enabled,
             });
             checks.push(DoctorCheck {
                 name: "tenant_boundary".into(),
@@ -2895,9 +3120,10 @@ impl FcpConnector for FeishuConnector {
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid Feishu config: {e}"),
-            })?;
+        })?;
         validate_config(&config)?;
         config.webhook_state = config.webhook_state.clone().validate()?;
+        config.webhook_ingress = config.webhook_ingress.clone().validate()?;
 
         let request_timeout = Duration::from_millis(config.request_timeout_ms);
         let runtime = ConnectorRuntime::new(

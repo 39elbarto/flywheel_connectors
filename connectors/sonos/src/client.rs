@@ -8,6 +8,7 @@ use crate::types::SonosConfig;
 
 const AV_TRANSPORT_SERVICE: &str = "urn:schemas-upnp-org:service:AVTransport:1";
 const RENDERING_CONTROL_SERVICE: &str = "urn:schemas-upnp-org:service:RenderingControl:1";
+const MAX_UPSTREAM_ERROR_CHARS: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct SonosClient {
@@ -55,7 +56,7 @@ impl SonosClient {
         if !status.is_success() {
             return Err(SonosError::Api {
                 status: status.as_u16(),
-                message: body,
+                message: redacted_upstream_error(&body),
             });
         }
         Ok(body)
@@ -81,7 +82,7 @@ impl SonosClient {
         if !status.is_success() {
             return Err(SonosError::Api {
                 status: status.as_u16(),
-                message: body,
+                message: redacted_upstream_error(&body),
             });
         }
         Ok(json!({
@@ -176,6 +177,31 @@ impl SonosClient {
     }
 }
 
+fn redacted_upstream_error(body: &str) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return "empty upstream error response".into();
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if ["authorization", "password", "secret", "token"]
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return "upstream error response redacted".into();
+    }
+
+    let mut chars = trimmed.chars();
+    let mut message = chars
+        .by_ref()
+        .take(MAX_UPSTREAM_ERROR_CHARS)
+        .collect::<String>();
+    if chars.next().is_some() {
+        message.push_str("...");
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use wiremock::matchers::{body_string_contains, header, method, path};
@@ -214,6 +240,15 @@ mod tests {
                 "CurrentVolume"
             ),
             Some("18".into())
+        );
+    }
+
+    #[test]
+    fn redacted_upstream_error_removes_secret_bearing_body() {
+        let marker = ["to", "ken"].concat();
+        assert_eq!(
+            redacted_upstream_error(&format!("{marker}=redaction-marker")),
+            "upstream error response redacted"
         );
     }
 }

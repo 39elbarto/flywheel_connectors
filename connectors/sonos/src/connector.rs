@@ -77,6 +77,12 @@ impl SonosConnector {
         }
     }
 
+    /// Return this connector instance identifier for bound capability tokens.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     fn manifest_hash() -> String {
         let mut hasher = Sha256::new();
         hasher.update(MANIFEST_TOML.as_bytes());
@@ -550,6 +556,7 @@ mod tests {
         signing_key: &Ed25519SigningKey,
         capability: &'static str,
         operation: &'static str,
+        instance_id: &str,
     ) -> CapabilityToken {
         let now = Utc::now();
         let constraints = CapabilityConstraints {
@@ -564,6 +571,7 @@ mod tests {
             .principal("user:test")
             .operations(&[operation])
             .issuer("node:test")
+            .target_instance(instance_id)
             .validity(now, now + ChronoDuration::hours(1))
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
@@ -629,7 +637,12 @@ mod tests {
                 operation: OperationId::from_static(OP_HEALTH),
                 zone_id: ZoneId::work(),
                 input: json!({}),
-                capability_token: capability_token(&signing_key, CAP_READ, OP_HEALTH),
+                capability_token: capability_token(
+                    &signing_key,
+                    CAP_READ,
+                    OP_HEALTH,
+                    connector.instance_id(),
+                ),
                 holder_proof: None,
                 context: None,
                 idempotency_key: None,
@@ -662,7 +675,7 @@ mod tests {
         let response = connector
             .simulate(simulate_request(
                 OP_PLAY,
-                capability_token(&signing_key, CAP_READ, OP_PLAY),
+                capability_token(&signing_key, CAP_READ, OP_PLAY, connector.instance_id()),
             ))
             .await
             .expect("simulate should return a policy result");

@@ -41,6 +41,12 @@ impl SonosConfig {
                 message: "device_url must use http or https".into(),
             });
         }
+        if !parsed.username().is_empty() || parsed.password().is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "device_url must not include embedded credentials".into(),
+            });
+        }
         if self.request_timeout_ms == 0 {
             return Err(FcpError::InvalidRequest {
                 code: 1003,

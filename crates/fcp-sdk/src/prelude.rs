@@ -74,7 +74,11 @@ pub use crate::Principal;
 pub use crate::{
     AgentId, ChannelId, ClaimKey, ClaimOutcome, DEFAULT_THREAD_OWNERSHIP_TTL, DmMode,
     InMemoryThreadOwnershipChecker, MentionRecord, MentionTracker, OwnershipRecord,
-    THREAD_OWNED_BY_PEER_ERROR_CODE, ThreadId, ThreadOwnershipChecker, thread_owned_by_peer_error,
+    THREAD_OWNED_BY_PEER_ERROR_CODE, TelegramMentionEntity, ThreadId, ThreadOwnershipChecker,
+    discord_text_mentions_agent, literal_at_mention_matches, matrix_mentions_agent,
+    mattermost_props_mentions_agent, normalize_slack_channel_id, slack_text_mentions_agent,
+    structured_user_mentions_agent, teams_mentions_agent, telegram_entities_mention_agent,
+    thread_owned_by_peer_error,
 };
 
 // Archetypes and state models

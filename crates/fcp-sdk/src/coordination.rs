@@ -258,6 +258,198 @@ impl ClaimKey {
     }
 }
 
+/// Telegram entity that can mention an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TelegramMentionEntity {
+    /// Textual `@username` mention.
+    Mention {
+        /// Mentioned username, with or without a leading `@`.
+        username: String,
+    },
+    /// Telegram `text_mention` entity carrying a concrete user id.
+    TextMention {
+        /// Mentioned Telegram user id.
+        user_id: String,
+    },
+}
+
+impl TelegramMentionEntity {
+    /// Create a textual `@username` entity.
+    #[must_use]
+    pub fn mention(username: impl Into<String>) -> Self {
+        Self::Mention {
+            username: username.into(),
+        }
+    }
+
+    /// Create a `text_mention` entity with a Telegram user id.
+    #[must_use]
+    pub fn text_mention(user_id: impl Into<String>) -> Self {
+        Self::TextMention {
+            user_id: user_id.into(),
+        }
+    }
+}
+
+/// Normalize a Slack channel, group, DM, MPIM, or workspace id.
+///
+/// The helper strips `slack:` and `channel:` prefixes case-insensitively,
+/// uppercases the remaining id, and accepts canonical ids beginning with
+/// `C`, `D`, `G`, `U`, or `W`.
+#[must_use]
+pub fn normalize_slack_channel_id(raw: &str) -> Option<ChannelId> {
+    let trimmed = raw.trim();
+    let stripped = strip_ascii_prefix(trimmed, "slack:")
+        .or_else(|| strip_ascii_prefix(trimmed, "channel:"))
+        .unwrap_or(trimmed);
+    let normalized = stripped.to_ascii_uppercase();
+    let mut chars = normalized.chars();
+    let first = chars.next()?;
+    if !matches!(first, 'C' | 'D' | 'G' | 'U' | 'W') {
+        return None;
+    }
+    if chars.all(|ch| ch.is_ascii_alphanumeric()) {
+        Some(ChannelId::new(normalized))
+    } else {
+        None
+    }
+}
+
+/// Return true when Slack text mentions an agent by user token or literal name.
+///
+/// This recognizes `<@USERID>` and `<@USERID|label>` tokens plus an ASCII
+/// case-insensitive literal `@AgentName` fallback. Literal matching avoids
+/// email-like tokens such as `name@AgentName.test`.
+#[must_use]
+pub fn slack_text_mentions_agent(text: &str, bot_user_id: &str, agent_name: &str) -> bool {
+    angle_token_mentions(text, "<@", bot_user_id, Some('|'))
+        || literal_at_mention_matches(text, agent_name)
+}
+
+/// Return true when Discord text mentions an agent by user token or owned role.
+///
+/// User mentions support both `<@USERID>` and legacy `<@!USERID>` forms. Role
+/// mentions match `<@&ROLEID>` only when the caller supplies that role id.
+#[must_use]
+pub fn discord_text_mentions_agent<'a, I, S>(text: &str, user_id: &str, role_ids: I) -> bool
+where
+    I: IntoIterator<Item = &'a S>,
+    S: AsRef<str> + 'a,
+{
+    angle_token_mentions(text, "<@", user_id, None)
+        || angle_token_mentions(text, "<@!", user_id, None)
+        || role_ids
+            .into_iter()
+            .any(|role_id| angle_token_mentions(text, "<@&", role_id.as_ref(), None))
+}
+
+/// Return true when Telegram entities mention an agent username or user id.
+#[must_use]
+pub fn telegram_entities_mention_agent(
+    entities: &[TelegramMentionEntity],
+    agent_username: &str,
+    agent_user_id: &str,
+) -> bool {
+    let expected_username = normalized_telegram_username(agent_username);
+    entities.iter().any(|entity| match entity {
+        TelegramMentionEntity::Mention { username } => {
+            let username = normalized_telegram_username(username);
+            !expected_username.is_empty() && username.eq_ignore_ascii_case(&expected_username)
+        }
+        TelegramMentionEntity::TextMention { user_id } => {
+            !agent_user_id.is_empty() && user_id == agent_user_id
+        }
+    })
+}
+
+/// Return true when a structured user-id mention list includes the agent.
+///
+/// This is the common path for Matrix `m.mentions.user_ids` and Teams
+/// `body.mentions[].mentioned.user.id` style payloads.
+#[must_use]
+pub fn structured_user_mentions_agent<'a, I, S>(mentioned_user_ids: I, agent_user_id: &str) -> bool
+where
+    I: IntoIterator<Item = &'a S>,
+    S: AsRef<str> + 'a,
+{
+    !agent_user_id.is_empty()
+        && mentioned_user_ids
+            .into_iter()
+            .any(|user_id| user_id.as_ref() == agent_user_id)
+}
+
+/// Return true when Matrix `m.mentions.user_ids` includes the agent.
+#[must_use]
+pub fn matrix_mentions_agent<'a, I, S>(mentioned_user_ids: I, agent_user_id: &str) -> bool
+where
+    I: IntoIterator<Item = &'a S>,
+    S: AsRef<str> + 'a,
+{
+    structured_user_mentions_agent(mentioned_user_ids, agent_user_id)
+}
+
+/// Return true when Teams structured mentions include the agent.
+#[must_use]
+pub fn teams_mentions_agent<'a, I, S>(mentioned_user_ids: I, agent_user_id: &str) -> bool
+where
+    I: IntoIterator<Item = &'a S>,
+    S: AsRef<str> + 'a,
+{
+    structured_user_mentions_agent(mentioned_user_ids, agent_user_id)
+}
+
+/// Return true when Mattermost `props.mentions` JSON includes the agent.
+///
+/// Mattermost stores mentions as a JSON array of user ids in the post props.
+/// Malformed JSON or non-array payloads return false.
+#[must_use]
+pub fn mattermost_props_mentions_agent(props_mentions_json: &str, agent_user_id: &str) -> bool {
+    if agent_user_id.is_empty() {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(props_mentions_json) else {
+        return false;
+    };
+    let Some(mentions) = value.as_array() else {
+        return false;
+    };
+    mentions
+        .iter()
+        .filter_map(serde_json::Value::as_str)
+        .any(|user_id| user_id == agent_user_id)
+}
+
+/// Return true when text contains a standalone literal `@name` mention.
+#[must_use]
+pub fn literal_at_mention_matches(text: &str, name: &str) -> bool {
+    let name = name.trim();
+    if name.is_empty() {
+        return false;
+    }
+
+    let mut search_start = 0;
+    while let Some(relative_at) = text[search_start..].find('@') {
+        let at_index = search_start + relative_at;
+        let candidate_start = at_index + 1;
+        let candidate_end = candidate_start + name.len();
+        if !is_literal_mention_boundary_before(text, at_index) {
+            search_start = candidate_start;
+            continue;
+        }
+        if text
+            .get(candidate_start..candidate_end)
+            .is_some_and(|candidate| {
+                candidate.eq_ignore_ascii_case(name)
+                    && is_literal_mention_boundary_after(text, candidate_end)
+            })
+        {
+            return true;
+        }
+        search_start = candidate_start;
+    }
+    false
+}
+
 /// Short-lived record that an agent was mentioned in a thread.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionRecord {
@@ -619,6 +811,65 @@ fn prune_claims(claims: &mut HashMap<ClaimKey, OwnershipRecord>, now: Instant) {
     claims.retain(|_, record| !record.is_expired(now));
 }
 
+fn strip_ascii_prefix<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
+}
+
+fn angle_token_mentions(
+    text: &str,
+    prefix: &str,
+    target_id: &str,
+    split_delimiter: Option<char>,
+) -> bool {
+    if target_id.is_empty() {
+        return false;
+    }
+
+    let mut search_start = 0;
+    while let Some(relative_start) = text[search_start..].find(prefix) {
+        let token_start = search_start + relative_start + prefix.len();
+        let Some(relative_end) = text[token_start..].find('>') else {
+            return false;
+        };
+        let token_end = token_start + relative_end;
+        let candidate = &text[token_start..token_end];
+        let candidate_id = split_delimiter.map_or(candidate, |delimiter| {
+            candidate
+                .split_once(delimiter)
+                .map_or(candidate, |(id, _)| id)
+        });
+        if candidate_id.eq_ignore_ascii_case(target_id) {
+            return true;
+        }
+        search_start = token_end + 1;
+    }
+    false
+}
+
+fn normalized_telegram_username(username: &str) -> String {
+    username.trim().trim_start_matches('@').to_owned()
+}
+
+fn is_literal_mention_boundary_before(text: &str, at_index: usize) -> bool {
+    text[..at_index]
+        .chars()
+        .next_back()
+        .is_none_or(|ch| !is_literal_mention_word_char(ch))
+}
+
+fn is_literal_mention_boundary_after(text: &str, candidate_end: usize) -> bool {
+    text.get(candidate_end..)
+        .and_then(|remaining| remaining.chars().next())
+        .is_none_or(|ch| !is_literal_mention_word_char(ch))
+}
+
+const fn is_literal_mention_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
+}
+
 fn fnv1a64(bytes: &[u8]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
@@ -650,6 +901,120 @@ mod tests {
 
     fn agent(id: &str) -> AgentId {
         AgentId::new(id)
+    }
+
+    #[test]
+    fn slack_channel_normalization_strips_prefixes_and_uppercases() {
+        assert_eq!(
+            normalize_slack_channel_id("slack:c123").map(|id| id.as_str().to_owned()),
+            Some("C123".to_owned())
+        );
+        assert_eq!(
+            normalize_slack_channel_id("channel:gabc123").map(|id| id.as_str().to_owned()),
+            Some("GABC123".to_owned())
+        );
+        assert_eq!(
+            normalize_slack_channel_id(" D999 ").map(|id| id.as_str().to_owned()),
+            Some("D999".to_owned())
+        );
+        assert!(normalize_slack_channel_id("x123").is_none());
+        assert!(normalize_slack_channel_id("C12-3").is_none());
+    }
+
+    #[test]
+    fn literal_mentions_require_ascii_boundaries() {
+        assert!(literal_at_mention_matches(
+            "please ask @AgentName now",
+            "agentname"
+        ));
+        assert!(literal_at_mention_matches("(@AgentName)", "AgentName"));
+        assert!(!literal_at_mention_matches(
+            "name@AgentName.test should not count",
+            "AgentName"
+        ));
+        assert!(!literal_at_mention_matches("@AgentNameExtra", "AgentName"));
+        assert!(!literal_at_mention_matches("@", "AgentName"));
+    }
+
+    #[test]
+    fn slack_text_mentions_user_tokens_or_literal_names() {
+        assert!(slack_text_mentions_agent(
+            "hello <@U12345>",
+            "U12345",
+            "AgentName"
+        ));
+        assert!(slack_text_mentions_agent(
+            "hello <@U12345|agent>",
+            "U12345",
+            "AgentName"
+        ));
+        assert!(slack_text_mentions_agent(
+            "hello @agentname",
+            "U99999",
+            "AgentName"
+        ));
+        assert!(!slack_text_mentions_agent(
+            "hello <@U99999>",
+            "U12345",
+            "AgentName"
+        ));
+    }
+
+    #[test]
+    fn discord_text_mentions_users_legacy_users_and_owned_roles() {
+        let roles = vec!["R1".to_owned(), "R2".to_owned()];
+
+        assert!(discord_text_mentions_agent("hello <@123>", "123", &roles));
+        assert!(discord_text_mentions_agent("hello <@!123>", "123", &roles));
+        assert!(discord_text_mentions_agent("hello <@&R2>", "999", &roles));
+        assert!(!discord_text_mentions_agent("hello <@&R3>", "999", &roles));
+        assert!(!discord_text_mentions_agent("hello <@456>", "123", &roles));
+    }
+
+    #[test]
+    fn telegram_entities_match_username_or_text_mention_user_id() {
+        let entities = vec![
+            TelegramMentionEntity::mention("@SupportBot"),
+            TelegramMentionEntity::text_mention("42"),
+        ];
+
+        assert!(telegram_entities_mention_agent(&entities, "supportbot", ""));
+        assert!(telegram_entities_mention_agent(&entities, "other", "42"));
+        assert!(!telegram_entities_mention_agent(&entities, "other", "43"));
+    }
+
+    #[test]
+    fn matrix_and_teams_use_structured_user_id_mentions() {
+        let matrix_mentions = vec![
+            "@alice:example.org".to_owned(),
+            "@bot:example.org".to_owned(),
+        ];
+        let teams_mentions = vec!["teams-user-1".to_owned(), "teams-bot".to_owned()];
+
+        assert!(matrix_mentions_agent(&matrix_mentions, "@bot:example.org"));
+        assert!(!matrix_mentions_agent(
+            &matrix_mentions,
+            "@other:example.org"
+        ));
+        assert!(teams_mentions_agent(&teams_mentions, "teams-bot"));
+        assert!(!structured_user_mentions_agent(&teams_mentions, ""));
+    }
+
+    #[test]
+    fn mattermost_props_mentions_parse_json_arrays_only() {
+        assert!(mattermost_props_mentions_agent(
+            r#"["user-a","bot-user"]"#,
+            "bot-user"
+        ));
+        assert!(!mattermost_props_mentions_agent(
+            r#"["user-a","bot-user"]"#,
+            "other"
+        ));
+        assert!(!mattermost_props_mentions_agent(
+            r#"{"mentions":["bot-user"]}"#,
+            "bot-user"
+        ));
+        assert!(!mattermost_props_mentions_agent("not-json", "bot-user"));
     }
 
     #[test]

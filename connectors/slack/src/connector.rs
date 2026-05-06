@@ -1869,7 +1869,7 @@ impl SlackMonitorPolicy {
     }
 }
 
-fn require_progress_draft_id<'a>(input: &'a Value) -> FcpResult<&'a str> {
+fn require_progress_draft_id(input: &Value) -> FcpResult<&str> {
     let draft_id = require_str(input, "draft_id")?.trim();
     if draft_id.is_empty() {
         return Err(FcpError::InvalidRequest {
@@ -2105,7 +2105,6 @@ fn validate_progress_draft_blocks(blocks: &[Value]) -> FcpResult<Option<Vec<Valu
             message: format!("blocks must contain at most {SLACK_MAX_BLOCKS} entries"),
         });
     }
-    let mut parsed = Vec::with_capacity(blocks.len());
     for block in blocks {
         let object = block.as_object().ok_or(FcpError::InvalidRequest {
             code: 1003,
@@ -2136,9 +2135,8 @@ fn validate_progress_draft_blocks(blocks: &[Value]) -> FcpResult<Option<Vec<Valu
                 ),
             });
         }
-        parsed.push(block.clone());
     }
-    Ok((!parsed.is_empty()).then_some(parsed))
+    Ok((!blocks.is_empty()).then(|| blocks.to_vec()))
 }
 
 fn progress_draft_sent_key(text: &str, blocks: Option<&[Value]>) -> FcpResult<String> {

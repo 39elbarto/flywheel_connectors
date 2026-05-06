@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:4a6a88aae0769258235d0fa64833e87340f85b8573c0605608730e38f2c19e51"
+interface_hash = "blake3-256:fcp.interface.v2:465bcd3768e237219ee05f9bfeb616589fd0ba695399a70fdb3c27f85de231ff"
 
 [connector]
 id = "fcp.slack"

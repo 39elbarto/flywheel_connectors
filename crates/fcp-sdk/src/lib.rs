@@ -217,6 +217,7 @@ pub use fcp_manifest::{
 // ─────────────────────────────────────────────────────────────────────────────
 
 pub mod contract;
+pub mod coordination;
 pub mod formatting;
 pub mod migration;
 pub mod prelude;
@@ -241,6 +242,13 @@ pub use contract::{
     BudgetSurface, CheckpointSurface, ConnectorApp, ConnectorAppContract, ConnectorAppDescriptor,
     ConnectorCapabilityCatalog, ConnectorOperationCapability, DiagnosticsSurface, DrainSurface,
     EvidenceSurface, InvokeSurface, ProvisioningSurface, ResumeSurface, StreamingSurface,
+};
+
+/// Chat coordination helpers.
+pub use coordination::{
+    AgentId, ChannelId, ClaimKey, ClaimOutcome, DEFAULT_THREAD_OWNERSHIP_TTL, DmMode,
+    InMemoryThreadOwnershipChecker, MentionRecord, MentionTracker, OwnershipRecord,
+    THREAD_OWNED_BY_PEER_ERROR_CODE, ThreadId, ThreadOwnershipChecker, thread_owned_by_peer_error,
 };
 
 /// Formatting helpers with safe fallback behavior.

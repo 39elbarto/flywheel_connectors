@@ -274,12 +274,14 @@ thread_local! {
     /// `Option` is "is the override set?" (None == fall through to real
     /// env read); inner `Option` is "what raw value should be reported?"
     /// (None == env-unset).
+    #[allow(clippy::option_option)]
     static AMBIENT_OPT_IN_TEST_VALUE:
         std::cell::RefCell<Option<Option<String>>> =
             const { std::cell::RefCell::new(None) };
 
     /// Test-only override for the request-timeout env read. Same shape
     /// and rationale as `AMBIENT_OPT_IN_TEST_VALUE`.
+    #[allow(clippy::option_option)]
     static REQUEST_TIMEOUT_TEST_VALUE:
         std::cell::RefCell<Option<Option<String>>> =
             const { std::cell::RefCell::new(None) };

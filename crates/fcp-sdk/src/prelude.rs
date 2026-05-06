@@ -70,6 +70,13 @@ pub use crate::{Provenance, TaintFlag, TaintLevel, TrustLevel};
 // Principal
 pub use crate::Principal;
 
+// Chat coordination helpers
+pub use crate::{
+    AgentId, ChannelId, ClaimKey, ClaimOutcome, DEFAULT_THREAD_OWNERSHIP_TTL, DmMode,
+    InMemoryThreadOwnershipChecker, MentionRecord, MentionTracker, OwnershipRecord,
+    THREAD_OWNED_BY_PEER_ERROR_CODE, ThreadId, ThreadOwnershipChecker, thread_owned_by_peer_error,
+};
+
 // Archetypes and state models
 pub use crate::{
     ConnectorArchetype, ConnectorCrdtType, ConnectorRuntimeFormat, ConnectorStateModel, CursorState,

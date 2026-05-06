@@ -374,6 +374,35 @@ impl ConnectorPrewarmConfig {
             };
         }
 
+        match observation.pool_state {
+            PrewarmPoolState::WarmHit => {}
+            PrewarmPoolState::Disabled => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::NotConfigured,
+                };
+            }
+            PrewarmPoolState::Empty => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::EmptyPool,
+                };
+            }
+            PrewarmPoolState::Stale => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::WarmEntryStale,
+                };
+            }
+            PrewarmPoolState::CrashBeforeCheckout => {
+                return PrewarmCheckoutDecision::FallbackOnDemand {
+                    reason: PrewarmFallbackReason::CrashBeforeCheckout,
+                };
+            }
+            PrewarmPoolState::Rejected => {
+                return PrewarmCheckoutDecision::RejectUnsafe {
+                    reason: PrewarmUnsafeReason::WarmEntryRejected,
+                };
+            }
+        }
+
         match observation.manifest {
             PrewarmManifestState::Current => {}
             PrewarmManifestState::Missing => {
@@ -551,6 +580,8 @@ pub enum PrewarmPoolState {
 /// Live observation used to decide whether a warm entry is safe to checkout.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrewarmCheckoutObservation {
+    /// Current pool state for the candidate checkout.
+    pub pool_state: PrewarmPoolState,
     /// Manifest freshness for the candidate warm entry.
     pub manifest: PrewarmManifestState,
     /// Zone binding state for the candidate warm entry.
@@ -631,6 +662,8 @@ pub enum PrewarmFallbackReason {
 pub enum PrewarmUnsafeReason {
     /// Zygote startup was requested without a security proof.
     ZygoteWithoutSecurityProof,
+    /// Pool metadata marked the warm entry as rejected before checkout.
+    WarmEntryRejected,
     /// The warm entry already loaded credential material.
     CredentialMaterialLoaded,
 }
@@ -1779,6 +1812,7 @@ mod tests {
 
     fn safe_prewarm_observation() -> PrewarmCheckoutObservation {
         PrewarmCheckoutObservation {
+            pool_state: PrewarmPoolState::WarmHit,
             manifest: PrewarmManifestState::Current,
             zone_binding: PrewarmZoneBinding::Bound,
             sandbox: PrewarmSandboxState::LimitsActive,
@@ -1875,6 +1909,24 @@ mod tests {
             config
                 .decide_checkout(&safe_prewarm_observation())
                 .admits_warm_entry()
+        );
+    }
+
+    #[test]
+    fn prewarm_falls_back_when_pool_has_no_candidate() {
+        let config = ConnectorPrewarmConfig::warm_pool(
+            1,
+            2,
+            Duration::from_secs(30),
+            Duration::from_secs(1),
+        );
+        let mut observation = safe_prewarm_observation();
+        observation.pool_state = PrewarmPoolState::Empty;
+        assert_eq!(
+            config.decide_checkout(&observation),
+            PrewarmCheckoutDecision::FallbackOnDemand {
+                reason: PrewarmFallbackReason::EmptyPool
+            }
         );
     }
 

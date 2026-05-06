@@ -408,9 +408,14 @@ async fn handle_response<T: serde::de::DeserializeOwned>(
         return AttemptOutcome::Terminal(err);
     }
 
-    match resp.json::<T>().await {
+    let text = match resp.text().await {
+        Ok(t) => t,
+        Err(e) => return AttemptOutcome::Terminal(Error::Http(e)),
+    };
+
+    match serde_json::from_str::<T>(&text) {
         Ok(r) => AttemptOutcome::Success(r),
-        Err(e) => AttemptOutcome::Terminal(Error::Http(e)),
+        Err(e) => AttemptOutcome::Terminal(Error::Json(e)),
     }
 }
 

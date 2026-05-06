@@ -274,6 +274,9 @@ pub const SWARM_GAUNTLET_SCHEMA_VERSION: &str = "swarm-gauntlet/v1";
 /// Schema tag for one structured gauntlet log record.
 pub const SWARM_GAUNTLET_LOG_SCHEMA_VERSION: &str = "swarm-gauntlet-log/v1";
 
+/// Schema tag expected for per-operation resource ledger records.
+pub const SWARM_RESOURCE_LEDGER_SCHEMA_VERSION: &str = "resource-ledger/v1";
+
 /// Schema tag for 64-core/256GiB promotion qualification records.
 pub const SWARM_PROMOTION_SCHEMA_VERSION: &str = "swarm-promotion/v1";
 
@@ -1690,6 +1693,9 @@ pub struct SwarmGauntletEvidenceBundle {
     pub decision_cards: Vec<SwarmDecisionCard>,
     /// Phase evidence proving the integrated surface was exercised.
     pub phase_evidence: Vec<SwarmGauntletPhaseEvidence>,
+    /// Redaction-safe per-operation resource ledger records.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub resource_ledger_records: Vec<Value>,
     /// Audit/store counters.
     pub counters: SwarmGauntletCounters,
     /// Optional skip artifact for a soak/promotion lane.
@@ -1724,9 +1730,26 @@ impl SwarmGauntletEvidenceBundle {
             resource_snapshots,
             decision_cards,
             phase_evidence,
+            resource_ledger_records: Vec::new(),
             counters,
             skip_artifact,
         })
+    }
+
+    /// Attach validated resource ledger JSONL records to the gauntlet bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns a machine-readable error if any record is not a
+    /// `resource-ledger/v1` JSONL value with the fields operators need for
+    /// correlation.
+    pub fn with_resource_ledger_records(
+        mut self,
+        records: Vec<Value>,
+    ) -> Result<Self, SwarmGauntletError> {
+        validate_resource_ledger_records(&records)?;
+        self.resource_ledger_records = records;
+        Ok(self)
     }
 
     /// Render an operator and agent friendly summary.
@@ -1745,6 +1768,7 @@ impl SwarmGauntletEvidenceBundle {
                 .iter()
                 .map(|card| card.card_id.clone())
                 .collect(),
+            resource_ledger_record_count: self.resource_ledger_records.len(),
             phase_count: self.phase_evidence.len(),
             counters: self.counters,
             skipped: self.skip_artifact.is_some(),
@@ -1775,6 +1799,7 @@ impl SwarmGauntletEvidenceBundle {
                 "phase_evidence": serde_json::to_value(phase)?,
             }));
         }
+        records.extend(self.resource_ledger_records.iter().cloned());
         if let Some(skip_artifact) = &self.skip_artifact {
             records.push(skip_artifact.to_jsonl_value()?);
         }
@@ -1823,6 +1848,9 @@ impl SwarmGauntletEvidenceBundle {
             "rss_bytes": resource.map(|snapshot| snapshot.rss_bytes),
             "cpu_microunits": resource.map(|snapshot| snapshot.cpu_microunits),
             "decision_card_ids": self.decision_cards.iter().map(|card| card.card_id.as_str()).collect::<Vec<_>>(),
+            "resource_ledger_record_count": self.resource_ledger_records.len(),
+            "resource_ledger_record_type": "resource_ledger",
+            "resource_ledger_operation_ids": resource_ledger_operation_ids(&self.resource_ledger_records),
             "evidence_bundle_id": self.latency_bundle.artifact_manifest.as_ref().map(|manifest| manifest.bundle_id.as_str()),
             "skip_reason": self.skip_artifact.as_ref().map(|skip| skip.missing_prerequisites.join(",")),
             "audit_event_count": self.counters.audit_event_count,
@@ -1851,6 +1879,8 @@ pub struct SwarmGauntletSummary {
     pub summary_count: usize,
     /// Decision cards included in the run.
     pub decision_card_ids: Vec<String>,
+    /// Per-operation resource ledger records included in the run.
+    pub resource_ledger_record_count: usize,
     /// Number of phase evidence records.
     pub phase_count: usize,
     /// Audit/store counters.
@@ -1880,6 +1910,11 @@ pub enum SwarmGauntletError {
     MissingResourceSnapshot {
         /// Missing latency scenario id.
         scenario_id: String,
+    },
+    /// A resource ledger JSONL record was malformed.
+    InvalidResourceLedgerRecord {
+        /// Human-readable validation reason.
+        reason: String,
     },
     /// Audit phase was requested but no audit events were recorded.
     MissingAuditEvidence,
@@ -1913,6 +1948,9 @@ impl fmt::Display for SwarmGauntletError {
                     "missing swarm gauntlet resource snapshot '{scenario_id}'"
                 )
             }
+            Self::InvalidResourceLedgerRecord { reason } => {
+                write!(f, "invalid swarm gauntlet resource ledger record: {reason}")
+            }
             Self::MissingAuditEvidence => write!(f, "missing swarm gauntlet audit evidence"),
             Self::MissingStoreEvidence => write!(f, "missing swarm gauntlet store evidence"),
         }
@@ -1920,6 +1958,92 @@ impl fmt::Display for SwarmGauntletError {
 }
 
 impl Error for SwarmGauntletError {}
+
+fn validate_resource_ledger_records(records: &[Value]) -> Result<(), SwarmGauntletError> {
+    for (index, record) in records.iter().enumerate() {
+        let reason = |message: &str| SwarmGauntletError::InvalidResourceLedgerRecord {
+            reason: format!("record {index}: {message}"),
+        };
+
+        if record["record_type"] != "resource_ledger" {
+            return Err(reason("record_type must be resource_ledger"));
+        }
+        if record["schema_version"] != SWARM_RESOURCE_LEDGER_SCHEMA_VERSION {
+            return Err(reason(
+                "top-level schema_version must be resource-ledger/v1",
+            ));
+        }
+        let ledger = record
+            .get("ledger")
+            .and_then(Value::as_object)
+            .ok_or_else(|| reason("ledger object is required"))?;
+        for field in [
+            "scenario_id",
+            "operation_id",
+            "kind",
+            "outcome",
+            "git_revision",
+            "worker_ref",
+        ] {
+            if ledger
+                .get(field)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .is_none()
+            {
+                return Err(reason(&format!(
+                    "ledger.{field} must be a non-empty string"
+                )));
+            }
+        }
+        if ledger
+            .get("command_line")
+            .and_then(Value::as_array)
+            .is_none()
+        {
+            return Err(reason("ledger.command_line must be an array"));
+        }
+        if ledger.get("samples").and_then(Value::as_object).is_none() {
+            return Err(reason("ledger.samples must be an object"));
+        }
+        if ledger
+            .get("samples")
+            .and_then(|samples| samples.get("state"))
+            .and_then(Value::as_str)
+            .filter(|state| !state.is_empty())
+            .is_none()
+        {
+            return Err(reason("ledger.samples.state must be a non-empty string"));
+        }
+        if ledger
+            .get("worker_ref")
+            .and_then(Value::as_str)
+            .is_some_and(|worker| !worker.starts_with("worker:blake3:"))
+        {
+            return Err(reason("ledger.worker_ref must be a hashed worker ref"));
+        }
+        for (field, prefix) in [
+            ("zone_ref", "zone:blake3:"),
+            ("principal_ref", "principal:blake3:"),
+        ] {
+            if ledger
+                .get(field)
+                .and_then(Value::as_str)
+                .is_some_and(|value| !value.starts_with(prefix))
+            {
+                return Err(reason(&format!("ledger.{field} must be hashed")));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn resource_ledger_operation_ids(records: &[Value]) -> Vec<&str> {
+    records
+        .iter()
+        .filter_map(|record| record["ledger"]["operation_id"].as_str())
+        .collect()
+}
 
 fn validate_gauntlet_phase_evidence(
     manifest: &SwarmGauntletManifest,
@@ -5810,6 +5934,48 @@ mod tests {
             .collect()
     }
 
+    fn gauntlet_resource_ledger_record(operation_id: &str, kind: &str) -> Value {
+        json!({
+            "record_type": "resource_ledger",
+            "schema_version": SWARM_RESOURCE_LEDGER_SCHEMA_VERSION,
+            "bead_id": "flywheel_connectors-k3zfl.10",
+            "ledger": {
+                "schema_version": SWARM_RESOURCE_LEDGER_SCHEMA_VERSION,
+                "bead_id": "flywheel_connectors-k3zfl.10",
+                "generated_at": Utc::now(),
+                "scenario_id": "integrated_swarm_gauntlet_1000",
+                "operation_id": operation_id,
+                "kind": kind,
+                "outcome": "admitted",
+                "command_line": ["rch", "exec", "--", "cargo", "test"],
+                "git_revision": "abc123",
+                "worker_ref": "worker:blake3:0123456789abcdef",
+                "zone_ref": "zone:blake3:0123456789abcdef",
+                "principal_ref": "principal:blake3:0123456789abcdef",
+                "connector_id": "connector:gauntlet-fixture",
+                "controller_decision": "admitted",
+                "samples": {
+                    "state": "observed",
+                    "queue_pressure_per_mille": 100,
+                    "cpu_pressure_per_mille": 250,
+                    "memory_pressure_per_mille": 300,
+                    "in_flight": 32,
+                    "queue_depth": 4,
+                    "retry_after_ms": 0
+                },
+                "latency": {
+                    "sample_count": 3,
+                    "min_ns": 100,
+                    "max_ns": 300,
+                    "mean_ns": 200,
+                    "p50_ns": 200,
+                    "p95_ns": 300,
+                    "p99_ns": 300
+                }
+            }
+        })
+    }
+
     #[test]
     fn collector_empty_by_default() {
         let collector = EvidenceCollector::new();
@@ -7100,8 +7266,105 @@ mod tests {
         assert_eq!(summary.sample_count, 12);
         assert_eq!(summary.summary_count, 4);
         assert_eq!(summary.decision_card_ids.len(), 3);
+        assert_eq!(summary.resource_ledger_record_count, 0);
         assert_eq!(summary.phase_count, SwarmGauntletPhase::REQUIRED.len());
         assert_eq!(summary.counters.same_zone_audit_appends, 512);
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_carries_resource_ledger_records_for_operator_correlation()
+    -> Result<(), Box<dyn Error>> {
+        let manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
+        let latency_bundle = gauntlet_latency_bundle()?;
+        let resources = gauntlet_resource_snapshots(&latency_bundle);
+        let first_scenario = latency_bundle.summaries[0].scenario_id.clone();
+        let gauntlet = SwarmGauntletEvidenceBundle::new(
+            manifest,
+            latency_bundle,
+            resources,
+            gauntlet_decision_cards(&first_scenario),
+            gauntlet_phase_evidence(),
+            SwarmGauntletCounters {
+                audit_event_count: 4,
+                same_zone_audit_appends: 512,
+                sparse_high_k_metadata_events: 3,
+            },
+            None,
+        )?
+        .with_resource_ledger_records(vec![
+            gauntlet_resource_ledger_record("op-host-invoke", "invoke"),
+            gauntlet_resource_ledger_record("op-host-backpressure", "backpressure"),
+        ])?;
+
+        let records = gauntlet.to_jsonl_values()?;
+        let summary = gauntlet.summary();
+        let log_record = records
+            .iter()
+            .find(|record| record["record_type"] == "swarm_gauntlet_log")
+            .ok_or("gauntlet log record must be emitted")?;
+
+        assert_eq!(summary.resource_ledger_record_count, 2);
+        assert_eq!(log_record["resource_ledger_record_count"], 2);
+        assert_eq!(log_record["resource_ledger_record_type"], "resource_ledger");
+        assert_eq!(
+            log_record["resource_ledger_operation_ids"],
+            json!(["op-host-invoke", "op-host-backpressure"])
+        );
+        assert!(
+            records
+                .iter()
+                .any(|record| record["record_type"] == "resource_ledger")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn swarm_gauntlet_rejects_malformed_resource_ledger_records() -> Result<(), Box<dyn Error>> {
+        let manifest = SwarmGauntletManifest::smoke(vec![
+            "cargo".to_string(),
+            "test".to_string(),
+            "-p".to_string(),
+            "fcp-e2e".to_string(),
+            "--test".to_string(),
+            "swarm_gauntlet_e2e".to_string(),
+        ]);
+        let latency_bundle = gauntlet_latency_bundle()?;
+        let resources = gauntlet_resource_snapshots(&latency_bundle);
+        let first_scenario = latency_bundle.summaries[0].scenario_id.clone();
+        let err = SwarmGauntletEvidenceBundle::new(
+            manifest,
+            latency_bundle,
+            resources,
+            gauntlet_decision_cards(&first_scenario),
+            gauntlet_phase_evidence(),
+            SwarmGauntletCounters {
+                audit_event_count: 4,
+                same_zone_audit_appends: 512,
+                sparse_high_k_metadata_events: 3,
+            },
+            None,
+        )?
+        .with_resource_ledger_records(vec![json!({
+            "record_type": "resource_ledger",
+            "schema_version": SWARM_RESOURCE_LEDGER_SCHEMA_VERSION,
+            "ledger": {
+                "operation_id": "op-missing-worker-ref"
+            }
+        })])
+        .expect_err("malformed ledger record must be rejected");
+
+        assert!(matches!(
+            err,
+            SwarmGauntletError::InvalidResourceLedgerRecord { .. }
+        ));
         Ok(())
     }
 

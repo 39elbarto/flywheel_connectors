@@ -19,6 +19,9 @@ pub const DEFAULT_THREAD_OWNERSHIP_TTL: Duration = Duration::from_secs(300);
 /// FCP error code used when a peer owns a chat thread.
 pub const THREAD_OWNED_BY_PEER_ERROR_CODE: u16 = 4090;
 
+/// FCP error code used when fail-closed coordination cannot decide ownership.
+pub const THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE: u16 = 5090;
+
 /// Connector-level policy for chat messages without a native thread id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DmMode {
@@ -27,6 +30,257 @@ pub enum DmMode {
     /// Treat the conversation id as both channel and thread id.
     #[default]
     TreatAsThread,
+}
+
+/// Backend selected by connector-level chat coordination config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ChatCoordinationBackend {
+    /// Agent Mail exclusive file reservations.
+    #[default]
+    AgentMail,
+    /// Mesh gossip claim propagation.
+    MeshGossip,
+    /// In-process checker, primarily for fixtures and tests.
+    InMemory,
+}
+
+/// Reason a connector call site skips chat coordination for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatCoordinationSkipReason {
+    /// Coordination is disabled by live config.
+    Disabled,
+    /// The channel is outside the configured rollout allowlist.
+    ChannelNotAllowed,
+    /// The message had no thread id and direct-message mode is skip.
+    ThreadlessDmSkipped,
+}
+
+/// Connector action selected by chat coordination policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatCoordinationAction {
+    /// Claim ownership for the computed key before sending.
+    Claim {
+        /// Claim key to acquire before the outbound send.
+        key: ClaimKey,
+    },
+    /// Skip ownership checks for the given reason.
+    Skip {
+        /// Reason the claim was skipped.
+        reason: ChatCoordinationSkipReason,
+    },
+}
+
+impl ChatCoordinationAction {
+    /// Return the claim key when this action requires a claim.
+    #[must_use]
+    pub const fn claim_key(&self) -> Option<&ClaimKey> {
+        match self {
+            Self::Claim { key } => Some(key),
+            Self::Skip { .. } => None,
+        }
+    }
+}
+
+/// Connector-facing chat coordination policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatCoordinationConfig {
+    enabled: bool,
+    ttl: Duration,
+    fail_open: bool,
+    allowlist_channels: Vec<ChannelId>,
+    backend: ChatCoordinationBackend,
+    dm_mode: DmMode,
+}
+
+impl ChatCoordinationConfig {
+    /// Create the default enabled, fail-open chat coordination policy.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Whether ownership coordination is enabled.
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// Claim and mention TTL selected by live config.
+    #[must_use]
+    pub const fn ttl(&self) -> Duration {
+        self.ttl
+    }
+
+    /// Whether indeterminate backend outcomes should proceed.
+    #[must_use]
+    pub const fn fail_open(&self) -> bool {
+        self.fail_open
+    }
+
+    /// Empty allowlist means all channels are coordinated.
+    #[must_use]
+    pub fn allowlist_channels(&self) -> &[ChannelId] {
+        &self.allowlist_channels
+    }
+
+    /// Selected durable coordination backend.
+    #[must_use]
+    pub const fn backend(&self) -> ChatCoordinationBackend {
+        self.backend
+    }
+
+    /// Direct-message handling mode.
+    #[must_use]
+    pub const fn dm_mode(&self) -> DmMode {
+        self.dm_mode
+    }
+
+    /// Return a copy with coordination enabled or disabled.
+    #[must_use]
+    pub const fn with_enabled(mut self, enabled: bool) -> Self {
+        self.enabled = enabled;
+        self
+    }
+
+    /// Return a copy with a custom TTL.
+    #[must_use]
+    pub const fn with_ttl(mut self, ttl: Duration) -> Self {
+        self.ttl = ttl;
+        self
+    }
+
+    /// Return a copy with fail-open behavior changed.
+    #[must_use]
+    pub const fn with_fail_open(mut self, fail_open: bool) -> Self {
+        self.fail_open = fail_open;
+        self
+    }
+
+    /// Return a copy with an explicit channel rollout allowlist.
+    #[must_use]
+    pub fn with_allowlist_channels<I, C>(mut self, channels: I) -> Self
+    where
+        I: IntoIterator<Item = C>,
+        C: Into<ChannelId>,
+    {
+        self.allowlist_channels = channels.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Return a copy with a selected backend.
+    #[must_use]
+    pub const fn with_backend(mut self, backend: ChatCoordinationBackend) -> Self {
+        self.backend = backend;
+        self
+    }
+
+    /// Return a copy with a selected direct-message policy.
+    #[must_use]
+    pub const fn with_dm_mode(mut self, dm_mode: DmMode) -> Self {
+        self.dm_mode = dm_mode;
+        self
+    }
+
+    /// Whether `channel_id` is inside the configured rollout allowlist.
+    #[must_use]
+    pub fn channel_is_allowed(&self, channel_id: &ChannelId) -> bool {
+        self.allowlist_channels.is_empty()
+            || self
+                .allowlist_channels
+                .iter()
+                .any(|allowed| allowed == channel_id)
+    }
+
+    /// Select the claim action for a candidate outbound chat message.
+    #[must_use]
+    pub fn action_for_message(
+        &self,
+        zone_id: ZoneId,
+        connector_id: ConnectorId,
+        channel_id: ChannelId,
+        thread_id: Option<ThreadId>,
+    ) -> ChatCoordinationAction {
+        if !self.enabled {
+            return ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::Disabled,
+            };
+        }
+        if !self.channel_is_allowed(&channel_id) {
+            return ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ChannelNotAllowed,
+            };
+        }
+        ClaimKey::for_chat_message(zone_id, connector_id, channel_id, thread_id, self.dm_mode)
+            .map_or_else(
+                || ChatCoordinationAction::Skip {
+                    reason: ChatCoordinationSkipReason::ThreadlessDmSkipped,
+                },
+                |key| ChatCoordinationAction::Claim { key },
+            )
+    }
+
+    /// Map a backend claim outcome through this policy's fail-open setting.
+    #[must_use]
+    pub fn decision_for_claim_outcome(&self, outcome: ClaimOutcome) -> ChatClaimDecision {
+        ChatClaimDecision::from_claim_outcome(outcome, self.fail_open)
+    }
+}
+
+impl Default for ChatCoordinationConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            ttl: DEFAULT_THREAD_OWNERSHIP_TTL,
+            fail_open: true,
+            allowlist_channels: Vec::new(),
+            backend: ChatCoordinationBackend::AgentMail,
+            dm_mode: DmMode::TreatAsThread,
+        }
+    }
+}
+
+/// Connector send decision after applying a claim backend outcome.
+#[derive(Debug, Clone)]
+pub enum ChatClaimDecision {
+    /// Send may continue normally.
+    Proceed,
+    /// Send may continue, but should emit degraded coordination diagnostics.
+    DegradedProceed {
+        /// Redaction-safe backend reason.
+        reason: String,
+    },
+    /// Send must be denied with this FCP error.
+    Deny(FcpError),
+}
+
+impl ChatClaimDecision {
+    /// Map a raw claim outcome into connector send behavior.
+    #[must_use]
+    pub fn from_claim_outcome(outcome: ClaimOutcome, fail_open: bool) -> Self {
+        match outcome {
+            ClaimOutcome::Granted(_) => Self::Proceed,
+            ClaimOutcome::AlreadyOwned(owner) => Self::Deny(thread_owned_by_peer_error(&owner)),
+            ClaimOutcome::Indeterminate(reason) if fail_open => Self::DegradedProceed { reason },
+            ClaimOutcome::Indeterminate(reason) => {
+                Self::Deny(thread_ownership_indeterminate_error(&reason))
+            }
+        }
+    }
+
+    /// Whether the connector should perform the outbound send.
+    #[must_use]
+    pub const fn should_send(&self) -> bool {
+        matches!(self, Self::Proceed | Self::DegradedProceed { .. })
+    }
+
+    /// Borrow the denial error, if any.
+    #[must_use]
+    pub const fn denial_error(&self) -> Option<&FcpError> {
+        match self {
+            Self::Deny(error) => Some(error),
+            Self::Proceed | Self::DegradedProceed { .. } => None,
+        }
+    }
 }
 
 /// Agent identifier used in chat coordination decisions.
@@ -649,6 +903,15 @@ pub fn thread_owned_by_peer_error(owner_agent_id: &AgentId) -> FcpError {
     }
 }
 
+/// Create the standard FCP error for fail-closed indeterminate ownership.
+#[must_use]
+pub fn thread_ownership_indeterminate_error(reason: &str) -> FcpError {
+    FcpError::ConnectorUnavailable {
+        code: THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE,
+        message: format!("thread_ownership_indeterminate:{reason}"),
+    }
+}
+
 /// Async claim backend used by connector call sites.
 #[async_trait]
 pub trait ThreadOwnershipChecker: Send + Sync {
@@ -901,6 +1164,154 @@ mod tests {
 
     fn agent(id: &str) -> AgentId {
         AgentId::new(id)
+    }
+
+    #[test]
+    fn chat_coordination_config_defaults_match_parent_policy() {
+        let config = ChatCoordinationConfig::default();
+
+        assert!(config.enabled());
+        assert_eq!(config.ttl(), DEFAULT_THREAD_OWNERSHIP_TTL);
+        assert!(config.fail_open());
+        assert!(config.allowlist_channels().is_empty());
+        assert_eq!(config.backend(), ChatCoordinationBackend::AgentMail);
+        assert_eq!(config.dm_mode(), DmMode::TreatAsThread);
+        assert!(config.channel_is_allowed(&ChannelId::new("C123")));
+    }
+
+    #[test]
+    fn chat_coordination_action_respects_enabled_and_allowlist() {
+        let disabled = ChatCoordinationConfig::new().with_enabled(false);
+        assert!(matches!(
+            disabled.action_for_message(
+                ZoneId::work(),
+                connector("slack:chat:1.0.0"),
+                ChannelId::new("C123"),
+                Some(ThreadId::new("1700000000.000100"))
+            ),
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::Disabled
+            }
+        ));
+
+        let allowed = ChatCoordinationConfig::new()
+            .with_allowlist_channels([ChannelId::new("C123"), ChannelId::new("C456")]);
+        assert!(matches!(
+            allowed.action_for_message(
+                ZoneId::work(),
+                connector("slack:chat:1.0.0"),
+                ChannelId::new("C999"),
+                Some(ThreadId::new("1700000000.000100"))
+            ),
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ChannelNotAllowed
+            }
+        ));
+        assert!(matches!(
+            allowed.action_for_message(
+                ZoneId::work(),
+                connector("slack:chat:1.0.0"),
+                ChannelId::new("C123"),
+                Some(ThreadId::new("1700000000.000100"))
+            ),
+            ChatCoordinationAction::Claim { .. }
+        ));
+    }
+
+    #[test]
+    fn chat_coordination_action_handles_threadless_dm_modes() {
+        let channel = ChannelId::new("signal-dm-42");
+        let skipped = ChatCoordinationConfig::new()
+            .with_dm_mode(DmMode::Skip)
+            .action_for_message(
+                ZoneId::work(),
+                connector("signal:chat:1.0.0"),
+                channel.clone(),
+                None,
+            );
+        assert!(matches!(
+            skipped,
+            ChatCoordinationAction::Skip {
+                reason: ChatCoordinationSkipReason::ThreadlessDmSkipped
+            }
+        ));
+
+        let treated = ChatCoordinationConfig::new().action_for_message(
+            ZoneId::work(),
+            connector("signal:chat:1.0.0"),
+            channel.clone(),
+            None,
+        );
+        assert!(matches!(
+            treated,
+            ChatCoordinationAction::Claim { ref key }
+                if key.channel_id() == &channel && key.thread_id().as_str() == channel.as_str()
+        ));
+    }
+
+    #[test]
+    fn claim_decision_maps_claim_outcomes_to_send_policy() {
+        let granted =
+            ChatClaimDecision::from_claim_outcome(ClaimOutcome::Granted(agent("alice")), true);
+        assert!(granted.should_send());
+        assert!(granted.denial_error().is_none());
+
+        let owned =
+            ChatClaimDecision::from_claim_outcome(ClaimOutcome::AlreadyOwned(agent("alice")), true);
+        assert!(!owned.should_send());
+        assert!(matches!(
+            owned.denial_error(),
+            Some(FcpError::Unauthorized {
+                code: THREAD_OWNED_BY_PEER_ERROR_CODE,
+                message,
+            }) if message == "thread_owned_by_peer:alice"
+        ));
+
+        let degraded = ChatClaimDecision::from_claim_outcome(
+            ClaimOutcome::Indeterminate("agent_mail_unavailable".to_owned()),
+            true,
+        );
+        assert!(degraded.should_send());
+        assert!(matches!(
+            degraded,
+            ChatClaimDecision::DegradedProceed { ref reason }
+                if reason == "agent_mail_unavailable"
+        ));
+
+        let denied = ChatClaimDecision::from_claim_outcome(
+            ClaimOutcome::Indeterminate("agent_mail_unavailable".to_owned()),
+            false,
+        );
+        assert!(!denied.should_send());
+        assert!(matches!(
+            denied.denial_error(),
+            Some(FcpError::ConnectorUnavailable {
+                code: THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE,
+                message,
+            }) if message == "thread_ownership_indeterminate:agent_mail_unavailable"
+        ));
+    }
+
+    #[test]
+    fn config_decision_uses_live_fail_open_value() {
+        let fail_open = ChatCoordinationConfig::new().with_fail_open(true);
+        let fail_closed = ChatCoordinationConfig::new().with_fail_open(false);
+
+        assert!(
+            fail_open
+                .decision_for_claim_outcome(ClaimOutcome::Indeterminate(
+                    "agent_mail_unavailable".to_owned()
+                ))
+                .should_send()
+        );
+        assert!(
+            fail_closed
+                .decision_for_claim_outcome(ClaimOutcome::Indeterminate(
+                    "agent_mail_unavailable".to_owned()
+                ))
+                .denial_error()
+                .is_some()
+        );
     }
 
     #[test]

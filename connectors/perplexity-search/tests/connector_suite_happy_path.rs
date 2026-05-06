@@ -22,7 +22,10 @@ fn signing_key_and_pub() -> (Ed25519SigningKey, [u8; 32]) {
     (signing_key, public_key)
 }
 
-fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
+fn handshake_request(
+    host_public_key: [u8; 32],
+    requested_instance_id: InstanceId,
+) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),
         zone: ZoneId::work(),
@@ -32,11 +35,14 @@ fn handshake_request(host_public_key: [u8; 32]) -> HandshakeRequest {
         capabilities_requested: vec![CapabilityId::from_static(CAP_SEARCH)],
         host: None,
         transport_caps: None,
-        requested_instance_id: Some(InstanceId::new()),
+        requested_instance_id: Some(requested_instance_id),
     }
 }
 
-fn search_capability(signing_key: &Ed25519SigningKey) -> CapabilityToken {
+fn search_capability(
+    signing_key: &Ed25519SigningKey,
+    target_instance: &InstanceId,
+) -> CapabilityToken {
     let now = Utc::now();
     let constraints = CapabilityConstraints {
         resource_allow: vec!["*".into()],
@@ -52,6 +58,7 @@ fn search_capability(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         .operations(&[OP_SEARCH])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(target_instance.as_str())
         .try_constraints_cbor(&constraints_cbor)
         .expect("constraints CBOR should validate")
         .sign(signing_key)
@@ -84,16 +91,17 @@ fn search_invoke(id: &'static str, capability_token: CapabilityToken) -> InvokeR
 
 fn suite(server: &MockServer) -> ConnectorSuite {
     let (signing_key, public_key) = signing_key_and_pub();
+    let requested_instance_id = InstanceId::new();
     ConnectorSuite {
         test_name: "perplexity_search_connector_suite_happy_path".into(),
         config: json!({
             "api_key": "pplx-test-key",
             "base_url": server.uri()
         }),
-        handshake: handshake_request(public_key),
+        handshake: handshake_request(public_key, requested_instance_id.clone()),
         invoke: Some(search_invoke(
             "perplexity-search-suite",
-            search_capability(&signing_key),
+            search_capability(&signing_key, &requested_instance_id),
         )),
         invoke_expectations: InvokeExpectations::default(),
     }
@@ -140,6 +148,6 @@ async fn connector_suite_search_happy_path_uses_mock_server() {
         .await
         .expect("connector suite run");
 
-    assert!(report.passed, "connector suite should pass");
+    assert!(report.passed, "connector suite should pass: {report:#?}");
     assert!(!report.logs.is_empty(), "structured logs should be present");
 }

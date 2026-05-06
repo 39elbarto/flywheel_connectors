@@ -1,5 +1,6 @@
 //! Perplexity Search connector implementation.
 
+use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -15,35 +16,61 @@ use fcp_sdk::migration::HttpRetryConfig;
 use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use url::Url;
 
 use crate::client::PerplexityClient;
-use crate::types::{ChatCompletionRequest, ChatMessage, PerplexityAuth};
+use crate::types::{
+    ChatCompletionRequest, ChatMessage, PerplexityAuth, SearchApiRequest, SearchApiResult,
+};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const OP_SEARCH: &str = "perplexity-search.query";
+const OP_NATIVE_SEARCH: &str = "perplexity-search.search";
 
 const CAP_SEARCH: &str = "perplexity-search.query";
+const CAP_NATIVE_SEARCH: &str = "perplexity-search.search";
+
+const DIRECT_PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
+const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
+const OPENROUTER_DEFAULT_MODEL: &str = "perplexity/sonar-pro";
 
 // ── Config ──
 
 #[derive(Clone, Deserialize)]
-pub struct PerplexityConfig {
-    #[serde(default = "default_base_url")]
-    pub base_url: String,
-    #[serde(flatten)]
-    pub auth: PerplexityAuth,
+struct RawPerplexityConfig {
     #[serde(default)]
-    pub retry: HttpRetryConfig,
+    base_url: Option<String>,
+    #[serde(flatten)]
+    auth: PerplexityAuth,
+    #[serde(default)]
+    retry: HttpRetryConfig,
     #[serde(default = "default_timeout_ms")]
+    request_timeout_ms: u64,
+    #[serde(default)]
+    default_model: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PerplexityTransport {
+    Direct,
+    OpenRouter,
+    Custom,
+}
+
+#[derive(Clone)]
+pub struct PerplexityConfig {
+    pub base_url: String,
+    pub auth: PerplexityAuth,
+    pub retry: HttpRetryConfig,
     pub request_timeout_ms: u64,
     /// Default model to use when the caller does not specify one.
-    #[serde(default = "default_model")]
     pub default_model: String,
+    transport: PerplexityTransport,
 }
 
 fn default_base_url() -> String {
-    "https://api.perplexity.ai".into()
+    DIRECT_PERPLEXITY_BASE_URL.into()
 }
 
 const fn default_timeout_ms() -> u64 {
@@ -61,7 +88,107 @@ impl std::fmt::Debug for PerplexityConfig {
             .field("auth", &self.auth)
             .field("default_model", &self.default_model)
             .field("request_timeout_ms", &self.request_timeout_ms)
+            .field("transport", &self.transport)
             .finish_non_exhaustive()
+    }
+}
+
+fn trim_string(value: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        String::new()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_openrouter_api_key(api_key: &str) -> bool {
+    api_key.trim().to_ascii_lowercase().starts_with("sk-or-")
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") || host.to_ascii_lowercase().ends_with(".localhost") {
+        return true;
+    }
+    host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+const fn is_sensitive_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => {
+            let octets = ip.octets();
+            let documentation_range = matches!(
+                octets,
+                [192, 0, 2, _] | [198, 51, 100, _] | [203, 0, 113, _]
+            );
+            ip.is_private()
+                || ip.is_link_local()
+                || ip.is_broadcast()
+                || documentation_range
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+        IpAddr::V6(ip) => {
+            let [first, second, ..] = ip.segments();
+            let documentation_range = first == 0x2001 && second == 0x0db8;
+            ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || documentation_range
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+    }
+}
+
+fn is_direct_perplexity_base_url(base_url: &str) -> bool {
+    Url::parse(base_url).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("api.perplexity.ai"))
+    })
+}
+
+fn is_openrouter_base_url(base_url: &str) -> bool {
+    Url::parse(base_url).is_ok_and(|url| {
+        url.host_str()
+            .is_some_and(|host| host.eq_ignore_ascii_case("openrouter.ai"))
+    })
+}
+
+fn validate_base_url(base_url: &str) -> Result<Url, String> {
+    let parsed =
+        Url::parse(base_url).map_err(|e| format!("base_url must be a valid absolute URL: {e}"))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err("base_url must use http or https".into());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("base_url must not contain embedded credentials".into());
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err("base_url must not contain a query string or fragment".into());
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "base_url must include a host".to_string())?;
+    if parsed.scheme() == "http" && !is_loopback_host(host) {
+        return Err("base_url may only use public http for loopback test endpoints".into());
+    }
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if !ip.is_loopback() && is_sensitive_ip(ip) {
+            return Err(
+                "base_url must not target private, link-local, or documentation IP ranges".into(),
+            );
+        }
+    }
+    Ok(parsed)
+}
+
+fn resolve_transport(base_url: &str) -> PerplexityTransport {
+    if is_openrouter_base_url(base_url) {
+        PerplexityTransport::OpenRouter
+    } else if is_direct_perplexity_base_url(base_url) {
+        PerplexityTransport::Direct
+    } else {
+        PerplexityTransport::Custom
     }
 }
 
@@ -71,11 +198,7 @@ impl PerplexityConfig {
         if base_url.is_empty() {
             return Err("base_url cannot be empty".into());
         }
-        let parsed = reqwest::Url::parse(base_url)
-            .map_err(|e| format!("base_url must be a valid absolute URL: {e}"))?;
-        if !matches!(parsed.scheme(), "http" | "https") {
-            return Err("base_url must use http or https".into());
-        }
+        validate_base_url(base_url)?;
         if self.request_timeout_ms == 0 {
             return Err("request_timeout_ms must be greater than zero".into());
         }
@@ -86,10 +209,35 @@ impl PerplexityConfig {
     }
 
     fn from_value(value: serde_json::Value) -> FcpResult<Self> {
-        let config: Self = serde_json::from_value(value).map_err(|e| FcpError::InvalidRequest {
-            code: 1001,
-            message: format!("Invalid configuration: {e}"),
-        })?;
+        let raw: RawPerplexityConfig =
+            serde_json::from_value(value).map_err(|e| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("Invalid configuration: {e}"),
+            })?;
+
+        let explicit_base_url = raw.base_url.as_deref().map(trim_string);
+        let base_url = explicit_base_url.unwrap_or_else(|| {
+            if is_openrouter_api_key(&raw.auth.api_key) {
+                OPENROUTER_BASE_URL.into()
+            } else {
+                default_base_url()
+            }
+        });
+        let transport = resolve_transport(&base_url);
+        let default_model = match raw.default_model.as_deref().map(trim_string) {
+            Some(model) => model,
+            None if transport == PerplexityTransport::OpenRouter => OPENROUTER_DEFAULT_MODEL.into(),
+            None => default_model(),
+        };
+
+        let config = Self {
+            base_url,
+            auth: raw.auth,
+            retry: raw.retry,
+            request_timeout_ms: raw.request_timeout_ms,
+            default_model,
+            transport,
+        };
         config
             .validate()
             .map_err(|message| FcpError::InvalidRequest {
@@ -206,6 +354,7 @@ impl PerplexitySearchConnector {
     fn capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
         match operation {
             OP_SEARCH => Ok(CapabilityId::from_static(CAP_SEARCH)),
+            OP_NATIVE_SEARCH => Ok(CapabilityId::from_static(CAP_NATIVE_SEARCH)),
             _ => Err(FcpError::InvalidRequest {
                 code: 1004,
                 message: format!("Unknown operation: {operation}"),
@@ -231,6 +380,312 @@ impl PerplexitySearchConnector {
         Ok(value)
     }
 
+    fn optional_str(input: &serde_json::Value, key: &str) -> FcpResult<Option<String>> {
+        let Some(value) = input.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let Some(raw) = value.as_str() else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a string"),
+            });
+        };
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must not be empty"),
+            });
+        }
+        Ok(Some(trimmed.to_string()))
+    }
+
+    fn optional_bool(input: &serde_json::Value, key: &str) -> FcpResult<Option<bool>> {
+        let Some(value) = input.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        value
+            .as_bool()
+            .map(Some)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a boolean"),
+            })
+    }
+
+    fn optional_f64(input: &serde_json::Value, key: &str) -> FcpResult<Option<f64>> {
+        let Some(value) = input.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        value
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be a number"),
+            })
+    }
+
+    fn optional_u32(
+        input: &serde_json::Value,
+        key: &str,
+        min: u32,
+        max: u32,
+    ) -> FcpResult<Option<u32>> {
+        let Some(value) = input.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let number = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Field '{key}' must be a positive integer"),
+        })?;
+        if number < u64::from(min) || number > u64::from(max) {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("Field '{key}' must be between {min} and {max}"),
+            });
+        }
+        Ok(Some(u32::try_from(number).unwrap_or(max)))
+    }
+
+    fn optional_string_array(
+        input: &serde_json::Value,
+        key: &str,
+    ) -> FcpResult<Option<Vec<String>>> {
+        let Some(value) = input.get(key) else {
+            return Ok(None);
+        };
+        if value.is_null() {
+            return Ok(None);
+        }
+        let array = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1005,
+            message: format!("Field '{key}' must be an array of strings"),
+        })?;
+        let mut values = Vec::with_capacity(array.len());
+        for entry in array {
+            let Some(raw) = entry.as_str() else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must contain only strings"),
+                });
+            };
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("Field '{key}' must not contain empty strings"),
+                });
+            }
+            values.push(trimmed.to_string());
+        }
+        Ok(Some(values))
+    }
+
+    fn field_present(input: &serde_json::Value, key: &str) -> bool {
+        input.get(key).is_some_and(|value| !value.is_null())
+    }
+
+    fn unsupported_chat_filter(input: &serde_json::Value) -> FcpResult<()> {
+        for key in [
+            "country",
+            "language",
+            "date_after",
+            "date_before",
+            "domain_filter",
+            "max_tokens_per_page",
+        ] {
+            if Self::field_present(input, key) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!(
+                        "Field '{key}' is only supported by {OP_NATIVE_SEARCH}; use search_domain_filter for chat-completions domain filtering"
+                    ),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn recency_filter(input: &serde_json::Value, allow_hour: bool) -> FcpResult<Option<String>> {
+        let freshness = Self::optional_str(input, "freshness")?;
+        let search_recency_filter = Self::optional_str(input, "search_recency_filter")?;
+        if let (Some(left), Some(right)) = (&freshness, &search_recency_filter) {
+            if left != right {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message:
+                        "freshness and search_recency_filter must match when both are provided"
+                            .into(),
+                });
+            }
+        }
+        let Some(value) = freshness.or(search_recency_filter) else {
+            return Ok(None);
+        };
+        let allowed = if allow_hour {
+            matches!(value.as_str(), "hour" | "day" | "week" | "month" | "year")
+        } else {
+            matches!(value.as_str(), "day" | "week" | "month" | "year")
+        };
+        if !allowed {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: if allow_hour {
+                    "freshness/search_recency_filter must be hour, day, week, month, or year".into()
+                } else {
+                    "freshness/search_recency_filter must be day, week, month, or year".into()
+                },
+            });
+        }
+        Ok(Some(value))
+    }
+
+    fn domain_filter(input: &serde_json::Value) -> FcpResult<Option<Vec<String>>> {
+        let domain_filter = Self::optional_string_array(input, "domain_filter")?;
+        let search_domain_filter = Self::optional_string_array(input, "search_domain_filter")?;
+        if let (Some(left), Some(right)) = (&domain_filter, &search_domain_filter) {
+            if left != right {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message:
+                        "domain_filter and search_domain_filter must match when both are provided"
+                            .into(),
+                });
+            }
+        }
+        let filter = domain_filter.or(search_domain_filter);
+        if let Some(values) = &filter {
+            Self::validate_domain_filter(values)?;
+        }
+        Ok(filter)
+    }
+
+    fn validate_domain_filter(values: &[String]) -> FcpResult<()> {
+        if values.len() > 20 {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "domain_filter supports a maximum of 20 domains".into(),
+            });
+        }
+        let has_deny = values.iter().any(|entry| entry.starts_with('-'));
+        let has_allow = values.iter().any(|entry| !entry.starts_with('-'));
+        if has_deny && has_allow {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: "domain_filter cannot mix allowlist and denylist entries".into(),
+            });
+        }
+        Ok(())
+    }
+
+    fn iso_to_perplexity_date(value: &str, field: &str) -> FcpResult<String> {
+        let mut parts = value.split('-');
+        let (Some(year_raw), Some(month_raw), Some(day_raw), None) =
+            (parts.next(), parts.next(), parts.next(), parts.next())
+        else {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be YYYY-MM-DD format"),
+            });
+        };
+        if year_raw.len() != 4 || month_raw.len() != 2 || day_raw.len() != 2 {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be YYYY-MM-DD format"),
+            });
+        }
+        let year = year_raw
+            .parse::<u32>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be YYYY-MM-DD format"),
+            })?;
+        let month = month_raw
+            .parse::<u32>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be YYYY-MM-DD format"),
+            })?;
+        let day = day_raw
+            .parse::<u32>()
+            .map_err(|_| FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be YYYY-MM-DD format"),
+            })?;
+        let max_day = match month {
+            1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+            4 | 6 | 9 | 11 => 30,
+            2 if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 => 29,
+            2 => 28,
+            _ => 0,
+        };
+        if day == 0 || day > max_day {
+            return Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: format!("{field} must be a real calendar date"),
+            });
+        }
+        Ok(format!("{month}/{day}/{year}"))
+    }
+
+    fn validate_country_or_language(value: Option<&str>, key: &str) -> FcpResult<()> {
+        if let Some(value) = value {
+            if value.len() != 2 || !value.chars().all(|ch| ch.is_ascii_alphabetic()) {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: format!("{key} must be a 2-letter code"),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    fn site_name(url: &str) -> Option<String> {
+        Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(ToOwned::to_owned))
+    }
+
+    fn external_content() -> serde_json::Value {
+        json!({
+            "untrusted": true,
+            "source": "web_search",
+            "provider": "perplexity",
+            "wrapped": true
+        })
+    }
+
+    fn wrap_untrusted_web_content(value: &str) -> String {
+        format!("<untrusted-web-search>\n{value}\n</untrusted-web-search>")
+    }
+
+    fn search_result_json(result: &SearchApiResult) -> serde_json::Value {
+        let title = result.title.as_deref().unwrap_or_default();
+        let description = result.snippet.as_deref().unwrap_or_default();
+        let url = result.url.as_deref().unwrap_or_default();
+        json!({
+            "title": Self::wrap_untrusted_web_content(title),
+            "url": url,
+            "description": Self::wrap_untrusted_web_content(description),
+            "published": result.date,
+            "site_name": Self::site_name(url),
+            "external_content": Self::external_content()
+        })
+    }
+
     #[allow(clippy::too_many_lines)]
     async fn invoke_inner(&self, req: InvokeRequest) -> FcpResult<InvokeResponse> {
         self.base.check_ready()?;
@@ -253,6 +708,7 @@ impl PerplexitySearchConnector {
         let output = match operation {
             OP_SEARCH => {
                 let query = Self::require_str(&req.input, "query")?;
+                Self::unsupported_chat_filter(&req.input)?;
                 let model = req
                     .input
                     .get("model")
@@ -274,62 +730,21 @@ impl PerplexitySearchConnector {
                     content: query.to_string(),
                 });
 
-                #[allow(clippy::cast_possible_truncation)]
-                let max_tokens = req
-                    .input
-                    .get("max_tokens")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|v| v.min(u64::from(u32::MAX)) as u32);
-
-                let temperature = req
-                    .input
-                    .get("temperature")
-                    .and_then(serde_json::Value::as_f64);
-
-                let top_p = req.input.get("top_p").and_then(serde_json::Value::as_f64);
-
-                #[allow(clippy::cast_possible_truncation)]
-                let top_k = req
-                    .input
-                    .get("top_k")
-                    .and_then(serde_json::Value::as_u64)
-                    .map(|v| v.min(u64::from(u32::MAX)) as u32);
-
-                let search_domain_filter = req
-                    .input
-                    .get("search_domain_filter")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|v| v.as_str().map(String::from))
-                            .collect()
-                    });
-
-                let return_images = req
-                    .input
-                    .get("return_images")
-                    .and_then(serde_json::Value::as_bool);
-
-                let return_related_questions = req
-                    .input
-                    .get("return_related_questions")
-                    .and_then(serde_json::Value::as_bool);
-
-                let search_recency_filter = req
-                    .input
-                    .get("search_recency_filter")
-                    .and_then(|v| v.as_str())
-                    .map(String::from);
-
-                let presence_penalty = req
-                    .input
-                    .get("presence_penalty")
-                    .and_then(serde_json::Value::as_f64);
-
-                let frequency_penalty = req
-                    .input
-                    .get("frequency_penalty")
-                    .and_then(serde_json::Value::as_f64);
+                let max_tokens = Self::optional_u32(&req.input, "max_tokens", 1, u32::MAX)?;
+                let temperature = Self::optional_f64(&req.input, "temperature")?;
+                let top_p = Self::optional_f64(&req.input, "top_p")?;
+                let top_k = Self::optional_u32(&req.input, "top_k", 1, u32::MAX)?;
+                let search_domain_filter =
+                    Self::optional_string_array(&req.input, "search_domain_filter")?;
+                if let Some(values) = &search_domain_filter {
+                    Self::validate_domain_filter(values)?;
+                }
+                let return_images = Self::optional_bool(&req.input, "return_images")?;
+                let return_related_questions =
+                    Self::optional_bool(&req.input, "return_related_questions")?;
+                let search_recency_filter = Self::recency_filter(&req.input, true)?;
+                let presence_penalty = Self::optional_f64(&req.input, "presence_penalty")?;
+                let frequency_penalty = Self::optional_f64(&req.input, "frequency_penalty")?;
 
                 let chat_req = ChatCompletionRequest {
                     model: model.to_string(),
@@ -365,6 +780,89 @@ impl PerplexitySearchConnector {
                     "usage": resp.usage,
                     "id": resp.id,
                     "finish_reason": resp.choices.first().and_then(|c| c.finish_reason.as_deref()),
+                    "external_content": Self::external_content(),
+                })
+            }
+            OP_NATIVE_SEARCH => {
+                if config.transport == PerplexityTransport::OpenRouter {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "Native Perplexity Search API is not available through OpenRouter; use perplexity-search.query for OpenRouter chat-completions routing".into(),
+                    });
+                }
+
+                let query = Self::require_str(&req.input, "query")?;
+                let count = Self::optional_u32(&req.input, "count", 1, 10)?
+                    .or(Self::optional_u32(&req.input, "max_results", 1, 10)?)
+                    .unwrap_or(10);
+                let country = Self::optional_str(&req.input, "country")?;
+                let language = Self::optional_str(&req.input, "language")?;
+                Self::validate_country_or_language(country.as_deref(), "country")?;
+                Self::validate_country_or_language(language.as_deref(), "language")?;
+                let search_recency_filter = Self::recency_filter(&req.input, false)?;
+                let search_domain_filter = Self::domain_filter(&req.input)?;
+                let max_tokens = Self::optional_u32(&req.input, "max_tokens", 1, 1_000_000)?;
+                let max_tokens_per_page =
+                    Self::optional_u32(&req.input, "max_tokens_per_page", 1, 1_000_000)?;
+
+                let raw_date_after = Self::optional_str(&req.input, "date_after")?;
+                let raw_date_before = Self::optional_str(&req.input, "date_before")?;
+                if search_recency_filter.is_some()
+                    && (raw_date_after.is_some() || raw_date_before.is_some())
+                {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message:
+                            "freshness/search_recency_filter cannot be combined with date filters"
+                                .into(),
+                    });
+                }
+                let search_after_date = raw_date_after
+                    .as_deref()
+                    .map(|value| Self::iso_to_perplexity_date(value, "date_after"))
+                    .transpose()?;
+                let search_before_date = raw_date_before
+                    .as_deref()
+                    .map(|value| Self::iso_to_perplexity_date(value, "date_before"))
+                    .transpose()?;
+                if let (Some(after), Some(before)) = (&raw_date_after, &raw_date_before) {
+                    if after > before {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "date_after must be before date_before".into(),
+                        });
+                    }
+                }
+
+                let search_req = SearchApiRequest {
+                    query: query.to_string(),
+                    max_results: count,
+                    country,
+                    search_domain_filter,
+                    search_recency_filter,
+                    search_language_filter: language.map(|value| vec![value]),
+                    search_after_date,
+                    search_before_date,
+                    max_tokens,
+                    max_tokens_per_page,
+                };
+
+                let resp = client
+                    .native_search(&search_req)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let results = resp
+                    .results
+                    .iter()
+                    .map(Self::search_result_json)
+                    .collect::<Vec<_>>();
+
+                json!({
+                    "query": query,
+                    "provider": "perplexity",
+                    "count": results.len(),
+                    "results": results,
+                    "external_content": Self::external_content(),
                 })
             }
             _ => {
@@ -396,48 +894,92 @@ fn schema(required: &[&str]) -> serde_json::Value {
 }
 
 fn operations_info() -> Vec<OperationInfo> {
-    vec![OperationInfo {
-        id: OperationId::from_static(OP_SEARCH),
-        summary: "Execute a grounded Perplexity web research query".into(),
-        description: Some(
-            "Sends a query to the Perplexity chat completions API (sonar model family) \
-             and returns the answer with web citations."
-                .into(),
-        ),
-        input_schema: json!({
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": { "type": "string", "description": "The research question to answer" },
-                "model": { "type": "string", "description": "Model to use (default: sonar)" },
-                "system_prompt": { "type": "string", "description": "Optional system prompt to guide the search" },
-                "max_tokens": { "type": "integer", "description": "Maximum tokens in the response" },
-                "temperature": { "type": "number", "description": "Sampling temperature (0.0-2.0)" },
-                "top_p": { "type": "number", "description": "Nucleus sampling threshold" },
-                "top_k": { "type": "integer", "description": "Top-k sampling parameter" },
-                "search_domain_filter": { "type": "array", "items": { "type": "string" }, "description": "Restrict search to these domains" },
-                "return_images": { "type": "boolean", "description": "Include image results" },
-                "return_related_questions": { "type": "boolean", "description": "Include related questions" },
-                "search_recency_filter": { "type": "string", "enum": ["month", "week", "day", "hour"], "description": "Filter results by recency" }
-            }
-        }),
-        output_schema: schema(&["answer"]),
-        capability: CapabilityId::from_static(CAP_SEARCH),
-        risk_level: RiskLevel::Medium,
-        safety_tier: SafetyTier::Safe,
-        idempotency: IdempotencyClass::None,
-        ai_hints: AgentHint {
-            when_to_use: "Use this operation to search the web for current, grounded information with citations. Ideal for fact-checking, research queries, and getting up-to-date answers.".into(),
-            common_mistakes: vec![
-                "Sending very long queries that exceed model context limits".into(),
-                "Expecting structured data output (responses are natural language)".into(),
-            ],
-            examples: vec![],
-            related: Vec::new(),
+    vec![
+        OperationInfo {
+            id: OperationId::from_static(OP_SEARCH),
+            summary: "Execute a grounded Perplexity web research query".into(),
+            description: Some(
+                "Sends a query to the Perplexity/OpenRouter chat-completions API \
+                 and returns the answer with web citations."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "The research question to answer" },
+                    "model": { "type": "string", "description": "Model to use (default: sonar or perplexity/sonar-pro on OpenRouter)" },
+                    "system_prompt": { "type": "string", "description": "Optional system prompt to guide the search" },
+                    "max_tokens": { "type": "integer", "description": "Maximum tokens in the response" },
+                    "temperature": { "type": "number", "description": "Sampling temperature (0.0-2.0)" },
+                    "top_p": { "type": "number", "description": "Nucleus sampling threshold" },
+                    "top_k": { "type": "integer", "description": "Top-k sampling parameter" },
+                    "search_domain_filter": { "type": "array", "items": { "type": "string" }, "description": "Chat-completions domain filter, max 20, all allowlist or all denylist" },
+                    "return_images": { "type": "boolean", "description": "Include image results" },
+                    "return_related_questions": { "type": "boolean", "description": "Include related questions" },
+                    "freshness": { "type": "string", "enum": ["year", "month", "week", "day", "hour"], "description": "Alias for search_recency_filter" },
+                    "search_recency_filter": { "type": "string", "enum": ["year", "month", "week", "day", "hour"], "description": "Filter results by recency" }
+                }
+            }),
+            output_schema: schema(&["answer"]),
+            capability: CapabilityId::from_static(CAP_SEARCH),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use this operation to search the web for current, grounded information with citations when an answer synthesis is desired.".into(),
+                common_mistakes: vec![
+                    "Sending native Search API filters such as country or date_after to the chat-completions operation".into(),
+                    "Expecting structured result records from the answer-synthesis operation".into(),
+                ],
+                examples: vec![],
+                related: vec![CapabilityId::from_static(CAP_NATIVE_SEARCH)],
+            },
+            rate_limit: None,
+            requires_approval: None,
         },
-        rate_limit: None,
-        requires_approval: None,
-    }]
+        OperationInfo {
+            id: OperationId::from_static(OP_NATIVE_SEARCH),
+            summary: "Execute a native Perplexity Search API query".into(),
+            description: Some(
+                "Posts to the native Perplexity /search endpoint and returns structured \
+                 untrusted result records with title, URL, snippet, date, and site metadata."
+                    .into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["query"],
+                "properties": {
+                    "query": { "type": "string", "description": "Search query string" },
+                    "count": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Number of results to return" },
+                    "country": { "type": "string", "description": "2-letter country code" },
+                    "language": { "type": "string", "description": "2-letter ISO 639-1 language code" },
+                    "freshness": { "type": "string", "enum": ["year", "month", "week", "day"], "description": "Time freshness filter" },
+                    "date_after": { "type": "string", "description": "Only results after YYYY-MM-DD" },
+                    "date_before": { "type": "string", "description": "Only results before YYYY-MM-DD" },
+                    "domain_filter": { "type": "array", "items": { "type": "string" }, "description": "Domain allowlist or denylist, max 20" },
+                    "max_tokens": { "type": "integer", "minimum": 1, "maximum": 1_000_000, "description": "Total content budget across results" },
+                    "max_tokens_per_page": { "type": "integer", "minimum": 1, "maximum": 1_000_000, "description": "Max extracted tokens per page" }
+                }
+            }),
+            output_schema: schema(&["results"]),
+            capability: CapabilityId::from_static(CAP_NATIVE_SEARCH),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use this operation when callers need structured web result records rather than a synthesized answer.".into(),
+                common_mistakes: vec![
+                    "Using this operation with an OpenRouter API key or OpenRouter base URL".into(),
+                    "Combining freshness with date_after/date_before".into(),
+                ],
+                examples: vec![],
+                related: vec![CapabilityId::from_static(CAP_SEARCH)],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+    ]
 }
 
 // ── FcpConnector trait impl ──
@@ -471,6 +1013,9 @@ impl FcpConnector for PerplexitySearchConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -654,32 +1199,40 @@ mod tests {
             zone_dir: None,
             host_public_key,
             nonce: [7u8; 32],
-            capabilities_requested: vec![CapabilityId::from_static(CAP_SEARCH)],
+            capabilities_requested: vec![
+                CapabilityId::from_static(CAP_SEARCH),
+                CapabilityId::from_static(CAP_NATIVE_SEARCH),
+            ],
             host: None,
             transport_caps: None,
             requested_instance_id: None,
         }
     }
 
-    fn generate_test_capability_with_operations(
+    fn generate_test_capability_for(
         signing_key: &Ed25519SigningKey,
+        capability_id: &'static str,
         operations: &[&'static str],
+        target_instance: Option<&str>,
     ) -> CapabilityToken {
         let now = Utc::now();
-        // C3.4: tokens MUST include constraints (default-deny)
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
             ..Default::default()
         };
         let mut cbor = Vec::new();
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
-        let raw = CapabilityTokenBuilder::new()
-            .capability_id(CAP_SEARCH)
+        let mut builder = CapabilityTokenBuilder::new()
+            .capability_id(capability_id)
             .zone_id("z:work")
             .principal("user:test")
             .operations(operations)
             .issuer("node:test")
-            .validity(now, now + ChronoDuration::hours(1))
+            .validity(now, now + ChronoDuration::hours(1));
+        if let Some(instance_id) = target_instance {
+            builder = builder.target_instance(instance_id);
+        }
+        let raw = builder
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
             .sign(signing_key)
@@ -687,16 +1240,59 @@ mod tests {
         CapabilityToken::from_raw(raw)
     }
 
+    fn generate_test_capability_with_operations(
+        signing_key: &Ed25519SigningKey,
+        operations: &[&'static str],
+    ) -> CapabilityToken {
+        generate_test_capability_for(signing_key, CAP_SEARCH, operations, None)
+    }
+
     fn generate_test_capability(signing_key: &Ed25519SigningKey) -> CapabilityToken {
         generate_test_capability_with_operations(signing_key, &[OP_SEARCH])
     }
 
-    fn invoke_req(input: serde_json::Value, capability: CapabilityToken) -> InvokeRequest {
+    fn generate_bound_test_capability_with_operations(
+        signing_key: &Ed25519SigningKey,
+        connector: &PerplexitySearchConnector,
+        operations: &[&'static str],
+    ) -> CapabilityToken {
+        generate_test_capability_for(
+            signing_key,
+            CAP_SEARCH,
+            operations,
+            Some(connector.base.instance_id.as_str()),
+        )
+    }
+
+    fn generate_bound_test_capability(
+        signing_key: &Ed25519SigningKey,
+        connector: &PerplexitySearchConnector,
+    ) -> CapabilityToken {
+        generate_bound_test_capability_with_operations(signing_key, connector, &[OP_SEARCH])
+    }
+
+    fn generate_bound_native_search_capability(
+        signing_key: &Ed25519SigningKey,
+        connector: &PerplexitySearchConnector,
+    ) -> CapabilityToken {
+        generate_test_capability_for(
+            signing_key,
+            CAP_NATIVE_SEARCH,
+            &[OP_NATIVE_SEARCH],
+            Some(connector.base.instance_id.as_str()),
+        )
+    }
+
+    fn invoke_req_for_operation(
+        operation: &'static str,
+        input: serde_json::Value,
+        capability: CapabilityToken,
+    ) -> InvokeRequest {
         InvokeRequest {
             r#type: "invoke".into(),
             id: RequestId::new("pp-test-1"),
             connector_id: ConnectorId::from_static("fcp.perplexity-search"),
-            operation: OperationId::from_static(OP_SEARCH),
+            operation: OperationId::from_static(operation),
             zone_id: ZoneId::work(),
             input,
             capability_token: capability,
@@ -709,6 +1305,10 @@ mod tests {
             provenance: None,
             approval_tokens: vec![],
         }
+    }
+
+    fn invoke_req(input: serde_json::Value, capability: CapabilityToken) -> InvokeRequest {
+        invoke_req_for_operation(OP_SEARCH, input, capability)
     }
 
     fn simulate_req(capability: CapabilityToken) -> SimulateRequest {
@@ -816,6 +1416,75 @@ mod tests {
     }
 
     #[test]
+    fn configure_infers_openrouter_from_key_prefix() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = PerplexitySearchConnector::new();
+            connector
+                .configure(json!({
+                    "api_key": "sk-or-v1-test"
+                }))
+                .await
+                .unwrap();
+            let config = connector.config.as_ref().unwrap();
+            assert_eq!(config.base_url, OPENROUTER_BASE_URL);
+            assert_eq!(config.default_model, OPENROUTER_DEFAULT_MODEL);
+            assert_eq!(config.transport, PerplexityTransport::OpenRouter);
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_public_http_base_url() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = PerplexitySearchConnector::new();
+            let err = connector
+                .configure(json!({
+                    "api_key": "pplx-test",
+                    "base_url": "http://api.perplexity.ai"
+                }))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_allows_loopback_http_base_url() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = PerplexitySearchConnector::new();
+            connector
+                .configure(json!({
+                    "api_key": "pplx-test",
+                    "base_url": "http://127.0.0.1:8080"
+                }))
+                .await
+                .unwrap();
+            assert_eq!(
+                connector.config.as_ref().unwrap().transport,
+                PerplexityTransport::Custom
+            );
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn configure_rejects_private_ip_base_url() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let mut connector = PerplexitySearchConnector::new();
+            let err = connector
+                .configure(json!({
+                    "api_key": "pplx-test",
+                    "base_url": "https://10.0.0.5"
+                }))
+                .await
+                .unwrap_err();
+            assert!(matches!(err, FcpError::InvalidRequest { code: 1001, .. }));
+        })
+        .unwrap();
+    }
+
+    #[test]
     fn health_degraded_before_configure() {
         fcp_async_core::runtime::block_on_sync(async {
             let connector = PerplexitySearchConnector::new();
@@ -902,8 +1571,11 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             connector.handshake(handshake_req(pk)).await.unwrap();
 
-            let under_scoped_grant =
-                generate_test_capability_with_operations(&sk, &["perplexity-search.other"]);
+            let under_scoped_grant = generate_bound_test_capability_with_operations(
+                &sk,
+                &connector,
+                &["perplexity-search.other"],
+            );
             let response = connector
                 .simulate(simulate_req(under_scoped_grant))
                 .await
@@ -920,10 +1592,12 @@ mod tests {
     fn introspect_lists_search_operation() {
         let connector = PerplexitySearchConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 1);
+        assert_eq!(intro.operations.len(), 2);
         assert_eq!(intro.operations[0].id.as_str(), OP_SEARCH);
+        assert_eq!(intro.operations[1].id.as_str(), OP_NATIVE_SEARCH);
         assert_eq!(intro.operations[0].risk_level, RiskLevel::Medium);
         assert_eq!(intro.operations[0].safety_tier, SafetyTier::Safe);
+        assert_eq!(intro.operations[1].capability.as_str(), CAP_NATIVE_SEARCH);
     }
 
     #[test]
@@ -955,7 +1629,7 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             connector.handshake(handshake_req(pk)).await.unwrap();
 
-            let cap = generate_test_capability(&sk);
+            let cap = generate_bound_test_capability(&sk, &connector);
             let req = InvokeRequest {
                 r#type: "invoke".into(),
                 id: RequestId::new("pp-unknown-op"),
@@ -987,7 +1661,7 @@ mod tests {
             connector.configure(valid_config()).await.unwrap();
             connector.handshake(handshake_req(pk)).await.unwrap();
 
-            let cap = generate_test_capability(&sk);
+            let cap = generate_bound_test_capability(&sk, &connector);
             let req = invoke_req(json!({}), cap);
             let err = connector.invoke(req).await.unwrap_err();
             match err {
@@ -1052,7 +1726,7 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let cap = generate_test_capability(&sk);
+        let cap = generate_bound_test_capability(&sk, &connector);
         let req = invoke_req(
             json!({
                 "query": "What is Rust?",
@@ -1072,6 +1746,205 @@ mod tests {
         assert_eq!(output["usage"]["total_tokens"], 27);
         assert_eq!(output["finish_reason"], "stop");
         assert_eq!(output["id"], "chatcmpl-test-123");
+        assert_eq!(output["external_content"]["untrusted"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_native_search_with_mock_server() {
+        use wiremock::matchers::{body_json, header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/search"))
+            .and(header("authorization", "Bearer pplx-test-key"))
+            .and(body_json(json!({
+                "query": "rust async runtimes",
+                "max_results": 2,
+                "country": "US",
+                "search_domain_filter": ["rust-lang.org"],
+                "search_language_filter": ["en"],
+                "search_after_date": "5/1/2026",
+                "max_tokens": 1000,
+                "max_tokens_per_page": 250
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "results": [{
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org/",
+                    "snippet": "Rust is a language empowering everyone to build reliable software.",
+                    "date": "2026-05-02"
+                }]
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let (sk, pk) = signing_key_and_pub();
+        let mut connector = PerplexitySearchConnector::new();
+        connector
+            .configure(json!({
+                "api_key": "pplx-test-key",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+        connector.handshake(handshake_req(pk)).await.unwrap();
+
+        let cap = generate_bound_native_search_capability(&sk, &connector);
+        let req = invoke_req_for_operation(
+            OP_NATIVE_SEARCH,
+            json!({
+                "query": "rust async runtimes",
+                "count": 2,
+                "country": "US",
+                "domain_filter": ["rust-lang.org"],
+                "language": "en",
+                "date_after": "2026-05-01",
+                "max_tokens": 1000,
+                "max_tokens_per_page": 250
+            }),
+            cap,
+        );
+
+        let resp = connector.invoke(req).await.unwrap();
+        let output = resp.result.expect("result should be present");
+        assert_eq!(output["provider"], "perplexity");
+        assert_eq!(output["count"], 1);
+        assert_eq!(output["results"][0]["url"], "https://www.rust-lang.org/");
+        assert_eq!(output["results"][0]["site_name"], "www.rust-lang.org");
+        assert!(
+            output["results"][0]["title"]
+                .as_str()
+                .unwrap()
+                .contains("<untrusted-web-search>")
+        );
+        assert_eq!(output["external_content"]["untrusted"], true);
+    }
+
+    #[test]
+    fn native_search_rejects_invalid_filters_before_http() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, pk) = signing_key_and_pub();
+            let mut connector = PerplexitySearchConnector::new();
+            connector.configure(valid_config()).await.unwrap();
+            connector.handshake(handshake_req(pk)).await.unwrap();
+
+            let cap = generate_bound_native_search_capability(&sk, &connector);
+            let req = invoke_req_for_operation(
+                OP_NATIVE_SEARCH,
+                json!({
+                    "query": "test",
+                    "freshness": "week",
+                    "date_after": "2026-05-01"
+                }),
+                cap,
+            );
+
+            let err = connector.invoke(req).await.unwrap_err();
+            match err {
+                FcpError::InvalidRequest { code, message } => {
+                    assert_eq!(code, 1005);
+                    assert!(message.contains("cannot be combined"));
+                }
+                other => assert!(
+                    matches!(other, FcpError::InvalidRequest { .. }),
+                    "expected InvalidRequest, got {other:?}"
+                ),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn native_search_rejects_mixed_domain_filter() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, pk) = signing_key_and_pub();
+            let mut connector = PerplexitySearchConnector::new();
+            connector.configure(valid_config()).await.unwrap();
+            connector.handshake(handshake_req(pk)).await.unwrap();
+
+            let cap = generate_bound_native_search_capability(&sk, &connector);
+            let req = invoke_req_for_operation(
+                OP_NATIVE_SEARCH,
+                json!({
+                    "query": "test",
+                    "domain_filter": ["example.com", "-blocked.example"]
+                }),
+                cap,
+            );
+
+            let err = connector.invoke(req).await.unwrap_err();
+            match err {
+                FcpError::InvalidRequest { message, .. } => {
+                    assert!(message.contains("cannot mix"));
+                }
+                other => assert!(
+                    matches!(other, FcpError::InvalidRequest { .. }),
+                    "expected InvalidRequest, got {other:?}"
+                ),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn chat_query_rejects_native_only_filters() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, pk) = signing_key_and_pub();
+            let mut connector = PerplexitySearchConnector::new();
+            connector.configure(valid_config()).await.unwrap();
+            connector.handshake(handshake_req(pk)).await.unwrap();
+
+            let cap = generate_bound_test_capability(&sk, &connector);
+            let req = invoke_req(
+                json!({
+                    "query": "test",
+                    "date_after": "2026-05-01"
+                }),
+                cap,
+            );
+
+            let err = connector.invoke(req).await.unwrap_err();
+            match err {
+                FcpError::InvalidRequest { message, .. } => {
+                    assert!(message.contains(OP_NATIVE_SEARCH));
+                }
+                other => assert!(
+                    matches!(other, FcpError::InvalidRequest { .. }),
+                    "expected InvalidRequest, got {other:?}"
+                ),
+            }
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn native_search_rejects_openrouter_transport() {
+        fcp_async_core::runtime::block_on_sync(async {
+            let (sk, pk) = signing_key_and_pub();
+            let mut connector = PerplexitySearchConnector::new();
+            connector
+                .configure(json!({ "api_key": "sk-or-v1-test" }))
+                .await
+                .unwrap();
+            connector.handshake(handshake_req(pk)).await.unwrap();
+
+            let cap = generate_bound_native_search_capability(&sk, &connector);
+            let req = invoke_req_for_operation(OP_NATIVE_SEARCH, json!({ "query": "test" }), cap);
+
+            let err = connector.invoke(req).await.unwrap_err();
+            match err {
+                FcpError::InvalidRequest { message, .. } => {
+                    assert!(message.contains("OpenRouter"));
+                }
+                other => assert!(
+                    matches!(other, FcpError::InvalidRequest { .. }),
+                    "expected InvalidRequest, got {other:?}"
+                ),
+            }
+        })
+        .unwrap();
     }
 
     #[fcp_async_core::runtime::test]
@@ -1103,7 +1976,7 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let cap = generate_test_capability(&sk);
+        let cap = generate_bound_test_capability(&sk, &connector);
         let req = invoke_req(json!({ "query": "test" }), cap);
 
         let err = connector.invoke(req).await.unwrap_err();
@@ -1140,11 +2013,106 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let cap = generate_test_capability(&sk);
+        let cap = generate_bound_test_capability(&sk, &connector);
         let req = invoke_req(json!({ "query": "test" }), cap);
 
         let err = connector.invoke(req).await.unwrap_err();
         assert!(matches!(err, FcpError::RateLimited { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_search_rejects_malformed_provider_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "chatcmpl-malformed"
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let (sk, pk) = signing_key_and_pub();
+        let mut connector = PerplexitySearchConnector::new();
+        connector
+            .configure(json!({
+                "api_key": "pplx-test-key",
+                "base_url": mock_server.uri()
+            }))
+            .await
+            .unwrap();
+        connector.handshake(handshake_req(pk)).await.unwrap();
+
+        let cap = generate_bound_test_capability(&sk, &connector);
+        let req = invoke_req(json!({ "query": "test" }), cap);
+
+        let err = connector.invoke(req).await.unwrap_err();
+        match err {
+            FcpError::Internal { message } => {
+                assert!(message.contains("JSON parse error"));
+            }
+            other => assert!(
+                matches!(other, FcpError::Internal { .. }),
+                "expected Internal JSON parse error"
+            ),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn invoke_search_times_out_slow_provider_response() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(100))
+                    .set_body_json(json!({
+                        "id": "chatcmpl-slow",
+                        "model": "sonar",
+                        "object": "chat.completion",
+                        "created": 1_700_000_000u64,
+                        "choices": []
+                    })),
+            )
+            .mount(&mock_server)
+            .await;
+
+        let (sk, pk) = signing_key_and_pub();
+        let mut connector = PerplexitySearchConnector::new();
+        connector
+            .configure(json!({
+                "api_key": "pplx-test-key",
+                "base_url": mock_server.uri(),
+                "request_timeout_ms": 5,
+                "retry": { "max_retries": 0 }
+            }))
+            .await
+            .unwrap();
+        connector.handshake(handshake_req(pk)).await.unwrap();
+
+        let cap = generate_bound_test_capability(&sk, &connector);
+        let req = invoke_req(json!({ "query": "test" }), cap);
+
+        let err = connector.invoke(req).await.unwrap_err();
+        match err {
+            FcpError::External {
+                service, retryable, ..
+            } => {
+                assert_eq!(service, "perplexity");
+                assert!(retryable);
+            }
+            other => assert!(
+                matches!(other, FcpError::External { .. }),
+                "expected retryable External timeout"
+            ),
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1186,7 +2154,7 @@ mod tests {
             .unwrap();
         connector.handshake(handshake_req(pk)).await.unwrap();
 
-        let cap = generate_test_capability(&sk);
+        let cap = generate_bound_test_capability(&sk, &connector);
         let req = invoke_req(
             json!({
                 "query": "What is Rust?",

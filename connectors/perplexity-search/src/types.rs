@@ -97,6 +97,51 @@ pub struct Usage {
     pub total_tokens: u32,
 }
 
+// ── Native Search API ──
+
+/// Request body for the native Perplexity Search API.
+#[derive(Debug, Clone, Serialize)]
+pub struct SearchApiRequest {
+    pub query: String,
+    pub max_results: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_domain_filter: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_recency_filter: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_language_filter: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_after_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search_before_date: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_tokens_per_page: Option<u32>,
+}
+
+/// Top-level response from the native Perplexity Search API.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SearchApiResponse {
+    #[serde(default)]
+    pub results: Vec<SearchApiResult>,
+}
+
+/// A single native search result.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SearchApiResult {
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub snippet: Option<String>,
+    #[serde(default)]
+    pub date: Option<String>,
+}
+
 // ── API Error ──
 
 /// Error response body from the Perplexity API.
@@ -238,6 +283,52 @@ mod tests {
         let detail = resp.error.unwrap();
         assert_eq!(detail.message, "Invalid API Key");
         assert_eq!(detail.error_type.as_deref(), Some("authentication_error"));
+    }
+
+    #[test]
+    fn serialize_search_api_request_omits_none_fields() {
+        let req = SearchApiRequest {
+            query: "rust async".into(),
+            max_results: 5,
+            country: None,
+            search_domain_filter: Some(vec!["rust-lang.org".into()]),
+            search_recency_filter: Some("week".into()),
+            search_language_filter: None,
+            search_after_date: None,
+            search_before_date: None,
+            max_tokens: Some(1000),
+            max_tokens_per_page: None,
+        };
+
+        let json = serde_json::to_value(req).unwrap();
+        assert_eq!(json["query"], "rust async");
+        assert_eq!(json["max_results"], 5);
+        assert_eq!(json["search_domain_filter"][0], "rust-lang.org");
+        assert!(json.get("country").is_none());
+        assert!(json.get("max_tokens_per_page").is_none());
+    }
+
+    #[test]
+    fn deserialize_search_api_response_accepts_missing_fields() {
+        let json = serde_json::json!({
+            "results": [
+                {
+                    "title": "Rust",
+                    "url": "https://www.rust-lang.org/",
+                    "snippet": "Rust language",
+                    "date": "2026-05-01"
+                },
+                {}
+            ]
+        });
+
+        let resp: SearchApiResponse = serde_json::from_value(json).unwrap();
+        assert_eq!(resp.results.len(), 2);
+        assert_eq!(
+            resp.results[0].url.as_deref(),
+            Some("https://www.rust-lang.org/")
+        );
+        assert!(resp.results[1].title.is_none());
     }
 
     #[test]

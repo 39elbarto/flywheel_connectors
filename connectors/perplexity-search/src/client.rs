@@ -1,6 +1,7 @@
 use std::time::Duration;
 
 use reqwest::Client;
+use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
@@ -8,6 +9,7 @@ use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, Retr
 use crate::error::{PerplexityError, PerplexityResult};
 use crate::types::{
     ApiErrorResponse, ChatCompletionRequest, ChatCompletionResponse, PerplexityAuth,
+    SearchApiRequest, SearchApiResponse,
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.perplexity.ai";
@@ -28,6 +30,14 @@ impl std::fmt::Debug for PerplexityClient {
             .field("auth", &self.auth)
             .finish_non_exhaustive()
     }
+}
+
+fn redact_sensitive_material(message: String, sensitive_material: &str) -> String {
+    let auth_material = sensitive_material.trim();
+    if auth_material.len() < 8 {
+        return message;
+    }
+    message.replace(auth_material, "[REDACTED]")
 }
 
 #[allow(clippy::missing_errors_doc)]
@@ -109,9 +119,33 @@ impl PerplexityClient {
         request: &ChatCompletionRequest,
     ) -> PerplexityResult<ChatCompletionResponse> {
         let url = format!("{}/chat/completions", self.base_url);
+        let body = serde_json::to_value(request).map_err(PerplexityError::Json)?;
+        self.post_json(url, body, "chat/completions").await
+    }
+
+    /// Execute a native Perplexity Search API request.
+    ///
+    /// POST /search with structured web-search filters and result metadata.
+    pub async fn native_search(
+        &self,
+        request: &SearchApiRequest,
+    ) -> PerplexityResult<SearchApiResponse> {
+        let url = format!("{}/search", self.base_url);
+        let body = serde_json::to_value(request).map_err(PerplexityError::Json)?;
+        self.post_json(url, body, "search").await
+    }
+
+    async fn post_json<R>(
+        &self,
+        url: String,
+        body: serde_json::Value,
+        endpoint_label: &'static str,
+    ) -> PerplexityResult<R>
+    where
+        R: DeserializeOwned,
+    {
         let ctx = self.runtime.request_context();
         let policy = self.retry_config.to_retry_policy();
-        let body = serde_json::to_value(request).map_err(PerplexityError::Json)?;
         let auth_material = self.auth.api_key.clone();
 
         RetryLoop::execute(&ctx, &policy, |attempt| {
@@ -120,12 +154,16 @@ impl PerplexityClient {
             let auth_material = auth_material.clone();
             let body = body.clone();
             async move {
-                debug!(attempt, "Perplexity chat/completions request");
+                debug!(attempt, endpoint = endpoint_label, "Perplexity request");
 
                 let req = if auth_material.is_empty() {
                     client.post(&url).json(&body)
                 } else {
-                    client.post(&url).bearer_auth(&auth_material).json(&body)
+                    client
+                        .post(&url)
+                        .bearer_auth(&auth_material)
+                        .header(reqwest::header::ACCEPT, "application/json")
+                        .json(&body)
                 };
 
                 let resp = match req.send().await {
@@ -181,6 +219,7 @@ impl PerplexityClient {
                         } else {
                             (text, None)
                         };
+                    let message = redact_sensitive_material(message, &auth_material);
 
                     let err = PerplexityError::Api {
                         status,
@@ -203,7 +242,7 @@ impl PerplexityClient {
                     Err(e) => return AttemptOutcome::Terminal(PerplexityError::Http(e)),
                 };
 
-                match serde_json::from_str::<ChatCompletionResponse>(&text) {
+                match serde_json::from_str::<R>(&text) {
                     Ok(response) => AttemptOutcome::Success(response),
                     Err(e) => {
                         debug!(attempt, "Failed to parse Perplexity response: {e}");
@@ -288,5 +327,12 @@ mod tests {
         .with_base_url("http://localhost:8080");
 
         assert_eq!(client.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn redacts_secret_from_error_text() {
+        let redacted =
+            redact_sensitive_material("bad key pplx-redacted-value".into(), "pplx-redacted-value");
+        assert_eq!(redacted, "bad key [REDACTED]");
     }
 }

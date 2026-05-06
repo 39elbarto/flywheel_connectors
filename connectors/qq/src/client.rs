@@ -1,17 +1,21 @@
 //! `QQ` HTTP client with token caching and `ConnectorRuntime` integration.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use fcp_async_core::sync::Mutex;
+use fcp_sdk::runtime::{InMemoryStreamingSession, StreamingSession};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use reqwest::{Url, header::HeaderMap};
 use serde_json::{Value, json};
 
 use crate::error::{QqError, QqResult};
 use crate::types::{
-    AccessTokenResponse, NormalizedQqEvent, QqConfig, QqGatewayEvent, QqMessageEvent, QqRouting,
-    TOKEN_REFRESH_SAFETY_MARGIN_SECS,
+    AccessTokenResponse, EVENT_QQ_EVENT_DROPPED, EVENT_QQ_MESSAGE_AUTHORIZED, NormalizedQqEvent,
+    QqAccessPolicyMode, QqConfig, QqGatewayEvent, QqGatewayEventProjection,
+    QqGatewayRuntimeConfig, QqGatewayRuntimeSnapshot, QqInboundPolicyConfig,
+    QqInboundPolicyDecision, QqMessageEvent, QqRouting, TOKEN_REFRESH_SAFETY_MARGIN_SECS,
 };
 
 const QQ_GATEWAY_EVENT_TYPE_MAX_CHARS: usize = 64;
@@ -39,6 +43,7 @@ pub struct QqClient {
     config: QqConfig,
     client: reqwest::Client,
     token_cache: Arc<Mutex<Option<CachedAccessToken>>>,
+    gateway_runtime: Arc<Mutex<QqGatewayRuntime>>,
     runtime: ConnectorRuntime,
 }
 
@@ -48,6 +53,7 @@ impl std::fmt::Debug for QqClient {
             .field("config", &self.config)
             .field("client", &"reqwest::Client")
             .field("token_cache", &"token cache")
+            .field("gateway_runtime", &"gateway runtime")
             .field("runtime", &"ConnectorRuntime")
             .finish_non_exhaustive()
     }
@@ -81,6 +87,7 @@ impl QqClient {
                 "request_timeout_ms must be greater than zero".into(),
             ));
         }
+        validate_gateway_config(&config.gateway)?;
 
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(config.request_timeout_ms))
@@ -93,6 +100,7 @@ impl QqClient {
         );
 
         Ok(Self {
+            gateway_runtime: Arc::new(Mutex::new(QqGatewayRuntime::new(config.gateway.clone()))),
             config,
             client,
             token_cache: Arc::new(Mutex::new(None)),
@@ -108,6 +116,25 @@ impl QqClient {
     #[must_use]
     pub const fn config(&self) -> &QqConfig {
         &self.config
+    }
+
+    /// Snapshot the in-memory QQ gateway runtime state.
+    pub async fn gateway_runtime_snapshot(&self) -> QqGatewayRuntimeSnapshot {
+        self.gateway_runtime.lock().await.snapshot()
+    }
+
+    /// Project a raw QQ gateway frame through session state, replay checks, and inbound policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only for malformed message dispatch payloads or invalid runtime
+    /// configuration. Non-message dispatches, duplicates, stale sequences, and policy denials
+    /// are represented as dropped projections.
+    pub async fn project_gateway_event(
+        &self,
+        event: QqGatewayEvent,
+    ) -> QqResult<QqGatewayEventProjection> {
+        self.gateway_runtime.lock().await.project_event(event)
     }
 
     pub fn shutdown(&self) {
@@ -230,6 +257,358 @@ impl QqClient {
 
         response.json().await.map_err(QqError::Http)
     }
+}
+
+#[derive(Debug)]
+pub struct QqGatewayRuntime {
+    config: QqGatewayRuntimeConfig,
+    session: InMemoryStreamingSession,
+    seen_event_ids: VecDeque<String>,
+    heartbeat_sent_count: u64,
+    heartbeat_ack_count: u64,
+    reconnect_attempts: u32,
+    queue_depth: usize,
+    accepted_events: u64,
+    dropped_events: u64,
+    duplicate_events: u64,
+    stale_sequence_events: u64,
+}
+
+impl QqGatewayRuntime {
+    #[must_use]
+    pub fn new(config: QqGatewayRuntimeConfig) -> Self {
+        let mut session = InMemoryStreamingSession::new();
+        if let Some(session_id) = config.restore_session_id.clone() {
+            session.set_resume_token(session_id);
+        }
+        if let Some(sequence) = config.restore_sequence {
+            session.set_sequence(sequence);
+        }
+        Self {
+            config,
+            session,
+            seen_event_ids: VecDeque::new(),
+            heartbeat_sent_count: 0,
+            heartbeat_ack_count: 0,
+            reconnect_attempts: 0,
+            queue_depth: 0,
+            accepted_events: 0,
+            dropped_events: 0,
+            duplicate_events: 0,
+            stale_sequence_events: 0,
+        }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> QqGatewayRuntimeSnapshot {
+        QqGatewayRuntimeSnapshot {
+            enabled: self.config.enabled,
+            session_id: self.session.resume_token(),
+            last_sequence: self.session.sequence(),
+            heartbeat_interval_ms: self.config.heartbeat_interval_ms,
+            heartbeat_sent_count: self.heartbeat_sent_count,
+            heartbeat_ack_count: self.heartbeat_ack_count,
+            reconnect_attempts: self.reconnect_attempts,
+            max_reconnect_attempts: self.config.max_reconnect_attempts,
+            reconnect_backoff_ms: self.config.reconnect_backoff_ms,
+            queue_depth: self.queue_depth,
+            max_queue_depth: self.config.max_queue_depth,
+            dedupe_size: self.seen_event_ids.len(),
+            dedupe_window_size: self.config.dedupe_window_size,
+            accepted_events: self.accepted_events,
+            dropped_events: self.dropped_events,
+            duplicate_events: self.duplicate_events,
+            stale_sequence_events: self.stale_sequence_events,
+        }
+    }
+
+    /// Project a raw QQ gateway frame through the runtime state machine.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when a dispatch event looks like a QQ message event but the
+    /// message payload is malformed or exceeds parser bounds.
+    pub fn project_event(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
+        match event.op {
+            0 => self.project_dispatch(event),
+            1 => {
+                self.session.record_heartbeat_sent(Instant::now());
+                self.heartbeat_sent_count = self.heartbeat_sent_count.saturating_add(1);
+                Ok(self.dropped_projection(event.s, event.id, "heartbeat_request"))
+            }
+            10 => {
+                if let Some(session_id) = event
+                    .d
+                    .as_ref()
+                    .and_then(|data| data.get("session_id"))
+                    .and_then(Value::as_str)
+                    .filter(|session_id| !session_id.trim().is_empty())
+                {
+                    self.session.set_resume_token(session_id.trim().to_string());
+                }
+                Ok(self.dropped_projection(event.s, event.id, "hello"))
+            }
+            11 => {
+                self.session.record_heartbeat_ack(Instant::now());
+                self.heartbeat_ack_count = self.heartbeat_ack_count.saturating_add(1);
+                Ok(self.dropped_projection(event.s, event.id, "heartbeat_ack"))
+            }
+            _ => Ok(self.dropped_projection(event.s, event.id, "unsupported_opcode")),
+        }
+    }
+
+    fn project_dispatch(&mut self, event: QqGatewayEvent) -> QqResult<QqGatewayEventProjection> {
+        if let Some(sequence) = event.s {
+            let current = self.session.sequence();
+            if current != 0 && sequence <= current {
+                self.stale_sequence_events = self.stale_sequence_events.saturating_add(1);
+                return Ok(self.dropped_projection(event.s, event.id, "stale_sequence"));
+            }
+            self.session.set_sequence(sequence);
+        }
+
+        let event_id = gateway_event_id(&event);
+        if let Some(id) = event_id.as_deref()
+            && self.seen_event_ids.iter().any(|seen| seen == id)
+        {
+            self.duplicate_events = self.duplicate_events.saturating_add(1);
+            return Ok(self.dropped_projection(event.s, event_id, "duplicate_event"));
+        }
+
+        let normalized = match normalize_message_event(&event) {
+            Ok(normalized) => normalized,
+            Err(QqError::InvalidInput(message)) if message.contains("not a normalizable") => {
+                return Ok(self.dropped_projection(event.s, event_id, "not_normalizable"));
+            }
+            Err(error) => return Err(error),
+        };
+        self.remember_event_id(event_id.as_deref());
+
+        if self.queue_depth >= self.config.max_queue_depth {
+            return Ok(self.dropped_projection(event.s, event_id, "queue_full"));
+        }
+
+        let policy = evaluate_inbound_policy(&normalized, &self.config.policy);
+        if !policy.allowed {
+            self.dropped_events = self.dropped_events.saturating_add(1);
+            return Ok(QqGatewayEventProjection {
+                accepted: false,
+                topic: EVENT_QQ_EVENT_DROPPED,
+                reason_code: policy.reason_code,
+                sequence: event.s,
+                event_id,
+                normalized: Some(normalized),
+                policy: Some(policy),
+                runtime: self.snapshot(),
+            });
+        }
+
+        self.queue_depth = self.queue_depth.saturating_add(1);
+        self.accepted_events = self.accepted_events.saturating_add(1);
+        Ok(QqGatewayEventProjection {
+            accepted: true,
+            topic: EVENT_QQ_MESSAGE_AUTHORIZED,
+            reason_code: "accepted",
+            sequence: event.s,
+            event_id,
+            normalized: Some(normalized),
+            policy: Some(policy),
+            runtime: self.snapshot(),
+        })
+    }
+
+    fn remember_event_id(&mut self, id: Option<&str>) {
+        let Some(id) = id.filter(|id| !id.trim().is_empty()) else {
+            return;
+        };
+        self.seen_event_ids.push_back(id.to_string());
+        while self.seen_event_ids.len() > self.config.dedupe_window_size {
+            self.seen_event_ids.pop_front();
+        }
+    }
+
+    fn dropped_projection(
+        &mut self,
+        sequence: Option<u64>,
+        event_id: Option<String>,
+        reason_code: &'static str,
+    ) -> QqGatewayEventProjection {
+        self.dropped_events = self.dropped_events.saturating_add(1);
+        QqGatewayEventProjection {
+            accepted: false,
+            topic: EVENT_QQ_EVENT_DROPPED,
+            reason_code,
+            sequence,
+            event_id,
+            normalized: None,
+            policy: None,
+            runtime: self.snapshot(),
+        }
+    }
+}
+
+fn validate_gateway_config(config: &QqGatewayRuntimeConfig) -> QqResult<()> {
+    if config.heartbeat_interval_ms == 0 {
+        return Err(QqError::Config(
+            "gateway.heartbeat_interval_ms must be greater than zero".into(),
+        ));
+    }
+    if config.reconnect_backoff_ms == 0 {
+        return Err(QqError::Config(
+            "gateway.reconnect_backoff_ms must be greater than zero".into(),
+        ));
+    }
+    if config.dedupe_window_size == 0 {
+        return Err(QqError::Config(
+            "gateway.dedupe_window_size must be greater than zero".into(),
+        ));
+    }
+    if config.max_queue_depth == 0 {
+        return Err(QqError::Config(
+            "gateway.max_queue_depth must be greater than zero".into(),
+        ));
+    }
+    if config.dedupe_window_size > 10_000 {
+        return Err(QqError::Config(
+            "gateway.dedupe_window_size must be <= 10000".into(),
+        ));
+    }
+    if config.max_queue_depth > 10_000 {
+        return Err(QqError::Config(
+            "gateway.max_queue_depth must be <= 10000".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn gateway_event_id(event: &QqGatewayEvent) -> Option<String> {
+    event
+        .id
+        .clone()
+        .or_else(|| {
+            event
+                .d
+                .as_ref()
+                .and_then(|data| data.get("id"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .filter(|id| !id.trim().is_empty())
+}
+
+#[must_use]
+pub fn evaluate_inbound_policy(
+    event: &NormalizedQqEvent,
+    policy: &QqInboundPolicyConfig,
+) -> QqInboundPolicyDecision {
+    match event.routing {
+        QqRouting::C2c => evaluate_c2c_policy(event, policy),
+        QqRouting::Group => evaluate_group_policy(event, policy),
+        QqRouting::Channel => evaluate_channel_policy(event, policy),
+    }
+}
+
+fn evaluate_c2c_policy(
+    event: &NormalizedQqEvent,
+    policy: &QqInboundPolicyConfig,
+) -> QqInboundPolicyDecision {
+    let sender_id = event.sender_id.clone();
+    let allowed = mode_allows(policy.dm_policy, sender_id.as_deref(), &policy.dm_allow_from);
+    QqInboundPolicyDecision {
+        allowed,
+        reason_code: if allowed {
+            "c2c_allowed"
+        } else {
+            denied_reason(policy.dm_policy, "c2c")
+        },
+        routing: event.routing,
+        sender_id,
+        target_id: event.sender_id.clone(),
+        mentioned_bot: true,
+    }
+}
+
+fn evaluate_group_policy(
+    event: &NormalizedQqEvent,
+    policy: &QqInboundPolicyConfig,
+) -> QqInboundPolicyDecision {
+    let sender_id = event.sender_id.clone();
+    let group_id = event.group_id.clone();
+    let group_or_sender_allowed = group_id
+        .as_deref()
+        .is_some_and(|id| mode_allows(policy.group_policy, Some(id), &policy.group_allow_from))
+        || sender_id
+            .as_deref()
+            .is_some_and(|id| mode_allows(policy.group_policy, Some(id), &policy.group_allow_from));
+    let mode_allowed = match policy.group_policy {
+        QqAccessPolicyMode::Open => true,
+        QqAccessPolicyMode::Allowlist => group_or_sender_allowed,
+        QqAccessPolicyMode::Disabled => false,
+    };
+    let mentioned_bot = mentions_bot(event, policy);
+    let allowed = mode_allowed && (!policy.group_require_mention || mentioned_bot);
+    let reason_code = if allowed {
+        "group_allowed"
+    } else if !mode_allowed {
+        denied_reason(policy.group_policy, "group")
+    } else {
+        "missing_group_mention"
+    };
+    QqInboundPolicyDecision {
+        allowed,
+        reason_code,
+        routing: event.routing,
+        sender_id,
+        target_id: group_id,
+        mentioned_bot,
+    }
+}
+
+fn evaluate_channel_policy(
+    event: &NormalizedQqEvent,
+    _policy: &QqInboundPolicyConfig,
+) -> QqInboundPolicyDecision {
+    QqInboundPolicyDecision {
+        allowed: true,
+        reason_code: "channel_allowed",
+        routing: event.routing,
+        sender_id: event.sender_id.clone(),
+        target_id: event.channel_id.clone(),
+        mentioned_bot: event.event_type == "AT_MESSAGE_CREATE",
+    }
+}
+
+fn mode_allows(mode: QqAccessPolicyMode, candidate: Option<&str>, allowlist: &[String]) -> bool {
+    match mode {
+        QqAccessPolicyMode::Open => true,
+        QqAccessPolicyMode::Disabled => false,
+        QqAccessPolicyMode::Allowlist => candidate.is_some_and(|candidate| {
+            allowlist.iter().any(|allowed| allowed == candidate)
+        }),
+    }
+}
+
+const fn denied_reason(mode: QqAccessPolicyMode, prefix: &'static str) -> &'static str {
+    match (mode, prefix) {
+        (QqAccessPolicyMode::Disabled, "c2c") => "c2c_disabled",
+        (QqAccessPolicyMode::Disabled, "group") => "group_disabled",
+        (QqAccessPolicyMode::Allowlist, "c2c") => "c2c_sender_not_allowed",
+        (QqAccessPolicyMode::Allowlist, "group") => "group_not_allowed",
+        _ => "policy_denied",
+    }
+}
+
+fn mentions_bot(event: &NormalizedQqEvent, policy: &QqInboundPolicyConfig) -> bool {
+    if event.event_type == "GROUP_AT_MESSAGE_CREATE" {
+        return true;
+    }
+    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+        return false;
+    };
+    event
+        .text
+        .as_deref()
+        .is_some_and(|text| text.contains(bot_user_id))
 }
 
 fn validate_host(raw: &str, allowed_hosts: &[&str]) -> QqResult<()> {

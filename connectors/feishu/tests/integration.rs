@@ -176,24 +176,33 @@ async fn mock_auth_endpoint(server: &MockServer, status: u16) {
         .await;
 }
 
-async fn setup_connector(server: &MockServer) -> (FeishuConnector, Ed25519SigningKey) {
+async fn setup_connector_with_extra_config(
+    server: &MockServer,
+    extra_config: serde_json::Value,
+) -> (FeishuConnector, Ed25519SigningKey) {
     mock_auth_endpoint(server, 200).await;
 
     let mut connector = FeishuConnector::new();
     let signing_key = Ed25519SigningKey::generate();
+    let mut config = json!({
+        "base_url": server.uri(),
+        "app_id": APP_ID,
+        "app_secret": APP_SECRET,
+        "retry": {
+            "max_retries": 0,
+            "initial_delay_ms": 1,
+            "max_delay_ms": 1,
+            "jitter_enabled": false
+        },
+        "request_timeout_ms": 1_000
+    });
+    if let (Some(config), Some(extra_config)) = (config.as_object_mut(), extra_config.as_object()) {
+        for (key, value) in extra_config {
+            config.insert(key.clone(), value.clone());
+        }
+    }
     connector
-        .configure(json!({
-            "base_url": server.uri(),
-            "app_id": APP_ID,
-            "app_secret": APP_SECRET,
-            "retry": {
-                "max_retries": 0,
-                "initial_delay_ms": 1,
-                "max_delay_ms": 1,
-                "jitter_enabled": false
-            },
-            "request_timeout_ms": 1_000
-        }))
+        .configure(config)
         .await
         .unwrap();
     connector
@@ -201,6 +210,10 @@ async fn setup_connector(server: &MockServer) -> (FeishuConnector, Ed25519Signin
         .await
         .unwrap();
     (connector, signing_key)
+}
+
+async fn setup_connector(server: &MockServer) -> (FeishuConnector, Ed25519SigningKey) {
+    setup_connector_with_extra_config(server, json!({})).await
 }
 
 #[fcp_async_core::runtime::test]

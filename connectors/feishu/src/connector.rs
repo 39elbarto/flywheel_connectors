@@ -1041,6 +1041,9 @@ fn validate_webhook_input(input: &Value) -> FcpResult<()> {
     if let Some(path) = input.get("path").and_then(Value::as_str) {
         validate_webhook_ingress_path(path)?;
     }
+    if let Some(path) = input.get("route_path").and_then(Value::as_str) {
+        validate_webhook_ingress_path(path)?;
+    }
     if let Some(max_body_bytes) = input.get("max_body_bytes").and_then(Value::as_u64)
         && (max_body_bytes == 0 || max_body_bytes > FEISHU_WEBHOOK_MAX_BODY_BYTES as u64)
     {
@@ -1181,6 +1184,170 @@ fn optional_bool(value: &Value, field: &str) -> bool {
     value.get(field).and_then(Value::as_bool).unwrap_or(false)
 }
 
+struct WebhookSecurityMaterial<'a> {
+    verification_token: &'a str,
+    encrypt_key: &'a str,
+    source: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct WebhookRequestRegionEvidence<'a> {
+    ingress: Option<&'a FeishuWebhookIngressConfig>,
+    request_path: Option<&'a str>,
+    max_body_bytes: usize,
+    route_checked: bool,
+    content_type_checked: bool,
+    signature_verified: bool,
+    security_material_source: Option<&'static str>,
+}
+
+impl<'a> WebhookRequestRegionEvidence<'a> {
+    fn new(input: &'a Value, ingress: Option<&'a FeishuWebhookIngressConfig>) -> Self {
+        let configured = configured_ingress(ingress);
+        let configured_max_body_bytes =
+            configured.map_or(FEISHU_WEBHOOK_MAX_BODY_BYTES, |cfg| cfg.max_body_bytes);
+        let max_body_bytes = input
+            .get("max_body_bytes")
+            .and_then(Value::as_u64)
+            .and_then(|value| usize::try_from(value).ok())
+            .map_or(configured_max_body_bytes, |value| {
+                value.min(configured_max_body_bytes)
+            });
+        Self {
+            ingress,
+            request_path: forwarded_request_path(input),
+            max_body_bytes,
+            route_checked: false,
+            content_type_checked: false,
+            signature_verified: false,
+            security_material_source: None,
+        }
+    }
+}
+
+fn configured_ingress(
+    ingress: Option<&FeishuWebhookIngressConfig>,
+) -> Option<&FeishuWebhookIngressConfig> {
+    ingress.filter(|config| config.enabled)
+}
+
+fn optional_non_empty_string<'a>(input: &'a Value, field: &str) -> Option<&'a str> {
+    input
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn forwarded_request_path(input: &Value) -> Option<&str> {
+    optional_non_empty_string(input, "path").or_else(|| optional_non_empty_string(input, "route_path"))
+}
+
+fn content_type_is_json(value: &str) -> bool {
+    let media_type = value
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    media_type == "application/json" || media_type.ends_with("+json")
+}
+
+fn resolve_webhook_security_material<'a>(
+    input: &'a Value,
+    ingress: Option<&'a FeishuWebhookIngressConfig>,
+) -> FcpResult<WebhookSecurityMaterial<'a>> {
+    let request_token = optional_non_empty_string(input, "verification_token");
+    let request_key = optional_non_empty_string(input, "encrypt_key");
+    match (request_token, request_key) {
+        (Some(verification_token), Some(encrypt_key)) => Ok(WebhookSecurityMaterial {
+            verification_token,
+            encrypt_key,
+            source: "request",
+        }),
+        (Some(_), None) | (None, Some(_)) => Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: "verification_token and encrypt_key must be provided together or configured together via webhook_ingress".into(),
+        }),
+        (None, None) => {
+            let Some(ingress) = configured_ingress(ingress) else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "verification_token and encrypt_key are required unless webhook_ingress is enabled with configured security material".into(),
+                });
+            };
+            let (Some(verification_token), Some(encrypt_key)) = (
+                ingress.verification_token.as_deref(),
+                ingress.encrypt_key.as_deref(),
+            ) else {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "webhook_ingress is enabled but verification_token or encrypt_key is missing".into(),
+                });
+            };
+            Ok(WebhookSecurityMaterial {
+                verification_token,
+                encrypt_key,
+                source: "webhook_ingress_config",
+            })
+        }
+    }
+}
+
+fn validate_configured_webhook_region(
+    headers: &Map<String, Value>,
+    ingress: Option<&FeishuWebhookIngressConfig>,
+    logs: &mut Vec<Value>,
+    region: &mut WebhookRequestRegionEvidence<'_>,
+) -> Option<(u16, &'static str)> {
+    let ingress = configured_ingress(ingress)?;
+    region.route_checked = true;
+    let Some(request_path) = region.request_path else {
+        logs.push(json!({
+            "layer": "request_region",
+            "code": "route_path_required",
+            "expected_path": ingress.path,
+        }));
+        return Some((404, "route_path_required"));
+    };
+    if request_path != ingress.path {
+        logs.push(json!({
+            "layer": "request_region",
+            "code": "route_path_mismatch",
+            "expected_path": ingress.path,
+            "received_path": request_path,
+        }));
+        return Some((404, "route_path_mismatch"));
+    }
+    logs.push(json!({
+        "layer": "request_region",
+        "code": "route_path_matched",
+        "path": request_path,
+    }));
+
+    if !ingress.require_json_content_type {
+        return None;
+    }
+    region.content_type_checked = true;
+    let Some(content_type) = header_value(headers, "content-type") else {
+        logs.push(json!({"layer": "request_region", "code": "missing_content_type"}));
+        return Some((415, "missing_content_type"));
+    };
+    if !content_type_is_json(content_type) {
+        logs.push(json!({
+            "layer": "request_region",
+            "code": "unsupported_content_type",
+            "content_type": content_type,
+        }));
+        return Some((415, "unsupported_content_type"));
+    }
+    logs.push(json!({
+        "layer": "request_region",
+        "code": "content_type_json",
+    }));
+    None
+}
+
 fn feishu_signature_hex(timestamp: &str, nonce: &str, encrypt_key: &str, raw_body: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(timestamp.as_bytes());
@@ -1246,10 +1413,59 @@ fn webhook_response(
             "method_checked": true,
             "signature_verified": status_code < 400 || reason_code != "invalid_signature",
             "max_body_bytes": FEISHU_WEBHOOK_MAX_BODY_BYTES,
-            "transport": "host_forwarded_request",
+            "transport": FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED,
+            "configured_ingress": false,
+            "path": Value::Null,
+            "configured_path": Value::Null,
+            "route_checked": false,
+            "content_type_checked": false,
+            "listener_socket_opened": false,
+            "event_fanout": "host_consumes_returned_event_record",
         },
         "logs": logs,
     })
+}
+
+fn attach_webhook_request_region(
+    response: &mut Value,
+    region: WebhookRequestRegionEvidence<'_>,
+) {
+    let configured = configured_ingress(region.ingress);
+    response["request_region"] = json!({
+        "method_checked": true,
+        "signature_verified": region.signature_verified,
+        "max_body_bytes": region.max_body_bytes,
+        "transport": FEISHU_WEBHOOK_TRANSPORT_HOST_FORWARDED,
+        "configured_ingress": configured.is_some(),
+        "path": region.request_path,
+        "configured_path": configured.map(|ingress| ingress.path.as_str()),
+        "route_checked": region.route_checked,
+        "content_type_checked": region.content_type_checked,
+        "listener_socket_opened": false,
+        "event_fanout": "host_consumes_returned_event_record",
+        "host_owned_layers": [
+            "request_region",
+            "body_timeout",
+            "body_limit",
+            "load_shed",
+            "concurrency_limit",
+            "rate_limit",
+        ],
+        "security_material_source": region.security_material_source,
+    });
+}
+
+fn webhook_response_with_region(
+    status_code: u16,
+    reason_code: &str,
+    body_bytes: usize,
+    logs: Vec<Value>,
+    response_body: Value,
+    region: WebhookRequestRegionEvidence<'_>,
+) -> Value {
+    let mut response = webhook_response(status_code, reason_code, body_bytes, logs, response_body);
+    attach_webhook_request_region(&mut response, region);
+    response
 }
 
 fn webhook_rejection(
@@ -1259,6 +1475,16 @@ fn webhook_rejection(
     logs: Vec<Value>,
 ) -> Value {
     webhook_response(status_code, reason_code, body_bytes, logs, json!({}))
+}
+
+fn webhook_rejection_with_region(
+    status_code: u16,
+    reason_code: &str,
+    body_bytes: usize,
+    logs: Vec<Value>,
+    region: WebhookRequestRegionEvidence<'_>,
+) -> Value {
+    webhook_response_with_region(status_code, reason_code, body_bytes, logs, json!({}), region)
 }
 
 fn attach_webhook_event_identity(
@@ -1807,14 +2033,21 @@ fn invoke_webhook_ingest_request_with_state(
     input: &Value,
     webhook_state: Option<&FeishuWebhookStateStore>,
 ) -> FcpResult<Value> {
+    invoke_webhook_ingest_request_with_context(input, webhook_state, None)
+}
+
+fn invoke_webhook_ingest_request_with_context(
+    input: &Value,
+    webhook_state: Option<&FeishuWebhookStateStore>,
+    webhook_ingress: Option<&FeishuWebhookIngressConfig>,
+) -> FcpResult<Value> {
     validate_webhook_input(input)?;
     let method = required_string_input(input, "method")?;
     let headers = required_object_input(input, "headers")?;
     let raw_body = required_string_input(input, "raw_body")?;
-    let expected_verifier = required_string_input(input, "verification_token")?;
-    let encrypt_key = required_string_input(input, "encrypt_key")?;
     let policy = required_object_input(input, "policy")?;
     let body_bytes = raw_body.len();
+    let mut region = WebhookRequestRegionEvidence::new(input, webhook_ingress);
     let mut logs = vec![json!({
         "layer": "request_region",
         "code": "received",
@@ -1824,35 +2057,71 @@ fn invoke_webhook_ingest_request_with_state(
 
     if !method.eq_ignore_ascii_case("POST") {
         logs.push(json!({"layer": "request_region", "code": "method_not_allowed"}));
-        return Ok(webhook_rejection(
+        return Ok(webhook_rejection_with_region(
             405,
             "method_not_allowed",
             body_bytes,
             logs,
+            region,
         ));
     }
-    let max_body_bytes = input
-        .get("max_body_bytes")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(FEISHU_WEBHOOK_MAX_BODY_BYTES);
-    if body_bytes > max_body_bytes {
+    if let Some((status_code, reason_code)) =
+        validate_configured_webhook_region(headers, webhook_ingress, &mut logs, &mut region)
+    {
+        return Ok(webhook_rejection_with_region(
+            status_code,
+            reason_code,
+            body_bytes,
+            logs,
+            region,
+        ));
+    }
+    if body_bytes > region.max_body_bytes {
         logs.push(json!({"layer": "request_region", "code": "body_too_large"}));
-        return Ok(webhook_rejection(413, "body_too_large", body_bytes, logs));
+        return Ok(webhook_rejection_with_region(
+            413,
+            "body_too_large",
+            body_bytes,
+            logs,
+            region,
+        ));
     }
     if optional_bool(input, "deadline_exceeded") {
         logs.push(json!({"layer": "request_region", "code": "body_timeout"}));
-        return Ok(webhook_rejection(408, "body_timeout", body_bytes, logs));
+        return Ok(webhook_rejection_with_region(
+            408,
+            "body_timeout",
+            body_bytes,
+            logs,
+            region,
+        ));
     }
     if optional_bool(input, "rate_limited") {
         logs.push(json!({"layer": "request_region", "code": "rate_limited"}));
-        return Ok(webhook_rejection(429, "rate_limited", body_bytes, logs));
+        return Ok(webhook_rejection_with_region(
+            429,
+            "rate_limited",
+            body_bytes,
+            logs,
+            region,
+        ));
     }
 
-    if let Err(reason) = verify_webhook_signature(headers, encrypt_key, raw_body) {
+    let security = resolve_webhook_security_material(input, webhook_ingress)?;
+    region.security_material_source = Some(security.source);
+    logs.push(json!({
+        "layer": "security",
+        "code": "security_material_resolved",
+        "source": security.source,
+    }));
+
+    if let Err(reason) = verify_webhook_signature(headers, security.encrypt_key, raw_body) {
         logs.push(json!({"layer": "security", "code": reason}));
-        return Ok(webhook_rejection(401, reason, body_bytes, logs));
+        return Ok(webhook_rejection_with_region(
+            401, reason, body_bytes, logs, region,
+        ));
     }
+    region.signature_verified = true;
     logs.push(json!({"layer": "security", "code": "signature_verified"}));
 
     let payload: Value = match serde_json::from_str(raw_body) {
@@ -1861,7 +2130,13 @@ fn invoke_webhook_ingest_request_with_state(
             logs.push(
                 json!({"layer": "parser", "code": "malformed_json", "error": err.to_string()}),
             );
-            return Ok(webhook_rejection(400, "malformed_json", body_bytes, logs));
+            return Ok(webhook_rejection_with_region(
+                400,
+                "malformed_json",
+                body_bytes,
+                logs,
+                region,
+            ));
         }
     };
 
@@ -1869,44 +2144,48 @@ fn invoke_webhook_ingest_request_with_state(
         .get("token")
         .and_then(Value::as_str)
         .or_else(|| string_at_path(&payload, &["header", "token"]));
-    if presented_verifier != Some(expected_verifier) {
+    if presented_verifier != Some(security.verification_token) {
         logs.push(json!({"layer": "security", "code": "invalid_verification_token"}));
-        return Ok(webhook_rejection(
+        return Ok(webhook_rejection_with_region(
             401,
             "invalid_verification_token",
             body_bytes,
             logs,
+            region,
         ));
     }
     logs.push(json!({"layer": "security", "code": "verification_token_matched"}));
 
     if payload.get("encrypt").is_some() {
         logs.push(json!({"layer": "security", "code": "encrypted_payload_unsupported"}));
-        return Ok(webhook_rejection(
+        return Ok(webhook_rejection_with_region(
             415,
             "encrypted_payload_unsupported",
             body_bytes,
             logs,
+            region,
         ));
     }
 
     if payload.get("type").and_then(Value::as_str) == Some("url_verification") {
         let Some(challenge) = payload.get("challenge").and_then(Value::as_str) else {
             logs.push(json!({"layer": "parser", "code": "missing_challenge"}));
-            return Ok(webhook_rejection(
+            return Ok(webhook_rejection_with_region(
                 400,
                 "missing_challenge",
                 body_bytes,
                 logs,
+                region,
             ));
         };
         logs.push(json!({"layer": "dispatcher", "code": "challenge_response"}));
-        return Ok(webhook_response(
+        return Ok(webhook_response_with_region(
             200,
             "challenge_response",
             body_bytes,
             logs,
             json!({ "challenge": challenge }),
+            region,
         ));
     }
 
@@ -1920,7 +2199,8 @@ fn invoke_webhook_ingest_request_with_state(
             "code": "duplicate_event",
             "mode": "caller_supplied_seen_event_ids",
         }));
-        let mut duplicate = webhook_response(200, "duplicate_event", body_bytes, logs, json!({}));
+        let mut duplicate =
+            webhook_response_with_region(200, "duplicate_event", body_bytes, logs, json!({}), region);
         attach_webhook_event_identity(&mut duplicate, event_type, &event_id, &dedupe_key);
         return Ok(duplicate);
     }
@@ -1940,8 +2220,14 @@ fn invoke_webhook_ingest_request_with_state(
                     "code": "duplicate_event",
                     "mode": "connector_owned_state",
                 }));
-                let mut duplicate =
-                    webhook_response(200, "duplicate_event", body_bytes, logs, json!({}));
+                let mut duplicate = webhook_response_with_region(
+                    200,
+                    "duplicate_event",
+                    body_bytes,
+                    logs,
+                    json!({}),
+                    region,
+                );
                 attach_webhook_event_identity(&mut duplicate, event_type, &event_id, &dedupe_key);
                 attach_webhook_state_summary(&mut duplicate, Some(webhook_state.summary()?))?;
                 return Ok(duplicate);
@@ -1952,8 +2238,14 @@ fn invoke_webhook_ingest_request_with_state(
                     "code": "inflight_event",
                     "mode": "connector_owned_state",
                 }));
-                let mut in_flight =
-                    webhook_response(200, "inflight_event", body_bytes, logs, json!({}));
+                let mut in_flight = webhook_response_with_region(
+                    200,
+                    "inflight_event",
+                    body_bytes,
+                    logs,
+                    json!({}),
+                    region,
+                );
                 attach_webhook_event_identity(&mut in_flight, event_type, &event_id, &dedupe_key);
                 attach_webhook_state_summary(&mut in_flight, Some(webhook_state.summary()?))?;
                 return Ok(in_flight);
@@ -1982,7 +2274,7 @@ fn invoke_webhook_ingest_request_with_state(
                 )
             })
             .transpose()?;
-        let mut denied = webhook_response(
+        let mut denied = webhook_response_with_region(
             200,
             policy_decision
                 .get("reason_code")
@@ -1991,6 +2283,7 @@ fn invoke_webhook_ingest_request_with_state(
             body_bytes,
             logs,
             json!({}),
+            region,
         );
         attach_webhook_event_identity(&mut denied, event_type, &event_id, &dedupe_key);
         denied["normalized_event"] = normalized_event;
@@ -2012,26 +2305,14 @@ fn invoke_webhook_ingest_request_with_state(
         })
         .transpose()?;
     logs.push(json!({"layer": "dispatcher", "code": "event_normalized"}));
-    let mut response = json!({
-        "accepted": true,
-        "status_code": 200,
-        "reason_code": "event_accepted",
-        "event_emitted": true,
-        "event_id": event_id,
-        "event_type": event_type,
-        "dedupe_key": dedupe_key,
-        "normalized_event": normalized_event,
-        "policy_decision": policy_decision,
-        "response_body": {},
-        "body_bytes": body_bytes,
-        "request_region": {
-            "method_checked": true,
-            "signature_verified": true,
-            "max_body_bytes": max_body_bytes,
-            "transport": "host_forwarded_request",
-        },
-        "logs": logs,
-    });
+    let mut response =
+        webhook_response_with_region(200, "event_accepted", body_bytes, logs, json!({}), region);
+    response["event_emitted"] = json!(true);
+    response["event_id"] = json!(event_id);
+    response["event_type"] = json!(event_type);
+    response["dedupe_key"] = json!(dedupe_key);
+    response["normalized_event"] = normalized_event;
+    response["policy_decision"] = policy_decision;
     attach_webhook_state_summary(&mut response, state_summary)?;
     Ok(response)
 }
@@ -3611,7 +3892,11 @@ impl FeishuConnector {
                 })?
             }
             OP_WEBHOOK_INGEST_REQUEST => {
-                invoke_webhook_ingest_request_with_state(&req.input, Some(&self.webhook_state))?
+                invoke_webhook_ingest_request_with_context(
+                    &req.input,
+                    Some(&self.webhook_state),
+                    self.config.as_ref().map(|config| &config.webhook_ingress),
+                )?
             }
             OP_COMMENTS_PAIRINGS_MANAGE => {
                 let action =
@@ -4234,6 +4519,7 @@ mod tests {
             retry: HttpRetryConfig::default(),
             request_timeout_ms: 30_000,
             webhook_state: FeishuWebhookStateConfig::default(),
+            webhook_ingress: FeishuWebhookIngressConfig::default(),
         };
         let debug_output = format!("{config:?}");
         assert!(!debug_output.contains("secret_value_here"));
@@ -4426,6 +4712,7 @@ mod tests {
             retry: HttpRetryConfig::default(),
             request_timeout_ms: default_request_timeout_ms(),
             webhook_state: FeishuWebhookStateConfig::default(),
+            webhook_ingress: FeishuWebhookIngressConfig::default(),
         });
         connector.client = Some(
             FeishuClient::new(
@@ -4482,9 +4769,12 @@ mod tests {
     }
 
     fn signed_webhook_input(raw_body: String, policy: Value) -> Value {
+        signed_webhook_input_with_key(raw_body, policy, "encrypt-key")
+    }
+
+    fn signed_webhook_input_with_key(raw_body: String, policy: Value, encrypt_key: &str) -> Value {
         let timestamp = "1715000000";
         let nonce = "nonce-123";
-        let encrypt_key = "encrypt-key";
         let signature = feishu_signature_hex(timestamp, nonce, encrypt_key, &raw_body);
         json!({
             "method": "POST",
@@ -4498,6 +4788,17 @@ mod tests {
             "encrypt_key": encrypt_key,
             "policy": policy,
         })
+    }
+
+    fn configured_webhook_ingress() -> FeishuWebhookIngressConfig {
+        FeishuWebhookIngressConfig {
+            enabled: true,
+            verification_token: Some("verify-token".into()),
+            encrypt_key: Some("configured-encrypt-key".into()),
+            ..FeishuWebhookIngressConfig::default()
+        }
+        .validate()
+        .unwrap()
     }
 
     fn message_event_body(sender: &str, chat: &str) -> String {

@@ -4,7 +4,7 @@ use fcp_testkit::provider_contract::{
     ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[fcp_async_core::runtime::test]
 async fn deepgram_provider_contract_is_advertised() {
@@ -64,11 +64,45 @@ async fn deepgram_provider_contract_is_advertised() {
             .with_redaction_payload(ProviderRedactionPayload::new("doctor", doctor))
             .with_redaction_payload(ProviderRedactionPayload::new(
                 "introspection",
-                introspection,
+                introspection.clone(),
             ))
             .with_import_side_effect(ProviderImportSideEffectContract::new(
                 "fcp_deepgram",
                 "provider registry",
             )),
     );
+
+    let realtime = deferred_operation(&introspection, "deepgram.listen.stream");
+    assert_eq!(
+        realtime.get("default_model").and_then(Value::as_str),
+        Some("nova-3")
+    );
+    assert_eq!(
+        realtime.get("default_encoding").and_then(Value::as_str),
+        Some("mulaw")
+    );
+    assert_eq!(
+        realtime
+            .get("default_sample_rate_hz")
+            .and_then(Value::as_u64),
+        Some(8000)
+    );
+    assert!(
+        realtime
+            .get("rationale")
+            .and_then(Value::as_str)
+            .is_some_and(
+                |rationale| rationale.contains("asupersync") && rationale.contains("WebSocket")
+            )
+    );
+}
+
+fn deferred_operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {
+    introspection
+        .get("deferred_operations")
+        .and_then(Value::as_array)
+        .expect("deferred operations should be advertised")
+        .iter()
+        .find(|operation| operation.get("id").and_then(Value::as_str) == Some(id))
+        .expect("expected deferred operation should be advertised")
 }

@@ -405,6 +405,25 @@ impl DeepgramConnector {
                     "output_schema": { "type": "object" }
                 }
             ],
+            "deferred_operations": [
+                {
+                    "id": "deepgram.listen.stream",
+                    "summary": "Stream realtime Deepgram transcription",
+                    "capability": "deepgram.listen.streaming",
+                    "provider_reference": "OpenClaw realtime transcription provider",
+                    "rationale": "Deferred until FCP has an asupersync-supervised WebSocket session lifecycle with audio chunk backpressure, partial/final transcript event fan-out, and cancellation proof.",
+                    "default_model": DEFAULT_TRANSCRIPTION_MODEL,
+                    "default_encoding": "mulaw",
+                    "default_sample_rate_hz": 8000,
+                    "default_endpointing_ms": 800,
+                    "interim_results_default": true,
+                    "required_proof": [
+                        "LabRuntime cancellation drains without orphan transcript tasks",
+                        "loopback WebSocket e2e covers partial/final transcript frames",
+                        "redacted JSONL records audio frame counts and close/finalize behavior"
+                    ]
+                }
+            ],
             "events": [],
             "resource_types": []
         }))

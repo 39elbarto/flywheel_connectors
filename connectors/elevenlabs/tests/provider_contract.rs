@@ -4,7 +4,7 @@ use fcp_testkit::provider_contract::{
     ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[fcp_async_core::runtime::test]
 async fn elevenlabs_provider_contract_is_advertised() {
@@ -76,11 +76,53 @@ async fn elevenlabs_provider_contract_is_advertised() {
             .with_redaction_payload(ProviderRedactionPayload::new("doctor", doctor))
             .with_redaction_payload(ProviderRedactionPayload::new(
                 "introspection",
-                introspection,
+                introspection.clone(),
             ))
             .with_import_side_effect(ProviderImportSideEffectContract::new(
                 "fcp_elevenlabs",
                 "provider registry",
             )),
     );
+
+    let realtime = deferred_operation(&introspection, "elevenlabs.scribe.realtime.transcribe");
+    assert_eq!(
+        realtime.get("default_model_id").and_then(Value::as_str),
+        Some("scribe_v2_realtime")
+    );
+    assert_eq!(
+        realtime.get("default_audio_format").and_then(Value::as_str),
+        Some("ulaw_8000")
+    );
+    assert_eq!(
+        realtime
+            .get("default_commit_strategy")
+            .and_then(Value::as_str),
+        Some("vad")
+    );
+    assert!(
+        realtime
+            .get("rationale")
+            .and_then(Value::as_str)
+            .is_some_and(
+                |rationale| rationale.contains("asupersync") && rationale.contains("WebSocket")
+            )
+    );
+
+    let streaming_tts = deferred_operation(&introspection, "elevenlabs.tts.stream");
+    assert_eq!(
+        streaming_tts
+            .get("default_model_id")
+            .and_then(Value::as_str),
+        Some("eleven_multilingual_v2")
+    );
+}
+
+fn deferred_operation<'a>(introspection: &'a Value, id: &str) -> &'a Value {
+    introspection
+        .get("deferred_operations")
+        .and_then(Value::as_array)
+        .expect("deferred operations should be advertised")
+        .iter()
+        .find(|operation| operation.get("id").and_then(Value::as_str) == Some(id))
+        .expect("expected deferred operation should be advertised")
 }

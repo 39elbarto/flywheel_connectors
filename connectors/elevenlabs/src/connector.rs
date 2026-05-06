@@ -450,6 +450,7 @@ impl ElevenlabsConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": operations_info(),
+            "deferred_operations": deferred_operations_info(),
             "events": [],
             "resource_types": []
         }))
@@ -663,6 +664,40 @@ fn operations_info() -> Vec<Value> {
                 }
             },
             "output_schema": {"type": "object"},
+        }),
+    ]
+}
+
+fn deferred_operations_info() -> Vec<Value> {
+    vec![
+        json!({
+            "id": "elevenlabs.scribe.realtime.transcribe",
+            "summary": "Stream realtime ElevenLabs Scribe transcription",
+            "capability": "elevenlabs.stt.streaming",
+            "provider_reference": "OpenClaw Scribe v2 Realtime transcription provider",
+            "rationale": "Deferred until FCP has an asupersync-supervised WebSocket session lifecycle with VAD commit strategy, partial/final transcript event fan-out, and cancellation proof.",
+            "default_model_id": "scribe_v2_realtime",
+            "default_audio_format": "ulaw_8000",
+            "default_sample_rate_hz": 8000,
+            "default_commit_strategy": "vad",
+            "required_proof": [
+                "LabRuntime cancellation drains without orphan transcript tasks",
+                "loopback WebSocket e2e covers auth, malformed stream, partial/final frames, and clean shutdown",
+                "redacted JSONL records audio frame counts, commit strategy, and close behavior"
+            ]
+        }),
+        json!({
+            "id": "elevenlabs.tts.stream",
+            "summary": "Stream ElevenLabs text-to-speech audio",
+            "capability": "elevenlabs.tts.streaming",
+            "provider_reference": "OpenClaw speech provider streaming synthesis surface",
+            "rationale": "Deferred until FCP models streaming audio chunks separately from request-response TTS and proves supervised cancellation, byte accounting, and redacted evidence.",
+            "default_model_id": DEFAULT_TTS_MODEL_ID,
+            "required_proof": [
+                "LabRuntime cancellation drains without orphan audio tasks",
+                "loopback streaming e2e covers audio chunk fan-out and timeout",
+                "redacted JSONL records audio byte counts without logging audio content"
+            ]
         }),
     ]
 }

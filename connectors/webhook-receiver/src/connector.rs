@@ -1,33 +1,71 @@
 //! FCP Webhook Receiver Connector implementation.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{
+    collections::{BTreeMap, HashMap},
+    net::IpAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
-use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use chrono::DateTime;
+use base64::{
+    Engine,
+    engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
+};
+use chrono::{DateTime, Utc};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityId, ConnectorId, FcpError, FcpResult, IdempotencyClass,
     OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport,
 };
+use hmac::{Hmac, Mac};
 use rand::RngCore;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
+use sha1::Sha1;
+use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq;
 use tracing::{info, instrument};
 
 use crate::{
     client::{DEFAULT_PUBLIC_BASE_URL, WebhookStore},
     error::WebhookReceiverError,
-    types::WebhookProvider,
+    types::{WebhookEndpoint, WebhookEvent, WebhookProvider},
 };
 
 const INGRESS_LISTENER_STATUS: &str = "deferred";
-const INGRESS_LISTENER_MESSAGE: &str = "Native HTTP ingress listener is not implemented in this connector build; endpoint URLs are provisioning metadata only until a host or gateway ingress adapter binds them.";
+const INGRESS_LISTENER_MESSAGE: &str = "Native HTTP ingress listener is not implemented in this connector build; endpoint URLs are provisioning metadata until a host or gateway ingress adapter binds them.";
+const HOST_FORWARDED_INGRESS_STATUS: &str = "available";
+const HOST_FORWARDED_INGRESS_MESSAGE: &str = "Host-forwarded webhook.events.ingest is available for gateway adapters; this connector still opens no socket itself.";
+const GATEWAY_BINDING_STATUS: &str = "unbound";
+const GATEWAY_BINDING_MESSAGE: &str =
+    "No host or gateway HTTP adapter binding is reported by this connector instance.";
+const WEBHOOK_EVENTS_INGEST_OPERATION: &str = "webhook.events.ingest";
+const DEFAULT_MAX_BODY_BYTES: usize = 1024 * 1024;
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+const DEFAULT_BODY_TIMEOUT_MS: u64 = 15_000;
+const MAX_BODY_TIMEOUT_MS: u64 = 120_000;
+const DEFAULT_RATE_LIMIT_WINDOW_MS: u64 = 60_000;
+const DEFAULT_RATE_LIMIT_MAX: u64 = 120;
+const MAX_RATE_LIMIT_MAX: u64 = 10_000;
+const DEFAULT_IN_FLIGHT_MAX: u64 = 8;
+const MAX_IN_FLIGHT_MAX: u64 = 1024;
+const DEFAULT_SIGNATURE_TOLERANCE_SECONDS: i64 = 300;
+const MAX_SIGNATURE_TOLERANCE_SECONDS: i64 = 24 * 60 * 60;
+
+type HmacSha256 = Hmac<Sha256>;
+type HmacSha1 = Hmac<Sha1>;
 
 /// Parsed and validated webhook receiver configuration.
 #[derive(Debug, Clone)]
 struct WebhookReceiverConfig {
     public_base_url: String,
+    max_body_bytes: usize,
+    body_timeout_ms: u64,
+    rate_limit_window_ms: u64,
+    rate_limit_max: u64,
+    in_flight_max: u64,
+    signature_tolerance_seconds: i64,
 }
 
 impl WebhookReceiverConfig {
@@ -40,7 +78,49 @@ impl WebhookReceiverConfig {
             .unwrap_or(DEFAULT_PUBLIC_BASE_URL)
             .to_string();
 
-        Self { public_base_url }
+        Self {
+            public_base_url,
+            max_body_bytes: optional_usize_param(
+                params,
+                "max_body_bytes",
+                DEFAULT_MAX_BODY_BYTES,
+                MAX_BODY_BYTES,
+            ),
+            body_timeout_ms: optional_u64_param(
+                params,
+                "body_timeout_ms",
+                DEFAULT_BODY_TIMEOUT_MS,
+                MAX_BODY_TIMEOUT_MS,
+            ),
+            rate_limit_window_ms: optional_u64_param(
+                params,
+                "rate_limit_window_ms",
+                DEFAULT_RATE_LIMIT_WINDOW_MS,
+                u64::MAX,
+            )
+            .max(1),
+            rate_limit_max: optional_u64_param(
+                params,
+                "rate_limit_max",
+                DEFAULT_RATE_LIMIT_MAX,
+                MAX_RATE_LIMIT_MAX,
+            )
+            .max(1),
+            in_flight_max: optional_u64_param(
+                params,
+                "in_flight_max",
+                DEFAULT_IN_FLIGHT_MAX,
+                MAX_IN_FLIGHT_MAX,
+            )
+            .max(1),
+            signature_tolerance_seconds: optional_i64_param(
+                params,
+                "signature_tolerance_seconds",
+                DEFAULT_SIGNATURE_TOLERANCE_SECONDS,
+                MAX_SIGNATURE_TOLERANCE_SECONDS,
+            )
+            .max(1),
+        }
     }
 
     fn provisioning_readiness(&self, store: &WebhookStore) -> ProvisioningReadiness {
@@ -70,6 +150,10 @@ impl WebhookReceiverConfig {
             public_base_url_message,
             ingress_listener_status: INGRESS_LISTENER_STATUS.to_string(),
             ingress_listener_message: INGRESS_LISTENER_MESSAGE.to_string(),
+            host_forwarded_ingress_status: HOST_FORWARDED_INGRESS_STATUS.to_string(),
+            host_forwarded_ingress_message: HOST_FORWARDED_INGRESS_MESSAGE.to_string(),
+            gateway_binding_status: GATEWAY_BINDING_STATUS.to_string(),
+            gateway_binding_message: GATEWAY_BINDING_MESSAGE.to_string(),
             endpoint_count: store.endpoint_count(),
             active_endpoint_count: store.active_endpoint_count(),
             invalid_endpoint_count: endpoints_with_issues.len(),
@@ -93,6 +177,10 @@ struct ProvisioningReadiness {
     public_base_url_message: String,
     ingress_listener_status: String,
     ingress_listener_message: String,
+    host_forwarded_ingress_status: String,
+    host_forwarded_ingress_message: String,
+    gateway_binding_status: String,
+    gateway_binding_message: String,
     endpoint_count: usize,
     active_endpoint_count: usize,
     invalid_endpoint_count: usize,
@@ -126,6 +214,102 @@ struct DoctorCheck {
     critical: bool,
 }
 
+#[derive(Debug, Clone)]
+struct RateWindow {
+    count: u64,
+    window_start_ms: u64,
+}
+
+#[derive(Debug, Default)]
+struct IngressState {
+    authenticated_rate: HashMap<String, RateWindow>,
+    unauthenticated_rate: HashMap<String, RateWindow>,
+    in_flight: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct IngestBody {
+    payload: Value,
+    raw_body: String,
+    body_bytes: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SignatureProof {
+    provider: String,
+    algorithm: String,
+    header: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<i64>,
+}
+
+impl IngressState {
+    fn enforce_rate_limit(
+        &mut self,
+        stage: &'static str,
+        key: &str,
+        config: &WebhookReceiverConfig,
+        now_ms: u64,
+    ) -> Result<Value, WebhookReceiverError> {
+        let map = if stage == "authenticated" {
+            &mut self.authenticated_rate
+        } else {
+            &mut self.unauthenticated_rate
+        };
+        let window = map.entry(key.to_string()).or_insert(RateWindow {
+            count: 0,
+            window_start_ms: now_ms,
+        });
+        if now_ms.saturating_sub(window.window_start_ms) >= config.rate_limit_window_ms {
+            window.count = 0;
+            window.window_start_ms = now_ms;
+        }
+        window.count = window.count.saturating_add(1);
+        let limited = window.count > config.rate_limit_max;
+        let snapshot = json!({
+            "stage": stage,
+            "key_hash": redacted_hash(key),
+            "count": window.count,
+            "max": config.rate_limit_max,
+            "window_ms": config.rate_limit_window_ms,
+            "limited": limited,
+        });
+        if limited {
+            return Err(WebhookReceiverError::CapacityExceeded {
+                message: format!("{stage} webhook ingest rate limit exceeded"),
+            });
+        }
+        Ok(snapshot)
+    }
+
+    fn try_acquire(
+        &mut self,
+        key: &str,
+        config: &WebhookReceiverConfig,
+    ) -> Result<u64, WebhookReceiverError> {
+        let current = self.in_flight.get(key).copied().unwrap_or(0);
+        if current >= config.in_flight_max {
+            return Err(WebhookReceiverError::CapacityExceeded {
+                message: "webhook ingest in-flight limit exceeded".into(),
+            });
+        }
+        let next = current + 1;
+        self.in_flight.insert(key.to_string(), next);
+        Ok(next)
+    }
+
+    fn release(&mut self, key: &str) {
+        let Some(current) = self.in_flight.get_mut(key) else {
+            return;
+        };
+        if *current <= 1 {
+            self.in_flight.remove(key);
+        } else {
+            *current -= 1;
+        }
+    }
+}
+
 impl DoctorResult {
     #[must_use]
     fn from_checks(checks: Vec<DoctorCheck>) -> Self {
@@ -145,6 +329,7 @@ pub struct WebhookReceiverConnector {
     base: Arc<BaseConnector>,
     config: Option<WebhookReceiverConfig>,
     store: WebhookStore,
+    ingress_state: IngressState,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -159,6 +344,7 @@ impl WebhookReceiverConnector {
             ))),
             config: None,
             store: WebhookStore::new(),
+            ingress_state: IngressState::default(),
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -190,6 +376,10 @@ impl WebhookReceiverConnector {
             "public_base_url": self.store.public_base_url(),
             "ingress_listener_status": INGRESS_LISTENER_STATUS,
             "ingress_listener_message": INGRESS_LISTENER_MESSAGE,
+            "host_forwarded_ingress_status": HOST_FORWARDED_INGRESS_STATUS,
+            "host_forwarded_ingress_message": HOST_FORWARDED_INGRESS_MESSAGE,
+            "gateway_binding_status": GATEWAY_BINDING_STATUS,
+            "gateway_binding_message": GATEWAY_BINDING_MESSAGE,
         }))
     }
 
@@ -220,8 +410,11 @@ impl WebhookReceiverConnector {
             "capabilities": [
                 "webhook.endpoints.read",
                 "webhook.endpoints.write",
-                "webhook.events.read"
-            ]
+                "webhook.events.read",
+                "webhook.events.write"
+            ],
+            "event_caps": webhook_event_caps(),
+            "ingress_binding": ingress_binding_info()
         }))
     }
 
@@ -249,6 +442,10 @@ impl WebhookReceiverConnector {
             "public_base_url": self.config.as_ref().map(|config| config.public_base_url.clone()),
             "ingress_listener_status": INGRESS_LISTENER_STATUS,
             "ingress_listener_message": INGRESS_LISTENER_MESSAGE,
+            "host_forwarded_ingress_status": HOST_FORWARDED_INGRESS_STATUS,
+            "host_forwarded_ingress_message": HOST_FORWARDED_INGRESS_MESSAGE,
+            "gateway_binding_status": GATEWAY_BINDING_STATUS,
+            "gateway_binding_message": GATEWAY_BINDING_MESSAGE,
         }))
     }
 
@@ -310,6 +507,18 @@ impl WebhookReceiverConnector {
                 message: Some(readiness.ingress_listener_message),
                 critical: false,
             });
+            checks.push(DoctorCheck {
+                name: "host_forwarded_ingress".into(),
+                passed: true,
+                message: Some(readiness.host_forwarded_ingress_message),
+                critical: true,
+            });
+            checks.push(DoctorCheck {
+                name: "gateway_binding".into(),
+                passed: false,
+                message: Some(readiness.gateway_binding_message),
+                critical: false,
+            });
         }
 
         let handshaken = self.session_id.is_some();
@@ -367,8 +576,8 @@ impl WebhookReceiverConnector {
         }
 
         let mut report = SelfCheckReport::degraded(
-            "ingress_listener_deferred",
-            readiness.ingress_listener_message.clone(),
+            "gateway_ingress_unbound",
+            readiness.gateway_binding_message.clone(),
         );
         report.details = Some(json!({ "provisioning": readiness }));
         Self::serialize_self_check_report(report)
@@ -385,6 +594,17 @@ impl WebhookReceiverConnector {
                 "status": INGRESS_LISTENER_STATUS,
                 "message": INGRESS_LISTENER_MESSAGE,
             },
+            "host_forwarded_ingress": {
+                "status": HOST_FORWARDED_INGRESS_STATUS,
+                "operation": WEBHOOK_EVENTS_INGEST_OPERATION,
+                "message": HOST_FORWARDED_INGRESS_MESSAGE,
+            },
+            "gateway_binding": {
+                "status": GATEWAY_BINDING_STATUS,
+                "message": GATEWAY_BINDING_MESSAGE,
+            },
+            "event_caps": webhook_event_caps(),
+            "ingress_binding": ingress_binding_info(),
         }))
     }
 
@@ -414,6 +634,7 @@ impl WebhookReceiverConnector {
             "webhook.endpoints.delete" => self.invoke_endpoints_delete(&input),
             "webhook.endpoints.list" => self.invoke_endpoints_list(),
             "webhook.events.recent" => self.invoke_events_recent(&input),
+            WEBHOOK_EVENTS_INGEST_OPERATION => self.invoke_events_ingest(&input),
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -450,6 +671,7 @@ impl WebhookReceiverConnector {
     ) -> FcpResult<serde_json::Value> {
         info!("Webhook Receiver connector shutting down");
         self.store.clear();
+        self.ingress_state = IngressState::default();
         self.config = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
@@ -608,13 +830,154 @@ impl WebhookReceiverConnector {
                     "event_id": evt.event_id,
                     "endpoint_id": evt.endpoint_id,
                     "received_at": evt.received_at.to_rfc3339(),
+                    "headers": evt.headers,
                     "payload": evt.payload,
                     "signature_valid": evt.signature_valid,
+                    "source_ip_hash": evt.source_ip.as_deref().map(redacted_hash),
                 })
             })
             .collect();
 
         Ok(json!({ "events": events_json }))
+    }
+
+    fn invoke_events_ingest(
+        &mut self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, WebhookReceiverError> {
+        let config = self
+            .config
+            .clone()
+            .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                message: "connector must be configured before webhook ingest".into(),
+            })?;
+
+        if request_region_bool(input, "deadline_exceeded")
+            || request_region_bool(input, "cancelled")
+            || request_region_bool(input, "body_timeout")
+        {
+            return Err(WebhookReceiverError::RequestTimeout {
+                message: "webhook request-region deadline was exceeded".into(),
+            });
+        }
+
+        let method = optional_str(input, "method")?.unwrap_or("POST").trim();
+        if !method.eq_ignore_ascii_case("POST") {
+            return Err(WebhookReceiverError::MethodNotAllowed {
+                method: method.to_string(),
+            });
+        }
+
+        let path = require_str(input, "path")?.trim();
+        if path.is_empty() {
+            return Err(WebhookReceiverError::InvalidInput {
+                message: "path must not be empty".into(),
+            });
+        }
+
+        let endpoint = self.store.get_endpoint_by_path(path)?.clone();
+        let headers = parse_headers(input)?;
+        validate_ingest_content_type(&headers, endpoint.provider)?;
+        enforce_source_allowlist(&endpoint, optional_ingest_source_ip(input)?)?;
+
+        let client_key = optional_str(input, "client_id")?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| optional_ingest_source_ip(input).ok().flatten())
+            .unwrap_or_else(|| "unknown-client".into());
+        let rate_key = format!("{path}:{client_key}");
+        let now_ms = now_ms();
+
+        let unauthenticated_rate =
+            self.ingress_state
+                .enforce_rate_limit("unauthenticated", &rate_key, &config, now_ms)?;
+        let in_flight_count = self.ingress_state.try_acquire(&rate_key, &config)?;
+        let result = self.finish_events_ingest(
+            input,
+            &config,
+            &endpoint,
+            &headers,
+            &client_key,
+            &rate_key,
+            &unauthenticated_rate,
+            in_flight_count,
+            now_ms,
+        );
+        self.ingress_state.release(&rate_key);
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_events_ingest(
+        &mut self,
+        input: &serde_json::Value,
+        config: &WebhookReceiverConfig,
+        endpoint: &WebhookEndpoint,
+        headers: &BTreeMap<String, String>,
+        client_key: &str,
+        rate_key: &str,
+        unauthenticated_rate: &Value,
+        in_flight_count: u64,
+        now_ms: u64,
+    ) -> Result<serde_json::Value, WebhookReceiverError> {
+        let body = ingest_body(input, config.max_body_bytes)?;
+        let signature = verify_endpoint_signature(
+            endpoint,
+            headers,
+            &body,
+            input,
+            config.signature_tolerance_seconds,
+        )?;
+        let authenticated_rate =
+            self.ingress_state
+                .enforce_rate_limit("authenticated", rate_key, config, now_ms)?;
+
+        let event_id =
+            event_id_for_ingest(input, headers, &body.payload, endpoint, &body.raw_body)?;
+        let received_at = Utc::now();
+        let source_ip = optional_ingest_source_ip(input)?;
+        let event = WebhookEvent {
+            event_id: event_id.clone(),
+            endpoint_id: endpoint.endpoint_id.clone(),
+            received_at,
+            headers: redacted_event_headers(headers, endpoint),
+            payload: body.payload.clone(),
+            signature_valid: true,
+            source_ip: source_ip.clone(),
+        };
+        self.store.record_event(event)?;
+
+        Ok(json!({
+            "accepted": true,
+            "status_code": 202,
+            "event": {
+                "event_id": event_id,
+                "endpoint_id": endpoint.endpoint_id,
+                "path": endpoint.path,
+                "provider": endpoint.provider,
+                "received_at": received_at.to_rfc3339(),
+                "source_ip_hash": source_ip.as_deref().map(redacted_hash),
+            },
+            "ingest_log": {
+                "decision": "accepted",
+                "path": endpoint.path,
+                "provider": endpoint.provider.label(),
+                "client_hash": redacted_hash(client_key),
+                "body_bytes": body.body_bytes,
+                "signature": signature,
+                "rate_limits": [unauthenticated_rate, authenticated_rate],
+                "in_flight": {
+                    "key_hash": redacted_hash(rate_key),
+                    "count": in_flight_count,
+                    "max": config.in_flight_max,
+                },
+                "body_timeout_ms": config.body_timeout_ms,
+                "max_body_bytes": config.max_body_bytes,
+            },
+            "event_caps": webhook_event_caps(),
+            "ingress_binding": ingress_binding_info(),
+        }))
     }
 }
 
@@ -685,6 +1048,728 @@ fn parse_provider(input: &serde_json::Value) -> Result<WebhookProvider, WebhookR
 
     WebhookProvider::from_label(provider).ok_or_else(|| WebhookReceiverError::InvalidInput {
         message: format!("Unsupported provider preset: {provider}"),
+    })
+}
+
+fn optional_usize_param(
+    input: &serde_json::Value,
+    field: &str,
+    default: usize,
+    max: usize,
+) -> usize {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .map_or(default, |value| value.min(max))
+}
+
+fn optional_u64_param(input: &serde_json::Value, field: &str, default: u64, max: u64) -> u64 {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .filter(|value| *value > 0)
+        .map_or(default, |value| value.min(max))
+}
+
+fn optional_i64_param(input: &serde_json::Value, field: &str, default: i64, max: i64) -> i64 {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_i64)
+        .filter(|value| *value > 0)
+        .map_or(default, |value| value.min(max))
+}
+
+fn optional_usize_field(
+    input: &serde_json::Value,
+    field: &str,
+) -> Result<Option<usize>, WebhookReceiverError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| WebhookReceiverError::InvalidInput {
+            message: format!("{field} must be an unsigned integer"),
+        })?;
+    let converted = usize::try_from(raw).map_err(|_| WebhookReceiverError::InvalidInput {
+        message: format!("{field} is too large"),
+    })?;
+    Ok(Some(converted))
+}
+
+fn parse_headers(
+    input: &serde_json::Value,
+) -> Result<BTreeMap<String, String>, WebhookReceiverError> {
+    let headers = input
+        .get("headers")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| WebhookReceiverError::InvalidInput {
+            message: "headers must be an object of HTTP header strings".into(),
+        })?;
+    let mut parsed = BTreeMap::new();
+    for (key, value) in headers {
+        let value = value
+            .as_str()
+            .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                message: format!("header `{key}` must be a string"),
+            })?
+            .trim()
+            .to_string();
+        parsed.insert(key.to_ascii_lowercase(), value);
+    }
+    Ok(parsed)
+}
+
+fn header_value<'a>(headers: &'a BTreeMap<String, String>, header_name: &str) -> Option<&'a str> {
+    headers
+        .get(&header_name.to_ascii_lowercase())
+        .map(String::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn validate_ingest_content_type(
+    headers: &BTreeMap<String, String>,
+    provider: WebhookProvider,
+) -> Result<(), WebhookReceiverError> {
+    let content_type = header_value(headers, "content-type").ok_or_else(|| {
+        WebhookReceiverError::InvalidInput {
+            message: "Missing required Content-Type header".into(),
+        }
+    })?;
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or(content_type)
+        .trim()
+        .to_ascii_lowercase();
+    let json_like = media_type == "application/json" || media_type.ends_with("+json");
+    let twilio_form =
+        provider == WebhookProvider::Twilio && media_type == "application/x-www-form-urlencoded";
+    if json_like || twilio_form {
+        Ok(())
+    } else {
+        Err(WebhookReceiverError::UnsupportedMediaType {
+            content_type: content_type.to_string(),
+        })
+    }
+}
+
+fn ingest_body(
+    input: &serde_json::Value,
+    max_bytes: usize,
+) -> Result<IngestBody, WebhookReceiverError> {
+    if optional_usize_field(input, "body_size_bytes")?.is_some_and(|size| size > max_bytes) {
+        return Err(WebhookReceiverError::PayloadTooLarge {
+            message: format!("webhook body exceeds maximum size of {max_bytes} bytes"),
+        });
+    }
+
+    if let Some(value) = input.get("body") {
+        let raw_body = value
+            .as_str()
+            .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                message: "body must be a JSON string".into(),
+            })?
+            .to_string();
+        let body_bytes = raw_body.len();
+        if body_bytes > max_bytes {
+            return Err(WebhookReceiverError::PayloadTooLarge {
+                message: format!("webhook body exceeds maximum size of {max_bytes} bytes"),
+            });
+        }
+        let payload = serde_json::from_str(&raw_body).map_err(|error| {
+            WebhookReceiverError::InvalidInput {
+                message: format!("webhook body is not valid JSON: {error}"),
+            }
+        })?;
+        return Ok(IngestBody {
+            payload,
+            raw_body,
+            body_bytes,
+        });
+    }
+
+    let payload =
+        input
+            .get("payload")
+            .cloned()
+            .ok_or_else(|| WebhookReceiverError::InvalidInput {
+                message: "Missing required body or payload field".into(),
+            })?;
+    let raw_body =
+        serde_json::to_string(&payload).map_err(|error| WebhookReceiverError::Internal {
+            message: format!("Failed to serialize webhook payload: {error}"),
+        })?;
+    let body_bytes = raw_body.len();
+    if body_bytes > max_bytes {
+        return Err(WebhookReceiverError::PayloadTooLarge {
+            message: format!("webhook payload exceeds maximum size of {max_bytes} bytes"),
+        });
+    }
+    Ok(IngestBody {
+        payload,
+        raw_body,
+        body_bytes,
+    })
+}
+
+fn optional_ingest_source_ip(
+    input: &serde_json::Value,
+) -> Result<Option<String>, WebhookReceiverError> {
+    for field in ["source_ip", "remote_addr", "client_ip"] {
+        if let Some(value) = optional_str(input, field)?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(Some(value.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn enforce_source_allowlist(
+    endpoint: &WebhookEndpoint,
+    source_ip: Option<String>,
+) -> Result<(), WebhookReceiverError> {
+    if endpoint.allowed_sources.is_empty() {
+        return Ok(());
+    }
+    let source_ip = source_ip.ok_or_else(|| WebhookReceiverError::Forbidden {
+        message: "source_ip is required when allowed_sources is configured".into(),
+    })?;
+    let ip = source_ip
+        .parse::<IpAddr>()
+        .map_err(|_| WebhookReceiverError::Forbidden {
+            message: "source_ip is not a valid IP address".into(),
+        })?;
+    for source in &endpoint.allowed_sources {
+        if source_pattern_matches_ip(source, ip)? {
+            return Ok(());
+        }
+    }
+    Err(WebhookReceiverError::Forbidden {
+        message: "source_ip is not in endpoint allowed_sources".into(),
+    })
+}
+
+fn source_pattern_matches_ip(pattern: &str, ip: IpAddr) -> Result<bool, WebhookReceiverError> {
+    let pattern = pattern.trim();
+    if let Some((addr, prefix)) = pattern.split_once('/') {
+        let base = addr
+            .parse::<IpAddr>()
+            .map_err(|_| WebhookReceiverError::InvalidInput {
+                message: format!("invalid allowed_sources CIDR: {pattern}"),
+            })?;
+        let prefix = prefix
+            .parse::<u8>()
+            .map_err(|_| WebhookReceiverError::InvalidInput {
+                message: format!("invalid allowed_sources CIDR prefix: {pattern}"),
+            })?;
+        return ip_in_cidr(ip, base, prefix).ok_or_else(|| WebhookReceiverError::InvalidInput {
+            message: format!("allowed_sources CIDR family does not match request IP: {pattern}"),
+        });
+    }
+    let exact = pattern
+        .parse::<IpAddr>()
+        .map_err(|_| WebhookReceiverError::InvalidInput {
+            message: format!("invalid allowed_sources IP address: {pattern}"),
+        })?;
+    Ok(exact == ip)
+}
+
+fn ip_in_cidr(ip: IpAddr, base: IpAddr, prefix: u8) -> Option<bool> {
+    match (ip, base) {
+        (IpAddr::V4(ip), IpAddr::V4(base)) if prefix <= 32 => {
+            let mask = ipv4_mask(prefix);
+            Some((u32::from(ip) & mask) == (u32::from(base) & mask))
+        }
+        (IpAddr::V6(ip), IpAddr::V6(base)) if prefix <= 128 => {
+            let mask = ipv6_mask(prefix);
+            Some((u128::from(ip) & mask) == (u128::from(base) & mask))
+        }
+        (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)) => Some(false),
+        _ => None,
+    }
+}
+
+const fn ipv4_mask(prefix: u8) -> u32 {
+    if prefix == 0 {
+        0
+    } else {
+        u32::MAX << (32 - prefix)
+    }
+}
+
+const fn ipv6_mask(prefix: u8) -> u128 {
+    if prefix == 0 {
+        0
+    } else {
+        u128::MAX << (128 - prefix)
+    }
+}
+
+fn verify_endpoint_signature(
+    endpoint: &WebhookEndpoint,
+    headers: &BTreeMap<String, String>,
+    body: &IngestBody,
+    input: &serde_json::Value,
+    tolerance_seconds: i64,
+) -> Result<SignatureProof, WebhookReceiverError> {
+    match endpoint.signature_algorithm.to_ascii_lowercase().as_str() {
+        "hmac-sha256" => verify_hmac_sha256_signature(endpoint, headers, body),
+        "stripe-signature-v1" => {
+            verify_stripe_signature(endpoint, headers, body, tolerance_seconds)
+        }
+        "slack-signature-v0" => verify_slack_signature(endpoint, headers, body, tolerance_seconds),
+        "twilio-hmac-sha1" => verify_twilio_signature(endpoint, headers, body, input),
+        other => Err(WebhookReceiverError::InvalidInput {
+            message: format!("unsupported signature algorithm: {other}"),
+        }),
+    }
+}
+
+fn verify_hmac_sha256_signature(
+    endpoint: &WebhookEndpoint,
+    headers: &BTreeMap<String, String>,
+    body: &IngestBody,
+) -> Result<SignatureProof, WebhookReceiverError> {
+    let signature = header_value(headers, &endpoint.signature_header).ok_or_else(|| {
+        WebhookReceiverError::Unauthorized {
+            message: format!("missing signature header {}", endpoint.signature_header),
+        }
+    })?;
+    verify_hmac_sha256_hex(
+        &endpoint.signing_secret,
+        body.raw_body.as_bytes(),
+        signature,
+    )?;
+    Ok(SignatureProof {
+        provider: endpoint.provider.label().to_string(),
+        algorithm: endpoint.signature_algorithm.clone(),
+        header: endpoint.signature_header.clone(),
+        timestamp: None,
+    })
+}
+
+fn verify_stripe_signature(
+    endpoint: &WebhookEndpoint,
+    headers: &BTreeMap<String, String>,
+    body: &IngestBody,
+    tolerance_seconds: i64,
+) -> Result<SignatureProof, WebhookReceiverError> {
+    let signature = header_value(headers, &endpoint.signature_header).ok_or_else(|| {
+        WebhookReceiverError::Unauthorized {
+            message: format!("missing signature header {}", endpoint.signature_header),
+        }
+    })?;
+    let parsed = parse_stripe_signature_header(signature)?;
+    enforce_signature_timestamp(parsed.timestamp, tolerance_seconds, "Stripe")?;
+    let signed_payload = format!("{}.{}", parsed.timestamp, body.raw_body);
+    let expected = hmac_sha256(&endpoint.signing_secret, signed_payload.as_bytes())?;
+    let verified = parsed.v1_signatures.iter().any(|candidate| {
+        hex::decode(candidate)
+            .is_ok_and(|decoded| decoded.len() == expected.len() && ct_eq(&decoded, &expected))
+    });
+    if !verified {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: "Stripe webhook signature verification failed".into(),
+        });
+    }
+    Ok(SignatureProof {
+        provider: endpoint.provider.label().to_string(),
+        algorithm: endpoint.signature_algorithm.clone(),
+        header: endpoint.signature_header.clone(),
+        timestamp: Some(parsed.timestamp),
+    })
+}
+
+fn verify_slack_signature(
+    endpoint: &WebhookEndpoint,
+    headers: &BTreeMap<String, String>,
+    body: &IngestBody,
+    tolerance_seconds: i64,
+) -> Result<SignatureProof, WebhookReceiverError> {
+    let signature = header_value(headers, &endpoint.signature_header).ok_or_else(|| {
+        WebhookReceiverError::Unauthorized {
+            message: format!("missing signature header {}", endpoint.signature_header),
+        }
+    })?;
+    let timestamp = header_value(headers, "X-Slack-Request-Timestamp")
+        .ok_or_else(|| WebhookReceiverError::Unauthorized {
+            message: "missing X-Slack-Request-Timestamp header".into(),
+        })?
+        .parse::<i64>()
+        .map_err(|_| WebhookReceiverError::Unauthorized {
+            message: "invalid X-Slack-Request-Timestamp header".into(),
+        })?;
+    enforce_signature_timestamp(timestamp, tolerance_seconds, "Slack")?;
+    let signed_payload = format!("v0:{timestamp}:{}", body.raw_body);
+    let expected = hmac_sha256(&endpoint.signing_secret, signed_payload.as_bytes())?;
+    let candidate =
+        signature
+            .strip_prefix("v0=")
+            .ok_or_else(|| WebhookReceiverError::Unauthorized {
+                message: "Slack signature must use v0= prefix".into(),
+            })?;
+    let decoded = hex::decode(candidate).map_err(|_| WebhookReceiverError::Unauthorized {
+        message: "Slack signature is not valid hex".into(),
+    })?;
+    if decoded.len() != expected.len() || !ct_eq(&decoded, &expected) {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: "Slack webhook signature verification failed".into(),
+        });
+    }
+    Ok(SignatureProof {
+        provider: endpoint.provider.label().to_string(),
+        algorithm: endpoint.signature_algorithm.clone(),
+        header: endpoint.signature_header.clone(),
+        timestamp: Some(timestamp),
+    })
+}
+
+fn verify_twilio_signature(
+    endpoint: &WebhookEndpoint,
+    headers: &BTreeMap<String, String>,
+    body: &IngestBody,
+    input: &serde_json::Value,
+) -> Result<SignatureProof, WebhookReceiverError> {
+    let signature = header_value(headers, &endpoint.signature_header).ok_or_else(|| {
+        WebhookReceiverError::Unauthorized {
+            message: format!("missing signature header {}", endpoint.signature_header),
+        }
+    })?;
+    let provided = STANDARD
+        .decode(signature)
+        .map_err(|_| WebhookReceiverError::Unauthorized {
+            message: "Twilio signature is not valid base64".into(),
+        })?;
+    let params = input.get("params").unwrap_or(&body.payload);
+    let sorted = sorted_twilio_params(params)?;
+    let url = optional_str(input, "url")?
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(endpoint.url.as_str());
+    validate_twilio_url(url)?;
+    let mut data_to_sign = url.to_string();
+    for (key, value) in sorted {
+        data_to_sign.push_str(&key);
+        data_to_sign.push_str(&value);
+    }
+    let expected = hmac_sha1(&endpoint.signing_secret, data_to_sign.as_bytes())?;
+    if provided.len() != expected.len() || !ct_eq(&provided, &expected) {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: "Twilio webhook signature verification failed".into(),
+        });
+    }
+    Ok(SignatureProof {
+        provider: endpoint.provider.label().to_string(),
+        algorithm: endpoint.signature_algorithm.clone(),
+        header: endpoint.signature_header.clone(),
+        timestamp: None,
+    })
+}
+
+#[derive(Debug)]
+struct StripeSignatureParts {
+    timestamp: i64,
+    v1_signatures: Vec<String>,
+}
+
+fn parse_stripe_signature_header(
+    header: &str,
+) -> Result<StripeSignatureParts, WebhookReceiverError> {
+    let mut timestamp = None;
+    let mut v1_signatures = Vec::new();
+    for part in header.split(',') {
+        let part = part.trim();
+        if let Some(raw) = part.strip_prefix("t=") {
+            timestamp =
+                Some(
+                    raw.parse::<i64>()
+                        .map_err(|_| WebhookReceiverError::Unauthorized {
+                            message: "Stripe signature timestamp is invalid".into(),
+                        })?,
+                );
+        } else if let Some(signature) = part.strip_prefix("v1=") {
+            let signature = signature.trim();
+            if !signature.is_empty() {
+                v1_signatures.push(signature.to_string());
+            }
+        }
+    }
+    let timestamp = timestamp.ok_or_else(|| WebhookReceiverError::Unauthorized {
+        message: "Stripe signature is missing t= timestamp".into(),
+    })?;
+    if v1_signatures.is_empty() {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: "Stripe signature is missing v1= signature".into(),
+        });
+    }
+    Ok(StripeSignatureParts {
+        timestamp,
+        v1_signatures,
+    })
+}
+
+fn enforce_signature_timestamp(
+    timestamp: i64,
+    tolerance_seconds: i64,
+    provider: &str,
+) -> Result<(), WebhookReceiverError> {
+    let now = now_unix_seconds();
+    if now.abs_diff(timestamp) > tolerance_seconds as u64 {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: format!("{provider} webhook signature timestamp is outside allowed tolerance"),
+        });
+    }
+    Ok(())
+}
+
+fn verify_hmac_sha256_hex(
+    secret: &str,
+    data: &[u8],
+    signature: &str,
+) -> Result<(), WebhookReceiverError> {
+    let expected = hmac_sha256(secret, data)?;
+    let candidate = signature
+        .trim()
+        .strip_prefix("sha256=")
+        .unwrap_or_else(|| signature.trim());
+    let decoded = hex::decode(candidate).map_err(|_| WebhookReceiverError::Unauthorized {
+        message: "HMAC-SHA256 signature is not valid hex".into(),
+    })?;
+    if decoded.len() != expected.len() || !ct_eq(&decoded, &expected) {
+        return Err(WebhookReceiverError::Unauthorized {
+            message: "HMAC-SHA256 webhook signature verification failed".into(),
+        });
+    }
+    Ok(())
+}
+
+fn hmac_sha256(secret: &str, data: &[u8]) -> Result<Vec<u8>, WebhookReceiverError> {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).map_err(|error| {
+        WebhookReceiverError::Internal {
+            message: format!("failed to initialize HMAC-SHA256 verifier: {error}"),
+        }
+    })?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn hmac_sha1(secret: &str, data: &[u8]) -> Result<Vec<u8>, WebhookReceiverError> {
+    let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).map_err(|error| {
+        WebhookReceiverError::Internal {
+            message: format!("failed to initialize HMAC-SHA1 verifier: {error}"),
+        }
+    })?;
+    mac.update(data);
+    Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn ct_eq(left: &[u8], right: &[u8]) -> bool {
+    left.ct_eq(right).into()
+}
+
+fn sorted_twilio_params(
+    params: &serde_json::Value,
+) -> Result<Vec<(String, String)>, WebhookReceiverError> {
+    let params = params
+        .as_object()
+        .ok_or_else(|| WebhookReceiverError::InvalidInput {
+            message: "Twilio payload must be an object of form fields".into(),
+        })?;
+    let mut sorted = Vec::with_capacity(params.len());
+    for (field, value) in params {
+        sorted.push((field.clone(), twilio_param_value_to_string(field, value)?));
+    }
+    sorted.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(sorted)
+}
+
+fn twilio_param_value_to_string(
+    field: &str,
+    value: &serde_json::Value,
+) -> Result<String, WebhookReceiverError> {
+    match value {
+        serde_json::Value::String(value) => Ok(value.clone()),
+        serde_json::Value::Number(value) => Ok(value.to_string()),
+        serde_json::Value::Bool(value) => Ok(value.to_string()),
+        serde_json::Value::Null => Ok(String::new()),
+        serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            Err(WebhookReceiverError::InvalidInput {
+                message: format!(
+                    "Twilio webhook params field `{field}` must be a scalar string, number, boolean, or null"
+                ),
+            })
+        }
+    }
+}
+
+fn validate_twilio_url(url: &str) -> Result<(), WebhookReceiverError> {
+    let parsed = Url::parse(url).map_err(|error| WebhookReceiverError::InvalidInput {
+        message: format!("invalid Twilio webhook url: {error}"),
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(WebhookReceiverError::InvalidInput {
+            message: "Twilio webhook url must use http or https".into(),
+        });
+    }
+    if parsed.host_str().is_none() {
+        return Err(WebhookReceiverError::InvalidInput {
+            message: "Twilio webhook url must include a host".into(),
+        });
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(WebhookReceiverError::InvalidInput {
+            message: "Twilio webhook url must not include userinfo".into(),
+        });
+    }
+    if parsed.fragment().is_some() {
+        return Err(WebhookReceiverError::InvalidInput {
+            message: "Twilio webhook url must not include a fragment".into(),
+        });
+    }
+    Ok(())
+}
+
+fn event_id_for_ingest(
+    input: &serde_json::Value,
+    headers: &BTreeMap<String, String>,
+    payload: &serde_json::Value,
+    endpoint: &WebhookEndpoint,
+    raw_body: &str,
+) -> Result<String, WebhookReceiverError> {
+    for field in ["delivery_id", "event_id", "request_id"] {
+        if let Some(value) = optional_str(input, field)?
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value.to_string());
+        }
+    }
+    for header in [
+        "X-GitHub-Delivery",
+        "X-Request-ID",
+        "Stripe-Request-Id",
+        "X-Slack-Request-Id",
+    ] {
+        if let Some(value) = header_value(headers, header) {
+            return Ok(value.to_string());
+        }
+    }
+    for field in [
+        "id",
+        "event_id",
+        "eventId",
+        "delivery_id",
+        "MessageSid",
+        "SmsSid",
+        "CallSid",
+    ] {
+        if let Some(value) = payload
+            .get(field)
+            .and_then(value_to_event_id_component)
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(value);
+        }
+    }
+    Ok(format!(
+        "evt_{}",
+        redacted_hash(&format!("{}:{raw_body}", endpoint.endpoint_id))
+    ))
+}
+
+fn value_to_event_id_component(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(value) => {
+            let value = value.trim();
+            (!value.is_empty()).then(|| value.to_string())
+        }
+        serde_json::Value::Number(value) => Some(value.to_string()),
+        _ => None,
+    }
+}
+
+fn redacted_event_headers(
+    headers: &BTreeMap<String, String>,
+    endpoint: &WebhookEndpoint,
+) -> HashMap<String, String> {
+    headers
+        .iter()
+        .filter(|(key, _)| !is_sensitive_header(key, endpoint))
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
+fn is_sensitive_header(key: &str, endpoint: &WebhookEndpoint) -> bool {
+    let lower = key.to_ascii_lowercase();
+    lower == endpoint.signature_header.to_ascii_lowercase()
+        || lower.contains("authorization")
+        || lower.contains("cookie")
+        || lower.contains("signature")
+        || lower.contains("secret")
+        || lower.contains("token")
+}
+
+fn request_region_bool(input: &serde_json::Value, field: &str) -> bool {
+    input
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+        })
+}
+
+fn now_unix_seconds() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| {
+            i64::try_from(duration.as_secs()).unwrap_or(i64::MAX)
+        })
+}
+
+fn redacted_hash(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..16])
+}
+
+fn webhook_event_caps() -> serde_json::Value {
+    json!({
+        "streaming": false,
+        "replay": true,
+        "min_buffer_events": crate::client::MAX_EVENTS_PER_ENDPOINT,
+        "host_forwarded_ingress_operation": WEBHOOK_EVENTS_INGEST_OPERATION,
+        "native_listener": false,
+    })
+}
+
+fn ingress_binding_info() -> serde_json::Value {
+    json!({
+        "native_listener": {
+            "status": INGRESS_LISTENER_STATUS,
+            "message": INGRESS_LISTENER_MESSAGE,
+        },
+        "host_forwarded_operation": {
+            "status": HOST_FORWARDED_INGRESS_STATUS,
+            "operation": WEBHOOK_EVENTS_INGEST_OPERATION,
+            "message": HOST_FORWARDED_INGRESS_MESSAGE,
+        },
+        "gateway_adapter": {
+            "status": GATEWAY_BINDING_STATUS,
+            "message": GATEWAY_BINDING_MESSAGE,
+        },
     })
 }
 
@@ -989,6 +2074,60 @@ fn operations_info() -> Vec<OperationInfo> {
                 related: vec![CapabilityId::from_static("webhook.endpoints.list")],
             },
         ),
+        op_info(
+            WEBHOOK_EVENTS_INGEST_OPERATION,
+            "Process a host-forwarded webhook request through provider-aware ingress guardrails",
+            json!({
+                "type": "object",
+                "required": ["method", "path", "headers"],
+                "properties": {
+                    "method": { "type": "string", "description": "HTTP method accepted by the host or gateway adapter; POST is required" },
+                    "path": { "type": "string", "description": "Webhook request path to route to a registered endpoint" },
+                    "url": { "type": "string", "description": "Full public URL used by Twilio signature verification; defaults to endpoint URL" },
+                    "headers": { "type": "object", "description": "HTTP headers after host canonicalization" },
+                    "body": { "type": "string", "description": "Raw JSON body exactly as signed by the provider" },
+                    "payload": { "type": "object", "description": "Already parsed JSON payload when raw body is unavailable" },
+                    "params": { "type": "object", "description": "Twilio form params used for X-Twilio-Signature validation" },
+                    "source_ip": { "type": "string", "description": "Client IP resolved by the host adapter for allowlist enforcement" },
+                    "client_id": { "type": "string", "description": "Rate-limit key component chosen by the host adapter" },
+                    "delivery_id": { "type": "string", "description": "Stable provider delivery ID used for replay suppression" },
+                    "body_size_bytes": { "type": "integer", "description": "Host-measured body length for pre-parse body cap enforcement" },
+                    "deadline_exceeded": { "type": "boolean", "description": "Set true when the host request-region deadline already expired" },
+                    "body_timeout": { "type": "boolean", "description": "Set true when bounded body reading timed out in the host adapter" }
+                }
+            }),
+            json!({
+                "type": "object",
+                "required": ["accepted", "status_code", "event", "ingest_log", "event_caps", "ingress_binding"],
+                "properties": {
+                    "accepted": { "type": "boolean" },
+                    "status_code": { "type": "integer" },
+                    "event": { "type": "object" },
+                    "ingest_log": { "type": "object" },
+                    "event_caps": { "type": "object" },
+                    "ingress_binding": { "type": "object" }
+                }
+            }),
+            "webhook.events.write",
+            RiskLevel::High,
+            SafetyTier::Risky,
+            IdempotencyClass::Strict,
+            AgentHint {
+                when_to_use: "Handle an HTTP webhook request already accepted into an FCP host or gateway request region. The connector verifies route, source, signature, body limits, rate limits, and replay before recording the event.".into(),
+                common_mistakes: vec![
+                    "Calling this operation with a reserialized body that no longer matches the provider signature.".into(),
+                    "Forwarding signature, authorization, or cookie headers into downstream event history.".into(),
+                    "Treating this as a native HTTP listener; the connector still opens no network socket.".into(),
+                ],
+                examples: vec![
+                    r#"{"method": "POST", "path": "/hooks/github", "headers": {"Content-Type": "application/json", "X-Hub-Signature-256": "sha256=..."}, "body": "{\"id\":\"evt_1\"}", "source_ip": "203.0.113.10"}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("webhook.endpoints.create"),
+                    CapabilityId::from_static("webhook.events.recent"),
+                ],
+            },
+        ),
     ]
 }
 
@@ -1021,9 +2160,9 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_4_operations() {
+    fn operations_info_has_6_operations() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 5);
+        assert_eq!(ops.len(), 6);
     }
 
     #[test]
@@ -1096,6 +2235,7 @@ mod tests {
         assert!(ids.contains(&"webhook.endpoints.delete"));
         assert!(ids.contains(&"webhook.endpoints.list"));
         assert!(ids.contains(&"webhook.events.recent"));
+        assert!(ids.contains(&WEBHOOK_EVENTS_INGEST_OPERATION));
     }
 
     #[test]
@@ -1105,7 +2245,7 @@ mod tests {
         assert!(manifest.contains("native HTTP ingress is deferred in this build"));
         assert!(manifest.contains("streaming = false"));
         assert!(!manifest.contains("\"network.listen\""));
-        assert!(manifest.contains("native ingress is explicitly deferred"));
+        assert!(manifest.contains("host-forwarded webhook ingest"));
     }
 
     #[test]
@@ -1301,6 +2441,18 @@ mod tests {
             .find(|o| o.id.as_ref() == "webhook.events.recent")
             .unwrap();
         assert_eq!(op.capability.as_ref(), "webhook.events.read");
+    }
+
+    #[test]
+    fn operations_events_ingest_capability() {
+        let ops = operations_info();
+        let op = ops
+            .iter()
+            .find(|o| o.id.as_ref() == WEBHOOK_EVENTS_INGEST_OPERATION)
+            .unwrap();
+        assert_eq!(op.capability.as_ref(), "webhook.events.write");
+        assert_eq!(op.risk_level, RiskLevel::High);
+        assert_eq!(op.safety_tier, SafetyTier::Risky);
     }
 
     #[test]

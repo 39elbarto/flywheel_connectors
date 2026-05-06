@@ -188,6 +188,16 @@ impl WebhookStore {
             })
     }
 
+    /// Get a specific endpoint by path.
+    pub fn get_endpoint_by_path(&self, path: &str) -> WebhookReceiverResult<&WebhookEndpoint> {
+        self.endpoints
+            .values()
+            .find(|endpoint| endpoint.path == path && endpoint.active)
+            .ok_or_else(|| WebhookReceiverError::EndpointNotFound {
+                endpoint_id: path.into(),
+            })
+    }
+
     /// Snapshot the current endpoints for readiness checks.
     #[must_use]
     pub fn endpoint_snapshots(&self) -> Vec<WebhookEndpoint> {

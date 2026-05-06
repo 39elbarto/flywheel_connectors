@@ -36,6 +36,30 @@ pub enum WebhookReceiverError {
     #[error("Invalid input: {message}")]
     InvalidInput { message: String },
 
+    /// Request was not authorized
+    #[error("Unauthorized: {message}")]
+    Unauthorized { message: String },
+
+    /// Request was authenticated but not allowed by policy
+    #[error("Forbidden: {message}")]
+    Forbidden { message: String },
+
+    /// HTTP method is not supported for webhook ingress
+    #[error("Method not allowed: {method}")]
+    MethodNotAllowed { method: String },
+
+    /// Request content type is not supported
+    #[error("Unsupported media type: {content_type}")]
+    UnsupportedMediaType { content_type: String },
+
+    /// Request body exceeded the configured limit
+    #[error("Payload too large: {message}")]
+    PayloadTooLarge { message: String },
+
+    /// Request body read or request-region deadline timed out
+    #[error("Request timeout: {message}")]
+    RequestTimeout { message: String },
+
     /// Store capacity exceeded
     #[error("Store capacity exceeded: {message}")]
     CapacityExceeded { message: String },
@@ -50,10 +74,16 @@ impl WebhookReceiverError {
     pub const fn is_retryable(&self) -> bool {
         match self {
             Self::CapacityExceeded { .. } => true,
+            Self::RequestTimeout { .. } => true,
             Self::EndpointNotFound { .. }
             | Self::DuplicatePath { .. }
             | Self::DuplicateEvent { .. }
             | Self::InvalidInput { .. }
+            | Self::Unauthorized { .. }
+            | Self::Forbidden { .. }
+            | Self::MethodNotAllowed { .. }
+            | Self::UnsupportedMediaType { .. }
+            | Self::PayloadTooLarge { .. }
             | Self::Json(_)
             | Self::Internal { .. } => false,
         }
@@ -62,7 +92,9 @@ impl WebhookReceiverError {
     #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
-            Self::CapacityExceeded { .. } => Some(Duration::from_secs(5)),
+            Self::CapacityExceeded { .. } | Self::RequestTimeout { .. } => {
+                Some(Duration::from_secs(5))
+            }
             _ => None,
         }
     }
@@ -103,6 +135,48 @@ impl WebhookReceiverError {
                 status_code: Some(400),
                 retryable: false,
                 retry_after: None,
+            },
+            Self::Unauthorized { message } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: message.clone(),
+                status_code: Some(401),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::Forbidden { message } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: message.clone(),
+                status_code: Some(403),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::MethodNotAllowed { method } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: format!("Webhook ingress accepts POST requests only, got {method}"),
+                status_code: Some(405),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::UnsupportedMediaType { content_type } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: format!("Unsupported webhook content type: {content_type}"),
+                status_code: Some(415),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::PayloadTooLarge { message } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: message.clone(),
+                status_code: Some(413),
+                retryable: false,
+                retry_after: None,
+            },
+            Self::RequestTimeout { message } => FcpError::External {
+                service: "webhook-receiver".into(),
+                message: message.clone(),
+                status_code: Some(408),
+                retryable: true,
+                retry_after: self.retry_after(),
             },
             Self::CapacityExceeded { message } => FcpError::External {
                 service: "webhook-receiver".into(),

@@ -13,7 +13,15 @@
 
 use serde_json::json;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
+use fcp_prelude::FcpError;
 use fcp_webhook_receiver::connector::WebhookReceiverConnector;
+use hmac::{Hmac, Mac};
+use sha1::Sha1;
+use sha2::Sha256;
+
+type HmacSha256 = Hmac<Sha256>;
+type HmacSha1 = Hmac<Sha1>;
 
 async fn setup_connector() -> WebhookReceiverConnector {
     let mut c = WebhookReceiverConnector::new();
@@ -24,6 +32,89 @@ async fn setup_connector() -> WebhookReceiverConnector {
         .await
         .unwrap();
     c
+}
+
+async fn setup_connector_with_config(config: serde_json::Value) -> WebhookReceiverConnector {
+    let mut c = WebhookReceiverConnector::new();
+    c.handle_configure(config).await.unwrap();
+    c.handle_handshake(json!({"session_id": "test"}))
+        .await
+        .unwrap();
+    c
+}
+
+async fn create_endpoint(
+    c: &mut WebhookReceiverConnector,
+    path: &str,
+    provider: &str,
+    signing_secret: &str,
+) -> serde_json::Value {
+    c.handle_invoke(json!({
+        "operation_id": "webhook.endpoints.create",
+        "input": {
+            "path": path,
+            "provider": provider,
+            "signing_secret": signing_secret
+        }
+    }))
+    .await
+    .unwrap()
+}
+
+fn hmac_sha256_hex(secret: &str, data: &str) -> String {
+    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(data.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+fn hmac_sha1_base64(secret: &str, data: &str) -> String {
+    let mut mac = HmacSha1::new_from_slice(secret.as_bytes()).unwrap();
+    mac.update(data.as_bytes());
+    STANDARD.encode(mac.finalize().into_bytes())
+}
+
+fn unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        .try_into()
+        .unwrap()
+}
+
+async fn ingest(
+    c: &mut WebhookReceiverConnector,
+    path: &str,
+    headers: serde_json::Value,
+    body: &str,
+    delivery_id: &str,
+) -> Result<serde_json::Value, fcp_prelude::FcpError> {
+    c.handle_invoke(json!({
+        "operation_id": "webhook.events.ingest",
+        "input": {
+            "method": "POST",
+            "path": path,
+            "headers": headers,
+            "body": body,
+            "delivery_id": delivery_id,
+            "source_ip": "203.0.113.10",
+            "client_id": "client-a"
+        }
+    }))
+    .await
+}
+
+fn assert_external_status(result: Result<serde_json::Value, FcpError>, expected_status: u16) {
+    let error = result.expect_err("ingest should fail");
+    let actual_status = match &error {
+        FcpError::External { status_code, .. } => *status_code,
+        _ => None,
+    };
+    assert_eq!(
+        actual_status,
+        Some(expected_status),
+        "expected external status {expected_status}, got {error:?}"
+    );
 }
 
 // -- Lifecycle --
@@ -59,8 +150,10 @@ async fn lifecycle_full() {
         h["ingress_listener_message"]
             .as_str()
             .unwrap()
-            .contains("endpoint URLs are provisioning metadata only")
+            .contains("endpoint URLs are provisioning metadata")
     );
+    assert_eq!(h["host_forwarded_ingress_status"], "available");
+    assert_eq!(h["gateway_binding_status"], "unbound");
 }
 
 #[fcp_async_core::runtime::test]
@@ -82,7 +175,7 @@ async fn lifecycle_self_check_ready() {
     let c = setup_connector().await;
     let check = c.handle_self_check().await.unwrap();
     assert_eq!(check["status"], "degraded");
-    assert_eq!(check["reason_code"], "ingress_listener_deferred");
+    assert_eq!(check["reason_code"], "gateway_ingress_unbound");
     assert_eq!(
         check["details"]["provisioning"]["public_base_url"],
         "https://hooks.flywheel.test"
@@ -113,6 +206,12 @@ async fn lifecycle_doctor_healthy() {
         .expect("ingress listener check");
     assert_eq!(ingress["passed"], false);
     assert_eq!(ingress["critical"], false);
+    let host_forwarded = checks
+        .iter()
+        .find(|check| check["name"] == "host_forwarded_ingress")
+        .expect("host-forwarded ingress check");
+    assert_eq!(host_forwarded["passed"], true);
+    assert_eq!(host_forwarded["critical"], true);
 }
 
 #[fcp_async_core::runtime::test]
@@ -130,6 +229,11 @@ async fn lifecycle_introspect() {
     assert!(!ops.is_empty(), "introspect should list operations");
     assert!(ops[0]["id"].is_string());
     assert_eq!(intro["ingress_listener"]["status"], "deferred");
+    assert_eq!(intro["host_forwarded_ingress"]["status"], "available");
+    assert_eq!(
+        intro["event_caps"]["host_forwarded_ingress_operation"],
+        "webhook.events.ingest"
+    );
 }
 
 #[fcp_async_core::runtime::test]
@@ -145,7 +249,8 @@ async fn lifecycle_handshake_returns_capabilities() {
     assert_eq!(hs["protocol_version"], "2.0");
     assert_eq!(hs["connector_id"], "fcp.webhook-receiver");
     let caps = hs["capabilities"].as_array().unwrap();
-    assert_eq!(caps.len(), 3);
+    assert_eq!(caps.len(), 4);
+    assert!(caps.iter().any(|cap| cap == "webhook.events.write"));
 }
 
 // -- Endpoints Create --
@@ -506,6 +611,429 @@ async fn events_recent_endpoint_not_found() {
     );
 }
 
+// -- Events Ingest --
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_github_signature_records_redacted_event() {
+    let mut c = setup_connector().await;
+    let created = create_endpoint(&mut c, "/hooks/github", "github", "gh_secret").await;
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+    let body = r#"{"zen":"Keep it logically awesome.","id":"evt-github-1"}"#;
+    let signature = format!("sha256={}", hmac_sha256_hex("gh_secret", body));
+
+    let accepted = ingest(
+        &mut c,
+        "/hooks/github",
+        json!({
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature,
+            "Authorization": "Bearer secret",
+            "X-GitHub-Delivery": "delivery-github-1"
+        }),
+        body,
+        "delivery-github-1",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(accepted["accepted"], true);
+    assert_eq!(accepted["status_code"], 202);
+    assert_eq!(accepted["event"]["provider"], "github");
+    assert_eq!(accepted["event"]["event_id"], "delivery-github-1");
+    assert_eq!(
+        accepted["event_caps"]["host_forwarded_ingress_operation"],
+        "webhook.events.ingest"
+    );
+    assert_eq!(
+        accepted["ingress_binding"]["host_forwarded_operation"]["status"],
+        "available"
+    );
+
+    let recent = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.events.recent",
+            "input": {"endpoint_id": endpoint_id}
+        }))
+        .await
+        .unwrap();
+    let events = recent["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["event_id"], "delivery-github-1");
+    assert_eq!(events[0]["payload"]["id"], "evt-github-1");
+    assert_eq!(events[0]["headers"]["content-type"], "application/json");
+    assert!(events[0]["headers"].get("authorization").is_none());
+    assert!(events[0]["headers"].get("x-hub-signature-256").is_none());
+    assert!(events[0]["source_ip_hash"].as_str().is_some());
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_duplicate_delivery_is_rejected_without_recording_second_event() {
+    let mut c = setup_connector().await;
+    let created = create_endpoint(&mut c, "/hooks/dupe", "generic", "secret").await;
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+    let body = r#"{"id":"evt-duplicate"}"#;
+    let headers = json!({
+        "Content-Type": "application/json",
+        "X-Signature": hmac_sha256_hex("secret", body)
+    });
+
+    ingest(
+        &mut c,
+        "/hooks/dupe",
+        headers.clone(),
+        body,
+        "delivery-dupe",
+    )
+    .await
+    .unwrap();
+    assert_external_status(
+        ingest(&mut c, "/hooks/dupe", headers, body, "delivery-dupe").await,
+        409,
+    );
+
+    let recent = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.events.recent",
+            "input": {"endpoint_id": endpoint_id}
+        }))
+        .await
+        .unwrap();
+    assert_eq!(recent["events"].as_array().unwrap().len(), 1);
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_missing_signature_is_rejected_without_recording_event() {
+    let mut c = setup_connector().await;
+    let created = create_endpoint(&mut c, "/hooks/auth", "generic", "secret").await;
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+
+    assert_external_status(
+        ingest(
+            &mut c,
+            "/hooks/auth",
+            json!({"Content-Type": "application/json"}),
+            r#"{"id":"evt-auth"}"#,
+            "delivery-auth",
+        )
+        .await,
+        401,
+    );
+
+    let recent = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.events.recent",
+            "input": {"endpoint_id": endpoint_id}
+        }))
+        .await
+        .unwrap();
+    assert!(recent["events"].as_array().unwrap().is_empty());
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_source_allowlist_accepts_cidr_and_denies_other_sources() {
+    let mut c = setup_connector().await;
+    c.handle_invoke(json!({
+        "operation_id": "webhook.endpoints.create",
+        "input": {
+            "path": "/hooks/allow",
+            "provider": "github",
+            "signing_secret": "allow_secret",
+            "allowed_sources": ["203.0.113.0/24"]
+        }
+    }))
+    .await
+    .unwrap();
+    let body = r#"{"id":"evt-allow"}"#;
+    let signature = format!("sha256={}", hmac_sha256_hex("allow_secret", body));
+
+    ingest(
+        &mut c,
+        "/hooks/allow",
+        json!({
+            "Content-Type": "application/json",
+            "X-Hub-Signature-256": signature.clone()
+        }),
+        body,
+        "delivery-allow",
+    )
+    .await
+    .unwrap();
+
+    assert_external_status(
+        c.handle_invoke(json!({
+            "operation_id": "webhook.events.ingest",
+            "input": {
+                "method": "POST",
+                "path": "/hooks/allow",
+                "headers": {
+                    "Content-Type": "application/json",
+                    "X-Hub-Signature-256": signature
+                },
+                "body": body,
+                "delivery_id": "delivery-denied",
+                "source_ip": "198.51.100.10"
+            }
+        }))
+        .await,
+        403,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_rejects_non_post_method() {
+    let mut c = setup_connector().await;
+    assert_external_status(
+        c.handle_invoke(json!({
+            "operation_id": "webhook.events.ingest",
+            "input": {
+                "method": "GET",
+                "path": "/hooks/method",
+                "headers": {}
+            }
+        }))
+        .await,
+        405,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_rejects_unsupported_media_type() {
+    let mut c = setup_connector().await;
+    create_endpoint(&mut c, "/hooks/media", "generic", "secret").await;
+    let body = r#"{"id":"evt-media"}"#;
+    assert_external_status(
+        ingest(
+            &mut c,
+            "/hooks/media",
+            json!({
+                "Content-Type": "text/plain",
+                "X-Signature": hmac_sha256_hex("secret", body)
+            }),
+            body,
+            "delivery-media",
+        )
+        .await,
+        415,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_rejects_payload_over_configured_cap() {
+    let mut c = setup_connector_with_config(json!({
+        "public_base_url": "https://hooks.flywheel.test",
+        "max_body_bytes": 8
+    }))
+    .await;
+    create_endpoint(&mut c, "/hooks/large", "generic", "secret").await;
+    let body = r#"{"too":"large"}"#;
+    assert_external_status(
+        ingest(
+            &mut c,
+            "/hooks/large",
+            json!({
+                "Content-Type": "application/json",
+                "X-Signature": hmac_sha256_hex("secret", body)
+            }),
+            body,
+            "delivery-large",
+        )
+        .await,
+        413,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_maps_request_region_timeout() {
+    let mut c = setup_connector().await;
+    assert_external_status(
+        c.handle_invoke(json!({
+            "operation_id": "webhook.events.ingest",
+            "input": {
+                "deadline_exceeded": true
+            }
+        }))
+        .await,
+        408,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_rejects_malformed_json_body() {
+    let mut c = setup_connector().await;
+    create_endpoint(&mut c, "/hooks/bad-json", "generic", "secret").await;
+    let body = "{not-json";
+    assert_external_status(
+        ingest(
+            &mut c,
+            "/hooks/bad-json",
+            json!({
+                "Content-Type": "application/json",
+                "X-Signature": hmac_sha256_hex("secret", body)
+            }),
+            body,
+            "delivery-bad-json",
+        )
+        .await,
+        400,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_rejects_deleted_endpoint_path() {
+    let mut c = setup_connector().await;
+    let created = create_endpoint(&mut c, "/hooks/deleted", "generic", "secret").await;
+    let endpoint_id = created["endpoint_id"].as_str().unwrap();
+    c.handle_invoke(json!({
+        "operation_id": "webhook.endpoints.delete",
+        "input": {"endpoint_id": endpoint_id}
+    }))
+    .await
+    .unwrap();
+
+    let body = r#"{"id":"evt-deleted"}"#;
+    assert_external_status(
+        ingest(
+            &mut c,
+            "/hooks/deleted",
+            json!({
+                "Content-Type": "application/json",
+                "X-Signature": hmac_sha256_hex("secret", body)
+            }),
+            body,
+            "delivery-deleted",
+        )
+        .await,
+        404,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_applies_fixed_window_rate_limit() {
+    let mut c = setup_connector_with_config(json!({
+        "public_base_url": "https://hooks.flywheel.test",
+        "rate_limit_max": 1,
+        "rate_limit_window_ms": 60_000
+    }))
+    .await;
+    create_endpoint(&mut c, "/hooks/rate", "generic", "secret").await;
+    let body = r#"{"id":"evt-rate"}"#;
+    let headers = json!({
+        "Content-Type": "application/json",
+        "X-Signature": hmac_sha256_hex("secret", body)
+    });
+
+    ingest(
+        &mut c,
+        "/hooks/rate",
+        headers.clone(),
+        body,
+        "delivery-rate-1",
+    )
+    .await
+    .unwrap();
+    assert_external_status(
+        ingest(&mut c, "/hooks/rate", headers, body, "delivery-rate-2").await,
+        429,
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_accepts_stripe_signature() {
+    let mut c = setup_connector().await;
+    create_endpoint(&mut c, "/hooks/stripe", "stripe", "whsec_stripe").await;
+    let body = r#"{"id":"evt_stripe","type":"payment_intent.succeeded"}"#;
+    let timestamp = unix_seconds();
+    let signed_payload = format!("{timestamp}.{body}");
+    let signature = hmac_sha256_hex("whsec_stripe", &signed_payload);
+
+    let accepted = ingest(
+        &mut c,
+        "/hooks/stripe",
+        json!({
+            "Content-Type": "application/json",
+            "Stripe-Signature": format!("t={timestamp},v1={signature}")
+        }),
+        body,
+        "delivery-stripe",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(accepted["event"]["provider"], "stripe");
+    assert_eq!(accepted["ingest_log"]["signature"]["timestamp"], timestamp);
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_accepts_slack_signature() {
+    let mut c = setup_connector().await;
+    create_endpoint(&mut c, "/hooks/slack", "slack", "slack_secret").await;
+    let body = r#"{"event_id":"Ev123","type":"event_callback"}"#;
+    let timestamp = unix_seconds();
+    let signature = format!(
+        "v0={}",
+        hmac_sha256_hex("slack_secret", &format!("v0:{timestamp}:{body}"))
+    );
+
+    let accepted = ingest(
+        &mut c,
+        "/hooks/slack",
+        json!({
+            "Content-Type": "application/json",
+            "X-Slack-Request-Timestamp": timestamp.to_string(),
+            "X-Slack-Signature": signature
+        }),
+        body,
+        "delivery-slack",
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(accepted["event"]["provider"], "slack");
+    assert_eq!(accepted["ingest_log"]["signature"]["timestamp"], timestamp);
+}
+
+#[fcp_async_core::runtime::test]
+async fn events_ingest_accepts_twilio_signature() {
+    let mut c = setup_connector().await;
+    create_endpoint(&mut c, "/hooks/twilio", "twilio", "twilio_auth").await;
+    let url = "https://hooks.flywheel.test/hooks/twilio";
+    let params = json!({
+        "Body": "Hello",
+        "From": "+15551234567",
+        "MessageSid": "SM123",
+        "To": "+15557654321"
+    });
+    let signature_payload = format!(
+        "{url}Body{}From{}MessageSid{}To{}",
+        "Hello", "+15551234567", "SM123", "+15557654321"
+    );
+    let signature = hmac_sha1_base64("twilio_auth", &signature_payload);
+
+    let accepted = c
+        .handle_invoke(json!({
+            "operation_id": "webhook.events.ingest",
+            "input": {
+                "method": "POST",
+                "path": "/hooks/twilio",
+                "headers": {
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "X-Twilio-Signature": signature
+                },
+                "url": url,
+                "params": params,
+                "payload": params,
+                "delivery_id": "delivery-twilio",
+                "source_ip": "203.0.113.10",
+                "client_id": "client-twilio"
+            }
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(accepted["event"]["provider"], "twilio");
+    assert_eq!(accepted["event"]["event_id"], "delivery-twilio");
+}
+
 // -- Unknown operation / Simulate --
 
 #[fcp_async_core::runtime::test]
@@ -530,6 +1058,7 @@ async fn simulate_known_operations() {
         "webhook.endpoints.delete",
         "webhook.endpoints.list",
         "webhook.events.recent",
+        "webhook.events.ingest",
     ] {
         let result = c
             .handle_simulate(json!({"operation_id": op_id}))

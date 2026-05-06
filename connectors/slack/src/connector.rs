@@ -16,6 +16,11 @@ use fcp_prelude::{
     OperationInfo, Principal, RiskLevel, SafetyTier, SelfCheckReport, SessionId, SimulateRequest,
     SimulateResponse, ThreadInfo, TrustLevel, ZoneId,
 };
+use fcp_sdk::{
+    AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
+    ChatCoordinationConfig, ChatCoordinationSendDecision, ChatCoordinationSendRequest, DmMode,
+    InMemoryThreadOwnershipChecker, ThreadId, ThreadOwnershipChecker, normalize_slack_channel_id,
+};
 use fcp_streaming::{WsClient, WsConnection, WsMessage};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -96,6 +101,139 @@ fn validate_slack_base_url(raw: &str) -> FcpResult<String> {
     }
     Ok(trimmed.trim_end_matches('/').to_string())
 }
+
+fn default_slack_chat_coordination_config() -> ChatCoordinationConfig {
+    ChatCoordinationConfig::new().with_backend(ChatCoordinationBackend::InMemory)
+}
+
+fn parse_slack_chat_coordination_config(
+    value: Option<&Value>,
+    base: ChatCoordinationConfig,
+) -> FcpResult<ChatCoordinationConfig> {
+    let Some(value) = value else {
+        return Ok(base);
+    };
+    let object = value.as_object().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "chat_coordination must be an object".into(),
+    })?;
+
+    let mut config = base;
+    if let Some(enabled) = object.get("enabled") {
+        config = config.with_enabled(json_bool(enabled, "chat_coordination.enabled")?);
+    }
+    if let Some(ttl_seconds) = object.get("ttl_seconds") {
+        let seconds = ttl_seconds.as_u64().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.ttl_seconds must be an integer".into(),
+        })?;
+        if seconds == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.ttl_seconds must be greater than zero".into(),
+            });
+        }
+        config = config.with_ttl(Duration::from_secs(seconds));
+    }
+    if let Some(fail_open) = object.get("fail_open") {
+        config = config.with_fail_open(json_bool(fail_open, "chat_coordination.fail_open")?);
+    }
+    if let Some(allowlist) = object.get("allowlist_channels") {
+        let channels = allowlist.as_array().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.allowlist_channels must be an array".into(),
+        })?;
+        let mut normalized = Vec::with_capacity(channels.len());
+        for channel in channels {
+            let raw = channel.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "chat_coordination.allowlist_channels entries must be strings".into(),
+            })?;
+            let channel_id = normalize_slack_channel_id(raw).ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("invalid Slack channel id in allowlist: {raw}"),
+            })?;
+            normalized.push(channel_id);
+        }
+        config = config.with_allowlist_channels(normalized);
+    }
+    if let Some(backend) = object.get("backend") {
+        config = config.with_backend(parse_chat_coordination_backend(backend)?);
+    }
+    if let Some(dm_mode) = object.get("dm_mode") {
+        config = config.with_dm_mode(parse_chat_coordination_dm_mode(dm_mode)?);
+    }
+    Ok(config)
+}
+
+fn json_bool(value: &Value, field: &str) -> FcpResult<bool> {
+    value.as_bool().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a boolean"),
+    })
+}
+
+fn parse_chat_coordination_backend(value: &Value) -> FcpResult<ChatCoordinationBackend> {
+    match value.as_str() {
+        Some("agent_mail") => Ok(ChatCoordinationBackend::AgentMail),
+        Some("mesh_gossip") => Ok(ChatCoordinationBackend::MeshGossip),
+        Some("in_memory") => Ok(ChatCoordinationBackend::InMemory),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.backend: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.backend must be a string".into(),
+        }),
+    }
+}
+
+fn parse_chat_coordination_dm_mode(value: &Value) -> FcpResult<DmMode> {
+    match value.as_str() {
+        Some("skip") => Ok(DmMode::Skip),
+        Some("treat_as_thread") => Ok(DmMode::TreatAsThread),
+        Some(other) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("unsupported chat_coordination.dm_mode: {other}"),
+        }),
+        None => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "chat_coordination.dm_mode must be a string".into(),
+        }),
+    }
+}
+
+fn slack_effective_chat_coordination_config(
+    config: &ChatCoordinationConfig,
+    channel_id: &ChannelId,
+    thread_id: Option<&ThreadId>,
+) -> ChatCoordinationConfig {
+    if thread_id.is_none() && !slack_channel_is_dm(channel_id) {
+        return config.clone().with_dm_mode(DmMode::Skip);
+    }
+    config.clone()
+}
+
+fn slack_channel_is_dm(channel_id: &ChannelId) -> bool {
+    channel_id
+        .as_str()
+        .chars()
+        .next()
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(&'D'))
+}
+
+fn slack_coordination_audit_records(
+    decision: &ChatCoordinationSendDecision,
+    backend: ChatCoordinationBackend,
+    claimant_agent_id: &AgentId,
+) -> Vec<ChatCoordinationAuditRecord> {
+    let mut records = decision.audit_records().to_vec();
+    if let Some(record) = decision.send_executed_audit_record(backend, claimant_agent_id) {
+        records.push(record);
+    }
+    records
+}
 const SOCKET_RECONNECT_MIN_MS: u64 = 1_000;
 const SOCKET_RECONNECT_MAX_MS: u64 = 30_000;
 const SOCKET_DEFAULT_TOPICS: &[&str] = &[
@@ -127,6 +265,8 @@ pub struct SlackConnector {
     subscribed_topics: Arc<RwLock<Vec<String>>>,
     monitor_policy: Arc<RwLock<SlackMonitorPolicy>>,
     progress_drafts: Arc<RwLock<BTreeMap<String, SlackProgressDraftState>>>,
+    chat_coordination_config: ChatCoordinationConfig,
+    thread_ownership_checker: Arc<dyn ThreadOwnershipChecker>,
 }
 
 impl SlackConnector {
@@ -148,7 +288,21 @@ impl SlackConnector {
             subscribed_topics: Arc::new(RwLock::new(Vec::new())),
             monitor_policy: Arc::new(RwLock::new(SlackMonitorPolicy::default())),
             progress_drafts: Arc::new(RwLock::new(BTreeMap::new())),
+            chat_coordination_config: default_slack_chat_coordination_config(),
+            thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Replace the thread ownership checker used by outbound chat coordination.
+    #[must_use]
+    pub fn with_thread_ownership_checker(
+        mut self,
+        checker: Arc<dyn ThreadOwnershipChecker>,
+        backend: ChatCoordinationBackend,
+    ) -> Self {
+        self.thread_ownership_checker = checker;
+        self.chat_coordination_config = self.chat_coordination_config.with_backend(backend);
+        self
     }
 
     /// Subscribe to emitted connector events.
@@ -195,6 +349,10 @@ impl SlackConnector {
             .filter(|v| !v.is_empty());
         let socket_mode_auth = app_auth.unwrap_or(bot_auth).to_string();
         let monitor_policy = SlackMonitorPolicy::from_config(params.get("monitor_policy"))?;
+        let chat_coordination_config = parse_slack_chat_coordination_config(
+            params.get("chat_coordination"),
+            self.chat_coordination_config.clone(),
+        )?;
 
         let mut client = SlackClient::new(bot_auth).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
@@ -209,6 +367,7 @@ impl SlackConnector {
         *self.subscribed_topics.write().await = Vec::new();
         *self.monitor_policy.write().await = monitor_policy.clone();
         self.progress_drafts.write().await.clear();
+        self.chat_coordination_config = chat_coordination_config;
         self.base.set_configured(true);
         info!("Slack connector configured");
 
@@ -1056,15 +1215,28 @@ impl SlackConnector {
 
         let resource_uris = resource_uris_for_operation(operation, &input)?;
 
-        if let Some(verifier) = &self.verifier {
-            let _bound = verifier.verify_bound(cap, &cap_id, &op_id, &resource_uris)?;
+        let (zone_id, claimant_agent_id) = if let Some(verifier) = &self.verifier {
+            let bound = verifier.verify_bound(cap, &cap_id, &op_id, &resource_uris)?;
+            let claimant_agent_id = bound
+                .claims()
+                .get_principal_id()
+                .or_else(|| bound.claims().get_subject())
+                .unwrap_or_else(|| self.base.instance_id.as_str())
+                .to_owned();
+            (verifier.zone_id.clone(), AgentId::new(claimant_agent_id))
         } else {
             return Err(FcpError::NotConfigured);
-        }
+        };
 
         match operation {
-            "slack.post_message" => self.invoke_post_message(input).await,
-            "slack.reply_thread" => self.invoke_reply_thread(input).await,
+            "slack.post_message" => {
+                self.invoke_post_message(input, zone_id, claimant_agent_id)
+                    .await
+            }
+            "slack.reply_thread" => {
+                self.invoke_reply_thread(input, zone_id, claimant_agent_id)
+                    .await
+            }
             "slack.update_progress_draft" => self.invoke_update_progress_draft(input).await,
             "slack.get_channel_history" => self.invoke_get_channel_history(input).await,
             "slack.search_messages" => self.invoke_search_messages(input).await,
@@ -1082,11 +1254,26 @@ impl SlackConnector {
 
     // ── Operation implementations ─────────────────────────────────
 
-    async fn invoke_post_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_post_message(
+        &self,
+        input: serde_json::Value,
+        zone_id: ZoneId,
+        claimant_agent_id: AgentId,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
         let thread_ts = input.get("thread_ts").and_then(|v| v.as_str());
+        let coordination = self
+            .claim_before_slack_send(zone_id, channel, thread_ts, claimant_agent_id.clone())
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Slack post_message denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
 
         let message = client
             .post_message(channel, text, thread_ts)
@@ -1100,14 +1287,37 @@ impl SlackConnector {
             timestamp: message.ts.clone(),
         };
 
-        Ok(json!({ "message": message, "receipt": receipt }))
+        Ok(json!({
+            "message": message,
+            "receipt": receipt,
+            "coordination": slack_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            ),
+        }))
     }
 
-    async fn invoke_reply_thread(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
+    async fn invoke_reply_thread(
+        &self,
+        input: serde_json::Value,
+        zone_id: ZoneId,
+        claimant_agent_id: AgentId,
+    ) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
         let channel = require_str(&input, "channel")?;
         let text = require_str(&input, "text")?;
         let thread_ts = require_str(&input, "thread_ts")?;
+        let coordination = self
+            .claim_before_slack_send(zone_id, channel, Some(thread_ts), claimant_agent_id.clone())
+            .await;
+        if let Some(error) = coordination.denial_error() {
+            warn!(
+                error = %error,
+                "Slack reply_thread denied by chat coordination"
+            );
+            return Err(error.clone());
+        }
 
         let message = client
             .post_message(channel, text, Some(thread_ts))
@@ -1121,7 +1331,46 @@ impl SlackConnector {
             timestamp: message.ts.clone(),
         };
 
-        Ok(json!({ "message": message, "receipt": receipt }))
+        Ok(json!({
+            "message": message,
+            "receipt": receipt,
+            "coordination": slack_coordination_audit_records(
+                &coordination,
+                self.chat_coordination_config.backend(),
+                &claimant_agent_id,
+            ),
+        }))
+    }
+
+    async fn claim_before_slack_send(
+        &self,
+        zone_id: ZoneId,
+        channel: &str,
+        thread_ts: Option<&str>,
+        claimant_agent_id: AgentId,
+    ) -> ChatCoordinationSendDecision {
+        let channel_id =
+            normalize_slack_channel_id(channel).unwrap_or_else(|| ChannelId::new(channel));
+        let thread_id = thread_ts.map(ThreadId::new);
+        let config = slack_effective_chat_coordination_config(
+            &self.chat_coordination_config,
+            &channel_id,
+            thread_id.as_ref(),
+        );
+        let cx = fcp_async_core::compatibility_cx();
+        config
+            .claim_before_send(
+                &cx,
+                self.thread_ownership_checker.as_ref(),
+                ChatCoordinationSendRequest::new(
+                    zone_id,
+                    self.base.id.clone(),
+                    channel_id,
+                    thread_id,
+                    claimant_agent_id,
+                ),
+            )
+            .await
     }
 
     async fn invoke_update_progress_draft(

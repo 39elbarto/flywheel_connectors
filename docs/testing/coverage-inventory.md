@@ -450,7 +450,7 @@ The family tables below therefore group connectors into planning families while 
 | intercom | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | linkedin | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | logseq | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
-| mcp-bridge | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+| mcp-bridge | knowledge, operational | Y | Y | Y | N | N | Y | Y | HTTP Streamable MCP upstream only | mock-backed e2e only; no MCP stdio child lifecycle |
 | metabase | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | mixpanel | knowledge | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | monday | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
@@ -466,6 +466,22 @@ The family tables below therefore group connectors into planning families while 
 | todoist | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | trello | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
 | youtube | knowledge, operational | Y | Y | Y | N | N | Y | Y | undocumented | mock-backed e2e only |
+
+#### MCP Bridge Transport Boundary
+
+`connectors/mcp-bridge` is intentionally scoped to upstream MCP servers exposed
+over HTTP Streamable JSON-RPC. Its client surface is `connectors/mcp-bridge/src/client.rs`,
+and it does not launch or supervise upstream MCP stdio server subprocesses.
+PID tracking, stderr draining, shutdown, and reaping for FCP connector
+subprocesses are host-owned by `ConnectorProcessRunner` in
+`crates/fcp-host/src/bin/fcp-host.rs`.
+
+The `fwc serve-mcp` stdio JSON-RPC surface is the opposite direction: it exposes
+discovered FCP connectors as MCP tools for agents. It is not the upstream
+transport used by `mcp-bridge`. If `mcp-bridge` grows upstream MCP stdio support
+later, that work must land as a separate host/sandbox-owned design with command
+allowlisting, PID tracking, deterministic shutdown/reap tests, and `host_e2e`
+proof that no orphan child process or socket remains.
 
 ### Stateful Ingress
 

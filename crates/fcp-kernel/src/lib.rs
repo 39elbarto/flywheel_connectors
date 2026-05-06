@@ -216,8 +216,9 @@ pub use fcp_core::{
 // ── Credential & Secret Management ──────────────────────────────────
 
 pub use fcp_core::{
-    CredentialApplication, CredentialBackend, CredentialBackendError, CredentialId,
-    CredentialObject, CredentialValidationError,
+    CredentialApplication, CredentialBackend, CredentialBackendError, CredentialErrorKind,
+    CredentialErrorReport, CredentialId, CredentialLease, CredentialLeaseRelease,
+    CredentialLeaseRequest, CredentialObject, CredentialValidationError, LeaseToken,
 };
 
 pub use fcp_core::{
@@ -457,6 +458,14 @@ mod tests {
         let id = CredentialId::new();
         let _ = id.as_uuid();
         let _: CredentialApplication = CredentialApplication::HttpAuthorizationBearer;
+        let lease = CredentialLease::new(
+            id,
+            LeaseToken::new("lease:credential:kernel-test").expect("lease token"),
+        );
+        let _: CredentialLeaseRelease = lease.release_request();
+        let _: CredentialLeaseRequest = CredentialLeaseRequest::new(id);
+        let _: CredentialErrorReport =
+            CredentialErrorReport::new(id, lease.lease_token, CredentialErrorKind::RateLimited);
     }
 
     #[test]

@@ -52,7 +52,14 @@ pub use fcp_core::{ThreadInfo, ThreadKind};
 pub use crate::{ConnectorMetrics, HealthSnapshot, HealthState, SelfCheckReport, SelfCheckStatus};
 
 // Identifiers
-pub use crate::{ConnectorId, InstanceId, ObjectId, RequestId, ZoneId};
+pub use crate::{ConnectorId, CredentialId, InstanceId, ObjectId, RequestId, ZoneId};
+
+// Credential lease helpers
+pub use crate::{
+    CredentialErrorKind, CredentialErrorReport, CredentialLease, CredentialLeaseClient,
+    CredentialLeaseClientError, CredentialLeaseCxExt, CredentialLeaseRelease,
+    CredentialLeaseRequest, LeaseToken,
+};
 
 // Execution-form-neutral contract
 pub use crate::{

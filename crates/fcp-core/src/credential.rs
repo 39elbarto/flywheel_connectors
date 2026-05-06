@@ -18,7 +18,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{ObjectHeader, SecretId, ZoneId};
+use crate::{LeaseToken, ObjectHeader, SecretId, ZoneId};
 
 /// Canonical credential identifier (NORMATIVE).
 ///
@@ -351,6 +351,158 @@ impl fmt::Display for CredentialValidationError {
 
 impl std::error::Error for CredentialValidationError {}
 
+/// Connector request for a host-selected credential lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialLeaseRequest {
+    /// Existing connector credential reference.
+    pub credential_id: CredentialId,
+    /// Optional provider hint, such as `openai` or `anthropic`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Optional operation name for pool strategy/audit context.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<String>,
+}
+
+impl CredentialLeaseRequest {
+    /// Build a lease request for an existing credential reference.
+    #[must_use]
+    pub const fn new(credential_id: CredentialId) -> Self {
+        Self {
+            credential_id,
+            provider: None,
+            operation: None,
+        }
+    }
+
+    /// Attach a provider hint.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// Attach an operation hint.
+    #[must_use]
+    pub fn with_operation(mut self, operation: impl Into<String>) -> Self {
+        self.operation = Some(operation.into());
+        self
+    }
+}
+
+/// Secretless credential lease granted by the host.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialLease {
+    /// Concrete credential selected for this lease.
+    pub credential_id: CredentialId,
+    /// Opaque, display-safe lease authority token.
+    pub lease_token: LeaseToken,
+    /// Provider that issued the lease, when known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+}
+
+impl CredentialLease {
+    /// Build a secretless credential lease handle.
+    #[must_use]
+    pub const fn new(credential_id: CredentialId, lease_token: LeaseToken) -> Self {
+        Self {
+            credential_id,
+            lease_token,
+            provider: None,
+        }
+    }
+
+    /// Attach the provider that selected this lease.
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl Into<String>) -> Self {
+        self.provider = Some(provider.into());
+        self
+    }
+
+    /// Build the release request for this lease.
+    #[must_use]
+    pub fn release_request(&self) -> CredentialLeaseRelease {
+        CredentialLeaseRelease::new(self.credential_id, self.lease_token.clone())
+    }
+}
+
+/// Request to release a previously granted credential lease.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialLeaseRelease {
+    /// Credential that was leased.
+    pub credential_id: CredentialId,
+    /// Opaque lease token returned by the host.
+    pub lease_token: LeaseToken,
+}
+
+impl CredentialLeaseRelease {
+    /// Build a lease release request.
+    #[must_use]
+    pub const fn new(credential_id: CredentialId, lease_token: LeaseToken) -> Self {
+        Self {
+            credential_id,
+            lease_token,
+        }
+    }
+}
+
+/// Credential-scoped error class reported against a lease.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialErrorKind {
+    /// Provider returned a rate-limit response.
+    RateLimited,
+    /// Provider reported exhausted quota.
+    QuotaExhausted,
+    /// Provider rejected authentication.
+    AuthFailed,
+    /// Provider returned another retryable credential-scoped failure.
+    RetryableProviderError,
+}
+
+/// Connector report for a credential-scoped failure.
+///
+/// Reports carry only typed error classification and a sanitized retry hint.
+/// Provider response bodies are deliberately excluded because they may contain
+/// credential fragments or account-specific data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CredentialErrorReport {
+    /// Credential that produced the error.
+    pub credential_id: CredentialId,
+    /// Opaque lease token returned by the host.
+    pub lease_token: LeaseToken,
+    /// Credential-scoped failure class.
+    pub kind: CredentialErrorKind,
+    /// Sanitized provider retry hint in whole seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u64>,
+}
+
+impl CredentialErrorReport {
+    /// Build an error report for a leased credential.
+    #[must_use]
+    pub const fn new(
+        credential_id: CredentialId,
+        lease_token: LeaseToken,
+        kind: CredentialErrorKind,
+    ) -> Self {
+        Self {
+            credential_id,
+            lease_token,
+            kind,
+            retry_after_seconds: None,
+        }
+    }
+
+    /// Attach a sanitized retry-after duration in seconds.
+    #[must_use]
+    pub const fn with_retry_after_seconds(mut self, retry_after_seconds: u64) -> Self {
+        self.retry_after_seconds = Some(retry_after_seconds);
+        self
+    }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Credential backend trait (mesh-native contract)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -544,6 +696,74 @@ mod tests {
             let decoded: CredentialApplication = serde_json::from_str(&json).unwrap();
             assert_eq!(app, decoded);
         }
+    }
+
+    #[test]
+    fn credential_lease_request_omits_empty_hints() {
+        let credential_id = CredentialId::test_id([0x31; 16]);
+        let request = CredentialLeaseRequest::new(credential_id);
+
+        let json = serde_json::to_string(&request).unwrap();
+
+        assert!(json.contains("credential_id"));
+        assert!(!json.contains("provider"));
+        assert!(!json.contains("operation"));
+        let decoded: CredentialLeaseRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn credential_lease_request_preserves_hints() {
+        let request = CredentialLeaseRequest::new(CredentialId::test_id([0x32; 16]))
+            .with_provider("openai")
+            .with_operation("chat.completions");
+
+        let json = serde_json::to_string(&request).unwrap();
+        let decoded: CredentialLeaseRequest = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(decoded.provider.as_deref(), Some("openai"));
+        assert_eq!(decoded.operation.as_deref(), Some("chat.completions"));
+    }
+
+    #[test]
+    fn credential_lease_is_secretless_debug_and_serde() {
+        let credential_id = CredentialId::test_id([0x33; 16]);
+        let lease_handle = LeaseToken::new("lease:credential:test").unwrap();
+        let lease = CredentialLease::new(credential_id, lease_handle.clone()).with_provider("groq");
+
+        let debug = format!("{lease:?}");
+        assert!(debug.contains("CredentialLease"));
+        assert!(debug.contains("credential_id"));
+        assert!(!debug.contains("api_key"));
+        assert!(!debug.contains("secret"));
+        assert!(!debug.contains("sk-"));
+
+        let release = lease.release_request();
+        assert_eq!(release.credential_id, credential_id);
+        assert_eq!(release.lease_token, lease_handle);
+
+        let json = serde_json::to_string(&lease).unwrap();
+        let decoded: CredentialLease = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, lease);
+    }
+
+    #[test]
+    fn credential_error_report_roundtrips_retry_hint() {
+        let report = CredentialErrorReport::new(
+            CredentialId::test_id([0x34; 16]),
+            LeaseToken::new("lease:credential:rate-limited").unwrap(),
+            CredentialErrorKind::RateLimited,
+        )
+        .with_retry_after_seconds(30);
+
+        let json = serde_json::to_string(&report).unwrap();
+        assert!(json.contains("\"kind\":\"rate_limited\""));
+        assert!(json.contains("\"retry_after_seconds\":30"));
+        assert!(!json.contains("provider said"));
+        assert!(!json.contains("sk-"));
+
+        let decoded: CredentialErrorReport = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, report);
     }
 
     // ─────────────────────────────────────────────────────────────────────────

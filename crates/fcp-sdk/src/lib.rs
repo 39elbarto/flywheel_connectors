@@ -102,6 +102,12 @@ pub use fcp_kernel::{
     ConnectorMetrics,
     // Cost and availability
     CostEstimate,
+    CredentialErrorKind,
+    CredentialErrorReport,
+    CredentialId,
+    CredentialLease,
+    CredentialLeaseRelease,
+    CredentialLeaseRequest,
     CursorState,
     // Capability tokens
     EventAck,
@@ -134,6 +140,7 @@ pub use fcp_kernel::{
     LeasePurpose,
     LeaseRequest,
     LeaseResponse,
+    LeaseToken,
     OperationId,
     OperationInfo,
     OperationIntent,
@@ -218,6 +225,7 @@ pub use fcp_manifest::{
 
 pub mod contract;
 pub mod coordination;
+pub mod credentials;
 pub mod formatting;
 pub mod migration;
 pub mod prelude;
@@ -261,6 +269,9 @@ pub use coordination::{
     teams_mentions_agent, telegram_entities_mention_agent, thread_owned_by_peer_error,
     thread_ownership_indeterminate_error,
 };
+
+/// Credential lease client and connector-context helpers.
+pub use credentials::{CredentialLeaseClient, CredentialLeaseClientError, CredentialLeaseCxExt};
 
 /// Formatting helpers with safe fallback behavior.
 pub use formatting::{

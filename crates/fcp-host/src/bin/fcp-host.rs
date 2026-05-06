@@ -5879,6 +5879,288 @@ async fn simulate_handler(
     Ok(Json(response))
 }
 
+const MCP_SAMPLING_HANDLE_OPERATION: &str = "mcp.sampling.handle";
+const MCP_SAMPLING_EVENT: &str = "mcp_sampling_request_received";
+const MCP_SAMPLING_HOST_DISPATCH_FIELD: &str = "host_dispatch";
+const MCP_SAMPLING_HOST_DISPATCH_ALT_FIELD: &str = "host_sampling_dispatch";
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpSamplingHostDispatch {
+    #[serde(default)]
+    connector_id: Option<ConnectorId>,
+    #[serde(default)]
+    operation: Option<OperationId>,
+    capability_token: fcp_core::CapabilityToken,
+    #[serde(default)]
+    input: Option<Value>,
+    #[serde(default)]
+    deadline_ms: Option<u64>,
+    #[serde(default)]
+    idempotency_key: Option<String>,
+    #[serde(default)]
+    approval_tokens: Vec<ApprovalToken>,
+}
+
+fn mcp_sampling_event_result(response: &InvokeResponse) -> Option<&Value> {
+    let result = response.result.as_ref()?;
+    (result.get("event").and_then(Value::as_str) == Some(MCP_SAMPLING_EVENT)).then_some(result)
+}
+
+fn mcp_sampling_host_dispatch(
+    source: &InvokeRequest,
+) -> HostResult<Option<McpSamplingHostDispatch>> {
+    let raw = source
+        .input
+        .get(MCP_SAMPLING_HOST_DISPATCH_FIELD)
+        .or_else(|| source.input.get(MCP_SAMPLING_HOST_DISPATCH_ALT_FIELD));
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    serde_json::from_value(raw.clone())
+        .map(Some)
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid MCP sampling host dispatch configuration: {error}"
+            ))
+        })
+}
+
+fn mcp_sampling_configured_llm_connector(event: &Value) -> Option<&str> {
+    event
+        .get("llm_connector")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn mcp_sampling_default_llm_operation(connector_id: &ConnectorId) -> HostResult<OperationId> {
+    format!("{}.chat.completions", connector_id.as_str())
+        .parse()
+        .map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid default MCP sampling LLM operation for connector `{}`: {error}",
+                connector_id.as_str()
+            ))
+        })
+}
+
+fn mcp_sampling_event_to_chat_input(event: &Value) -> HostResult<Value> {
+    let params = event
+        .pointer("/request/params")
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            HostError::InvalidFilter(
+                "MCP sampling event is missing request.params for host dispatch".to_string(),
+            )
+        })?;
+    let messages = params.get("messages").cloned().ok_or_else(|| {
+        HostError::InvalidFilter(
+            "MCP sampling event is missing request.params.messages for host dispatch".to_string(),
+        )
+    })?;
+
+    let mut input = serde_json::Map::new();
+    input.insert("messages".to_string(), messages);
+    if let Some(max_tokens) = params.get("maxTokens").and_then(Value::as_u64) {
+        input.insert("max_tokens".to_string(), json!(max_tokens));
+    }
+    if let Some(model) = event
+        .pointer("/limits/model_override")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        input.insert("model".to_string(), json!(model));
+    }
+    if let Some(stop) = params.get("stopSequences").cloned() {
+        input.insert("stop".to_string(), stop);
+    }
+    Ok(Value::Object(input))
+}
+
+fn mcp_sampling_downstream_request(
+    source: &InvokeRequest,
+    event: &Value,
+    dispatch: McpSamplingHostDispatch,
+) -> HostResult<InvokeRequest> {
+    let configured_connector = mcp_sampling_configured_llm_connector(event);
+    let connector_id = match (dispatch.connector_id, configured_connector) {
+        (Some(connector_id), Some(configured)) if connector_id.as_str() != configured => {
+            return Err(HostError::InvalidFilter(format!(
+                "MCP sampling host dispatch connector `{}` does not match configured llm_connector `{configured}`",
+                connector_id.as_str()
+            )));
+        }
+        (Some(connector_id), _) => connector_id,
+        (None, Some(configured)) => configured.parse().map_err(|error| {
+            HostError::InvalidFilter(format!(
+                "invalid MCP sampling llm_connector `{configured}`: {error}"
+            ))
+        })?,
+        (None, None) => {
+            return Err(HostError::InvalidFilter(
+                "MCP sampling host dispatch requires connector_id or configured llm_connector"
+                    .to_string(),
+            ));
+        }
+    };
+
+    let operation = match dispatch.operation {
+        Some(operation) => operation,
+        None => mcp_sampling_default_llm_operation(&connector_id)?,
+    };
+    let input = match dispatch.input {
+        Some(input) => input,
+        None => mcp_sampling_event_to_chat_input(event)?,
+    };
+
+    let mut context = source.context.clone().unwrap_or_default();
+    context
+        .request_tags
+        .insert("fcp.host.dispatch".to_string(), "mcp_sampling".to_string());
+    context.request_tags.insert(
+        "fcp.host.parent_request_id".to_string(),
+        source.id.to_string(),
+    );
+
+    Ok(InvokeRequest {
+        r#type: "invoke".to_string(),
+        id: RequestId::random(),
+        connector_id,
+        operation,
+        zone_id: source.zone_id.clone(),
+        input,
+        capability_token: dispatch.capability_token,
+        holder_proof: None,
+        context: Some(context),
+        idempotency_key: dispatch.idempotency_key,
+        lease_seq: None,
+        deadline_ms: dispatch.deadline_ms.or(source.deadline_ms),
+        correlation_id: source.correlation_id.clone(),
+        provenance: source.provenance.clone(),
+        approval_tokens: dispatch.approval_tokens,
+    })
+}
+
+fn mcp_sampling_downstream_error(id: RequestId, response: InvokeResponse) -> InvokeResponse {
+    let error = response
+        .error
+        .unwrap_or_else(|| fcp_core::FcpError::External {
+            service: "mcp_sampling_host_dispatch".to_string(),
+            message: "downstream LLM connector returned an error without details".to_string(),
+            status_code: None,
+            retryable: false,
+            retry_after: None,
+        });
+    InvokeResponse::error(id, error)
+}
+
+fn mcp_sampling_host_response(
+    parent_id: RequestId,
+    mut bridge_response: InvokeResponse,
+    downstream_request: &InvokeRequest,
+    downstream_response: InvokeResponse,
+) -> InvokeResponse {
+    if !matches!(downstream_response.status, InvokeStatus::Ok) {
+        return mcp_sampling_downstream_error(parent_id, downstream_response);
+    }
+    let InvokeResponse {
+        id: downstream_response_id,
+        status: downstream_status,
+        result: downstream_result,
+        receipt_id,
+        audit_event_id,
+        decision_receipt_id,
+        resource_uris,
+        next_cursor,
+        usage_metrics,
+        response_metadata,
+        ..
+    } = downstream_response;
+
+    let mut result = bridge_response
+        .result
+        .take()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    result.insert("dispatch".to_string(), json!("host_orchestrated"));
+    result.insert("host_orchestrated".to_string(), json!(true));
+    result.insert(
+        "host_dispatch".to_string(),
+        json!({
+            "connector_id": downstream_request.connector_id.as_str(),
+            "operation": downstream_request.operation.as_str(),
+            "request_id": downstream_response_id,
+            "status": downstream_status,
+            "result": downstream_result,
+            "receipt_id": receipt_id,
+            "audit_event_id": audit_event_id,
+            "decision_receipt_id": decision_receipt_id,
+            "redaction": {
+                "prompt_logged": false,
+                "response_logged": false,
+                "metadata_logged": false
+            }
+        }),
+    );
+    bridge_response.result = Some(Value::Object(result));
+    bridge_response.usage_metrics = usage_metrics;
+    bridge_response.resource_uris = resource_uris;
+    bridge_response.next_cursor = next_cursor;
+    bridge_response.response_metadata = response_metadata;
+    bridge_response
+}
+
+async fn maybe_orchestrate_mcp_sampling(
+    state: &AppState,
+    asserted_principal: Option<&str>,
+    source: &InvokeRequest,
+    response: InvokeResponse,
+) -> HostResult<InvokeResponse> {
+    if source.operation.as_str() != MCP_SAMPLING_HANDLE_OPERATION {
+        return Ok(response);
+    }
+    let Some(event) = mcp_sampling_event_result(&response) else {
+        return Ok(response);
+    };
+    let Some(dispatch) = mcp_sampling_host_dispatch(source)? else {
+        return Ok(response);
+    };
+    let downstream_request = mcp_sampling_downstream_request(source, event, dispatch)?;
+    let preflight = evaluate_live_preflight(state, &downstream_request, asserted_principal).await;
+    if !preflight.allowed {
+        return Err(HostError::PreflightFailed(format!(
+            "MCP sampling host dispatch denied for connector `{}` operation `{}`: {}",
+            downstream_request.connector_id,
+            downstream_request.operation,
+            preflight
+                .reason
+                .unwrap_or_else(|| "preflight denied downstream LLM request".to_string())
+        )));
+    }
+
+    tracing::info!(
+        event = "mcp_sampling_host_dispatch",
+        source_connector_id = %source.connector_id,
+        source_operation = %source.operation,
+        target_connector_id = %downstream_request.connector_id,
+        target_operation = %downstream_request.operation,
+        source_request_id = %source.id,
+        downstream_request_id = %downstream_request.id,
+        prompt_logged = false,
+        response_logged = false,
+        "dispatching MCP sampling request through configured LLM connector"
+    );
+    let downstream_response = state.registry.invoke(downstream_request.clone()).await?;
+    Ok(mcp_sampling_host_response(
+        source.id.clone(),
+        response,
+        &downstream_request,
+        downstream_response,
+    ))
+}
+
 async fn cancel_handler(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -6588,11 +6870,20 @@ async fn invoke_handler(
     // authenticated and must not fall back to ownerless cancellation.
     track_verified_cancellation_owner(state.cancellation.as_ref(), &operation_id, &request)
         .map_err(map_host_error)?;
+    let source_request = request.clone();
     let invoke_result = state.registry.invoke(request).await;
     state.cancellation.complete(&operation_id);
 
     match invoke_result {
         Ok(response) => {
+            let response = maybe_orchestrate_mcp_sampling(
+                state.as_ref(),
+                asserted_principal.as_deref(),
+                &source_request,
+                response,
+            )
+            .await
+            .map_err(map_host_error)?;
             let duration_ms = elapsed_millis(started_at);
             record_invoke_budget_usage(
                 state.budget.as_ref(),
@@ -7940,6 +8231,25 @@ mod tests {
         })
     }
 
+    fn dispatcher_registry_with_connectors(
+        entries: Vec<(&'static str, Arc<SubprocessConnector>, ConnectorConfig)>,
+    ) -> Arc<SubprocessRegistry> {
+        let mut connectors = HashMap::new();
+        for (connector_id, connector, config) in entries {
+            connectors.insert(
+                ConnectorId::from_static(connector_id),
+                RegistryEntry { config, connector },
+            );
+        }
+        Arc::new(SubprocessRegistry {
+            state: Arc::new(RwLock::new(RegistryState { connectors })),
+            resilience: Arc::new(ResilienceLayer::default()),
+            version: Arc::new(AtomicU64::new(1)),
+            capability_verifying_key: None,
+            rate_limiters: Arc::new(HostRateLimiterStore::default()),
+        })
+    }
+
     fn dispatcher_app_state(
         registry: Arc<SubprocessRegistry>,
         lifecycle: Arc<HostAdminStateStore>,
@@ -8019,6 +8329,347 @@ mod tests {
             auth_caps: None,
             event_caps: None,
         }
+    }
+
+    fn dispatcher_test_config(connector_id: &'static str) -> ConnectorConfig {
+        ConnectorConfig {
+            id: connector_id.to_string(),
+            binary: "dispatcher-test".to_string(),
+            name: Some(format!("{connector_id} test connector")),
+            description: None,
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            config: None,
+            categories: vec!["test".to_string()],
+            version: None,
+            allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
+            enforce_empty_allow_lists: false,
+        }
+    }
+
+    #[test]
+    fn mcp_sampling_downstream_request_defaults_to_configured_chat_operation() {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let mcp_token = test_capability_token(
+            &signing_key,
+            "mcp.sampling.handle",
+            MCP_SAMPLING_HANDLE_OPERATION,
+            ZoneId::work().as_str(),
+        );
+        let llm_token = test_capability_token(
+            &signing_key,
+            "groq.chat",
+            "groq.chat.completions",
+            ZoneId::work().as_str(),
+        );
+        let source = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("mcp-bridge"),
+            operation: OperationId::from_static(MCP_SAMPLING_HANDLE_OPERATION),
+            zone_id: ZoneId::work(),
+            input: json!({
+                "request": {
+                    "method": "sampling/createMessage",
+                    "params": {
+                        "messages": [{"role": "user", "content": "redacted in logs"}],
+                        "maxTokens": 128
+                    }
+                },
+                "host_dispatch": {
+                    "capability_token": llm_token
+                }
+            }),
+            capability_token: mcp_token,
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: Some(2_000),
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+        let bridge_response = InvokeResponse::ok(
+            source.id.clone(),
+            json!({
+                "event": MCP_SAMPLING_EVENT,
+                "dispatch": "agent_event",
+                "host_orchestrated": false,
+                "llm_connector": "groq",
+                "limits": {
+                    "model_override": "llama-3.1-8b-instant"
+                },
+                "request": {
+                    "method": "sampling/createMessage",
+                    "params": {
+                        "messages": [{"role": "user", "content": "redacted in logs"}],
+                        "maxTokens": 128
+                    }
+                }
+            }),
+        );
+
+        let event = mcp_sampling_event_result(&bridge_response).expect("sampling event");
+        let dispatch = mcp_sampling_host_dispatch(&source)
+            .expect("host dispatch parse")
+            .expect("host dispatch present");
+        let downstream =
+            mcp_sampling_downstream_request(&source, event, dispatch).expect("downstream request");
+
+        assert_eq!(downstream.connector_id, ConnectorId::from_static("groq"));
+        assert_eq!(
+            downstream.operation,
+            OperationId::from_static("groq.chat.completions")
+        );
+        assert_eq!(downstream.zone_id, ZoneId::work());
+        assert_eq!(downstream.deadline_ms, Some(2_000));
+        assert_eq!(downstream.input["max_tokens"], 128);
+        assert_eq!(downstream.input["model"], "llama-3.1-8b-instant");
+        assert_eq!(
+            downstream.input["messages"][0]["content"],
+            "redacted in logs"
+        );
+        let tags = &downstream
+            .context
+            .as_ref()
+            .expect("host dispatch adds context")
+            .request_tags;
+        assert_eq!(
+            tags.get("fcp.host.dispatch"),
+            Some(&"mcp_sampling".to_string())
+        );
+        assert_eq!(
+            tags.get("fcp.host.parent_request_id"),
+            Some(&source.id.to_string())
+        );
+    }
+
+    #[fcp_async_core::runtime::test(flavor = "multi_thread")]
+    async fn invoke_handler_orchestrates_mcp_sampling_through_llm_connector() {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        let lifecycle = Arc::new(HostAdminStateStore::new());
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            "mcp-bridge",
+            "mcp.sampling.handle",
+            MCP_SAMPLING_HANDLE_OPERATION,
+            ZoneId::work().as_str(),
+        )
+        .await;
+        register_test_capability_issuer(
+            lifecycle.as_ref(),
+            &signing_key,
+            "groq",
+            "groq.chat",
+            "groq.chat.completions",
+            ZoneId::work().as_str(),
+        )
+        .await;
+
+        let mcp_introspection = serde_json::to_value(dispatcher_introspection(
+            MCP_SAMPLING_HANDLE_OPERATION,
+            "mcp.sampling.handle",
+            SafetyTier::Safe,
+        ))
+        .expect("mcp introspection serializes");
+        let llm_introspection = serde_json::to_value(dispatcher_introspection(
+            "groq.chat.completions",
+            "groq.chat",
+            SafetyTier::Safe,
+        ))
+        .expect("llm introspection serializes");
+        let mcp_invokes = Arc::new(AtomicU64::new(0));
+        let llm_invokes = Arc::new(AtomicU64::new(0));
+
+        let (mcp_tx, mut mcp_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let mcp_counter = Arc::clone(&mcp_invokes);
+        let mcp_task = task::spawn(async move {
+            while let Some(request) = mcp_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": mcp_introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        mcp_counter.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params).expect("decode mcp invoke");
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({
+                                    "event": MCP_SAMPLING_EVENT,
+                                    "dispatch": "agent_event",
+                                    "host_orchestrated": false,
+                                    "llm_connector": "groq",
+                                    "limits": {
+                                        "model_override": "llama-3.1-8b-instant"
+                                    },
+                                    "request": {
+                                        "method": "sampling/createMessage",
+                                        "params": {
+                                            "messages": [{"role": "user", "content": "do not log"}],
+                                            "maxTokens": 64
+                                        }
+                                    },
+                                    "redaction": {
+                                        "prompt_logged": false,
+                                        "response_logged": false,
+                                        "metadata_logged": false
+                                    }
+                                }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected mcp method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+
+        let (llm_tx, mut llm_rx) = mpsc::channel::<ConnectorRpcRequest>(8);
+        let llm_counter = Arc::clone(&llm_invokes);
+        let llm_task = task::spawn(async move {
+            while let Some(request) = llm_rx.recv().await {
+                match request.method.as_str() {
+                    "introspect" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": llm_introspection.clone(),
+                        })));
+                    }
+                    "health" => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": dispatcher_health_result(),
+                        })));
+                    }
+                    "invoke" => {
+                        llm_counter.fetch_add(1, Ordering::SeqCst);
+                        let invoke_request: InvokeRequest =
+                            serde_json::from_value(request.params).expect("decode llm invoke");
+                        assert_eq!(
+                            invoke_request.operation,
+                            OperationId::from_static("groq.chat.completions")
+                        );
+                        assert_eq!(invoke_request.input["max_tokens"], 64);
+                        let _ = request.response_tx.send(Ok(json!({
+                            "result": InvokeResponse::ok(
+                                invoke_request.id,
+                                json!({
+                                    "choices": [{
+                                        "message": {"role": "assistant", "content": "ok"}
+                                    }],
+                                    "usage": {"prompt_tokens": 2, "completion_tokens": 1}
+                                }),
+                            ),
+                        })));
+                    }
+                    method => {
+                        let _ = request.response_tx.send(Ok(json!({
+                            "error": { "message": format!("unexpected llm method {method}") },
+                        })));
+                    }
+                }
+            }
+        });
+
+        let registry = dispatcher_registry_with_connectors(vec![
+            (
+                "mcp-bridge",
+                dispatcher_test_connector("mcp-bridge", mcp_tx, mcp_task),
+                dispatcher_test_config("mcp-bridge"),
+            ),
+            (
+                "groq",
+                dispatcher_test_connector("groq", llm_tx, llm_task),
+                dispatcher_test_config("groq"),
+            ),
+        ]);
+        let mut policies = HashMap::new();
+        policies.insert(ZoneId::work(), host_runtime_policy(ZoneId::work()));
+        let state = dispatcher_app_state(
+            registry,
+            Arc::clone(&lifecycle),
+            Some(signing_key.verifying_key()),
+            policies,
+        );
+
+        let llm_token = test_capability_token(
+            &signing_key,
+            "groq.chat",
+            "groq.chat.completions",
+            ZoneId::work().as_str(),
+        );
+        let request = InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("mcp-bridge"),
+            operation: OperationId::from_static(MCP_SAMPLING_HANDLE_OPERATION),
+            zone_id: ZoneId::work(),
+            input: json!({
+                "request": {
+                    "method": "sampling/createMessage",
+                    "params": {
+                        "messages": [{"role": "user", "content": "do not log"}],
+                        "maxTokens": 64
+                    }
+                },
+                "host_dispatch": {
+                    "capability_token": llm_token
+                }
+            }),
+            capability_token: test_capability_token(
+                &signing_key,
+                "mcp.sampling.handle",
+                MCP_SAMPLING_HANDLE_OPERATION,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: Some(5_000),
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        };
+
+        let response = invoke_handler(State(state), HeaderMap::new(), Json(request))
+            .await
+            .expect("host-orchestrated sampling invoke should succeed")
+            .0;
+
+        assert_eq!(response.status, InvokeStatus::Ok);
+        let result = response.result.expect("sampling response result");
+        assert_eq!(result["dispatch"], "host_orchestrated");
+        assert_eq!(result["host_orchestrated"], true);
+        assert_eq!(result["host_dispatch"]["connector_id"], "groq");
+        assert_eq!(
+            result["host_dispatch"]["operation"],
+            "groq.chat.completions"
+        );
+        assert_eq!(
+            result["host_dispatch"]["result"]["choices"][0]["message"]["content"],
+            "ok"
+        );
+        assert_eq!(result["host_dispatch"]["redaction"]["prompt_logged"], false);
+        assert_eq!(
+            result["host_dispatch"]["redaction"]["response_logged"],
+            false
+        );
+        assert_eq!(mcp_invokes.load(Ordering::SeqCst), 1);
+        assert_eq!(llm_invokes.load(Ordering::SeqCst), 1);
     }
 
     fn constraints_cbor(constraints: &fcp_core::CapabilityConstraints) -> Vec<u8> {

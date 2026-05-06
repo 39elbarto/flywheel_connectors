@@ -3444,6 +3444,7 @@ dependencies = [
 name = "fcp-e2e"
 version = "0.1.0"
 dependencies = [
+ "asupersync",
  "base64 0.22.1",
  "blake3",
  "bytes",
@@ -3477,8 +3478,8 @@ dependencies = [
  "fcp-dropbox",
  "fcp-duckdb",
  "fcp-duckduckgo",
- "fcp-elevenlabs",
  "fcp-elasticsearch",
+ "fcp-elevenlabs",
  "fcp-evernote",
  "fcp-evidence",
  "fcp-figma",

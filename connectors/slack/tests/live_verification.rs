@@ -30,7 +30,7 @@ macro_rules! skip_without_token {
         let Some($var) = slack_token() else {
             eprintln!(
                 "SKIP: SLACK_BOT_TOKEN not set — skipping live Slack connector verification. \
-                 Set SLACK_BOT_TOKEN=xoxb-... to enable."
+                 Provide an xoxb-style Slack bot credential to enable."
             );
             return;
         };
@@ -106,14 +106,13 @@ async fn live_conversations_list() {
 
     let mut connector = SlackConnector::new();
     let signing_key = setup_live_connector(&mut connector, &token).await;
-    let cap_token =
-        generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
+    let cap = generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
 
     let result = connector
         .handle_invoke(json!({
             "operation": "slack.list_channels",
             "input": {},
-            "capability_token": cap_token
+            "capability_token": cap
         }))
         .await
         .expect("list_channels should succeed");
@@ -169,14 +168,13 @@ async fn live_error_mapping_invalid_token() {
         .await
         .expect("handshake should succeed");
 
-    let cap_token =
-        generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
+    let cap = generate_read_token(&signing_key, "slack.list_channels", connector.instance_id());
 
     let err = connector
         .handle_invoke(json!({
             "operation": "slack.list_channels",
             "input": {},
-            "capability_token": cap_token
+            "capability_token": cap
         }))
         .await;
 

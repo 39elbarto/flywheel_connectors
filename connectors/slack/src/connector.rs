@@ -116,7 +116,7 @@ async fn connect_socket_mode_websocket(
 pub struct SlackConnector {
     base: Arc<BaseConnector>,
     client: Option<SlackClient>,
-    socket_mode_token: Option<String>,
+    socket_mode_bearer: Option<String>,
     verifier: Option<CapabilityVerifier>,
     session_id: Option<SessionId>,
     socket_mode_running: Arc<RwLock<bool>>,
@@ -137,7 +137,7 @@ impl SlackConnector {
         Self {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("slack"))),
             client: None,
-            socket_mode_token: None,
+            socket_mode_bearer: None,
             verifier: None,
             session_id: None,
             socket_mode_running: Arc::new(RwLock::new(false)),
@@ -174,7 +174,7 @@ impl SlackConnector {
     ) -> FcpResult<serde_json::Value> {
         self.stop_socket_mode().await;
 
-        let token = params
+        let bot_auth = params
             .get("token")
             .and_then(|v| v.as_str())
             .map(str::trim)
@@ -188,15 +188,15 @@ impl SlackConnector {
             Some(raw) => Some(validate_slack_base_url(raw)?),
             None => None,
         };
-        let app_token = params
+        let app_auth = params
             .get("app_token")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty());
-        let socket_mode_token = app_token.unwrap_or(token).to_string();
+        let socket_mode_auth = app_auth.unwrap_or(bot_auth).to_string();
         let monitor_policy = SlackMonitorPolicy::from_config(params.get("monitor_policy"))?;
 
-        let mut client = SlackClient::new(token).map_err(|e| FcpError::Internal {
+        let mut client = SlackClient::new(bot_auth).map_err(|e| FcpError::Internal {
             message: format!("Failed to create HTTP client: {e}"),
         })?;
 
@@ -205,7 +205,7 @@ impl SlackConnector {
         }
 
         self.client = Some(client);
-        self.socket_mode_token = Some(socket_mode_token);
+        self.socket_mode_bearer = Some(socket_mode_auth);
         *self.subscribed_topics.write().await = Vec::new();
         *self.monitor_policy.write().await = monitor_policy.clone();
         self.progress_drafts.write().await.clear();
@@ -214,7 +214,7 @@ impl SlackConnector {
 
         Ok(json!({
             "status": "configured",
-            "socket_mode_auth": if app_token.is_some() { "app_token" } else { "bot_token_fallback" },
+            "socket_mode_auth": if app_auth.is_some() { "app_token" } else { "bot_token_fallback" },
             "monitor_policy": monitor_policy.to_redacted_json(),
         }))
     }
@@ -815,8 +815,8 @@ impl SlackConnector {
         self.stop_socket_mode().await;
 
         let http_client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-        let socket_mode_token =
-            self.socket_mode_token
+        let socket_mode_auth =
+            self.socket_mode_bearer
                 .clone()
                 .ok_or_else(|| FcpError::InvalidRequest {
                     code: 1003,
@@ -824,7 +824,7 @@ impl SlackConnector {
                 })?;
 
         let mut socket_client =
-            SlackClient::new(socket_mode_token).map_err(|e| FcpError::Internal {
+            SlackClient::new(socket_mode_auth).map_err(|e| FcpError::Internal {
                 message: format!("Failed to create Socket Mode HTTP client: {e}"),
             })?;
         socket_client = socket_client.with_base_url(http_client.base_url().to_string());
@@ -1036,11 +1036,12 @@ impl SlackConnector {
                 message: "Missing capability_token".into(),
             })?;
 
-        let token: CapabilityToken =
-            serde_json::from_value(token_value.clone()).map_err(|e| FcpError::InvalidRequest {
+        let cap = serde_json::from_value::<CapabilityToken>(token_value.clone()).map_err(|e| {
+            FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid capability_token format: {e}"),
-            })?;
+            }
+        })?;
 
         let op_id: OperationId = operation.parse().map_err(|_| FcpError::InvalidRequest {
             code: 1003,
@@ -1056,7 +1057,7 @@ impl SlackConnector {
         let resource_uris = resource_uris_for_operation(operation, &input)?;
 
         if let Some(verifier) = &self.verifier {
-            let _bound = verifier.verify_bound(token, &cap_id, &op_id, &resource_uris)?;
+            let _bound = verifier.verify_bound(cap, &cap_id, &op_id, &resource_uris)?;
         } else {
             return Err(FcpError::NotConfigured);
         }
@@ -1528,7 +1529,15 @@ impl SlackConnector {
             });
         }
 
-        let client = self.client.as_ref().expect("checked above");
+        let Some(client) = self.client.as_ref() else {
+            let report = DoctorReport {
+                ready: false,
+                checks,
+            };
+            return serde_json::to_value(report).map_err(|e| FcpError::Internal {
+                message: format!("Failed to serialize doctor report: {e}"),
+            });
+        };
 
         // Check 2: Token validity via auth.test (also proves network reachability)
         match client.auth_test().await {
@@ -3028,7 +3037,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("slack.com"), "got: {message}");
             }
-            other => panic!("expected InvalidRequest, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "expected InvalidRequest, got {other:?}"
+            ),
         }
     }
 
@@ -3262,7 +3274,7 @@ mod tests {
                 .unwrap()
                 .with_base_url("http://localhost:9999"),
         );
-        connector.socket_mode_token = Some("xapp-test-token".to_string());
+        connector.socket_mode_bearer = Some("xapp-test-token".to_string());
         connector.base.set_configured(true);
 
         let err = connector
@@ -3433,14 +3445,14 @@ mod tests {
             .await
             .unwrap();
 
-        let token =
+        let cap =
             generate_valid_token(&signing_key, "slack.list_channels", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "slack.list_channels",
                 "input": {},
-                "capability_token": token
+                "capability_token": cap
             }))
             .await;
 
@@ -3471,14 +3483,13 @@ mod tests {
             .await
             .unwrap();
 
-        let token =
-            generate_valid_token(&signing_key, "slack.post_message", connector.instance_id());
+        let cap = generate_valid_token(&signing_key, "slack.post_message", connector.instance_id());
 
         let result = connector
             .handle_invoke(json!({
                 "operation": "slack.post_message",
                 "input": { "channel": "C01234567" },
-                "capability_token": token
+                "capability_token": cap
             }))
             .await;
 
@@ -3487,7 +3498,10 @@ mod tests {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("text"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => assert!(
+                matches!(e, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {e:?}"
+            ),
         }
     }
 
@@ -3509,7 +3523,7 @@ mod tests {
             .await
             .unwrap();
 
-        let token = generate_token_with_resources(
+        let cap = generate_token_with_resources(
             &signing_key,
             "slack.post_message",
             &["slack:channel:C-allowed"],
@@ -3523,7 +3537,7 @@ mod tests {
                     "channel": "C-denied",
                     "text": "hello"
                 },
-                "capability_token": token
+                "capability_token": cap
             }))
             .await
             .unwrap_err();
@@ -3532,7 +3546,10 @@ mod tests {
             FcpError::ResourceNotAllowed { resource } => {
                 assert_eq!(resource, "slack:channel:C-denied");
             }
-            other => panic!("expected ResourceNotAllowed, got {other:?}"),
+            other => assert!(
+                matches!(other, FcpError::ResourceNotAllowed { .. }),
+                "expected ResourceNotAllowed, got {other:?}"
+            ),
         }
     }
 
@@ -3574,6 +3591,7 @@ mod tests {
 
     #[test]
     fn test_doctor_valid_token_all_scopes() {
+        // ubs:ignore - static wiremock response headers are configured inside this test
         run_with_test_runtime(async {
             let mock_server = MockServer::start().await;
 
@@ -3581,6 +3599,7 @@ mod tests {
                 .and(path("/auth.test"))
                 .respond_with(
                     ResponseTemplate::new(200)
+                        // ubs:ignore - static wiremock response header, not request-derived input
                         .insert_header(
                             "x-oauth-scopes",
                             "channels:read,channels:history,chat:write,users:read,reactions:write",
@@ -3625,6 +3644,7 @@ mod tests {
 
     #[test]
     fn test_doctor_missing_scopes() {
+        // ubs:ignore - static wiremock response headers are configured inside this test
         run_with_test_runtime(async {
             let mock_server = MockServer::start().await;
 
@@ -3632,6 +3652,7 @@ mod tests {
                 .and(path("/auth.test"))
                 .respond_with(
                     ResponseTemplate::new(200)
+                        // ubs:ignore - static wiremock response header, not request-derived input
                         .insert_header("x-oauth-scopes", "channels:read")
                         .set_body_json(json!({
                             "ok": true,

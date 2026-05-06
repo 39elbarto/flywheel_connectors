@@ -271,7 +271,7 @@ impl DingTalkClient {
     ///
     /// # Errors
     ///
-    /// Returns an error when the webhook URL is outside DingTalk's allowed
+    /// Returns an error when the webhook URL is outside `DingTalk`'s allowed
     /// reply hosts, the request fails, or the reply endpoint rejects the
     /// payload.
     pub async fn post_session_webhook(
@@ -316,6 +316,11 @@ fn validate_host(raw: &str, allowed_hosts: &[&str]) -> DingTalkResult<()> {
     let host = url
         .host_str()
         .ok_or_else(|| DingTalkError::Config(format!("URL `{raw}` must include a host")))?;
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(DingTalkError::Config(format!(
+            "URL `{raw}` must not include userinfo"
+        )));
+    }
     let is_local = matches!(host, "localhost" | "127.0.0.1");
     if !is_local && url.scheme() != "https" {
         return Err(DingTalkError::Config(format!(
@@ -354,6 +359,13 @@ fn validate_stream_config(config: &DingTalkConfig) -> DingTalkResult<()> {
     Ok(())
 }
 
+/// Validate a `DingTalk` Stream Mode session webhook URL.
+///
+/// # Errors
+///
+/// Returns an error when the URL is malformed, uses an unsupported scheme,
+/// includes userinfo, omits a host, or points at a host outside the allowed
+/// production and loopback test hosts.
 pub fn validate_session_webhook_url(raw: &str) -> DingTalkResult<()> {
     validate_host(
         raw,
@@ -640,6 +652,38 @@ mod tests {
         let debug = format!("{client:?}");
         assert!(debug.contains("[REDACTED]"));
         assert!(!debug.contains("test-secret"));
+    }
+
+    #[test]
+    fn validates_session_webhook_urls() {
+        assert!(validate_session_webhook_url("https://api.dingtalk.com/v1.0/robot/send").is_ok());
+        assert!(validate_session_webhook_url("https://oapi.dingtalk.com/robot/send").is_ok());
+        assert!(validate_session_webhook_url("http://localhost:8080/session").is_ok());
+        assert!(
+            validate_session_webhook_url("https://api.dingtalk.com.evil.example/session").is_err()
+        );
+        assert!(validate_session_webhook_url("http://api.dingtalk.com/session").is_err());
+        assert!(validate_session_webhook_url("https://user@api.dingtalk.com/session").is_err());
+        assert!(validate_session_webhook_url("https://evil.example/session").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_stream_cache_and_reply_limits() {
+        let mut config = localhost_config();
+        config.stream_replay_cache_entries = 0;
+        assert!(DingTalkClient::new(config).is_err());
+
+        let mut config = localhost_config();
+        config.stream_session_webhook_cache_entries = 0;
+        assert!(DingTalkClient::new(config).is_err());
+
+        let mut config = localhost_config();
+        config.stream_session_webhook_expiry_safety_ms = 0;
+        assert!(DingTalkClient::new(config).is_err());
+
+        let mut config = localhost_config();
+        config.stream_reply_timeout_ms = 0;
+        assert!(DingTalkClient::new(config).is_err());
     }
 
     #[fcp_async_core::runtime::test]

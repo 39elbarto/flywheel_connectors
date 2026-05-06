@@ -1,6 +1,6 @@
 # DingTalk Connector V3 Contract
 
-> **Status**: accepted first-slice contract
+> **Status**: accepted runtime contract with host-forwarded Stream Mode supervision
 > **Bead**: `flywheel_connectors-j05nu.1.13.1`
 > **Unblocks**:
 > - `flywheel_connectors-j05nu.1.13.2`
@@ -17,9 +17,9 @@
 
 ## Purpose
 
-This document fixes the accepted first V3 slice for `fcp.dingtalk` so the follow-on runtime and capability beads can converge on a stable contract instead of treating "DingTalk enterprise messaging" as an open-ended bucket that mixes outbound robot sends, token bootstrap, stream-mode event delivery, admin provisioning, and collaboration sync.
+This document fixes the accepted V3 runtime contract for `fcp.dingtalk` so follow-on runtime and capability beads can converge on a stable boundary instead of treating "DingTalk enterprise messaging" as an open-ended bucket that mixes outbound robot sends, token bootstrap, Stream Mode transport ownership, admin provisioning, and collaboration sync.
 
-The current connector is a request-response DingTalk robot surface for outbound text, link, and file sends, media upload, and credential health verification. It is not yet a stream-session connector, webhook receiver, event-normalization bridge, chat discovery service, or general DingTalk platform SDK.
+The current connector is a DingTalk robot surface for outbound text, link, and file sends, media upload, credential health verification, callback normalization, and host-forwarded Stream Mode frame supervision. It does not open or own the DingTalk public Stream Mode WebSocket; a host bridge forwards signed SDK frames into `dingtalk.stream.ingest_message`, and accepted frames can cache a validated `session_webhook` for `dingtalk.stream.reply`.
 
 ## Current Runtime Snapshot
 
@@ -29,20 +29,23 @@ The current crate exposes these operations:
 - `dingtalk.messages.send_link`
 - `dingtalk.messages.send_file`
 - `dingtalk.media.upload`
+- `dingtalk.events.normalize`
+- `dingtalk.stream.ingest_message`
+- `dingtalk.stream.reply`
 - `dingtalk.health`
 
 Important implementation truths from `connector.rs`, `main.rs`, and `manifest.toml`:
 
-- Configuration is `base_url`, `media_base_url`, `client_id`, `client_secret`, and bounded `request_timeout_ms`.
+- Configuration is `base_url`, `media_base_url`, `client_id`, `client_secret`, bounded `request_timeout_ms`, and explicit Stream Mode policy fields: `stream_mode_enabled`, DM/group gates, mention-required behavior, allowed users, free-response chats, mention patterns, replay cache size, session-webhook cache size, session-webhook expiry safety margin, and reply timeout.
 - One connector instance is bound to one DingTalk app credential pair and therefore one robot identity as modeled by the current runtime.
 - Authentication is app-level token bootstrap against `POST /v1.0/oauth2/accessToken`; the access token is cached in memory only.
 - Group sends go through `/v1.0/robot/groupMessages/send` using `openConversationId`.
 - Direct sends go through `/v1.0/robot/oToMessages/batchSend` using one supplied user ID at a time.
 - Media upload uses the separate `oapi.dingtalk.com` host and the legacy `/media/upload` flow with `access_token` and `type` in query parameters.
 - `health` and `self_check()` are both grounded in token issuance, not in a separate provider health endpoint.
-- `main.rs` accepts `subscribe` and `unsubscribe` RPC methods because of the shared connector interface, but the connector advertises `streaming = false` and exposes no events or replay surface.
-- There is currently no crate-local `tests/` directory; deterministic verification and final evidence are deferred to the later readiness and verification beads.
-- The parent feature describes stream-mode messaging and inbound collaboration flows, but the current tree does not implement those yet. This contract deliberately documents the narrower surface that actually exists today.
+- `main.rs` accepts `subscribe` and `unsubscribe` RPC methods because of the shared connector interface, but the connector advertises `streaming = false`: it supervises host-forwarded Stream Mode frames rather than owning a long-lived DingTalk WebSocket transport.
+- When `stream_mode_enabled = true`, handshake and introspection advertise replay support using the configured replay cache size. When it is false, stream ingest/reply fail closed and EventCaps do not claim replay.
+- Crate-local tests cover connector-suite request/response behavior plus a no-mock loopback Stream Mode harness that writes JSONL evidence for policy, duplicate, reply, rate-limit, timeout, and shutdown paths.
 
 ## Accepted First Slice
 
@@ -52,6 +55,9 @@ The accepted first DingTalk slice is intentionally narrow:
 - send one link-style robot message to one direct user target or one group conversation target
 - send one file message using a previously acquired `media_id`
 - upload one media object to obtain a `media_id`
+- normalize one DingTalk robot callback event
+- policy-gate and normalize one host-forwarded Stream Mode message frame
+- reply through a cached or explicitly forwarded DingTalk `session_webhook`
 - expose a safe token-issuance health probe
 
 This slice is intentionally closer to "outbound robot automation" than to "full DingTalk collaboration integration."
@@ -63,7 +69,8 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 | Outbound robot messaging | In scope | Text, link, and file sends are implemented. |
 | Media upload | In scope | Upload is implemented so later send flows can reference a `media_id`. |
 | Credential and reachability probe | In scope | `health` and `self_check()` verify token issuance. |
-| Stream sessions and inbound events | Out of scope | No stream lifecycle, replay, ack, or normalized event delivery exists yet. |
+| Stream frame supervision | In scope | Host-forwarded frames are policy-gated, deduplicated, normalized, and optionally emitted as `dingtalk.message` EventEnvelope JSON. |
+| Stream WebSocket transport ownership | Out of scope | The connector does not own the public DingTalk WebSocket client, reconnect loop, or SDK listener. The host bridge owns transport and forwards frames. |
 | Chat discovery and conversation listing | Out of scope | The caller must already know the target user ID or `openConversationId`. |
 | Message history and readback | Out of scope | The connector does not fetch prior messages or conversation state. |
 | User directory and org reads | Out of scope | No user profile, org, or directory APIs are exposed in this first slice. |
@@ -87,11 +94,13 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 
 - Production auth and message host: `api.dingtalk.com`
 - Production media upload host: `oapi.dingtalk.com`
+- Production session-webhook reply hosts: `api.dingtalk.com` and `oapi.dingtalk.com`
 - Port: `443`
 - TLS + SNI required for live traffic
 - `localhost` and `127.0.0.1` are accepted only for deterministic test harnesses
-- The runtime is request-response only
-- No inbound listener, webhook server, websocket stream, replay buffer, or durable local state is part of the accepted slice
+- The runtime does not open inbound listeners and does not own DingTalk's WebSocket Stream Mode transport
+- Host-forwarded stream frames use bounded in-memory replay/session-webhook state owned by the connector instance
+- Session webhook URLs are validated against DingTalk reply hosts, reject userinfo, and use HTTPS outside explicit localhost test seams
 - Configure-time host validation already rejects unexpected hosts, but the manifest has not yet been upgraded to explicit per-operation network constraints the way newer connector manifests have. That alignment belongs in the runtime and manifest follow-on bead.
 
 ## Capability Families
@@ -99,6 +108,7 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 | Capability | Purpose |
 |-----------|---------|
 | `dingtalk.messages.write` | Outbound text, link, and file sends |
+| `dingtalk.messages.read` | Callback normalization and Stream Mode frame supervision |
 | `dingtalk.media.write` | Media upload for later file-send flows |
 | `dingtalk.health.read` | Token issuance probe and readiness check |
 
@@ -110,14 +120,16 @@ This slice is intentionally closer to "outbound robot automation" than to "full 
 | `dingtalk.messages.send_link` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends one link-style card to one known target. |
 | `dingtalk.messages.send_file` | `POST /v1.0/robot/groupMessages/send` or `POST /v1.0/robot/oToMessages/batchSend` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends a file-backed message using a previously returned `media_id`. |
 | `dingtalk.media.upload` | `POST /media/upload?access_token=...&type=...` | `dingtalk.media.write` | `Risky` | `Medium` | `BestEffort` | Uploads bytes and returns provider media metadata; exact-once semantics are not guaranteed. |
+| `dingtalk.events.normalize` | Local normalization | `dingtalk.messages.read` | `Safe` | `Low` | `Strict` | Converts a DingTalk robot callback/stream frame into normalized message metadata. |
+| `dingtalk.stream.ingest_message` | Host-forwarded Stream Mode frame | `dingtalk.messages.read` | `Safe` | `Low` | `Strict` | Applies enablement, sender, DM/group, mention, duplicate, media-bound, and session-webhook policy before emitting EventEnvelope JSON. |
+| `dingtalk.stream.reply` | `POST <sessionWebhook>` | `dingtalk.messages.write` | `Risky` | `Medium` | `None` | Sends a markdown reply through a validated cached or explicitly supplied Stream Mode session webhook. |
 | `dingtalk.health` | `POST /v1.0/oauth2/accessToken` | `dingtalk.health.read` | `Safe` | `Low` | `Strict` | Safe credential and reachability probe backed by token issuance. |
 
 ## Explicit Non-Goals
 
 The accepted first DingTalk slice does not include:
 
-- stream-mode event sessions
-- inbound event normalization or replay
+- connector-owned Stream Mode WebSocket sessions
 - webhook receipt or signature verification
 - chat listing, conversation membership, or message history retrieval
 - user directory reads, org graph reads, or contact synchronization
@@ -128,8 +140,8 @@ The accepted first DingTalk slice does not include:
 
 These are excluded on purpose:
 
-- They materially widen the trust boundary beyond the outbound robot surface already implemented.
-- The parent feature's stream and inbound-event ambitions belong to later beads, especially `.1.13.4`, rather than being smuggled into the first runtime contract.
+- They materially widen the trust boundary beyond the robot send, media upload, callback normalization, and host-forwarded stream-frame surface already implemented.
+- Public WebSocket transport ownership, reconnect backoff, and SDK listener lifecycle remain a separate risk class from host-forwarded frame supervision.
 - Admin and provisioning flows are a different risk class from message send and health probe operations.
 
 ## Implementation Notes For `flywheel_connectors-j05nu.1.13.2`
@@ -139,14 +151,14 @@ These are excluded on purpose:
 - Factor the current inline HTTP logic into a typed client and explicit error-mapping layer without changing the accepted operation inventory.
 - Preserve the split between `base_url` and `media_base_url`; upload and message-send flows currently hit different hosts and should stay explicit.
 - Tighten configuration validation around host canonicalization, path or query drift, and timeout bounds rather than allowing silent URL mutation.
-- Do not add event streams, chat discovery, or admin APIs as part of the typed-config or client follow-on.
+- Do not add connector-owned WebSocket streams, chat discovery, or admin APIs as part of the typed-config or client follow-on.
 
 ## Source Notes
 
 This contract is grounded in the current connector implementation and DingTalk's public developer entry points:
 
 - `connectors/dingtalk/src/connector.rs` defines the operation inventory, target parsing, auth bootstrap, safety semantics, and health behavior.
-- `connectors/dingtalk/src/main.rs` defines the JSON-RPC method surface and confirms that the connector is currently request-response only.
+- `connectors/dingtalk/src/main.rs` defines the JSON-RPC method surface; `subscribe` and `unsubscribe` remain unsupported because Stream Mode is currently host-forwarded through explicit invoke operations.
 - `connectors/dingtalk/manifest.toml` defines the current declared capabilities and basic sandbox posture, even though it still needs a later schema and network-constraint refresh.
 - DingTalk robot tutorial: https://open.dingtalk.com/document/tutorial/create-a-robot
 - DingTalk open platform entry point: https://open.dingtalk.com/

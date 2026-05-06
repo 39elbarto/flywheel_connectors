@@ -12,6 +12,7 @@ pub const DEFAULT_STREAM_SESSION_WEBHOOK_EXPIRY_SAFETY_MS: u64 = 5 * 60 * 1_000;
 pub const DEFAULT_STREAM_REPLY_TIMEOUT_MS: u64 = 15_000;
 
 #[derive(Clone, Deserialize)]
+#[allow(clippy::struct_excessive_bools)]
 pub struct DingTalkConfig {
     #[serde(default = "default_base_url")]
     pub base_url: String,
@@ -348,6 +349,43 @@ mod tests {
         assert_eq!(config.media_base_url, "https://oapi.dingtalk.com");
         assert_eq!(config.client_id, "ding-app");
         assert_eq!(config.client_secret, "secret");
+    }
+
+    #[test]
+    fn config_normalized_deduplicates_stream_policy_lists() {
+        let config = DingTalkConfig {
+            client_id: "ding-app".into(),
+            client_secret: "secret".into(),
+            stream_allowed_users: vec![
+                " Staff-1 ".into(),
+                "staff-1".into(),
+                String::new(),
+                "USER-2".into(),
+            ],
+            stream_free_response_chats: vec![" conv-1 ".into(), "conv-1".into(), String::new()],
+            stream_mention_patterns: vec!["@opsbot".into(), " @opsbot ".into(), String::new()],
+            ..Default::default()
+        }
+        .normalized();
+        assert_eq!(config.stream_allowed_users, ["staff-1", "user-2"]);
+        assert_eq!(config.stream_free_response_chats, ["conv-1"]);
+        assert_eq!(config.stream_mention_patterns, ["@opsbot"]);
+        assert_eq!(
+            config.stream_replay_cache_entries,
+            DEFAULT_STREAM_REPLAY_CACHE_ENTRIES
+        );
+        assert_eq!(
+            config.stream_session_webhook_cache_entries,
+            DEFAULT_STREAM_SESSION_WEBHOOK_CACHE_ENTRIES
+        );
+        assert_eq!(
+            config.stream_session_webhook_expiry_safety_ms,
+            DEFAULT_STREAM_SESSION_WEBHOOK_EXPIRY_SAFETY_MS
+        );
+        assert_eq!(
+            config.stream_reply_timeout_ms,
+            DEFAULT_STREAM_REPLY_TIMEOUT_MS
+        );
     }
 
     #[test]

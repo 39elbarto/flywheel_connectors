@@ -14,6 +14,11 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::fs::{File, OpenOptions, create_dir_all};
+use std::io::Write;
+use std::path::PathBuf;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
 use base64::Engine;
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
@@ -60,7 +65,10 @@ fn generate_valid_token(
 ) -> fcp_core::CapabilityToken {
     let cap = match op {
         "twilio.send_message" => "twilio.message",
-        "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
+        "twilio.create_call"
+        | "twilio.hangup_call"
+        | "twilio.generate_twiml"
+        | "twilio.media_stream.process_events" => "twilio.voice",
         "twilio.whatsapp_send" | "twilio.whatsapp_send_template" => "twilio.whatsapp",
         "twilio.conversation.create" | "twilio.conversation.message.send" => "twilio.conversations",
         "twilio.conversation.participant.add" | "twilio.conversation.participant.remove" => {
@@ -211,6 +219,118 @@ fn twilio_error_response(code: u32, message: &str) -> serde_json::Value {
         "status": 400,
         "more_info": "https://www.twilio.com/docs/errors"
     })
+}
+
+fn twilio_media_start_frame(stream_sid: &str, call_sid: &str) -> serde_json::Value {
+    json!({
+        "event": "start",
+        "sequenceNumber": "1",
+        "streamSid": stream_sid,
+        "start": {
+            "streamSid": stream_sid,
+            "accountSid": TEST_ACCOUNT_SID,
+            "callSid": call_sid,
+            "tracks": ["inbound"],
+            "customParameters": { "token": "stream-token" },
+            "mediaFormat": {
+                "encoding": "audio/x-mulaw",
+                "sampleRate": 8000,
+                "channels": 1
+            }
+        }
+    })
+}
+
+fn twilio_media_frame(
+    stream_sid: &str,
+    sequence: u64,
+    chunk: u64,
+    timestamp: u64,
+) -> serde_json::Value {
+    json!({
+        "event": "media",
+        "sequenceNumber": sequence.to_string(),
+        "streamSid": stream_sid,
+        "media": {
+            "track": "inbound",
+            "chunk": chunk.to_string(),
+            "timestamp": timestamp.to_string(),
+            "payload": base64::engine::general_purpose::STANDARD.encode(vec![0x7f; 160])
+        }
+    })
+}
+
+fn open_media_stream_e2e_log() -> (File, PathBuf) {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock after unix epoch")
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!(
+        "fcp-twilio-media-stream-e2e-{}-{now}",
+        std::process::id()
+    ));
+    create_dir_all(&dir).expect("create Twilio media stream e2e log dir");
+    let path = dir.join("twilio_media_stream_e2e.jsonl");
+    let file = OpenOptions::new()
+        .create_new(true)
+        .append(true)
+        .open(&path)
+        .expect("open Twilio media stream e2e log");
+    (file, path)
+}
+
+fn log_media_stream_e2e(
+    logs: &mut File,
+    scenario: &str,
+    result: &serde_json::Value,
+    latency_ms: u128,
+    details: serde_json::Value,
+) {
+    let latency_ms = u64::try_from(latency_ms).unwrap_or(u64::MAX);
+    let record = json!({
+        "record_type": "twilio_media_stream_connector_boundary_e2e",
+        "scenario": scenario,
+        "status": if result["accepted"].as_bool().unwrap_or(false) { "accepted" } else { "denied" },
+        "transport": "host_forwarded_twilio_websocket_frames",
+        "runtime": "fcp_async_core::runtime::test",
+        "call_sid": result.get("call_sid").cloned().unwrap_or(serde_json::Value::Null),
+        "stream_sid": result.get("stream_sid").cloned().unwrap_or(serde_json::Value::Null),
+        "sequence_numbers": details.get("sequence_numbers").cloned().unwrap_or_else(|| json!([])),
+        "queue_depth": result.get("queue_depth").cloned().unwrap_or_else(|| json!(0)),
+        "max_queue_depth": result.get("max_queue_depth").cloned().unwrap_or_else(|| json!(0)),
+        "pacing_decisions": result.get("pacing_decisions").cloned().unwrap_or_else(|| json!([])),
+        "reconnect_plan": result.get("reconnect_plan").cloned().unwrap_or_else(|| json!([])),
+        "latency_ms": latency_ms,
+        "cleanup": {
+            "clean_shutdown": result.get("clean_shutdown").cloned().unwrap_or_else(|| json!(false)),
+            "tainted": result.get("tainted").cloned().unwrap_or_else(|| json!(true)),
+        },
+        "final_result": {
+            "accepted": result.get("accepted").cloned().unwrap_or_else(|| json!(false)),
+            "status_code": result.get("status_code").cloned().unwrap_or_else(|| json!(0)),
+            "reason_code": result.get("reason_code").cloned().unwrap_or_else(|| json!("missing")),
+        },
+        "skip_reason": serde_json::Value::Null,
+        "details": details,
+    });
+    writeln!(logs, "{record}").expect("write Twilio media stream e2e log line");
+    logs.flush()
+        .expect("flush Twilio media stream e2e log line");
+}
+
+async fn invoke_media_stream_process_events(
+    connector: &mut TwilioConnector,
+    capability: fcp_core::CapabilityToken,
+    input: serde_json::Value,
+) -> serde_json::Value {
+    connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": input,
+            "capability_token": capability
+        }))
+        .await
+        .expect("media stream process_events should return structured output")
 }
 
 // ============================================================================
@@ -966,6 +1086,7 @@ async fn lifecycle_introspect_all_operations() {
         "twilio.hangup_call",
         "twilio.list_calls",
         "twilio.generate_twiml",
+        "twilio.media_stream.process_events",
         "twilio.list_recordings",
         "twilio.download_recording",
         "twilio.download_media",
@@ -1006,7 +1127,7 @@ async fn lifecycle_introspect_all_operations() {
     for expected in &expected_ops {
         assert!(op_ids.contains(expected), "missing operation: {expected}");
     }
-    assert_eq!(ops.len(), 41);
+    assert_eq!(ops.len(), 42);
 
     for op in ops {
         assert!(
@@ -1019,6 +1140,497 @@ async fn lifecycle_introspect_all_operations() {
             "output_schema should be object for {}",
             op["id"]
         );
+    }
+}
+
+// ============================================================================
+// Twilio Media Streams Tests
+// ============================================================================
+
+/// Media stream processing accepts a fake Twilio-compatible frame session.
+#[fcp_async_core::runtime::test]
+async fn media_stream_process_events_accepts_fake_twilio_session() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.media_stream.process_events.fake_session");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.media_stream.process_events"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.media_stream.process_events",
+    );
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [
+                    { "event": "connected", "protocol": "Call", "version": "1.0.0" },
+                    twilio_media_start_frame("MZfake001", "CAfake001"),
+                    twilio_media_frame("MZfake001", 2, 1, 0),
+                    twilio_media_frame("MZfake001", 3, 2, 20),
+                    {
+                        "event": "dtmf",
+                        "sequenceNumber": "4",
+                        "streamSid": "MZfake001",
+                        "dtmf": { "track": "inbound_track", "digit": "5" }
+                    },
+                    {
+                        "event": "mark",
+                        "sequenceNumber": "5",
+                        "streamSid": "MZfake001",
+                        "mark": { "name": "audio-ack" }
+                    },
+                    {
+                        "event": "stop",
+                        "sequenceNumber": "6",
+                        "streamSid": "MZfake001",
+                        "stop": { "accountSid": TEST_ACCOUNT_SID, "callSid": "CAfake001" }
+                    }
+                ],
+                "expected_stream_token": "stream-token",
+                "allowed_call_sids": ["CAfake001"],
+                "stream_token_issued_at_ms": 1000,
+                "now_ms": 1200,
+                "request_region": { "source": "fake_twilio_media_stream_harness" }
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("fake Twilio media stream should be accepted");
+
+    assert_eq!(result["accepted"], true);
+    assert_eq!(result["status_code"], 200);
+    assert_eq!(result["reason_code"], "stream_stopped");
+    assert_eq!(result["stream_sid"], "MZfake001");
+    assert_eq!(result["call_sid"], "CAfake001");
+    assert_eq!(result["media_frames"], 2);
+    assert_eq!(result["duplicate_frames"], 0);
+    assert_eq!(result["dtmf_digits"][0], "5");
+    assert_eq!(result["marks_received"][0], "audio-ack");
+    assert_eq!(
+        result["supervision"]["builder"],
+        "fcp_sdk::runtime::SupervisorConfig"
+    );
+    assert_eq!(
+        result["supervision"]["app_spec"]["child_scope"],
+        "twilio.media_stream.session"
+    );
+    assert_eq!(result["clean_shutdown"], true);
+}
+
+/// Media stream processing paces bidirectional outbound audio as 20 ms frames.
+#[fcp_async_core::runtime::test]
+async fn media_stream_process_events_paces_outbound_audio_and_marks() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.media_stream.process_events.pacing");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.media_stream.process_events"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.media_stream.process_events",
+    );
+    let outbound_payload = base64::engine::general_purpose::STANDARD.encode(vec![0x7f; 320]);
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [twilio_media_start_frame("MZpace001", "CApace001")],
+                "outbound": [
+                    { "type": "audio", "payload": outbound_payload, "mark": "tts-1" }
+                ]
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("outbound audio should be paced");
+
+    assert_eq!(result["accepted"], true);
+    assert_eq!(result["outbound_messages"].as_array().unwrap().len(), 3);
+    assert_eq!(result["outbound_messages"][0]["event"], "media");
+    assert_eq!(result["outbound_messages"][1]["event"], "media");
+    assert_eq!(result["outbound_messages"][2]["event"], "mark");
+    assert_eq!(result["pacing_decisions"][0]["scheduled_after_ms"], 0);
+    assert_eq!(result["pacing_decisions"][1]["scheduled_after_ms"], 20);
+    assert_eq!(result["pacing_decisions"][2]["scheduled_after_ms"], 40);
+    assert_eq!(result["queue_depth"], 0);
+    assert_eq!(result["clean_shutdown"], true);
+}
+
+/// Media stream processing rejects stale callbacks and suppresses duplicate media frames.
+#[fcp_async_core::runtime::test]
+async fn media_stream_process_events_rejects_stale_and_suppresses_duplicates() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.media_stream.process_events.stale_duplicate");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.media_stream.process_events"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.media_stream.process_events",
+    );
+
+    let duplicate = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [
+                    twilio_media_start_frame("MZdup001", "CAdup001"),
+                    twilio_media_frame("MZdup001", 2, 1, 0),
+                    twilio_media_frame("MZdup001", 2, 1, 0),
+                    twilio_media_frame("MZdup001", 3, 2, 20)
+                ]
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("duplicate media frame should be structured");
+
+    let stale = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [twilio_media_start_frame("MZstale001", "CAstale001")],
+                "expected_stream_token": "stream-token",
+                "stream_token_issued_at_ms": 1_000,
+                "now_ms": 60_000,
+                "stream_token_ttl_ms": 30_000
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("stale media callback should be structured");
+
+    assert_eq!(duplicate["accepted"], true);
+    assert_eq!(duplicate["media_frames"], 2);
+    assert_eq!(duplicate["duplicate_frames"], 1);
+    assert_eq!(duplicate["suppressed_frames"], 1);
+    assert_eq!(stale["accepted"], false);
+    assert_eq!(stale["status_code"], 403);
+    assert_eq!(stale["reason_code"], "stale_stream_token");
+}
+
+/// Media stream processing reports queue backpressure, timeout, and capped backoff.
+#[fcp_async_core::runtime::test]
+async fn media_stream_process_events_reports_backpressure_timeout_and_backoff_caps() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.media_stream.process_events.bounds");
+    let mock_server = MockServer::start().await;
+
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &mock_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.media_stream.process_events"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.media_stream.process_events",
+    );
+    let large_payload = base64::engine::general_purpose::STANDARD.encode(vec![0x7f; 480]);
+
+    let backpressure = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [twilio_media_start_frame("MZbounds001", "CAbounds001")],
+                "max_queued_audio_bytes": 200,
+                "reconnect_attempts": 4,
+                "max_reconnect_attempts": 4,
+                "base_backoff_ms": 100,
+                "max_backoff_ms": 250,
+                "outbound": [{ "type": "audio", "payload": large_payload }]
+            },
+            "capability_token": capability.clone()
+        }))
+        .await
+        .expect("backpressure should be structured");
+
+    let timeout = connector
+        .handle_invoke(json!({
+            "operation": "twilio.media_stream.process_events",
+            "input": {
+                "frames": [twilio_media_start_frame("MZtimeout001", "CAtimeout001")],
+                "deadline_exceeded": true
+            },
+            "capability_token": capability
+        }))
+        .await
+        .expect("timeout should be structured");
+
+    assert_eq!(backpressure["accepted"], false);
+    assert_eq!(backpressure["status_code"], 429);
+    assert_eq!(backpressure["reason_code"], "audio_backpressure");
+    assert_eq!(backpressure["backpressure"], true);
+    assert_eq!(backpressure["reconnect_plan"][0]["delay_ms"], 100);
+    assert_eq!(backpressure["reconnect_plan"][1]["delay_ms"], 200);
+    assert_eq!(backpressure["reconnect_plan"][2]["delay_ms"], 250);
+    assert_eq!(backpressure["reconnect_plan"][2]["capped"], true);
+    assert_eq!(timeout["accepted"], false);
+    assert_eq!(timeout["status_code"], 408);
+    assert_eq!(timeout["reason_code"], "request_timeout");
+    assert_eq!(timeout["clean_shutdown"], false);
+}
+
+/// Connector-boundary media stream evidence covers fake Twilio WebSocket frames and callback edges.
+#[fcp_async_core::runtime::test]
+async fn media_stream_process_events_no_mock_e2e_jsonl_covers_callback_edges() {
+    let _ctx = AsyncTestContext::for_scenario("twilio.media_stream.process_events.no_mock_e2e");
+    let (mut logs, log_path) = open_media_stream_e2e_log();
+    println!("twilio_media_stream_e2e_log={}", log_path.display());
+
+    let callback_server = MockServer::start().await;
+    let mut connector = TwilioConnector::new();
+    setup_configure(&mut connector, &callback_server.uri()).await;
+    let signing_key =
+        setup_handshake(&mut connector, &["twilio.media_stream.process_events"]).await;
+    let capability = generate_valid_token(
+        &signing_key,
+        connector.instance_id(),
+        "twilio.media_stream.process_events",
+    );
+    let outbound_payload = base64::engine::general_purpose::STANDARD.encode(vec![0x7f; 320]);
+    let large_payload = base64::engine::general_purpose::STANDARD.encode(vec![0x7f; 480]);
+
+    let scenarios = vec![
+        (
+            "start_media_mark_stop",
+            json!({
+                "frames": [
+                    { "event": "connected", "protocol": "Call", "version": "1.0.0" },
+                    twilio_media_start_frame("MZe2e001", "CAe2e001"),
+                    twilio_media_frame("MZe2e001", 2, 1, 0),
+                    twilio_media_frame("MZe2e001", 3, 2, 20),
+                    {
+                        "event": "mark",
+                        "sequenceNumber": "4",
+                        "streamSid": "MZe2e001",
+                        "mark": { "name": "tts-ack" }
+                    },
+                    {
+                        "event": "stop",
+                        "sequenceNumber": "5",
+                        "streamSid": "MZe2e001",
+                        "stop": { "accountSid": TEST_ACCOUNT_SID, "callSid": "CAe2e001" }
+                    }
+                ],
+                "expected_stream_token": "stream-token",
+                "allowed_call_sids": ["CAe2e001"],
+                "stream_token_issued_at_ms": 1_000,
+                "now_ms": 1_100,
+                "reconnect_attempts": 3,
+                "max_reconnect_attempts": 3,
+                "base_backoff_ms": 100,
+                "max_backoff_ms": 250,
+                "request_region": {
+                    "callback_server": callback_server.uri(),
+                    "surface": "fake_twilio_media_stream_websocket"
+                }
+            }),
+            true,
+            200,
+            "stream_stopped",
+            json!({
+                "sequence_numbers": [1, 2, 3, 4, 5],
+                "callback_server": callback_server.uri(),
+                "path": "/twilio/media-stream"
+            }),
+        ),
+        (
+            "duplicate_frame_suppressed",
+            json!({
+                "frames": [
+                    twilio_media_start_frame("MZe2e002", "CAe2e002"),
+                    twilio_media_frame("MZe2e002", 2, 1, 0),
+                    twilio_media_frame("MZe2e002", 2, 1, 0),
+                    twilio_media_frame("MZe2e002", 3, 2, 20)
+                ],
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            true,
+            200,
+            "stream_active",
+            json!({
+                "sequence_numbers": [1, 2, 2, 3],
+                "expected_suppressed_frames": 1,
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "outbound_queue_drain",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e003", "CAe2e003")],
+                "outbound": [{ "type": "audio", "payload": outbound_payload.clone(), "mark": "tts-1" }],
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            true,
+            200,
+            "stream_active",
+            json!({
+                "sequence_numbers": [1],
+                "expected_pacing_ms": [0, 20, 40],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "rate_limit_denied",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e004", "CAe2e004")],
+                "rate_limited": true,
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            false,
+            429,
+            "rate_limited",
+            json!({
+                "sequence_numbers": [],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "timeout_denied",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e005", "CAe2e005")],
+                "deadline_exceeded": true,
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            false,
+            408,
+            "request_timeout",
+            json!({
+                "sequence_numbers": [],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "cancellation_denied",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e006", "CAe2e006")],
+                "cancelled": true,
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            false,
+            408,
+            "request_cancelled",
+            json!({
+                "sequence_numbers": [],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "malformed_inbound_clear_denied",
+            json!({
+                "frames": [
+                    twilio_media_start_frame("MZe2e007", "CAe2e007"),
+                    { "event": "clear", "sequenceNumber": "2", "streamSid": "MZe2e007" }
+                ],
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            false,
+            400,
+            "unsupported_inbound_clear",
+            json!({
+                "sequence_numbers": [1, 2],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "backpressure_denied",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e008", "CAe2e008")],
+                "max_queued_audio_bytes": 200,
+                "outbound": [{ "type": "audio", "payload": large_payload.clone() }],
+                "reconnect_attempts": 4,
+                "max_reconnect_attempts": 4,
+                "base_backoff_ms": 100,
+                "max_backoff_ms": 250,
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            false,
+            429,
+            "audio_backpressure",
+            json!({
+                "sequence_numbers": [1],
+                "callback_server": callback_server.uri()
+            }),
+        ),
+        (
+            "send_failure_tainted_cleanup",
+            json!({
+                "frames": [twilio_media_start_frame("MZe2e009", "CAe2e009")],
+                "simulate_send_failure_after": 1,
+                "outbound": [{ "type": "audio", "payload": outbound_payload.clone(), "mark": "tts-2" }],
+                "request_region": { "callback_server": callback_server.uri() }
+            }),
+            true,
+            200,
+            "stream_active",
+            json!({
+                "sequence_numbers": [1],
+                "expected_failure_code": "send_failed",
+                "callback_server": callback_server.uri()
+            }),
+        ),
+    ];
+
+    for (scenario, input, expected_accepted, expected_status, expected_reason, details) in scenarios
+    {
+        let started = Instant::now();
+        let result =
+            invoke_media_stream_process_events(&mut connector, capability.clone(), input).await;
+        let latency_ms = started.elapsed().as_millis();
+
+        assert_eq!(result["accepted"], expected_accepted, "{scenario}");
+        assert_eq!(result["status_code"], expected_status, "{scenario}");
+        assert_eq!(result["reason_code"], expected_reason, "{scenario}");
+        assert!(result["logs"].as_array().is_some(), "{scenario}");
+        assert!(
+            result["supervision"]["app_spec"]["child_scope"] == "twilio.media_stream.session",
+            "{scenario}"
+        );
+        log_media_stream_e2e(&mut logs, scenario, &result, latency_ms, details);
+    }
+
+    let jsonl = std::fs::read_to_string(&log_path).expect("read Twilio media stream e2e JSONL");
+    assert!(!jsonl.trim().is_empty());
+    assert!(!jsonl.contains("stream-token"));
+    for scenario in [
+        "start_media_mark_stop",
+        "duplicate_frame_suppressed",
+        "outbound_queue_drain",
+        "rate_limit_denied",
+        "timeout_denied",
+        "cancellation_denied",
+        "malformed_inbound_clear_denied",
+        "backpressure_denied",
+        "send_failure_tainted_cleanup",
+    ] {
+        assert!(
+            jsonl.contains(scenario),
+            "missing JSONL scenario {scenario}"
+        );
+    }
+    for line in jsonl.lines() {
+        let value: serde_json::Value = serde_json::from_str(line).expect("JSONL line parses");
+        assert_eq!(
+            value["record_type"],
+            "twilio_media_stream_connector_boundary_e2e"
+        );
+        assert_eq!(value["transport"], "host_forwarded_twilio_websocket_frames");
+        assert!(value["latency_ms"].as_u64().is_some());
+        assert!(value["final_result"]["reason_code"].as_str().is_some());
+        assert!(value["cleanup"]["clean_shutdown"].as_bool().is_some());
+        assert!(value["pacing_decisions"].as_array().is_some());
+        assert!(value["reconnect_plan"].as_array().is_some());
     }
 }
 

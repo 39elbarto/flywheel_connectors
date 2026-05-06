@@ -1459,6 +1459,94 @@ impl TwilioConnector {
                         ],
                     },
                 ),
+                op_info(
+                    "twilio.media_stream.process_events",
+                    "Process host-forwarded Twilio Media Streams frames",
+                    json!({
+                        "type": "object",
+                        "required": ["frames"],
+                        "properties": {
+                            "frames": {
+                                "type": "array",
+                                "description": "Ordered Twilio WebSocket frames: connected/start/media/dtmf/mark/stop"
+                            },
+                            "mode": {
+                                "type": "string",
+                                "enum": ["bidirectional", "unidirectional"],
+                                "description": "Twilio Media Streams mode"
+                            },
+                            "outbound": {
+                                "type": "array",
+                                "description": "Connector-to-Twilio media, mark, and clear actions for bidirectional streams"
+                            },
+                            "expected_stream_token": { "type": "string" },
+                            "allowed_call_sids": { "type": "array", "items": { "type": "string" } },
+                            "stream_token_issued_at_ms": { "type": "integer" },
+                            "now_ms": { "type": "integer" },
+                            "stream_token_ttl_ms": { "type": "integer" },
+                            "max_frame_bytes": { "type": "integer" },
+                            "max_media_payload_bytes": { "type": "integer" },
+                            "max_queued_audio_bytes": { "type": "integer" },
+                            "disconnect_grace_ms": { "type": "integer" },
+                            "reconnect_attempts": { "type": "integer" },
+                            "max_reconnect_attempts": { "type": "integer" },
+                            "base_backoff_ms": { "type": "integer" },
+                            "max_backoff_ms": { "type": "integer" },
+                            "cancelled": { "type": "boolean" },
+                            "deadline_exceeded": { "type": "boolean" },
+                            "rate_limited": { "type": "boolean" },
+                            "request_region": { "type": "object" }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "accepted": { "type": "boolean" },
+                            "status_code": { "type": "integer" },
+                            "reason_code": { "type": "string" },
+                            "event_type": { "type": "string" },
+                            "stream_sid": { "type": "string" },
+                            "call_sid": { "type": "string" },
+                            "frames_received": { "type": "integer" },
+                            "media_frames": { "type": "integer" },
+                            "duplicate_frames": { "type": "integer" },
+                            "suppressed_frames": { "type": "integer" },
+                            "inbound_audio_bytes": { "type": "integer" },
+                            "outbound_messages": { "type": "array" },
+                            "pacing_decisions": { "type": "array" },
+                            "reconnect_plan": { "type": "array" },
+                            "queue_depth": { "type": "integer" },
+                            "max_queue_depth": { "type": "integer" },
+                            "queued_audio_bytes": { "type": "integer" },
+                            "backpressure": { "type": "boolean" },
+                            "request_region": { "type": "object" },
+                            "supervision": { "type": "object" },
+                            "logs": { "type": "array" },
+                            "tainted": { "type": "boolean" },
+                            "clean_shutdown": { "type": "boolean" }
+                        }
+                    }),
+                    "twilio.voice",
+                    RiskLevel::High,
+                    SafetyTier::Risky,
+                    IdempotencyClass::BestEffort,
+                    AgentHint {
+                        when_to_use: "Handle host-forwarded Twilio Media Streams frames for realtime voice. Use this after TwiML <Connect><Stream> starts a bidirectional stream; the connector validates start/media/mark/stop ordering and emits bounded outbound media/mark/clear actions.".into(),
+                        common_mistakes: vec![
+                            "Starting a listener inside the connector instead of forwarding WebSocket frames through the FCP host.".into(),
+                            "Sending outbound media on a unidirectional <Start><Stream> connection.".into(),
+                            "Sending audio with WAV/RIFF headers instead of raw base64 mu-law/8000 bytes.".into(),
+                        ],
+                        examples: vec![
+                            r#"{"frames": [{"event": "start", "sequenceNumber": "1", "streamSid": "MZxxx", "start": {"streamSid": "MZxxx", "callSid": "CAxxx", "tracks": ["inbound"], "mediaFormat": {"encoding": "audio/x-mulaw", "sampleRate": 8000, "channels": 1}}}]}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("twilio.generate_twiml"),
+                            CapabilityId::from_static("twilio.create_call"),
+                            CapabilityId::from_static("twilio.hangup_call"),
+                        ],
+                    },
+                ),
                 // ── Recordings and Media ─────────────────────────────
                 op_info(
                     "twilio.list_recordings",
@@ -2758,6 +2846,7 @@ impl TwilioConnector {
             "twilio.hangup_call" => self.invoke_hangup_call(input).await,
             "twilio.list_calls" => self.invoke_list_calls(input).await,
             "twilio.generate_twiml" => self.invoke_generate_twiml(&input),
+            "twilio.media_stream.process_events" => self.invoke_media_stream_process_events(&input),
             "twilio.list_recordings" => self.invoke_list_recordings(input).await,
             "twilio.download_recording" => self.invoke_download_recording(input).await,
             "twilio.download_media" => self.invoke_download_media(input).await,
@@ -3017,6 +3106,14 @@ impl TwilioConnector {
         );
 
         Ok(json!({ "twiml": twiml }))
+    }
+
+    #[allow(clippy::unused_self)]
+    fn invoke_media_stream_process_events(
+        &self,
+        input: &serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        crate::media_stream::process_media_stream_events(input)
     }
 
     async fn invoke_list_recordings(
@@ -4438,7 +4535,10 @@ mod tests {
     ) -> CapabilityToken {
         let cap = match op {
             "twilio.send_message" => "twilio.message",
-            "twilio.create_call" | "twilio.hangup_call" | "twilio.generate_twiml" => "twilio.voice",
+            "twilio.create_call"
+            | "twilio.hangup_call"
+            | "twilio.generate_twiml"
+            | "twilio.media_stream.process_events" => "twilio.voice",
             "twilio.whatsapp_send" | "twilio.whatsapp_send_template" => "twilio.whatsapp",
             "twilio.conversation.create" | "twilio.conversation.message.send" => {
                 "twilio.conversations"
@@ -4784,6 +4884,7 @@ mod tests {
         assert!(op_ids.contains(&"twilio.hangup_call"));
         assert!(op_ids.contains(&"twilio.list_calls"));
         assert!(op_ids.contains(&"twilio.generate_twiml"));
+        assert!(op_ids.contains(&"twilio.media_stream.process_events"));
         assert!(op_ids.contains(&"twilio.list_recordings"));
         assert!(op_ids.contains(&"twilio.download_recording"));
         assert!(op_ids.contains(&"twilio.download_media"));
@@ -4819,7 +4920,7 @@ mod tests {
         assert!(op_ids.contains(&"twilio.webhook.parse_sms_event"));
         assert!(op_ids.contains(&"twilio.webhook.parse_status_callback"));
         assert!(op_ids.contains(&"twilio.webhook.parse_voice_event"));
-        assert_eq!(ops.len(), 41);
+        assert_eq!(ops.len(), 42);
     }
 
     // ── Provisioning tests ─────────────────────────────────────────

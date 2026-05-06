@@ -35,4 +35,5 @@
 pub mod client;
 pub mod connector;
 pub mod error;
+pub mod media_stream;
 pub mod types;

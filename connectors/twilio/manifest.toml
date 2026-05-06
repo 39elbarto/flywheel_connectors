@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:d07b3118cfa30182d4f5ff0ed9fb56d8238413766e29785aff78f6328de5a38a"
+interface_hash = "blake3-256:fcp.interface.v2:cc7bdb7c08882376a1fdc05f6fb8827e05b63c27545d15fae63d3bcf9accdec3"
 
 [connector]
 id = "fcp.twilio"
@@ -911,6 +911,165 @@ examples = [
 ]
 related = [
     "twilio.create_call",
+]
+
+[provides.operations."twilio.media_stream.process_events"]
+description = "Process host-forwarded Twilio Media Streams frames with bounded outbound pacing"
+capability = "twilio.voice"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."twilio.media_stream.process_events".rate_limit]
+max = 120
+per_ms = 60000
+burst = 32
+
+[provides.operations."twilio.media_stream.process_events".input_schema]
+required = ["frames"]
+type = "object"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.frames]
+description = "Ordered Twilio WebSocket frames: connected, start, media, dtmf, mark, stop"
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.frames.items]
+type = "object"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.mode]
+description = "Media Streams mode; bidirectional streams permit connector media/mark/clear output"
+enum = ["bidirectional", "unidirectional"]
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.outbound]
+description = "Connector-to-Twilio media, mark, and clear actions for bidirectional streams"
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.outbound.items]
+type = "object"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.expected_stream_token]
+description = "Connector-issued stream token expected in start.customParameters.token"
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.allowed_call_sids]
+description = "Exact CallSid allowlist for this media stream session"
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.allowed_call_sids.items]
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.stream_token_issued_at_ms]
+description = "Connector-issued token timestamp used to reject stale starts"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.now_ms]
+description = "Current host monotonic timestamp for deterministic stale-token tests"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.stream_token_ttl_ms]
+description = "Maximum accepted stream token age"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.max_frame_bytes]
+description = "Maximum accepted serialized Twilio frame size"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.max_media_payload_bytes]
+description = "Maximum accepted decoded inbound media payload size"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.max_queued_audio_bytes]
+description = "Bounded connector outbound audio queue size"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.reconnect_attempts]
+description = "Number of reconnect decisions to compute"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.max_reconnect_attempts]
+description = "Maximum reconnect attempts allowed by the supervisor"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.base_backoff_ms]
+description = "Base reconnect backoff"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.max_backoff_ms]
+description = "Maximum reconnect backoff"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.disconnect_grace_ms]
+description = "Grace window for clean stream shutdown"
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.cancelled]
+description = "Host cancellation flag"
+type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.deadline_exceeded]
+description = "Host deadline-exceeded flag"
+type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".input_schema.properties.rate_limited]
+description = "Host admission/rate-limit flag"
+type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".output_schema]
+type = "object"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.accepted]
+type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.reason_code]
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.stream_sid]
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.call_sid]
+type = "string"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.media_frames]
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.duplicate_frames]
+type = "integer"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.outbound_messages]
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.pacing_decisions]
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.reconnect_plan]
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.supervision]
+type = "object"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.logs]
+type = "array"
+
+[provides.operations."twilio.media_stream.process_events".output_schema.properties.clean_shutdown]
+type = "boolean"
+
+[provides.operations."twilio.media_stream.process_events".ai_hints]
+when_to_use = "Process realtime voice frames forwarded by the FCP host from Twilio Media Streams. Use for bidirectional <Connect><Stream> sessions after create_call/generate_twiml setup."
+common_mistakes = [
+    "Starting a listener inside the connector instead of forwarding WebSocket frames through the FCP host.",
+    "Sending outbound media on a unidirectional <Start><Stream> connection.",
+    "Sending WAV/RIFF headers instead of raw base64 audio/x-mulaw at 8000 Hz.",
+]
+examples = ['{"frames":[{"event":"start","sequenceNumber":"1","streamSid":"MZxxx","start":{"streamSid":"MZxxx","callSid":"CAxxx","tracks":["inbound"],"mediaFormat":{"encoding":"audio/x-mulaw","sampleRate":8000,"channels":1}}}]}']
+related = [
+    "twilio.generate_twiml",
+    "twilio.create_call",
+    "twilio.hangup_call",
 ]
 
 # ---------------------------------------------------------------------------
@@ -2879,6 +3038,7 @@ scope = "instance"
 "twilio.hangup_call" = ["twilio.voice"]
 "twilio.list_calls" = ["twilio.read"]
 "twilio.generate_twiml" = ["twilio.voice"]
+"twilio.media_stream.process_events" = ["twilio.voice"]
 "twilio.list_recordings" = ["twilio.read"]
 "twilio.download_recording" = ["twilio.media"]
 "twilio.download_media" = ["twilio.media"]

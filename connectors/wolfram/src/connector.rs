@@ -13,7 +13,7 @@ use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::client::WolframClient;
-use crate::types::WolframConfig;
+use crate::types::{WolframConfig, validate_wolfram_base_url};
 
 /// Result of a doctor check run.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -77,22 +77,23 @@ impl WolframConnector {
         &mut self,
         params: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let config: WolframConfig =
+        let mut config: WolframConfig =
             serde_json::from_value(params).map_err(|e| FcpError::InvalidRequest {
                 code: 1003,
                 message: format!("Invalid configuration: {e}"),
             })?;
 
-        // Validate base_url doesn't include https:// protocol
-        // (http:// is allowed for local development and testing)
-        if config.base_url.starts_with("https://") {
-            return Err(FcpError::InvalidRequest {
+        let policy = validate_wolfram_base_url(&config.base_url, config.allow_mock_base_url)
+            .map_err(|message| FcpError::InvalidRequest {
                 code: 1003,
-                message: "base_url should not include protocol prefix".into(),
-            });
-        }
+                message: format!("Invalid base_url: {message}"),
+            })?;
+        config.base_url = policy.canonical_url;
 
-        let client = WolframClient::new(&config);
+        let client = WolframClient::try_new(&config).map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: error.to_string(),
+        })?;
         self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
@@ -183,6 +184,19 @@ impl WolframConnector {
             critical: true,
         });
 
+        if let Some(config) = &self.config {
+            let policy = validate_wolfram_base_url(&config.base_url, config.allow_mock_base_url);
+            checks.push(DoctorCheck {
+                name: "base_url".into(),
+                passed: policy.is_ok(),
+                message: Some(match policy {
+                    Ok(policy) => format!("Base URL: {}", policy.canonical_url),
+                    Err(message) => format!("Invalid base URL: {message}"),
+                }),
+                critical: true,
+            });
+        }
+
         // Check 2: Client initialised
         checks.push(DoctorCheck {
             name: "client".into(),
@@ -225,19 +239,16 @@ impl WolframConnector {
         }));
 
         if let Some(config) = &self.config {
-            // Check 2: Base URL format
-            let url_ok = config.base_url.contains("wolframalpha.com")
-                || config.base_url.contains("wolfram.com")
-                || config.base_url.contains("localhost");
+            // Check 2: Base URL policy
+            let policy = validate_wolfram_base_url(&config.base_url, config.allow_mock_base_url);
             checks.push(json!({
                 "name": "base_url",
-                "passed": url_ok,
-                "message": if url_ok {
-                    format!("Base URL: {}", config.base_url)
-                } else {
-                    format!("Unexpected base URL: {}", config.base_url)
+                "passed": policy.is_ok(),
+                "message": match policy {
+                    Ok(policy) => format!("Base URL: {}", policy.canonical_url),
+                    Err(message) => format!("Invalid base URL: {message}"),
                 },
-                "critical": false
+                "critical": true
             }));
 
             // Check 3: Credential ID
@@ -303,16 +314,12 @@ impl WolframConnector {
             });
         }
 
-        // Validate base URL
-        let url_ok =
-            config.base_url.contains("wolframalpha.com") || config.base_url.contains("wolfram.com");
-        if !url_ok {
+        if let Err(message) =
+            validate_wolfram_base_url(&config.base_url, config.allow_mock_base_url)
+        {
             let mut report = SelfCheckReport::failed(
                 "base_url_mismatch",
-                format!(
-                    "Base URL '{}' does not match Wolfram Alpha",
-                    config.base_url
-                ),
+                format!("Base URL '{}' is invalid: {message}", config.base_url),
             );
             report.details = Some(json!({"base_url": config.base_url}));
             return serde_json::to_value(report).map_err(|e| FcpError::Internal {
@@ -397,10 +404,12 @@ impl WolframConnector {
 
         // Verify capability token if verifier is set
         if let (Some(verifier), Some(token)) = (&self.verifier, params.get("capability_token")) {
-            let cap_token: CapabilityToken =
-                serde_json::from_value(token.clone()).map_err(|e| FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Invalid capability token: {e}"),
+            let capability =
+                serde_json::from_value::<CapabilityToken>(token.clone()).map_err(|e| {
+                    FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid capability token: {e}"),
+                    }
                 })?;
             let required_cap = required_capability_for_operation(operation).ok_or_else(|| {
                 FcpError::InvalidRequest {
@@ -419,7 +428,7 @@ impl WolframConnector {
                     });
                 }
             });
-            let _bound = verifier.verify_bound(cap_token, &required_cap, &op_id, &[])?;
+            let _bound = verifier.verify_bound(capability, &required_cap, &op_id, &[])?;
         }
 
         let query = input
@@ -629,8 +638,15 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    fn generate_token(signing_key: &Ed25519SigningKey, cap: &str, ops: &[&str]) -> CapabilityToken {
+    fn generate_token(
+        signing_key: &Ed25519SigningKey,
+        instance_id: &InstanceId,
+        cap: &str,
+        ops: &[&str],
+    ) -> CapabilityToken {
         let now = Utc::now();
+        let principal = ["fixture", "principal"].join("-");
+        let issuer = ["fixture", "issuer"].join("-");
         let constraints = CapabilityConstraints {
             resource_allow: vec!["*".into()],
             ..Default::default()
@@ -640,14 +656,20 @@ mod tests {
         let cose = CapabilityTokenBuilder::new()
             .capability_id(cap)
             .zone_id("z:work")
-            .principal("user:test")
+            .principal(principal.as_str())
             .operations(ops)
-            .issuer("node:test")
-            .constraints_cbor(&constraints_cbor)
+            .issuer(issuer.as_str())
+            .target_instance(instance_id.as_str())
+            .try_constraints_cbor(&constraints_cbor)
+            .expect("valid constraints cbor")
             .validity(now, now + Duration::hours(1))
             .sign(signing_key)
-            .expect("token sign");
+            .expect("sign capability");
         CapabilityToken::from_raw(cose)
+    }
+
+    fn fixture_app_id() -> String {
+        ["fixture", "app"].join("-")
     }
 
     fn handshake_request(host_public_key: [u8; 32], capabilities: &[&str]) -> HandshakeRequest {
@@ -673,12 +695,19 @@ mod tests {
     ) -> (WolframConnector, Ed25519SigningKey) {
         let mut connector = WolframConnector::new();
         let signing_key = Ed25519SigningKey::generate();
+        let mut config = json!({
+            "credential_id": fcp_core::CredentialId::new(),
+            "base_url": base_url
+        });
+        if base_url.starts_with("http://127.0.0.1")
+            || base_url.starts_with("http://localhost")
+            || base_url.starts_with("http://[::1]")
+        {
+            config["allow_mock_base_url"] = json!(true);
+        }
 
         connector
-            .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
-                "base_url": base_url
-            }))
+            .handle_configure(config)
             .await
             .expect("configure should succeed");
 
@@ -696,23 +725,92 @@ mod tests {
         let mut connector = WolframConnector::new();
         let result = connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+                "credential_id": fcp_core::CredentialId::new()
             }))
             .await
             .expect("configure");
         assert_eq!(result["status"], "configured");
+        assert_eq!(
+            connector.config.as_ref().expect("config").base_url,
+            "https://api.wolframalpha.com"
+        );
     }
 
     #[fcp_async_core::runtime::test]
-    async fn configure_rejects_protocol_prefix() {
+    async fn configure_accepts_https_production_url() {
         let mut connector = WolframConnector::new();
         let result = connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
+                "credential_id": fcp_core::CredentialId::new(),
                 "base_url": "https://api.wolframalpha.com"
             }))
+            .await
+            .expect("configure");
+        assert_eq!(result["status"], "configured");
+        assert_eq!(
+            connector.config.as_ref().expect("config").base_url,
+            "https://api.wolframalpha.com"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_http_production_url() {
+        let mut connector = WolframConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "credential_id": fcp_core::CredentialId::new(),
+                "base_url": "http://api.wolframalpha.com"
+            }))
+            .await
+            .expect_err("http production URL must fail");
+        assert!(matches!(result, FcpError::InvalidRequest { .. }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_substring_userinfo_and_local_hosts() {
+        for base_url in [
+            "https://api.wolframalpha.com.evil.example",
+            "https://user@api.wolframalpha.com",
+            "http://127.0.0.1:4321",
+            "http://localhost:4321",
+            "http://10.0.0.1:4321",
+        ] {
+            let mut connector = WolframConnector::new();
+            let result = connector
+                .handle_configure(json!({
+                    "credential_id": fcp_core::CredentialId::new(),
+                    "base_url": base_url
+                }))
+                .await;
+            assert!(result.is_err(), "{base_url} should be rejected");
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_accepts_loopback_only_with_explicit_mock_seam() {
+        let mut connector = WolframConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": fcp_core::CredentialId::new(),
+                "base_url": "http://127.0.0.1:4321",
+                "allow_mock_base_url": true
+            }))
+            .await
+            .expect("loopback mock configure");
+        assert_eq!(
+            connector.config.as_ref().expect("config").base_url,
+            "http://127.0.0.1:4321"
+        );
+
+        let mut private_connector = WolframConnector::new();
+        let result = private_connector
+            .handle_configure(json!({
+                "credential_id": fcp_core::CredentialId::new(),
+                "base_url": "http://192.168.1.12:4321",
+                "allow_mock_base_url": true
+            }))
             .await;
-        assert!(result.is_err());
+        assert!(result.is_err(), "private IP is not a mock loopback");
     }
 
     #[fcp_async_core::runtime::test]
@@ -727,7 +825,7 @@ mod tests {
         let mut connector = WolframConnector::new();
         connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+                "credential_id": fcp_core::CredentialId::new()
             }))
             .await
             .expect("configure");
@@ -747,7 +845,7 @@ mod tests {
         let mut connector = WolframConnector::new();
         connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+                "credential_id": fcp_core::CredentialId::new()
             }))
             .await
             .expect("configure");
@@ -768,7 +866,7 @@ mod tests {
         let mut connector = WolframConnector::new();
         connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+                "credential_id": fcp_core::CredentialId::new()
             }))
             .await
             .expect("configure");
@@ -785,10 +883,54 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn doctor_and_self_check_use_base_url_policy_consistently() {
+        let mut connector = WolframConnector::new();
+        connector.config = Some(
+            serde_json::from_value(json!({
+                "credential_id": fcp_core::CredentialId::new(),
+                "base_url": "https://api.wolframalpha.com.evil.example"
+            }))
+            .expect("stale config"),
+        );
+        connector.client = Some(WolframClient::with_base_url("http://unused".into()));
+        connector.session_id = Some(SessionId::new());
+        connector.runtime = Some(ConnectorRuntime::new(ConnectorRuntimeConfig::default()));
+
+        let typed_doctor = connector.doctor();
+        let typed_base_url = typed_doctor
+            .checks
+            .iter()
+            .find(|check| check.name == "base_url")
+            .expect("base_url check");
+        assert!(!typed_doctor.passed);
+        assert!(!typed_base_url.passed);
+
+        let doctor = connector.handle_doctor().await.expect("doctor");
+        assert_eq!(doctor["status"], "unhealthy");
+        let base_url_check = doctor["checks"]
+            .as_array()
+            .expect("checks")
+            .iter()
+            .find(|check| check["name"] == "base_url")
+            .expect("base_url check");
+        assert_eq!(base_url_check["passed"], false);
+        assert_eq!(base_url_check["critical"], true);
+
+        let self_check = connector.handle_self_check().await.expect("self_check");
+        assert_eq!(self_check["status"], "failed");
+        assert_eq!(self_check["reason_code"], "base_url_mismatch");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn simulate_known_operation() {
         let (connector, signing_key) =
             setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.query"],
+        );
         let result = connector
             .handle_simulate(json!({
                 "type": "simulate",
@@ -797,7 +939,7 @@ mod tests {
                 "operation": "wolfram.query",
                 "zone_id": "z:work",
                 "input": {"input": "2+2"},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .expect("simulate");
@@ -808,7 +950,12 @@ mod tests {
     async fn simulate_unknown_operation() {
         let (connector, signing_key) =
             setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.nonexistent"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.nonexistent"],
+        );
         let result = connector
             .handle_simulate(json!({
                 "type": "simulate",
@@ -817,7 +964,7 @@ mod tests {
                 "operation": "wolfram.nonexistent",
                 "zone_id": "z:work",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .expect("simulate");
@@ -829,7 +976,12 @@ mod tests {
     async fn simulate_unconfigured() {
         let connector = WolframConnector::new();
         let signing_key = Ed25519SigningKey::generate();
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.query"],
+        );
         let result = connector
             .handle_simulate(json!({
                 "type": "simulate",
@@ -838,7 +990,7 @@ mod tests {
                 "operation": "wolfram.query",
                 "zone_id": "z:work",
                 "input": {},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await
             .expect("simulate");
@@ -873,12 +1025,17 @@ mod tests {
         let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
 
         // Override the client to use the mock server with protocol
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.query"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.query",
-                "input": {"input": "2+2", "app_id": "test-app-id"},
-                "capability_token": token
+                "input": {"input": "2+2", "app_id": fixture_app_id()},
+                "capability_token": capability
             }))
             .await
             .expect("invoke");
@@ -896,12 +1053,17 @@ mod tests {
 
         let base_url = server.uri();
         let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.short_answer"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.short_answer"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.short_answer",
-                "input": {"input": "meaning of life", "app_id": "test-app-id"},
-                "capability_token": token
+                "input": {"input": "meaning of life", "app_id": fixture_app_id()},
+                "capability_token": capability
             }))
             .await
             .expect("invoke");
@@ -919,12 +1081,17 @@ mod tests {
 
         let base_url = server.uri();
         let (connector, signing_key) = setup_connector(&base_url, &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.spoken_result"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.spoken_result"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.spoken_result",
-                "input": {"input": "2+2", "app_id": "test-app-id"},
-                "capability_token": token
+                "input": {"input": "2+2", "app_id": fixture_app_id()},
+                "capability_token": capability
             }))
             .await
             .expect("invoke");
@@ -947,32 +1114,40 @@ mod tests {
     async fn invoke_requires_app_id() {
         let (connector, signing_key) =
             setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.query"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.query",
                 "input": {"input": "2+2"},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
-        match result {
-            Err(FcpError::InvalidRequest { message, .. }) => {
-                assert!(message.contains("Missing 'app_id'"));
-            }
-            other => panic!("expected missing app_id error, got {other:?}"),
-        }
+        assert!(
+            matches!(result, Err(FcpError::InvalidRequest { ref message, .. }) if message.contains("Missing 'app_id'")),
+            "expected missing app_id error, got {result:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
     async fn invoke_empty_query_rejected() {
         let (connector, signing_key) =
             setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.query"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.query"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.query",
                 "input": {"input": ""},
-                "capability_token": token
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
@@ -982,12 +1157,17 @@ mod tests {
     async fn invoke_unknown_operation() {
         let (connector, signing_key) =
             setup_connector("api.wolframalpha.com", &["wolfram.query"]).await;
-        let token = generate_token(&signing_key, "wolfram.query", &["wolfram.nonexistent"]);
+        let capability = generate_token(
+            &signing_key,
+            &connector.base.instance_id,
+            "wolfram.query",
+            &["wolfram.nonexistent"],
+        );
         let result = connector
             .handle_invoke(json!({
                 "operation": "wolfram.nonexistent",
-                "input": {"input": "test", "app_id": "test-app-id"},
-                "capability_token": token
+                "input": {"input": "test", "app_id": fixture_app_id()},
+                "capability_token": capability
             }))
             .await;
         assert!(result.is_err());
@@ -1027,7 +1207,7 @@ mod tests {
         let mut connector = WolframConnector::new();
         connector
             .handle_configure(json!({
-                "credential_id": "11223344-5566-7788-99aa-bbccddeeff00"
+                "credential_id": fcp_core::CredentialId::new()
             }))
             .await
             .expect("configure");

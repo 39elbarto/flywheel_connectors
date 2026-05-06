@@ -38,7 +38,7 @@ use serde_json::json;
 use tracing::{info, warn};
 
 use crate::error::WolframError;
-use crate::types::{QueryResult, WolframConfig};
+use crate::types::{QueryResult, WolframConfig, validate_wolfram_base_url};
 
 /// Wolfram Alpha API client.
 pub struct WolframClient {
@@ -51,25 +51,34 @@ pub struct WolframClient {
 
 impl WolframClient {
     /// Create a new Wolfram Alpha client.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the supplied configuration has not already passed
+    /// Wolfram base URL policy validation. Production callers should
+    /// prefer [`Self::try_new`] when handling untrusted configuration.
     #[must_use]
     pub fn new(config: &WolframConfig) -> Self {
-        let base_url =
-            if config.base_url.starts_with("http://") || config.base_url.starts_with("https://") {
-                config.base_url.clone()
-            } else {
-                format!("https://{}", config.base_url)
-            };
+        Self::try_new(config).expect("WolframConfig base_url must be validated before client use")
+    }
+
+    /// Create a new Wolfram Alpha client from validated configuration.
+    pub fn try_new(config: &WolframConfig) -> Result<Self, WolframError> {
+        let policy = validate_wolfram_base_url(&config.base_url, config.allow_mock_base_url)
+            .map_err(|message| WolframError::InvalidInput {
+                message: format!("Invalid base_url: {message}"),
+            })?;
         let timeout = Duration::from_millis(config.timeout_ms);
-        Self {
+        Ok(Self {
             client: reqwest::Client::new(),
-            base_url,
+            base_url: policy.canonical_url,
             timeout,
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
                 ..HttpRetryConfig::default()
             },
-        }
+        })
     }
 
     /// Create a client with a custom base URL (for testing).
@@ -233,8 +242,8 @@ impl WolframClient {
         // closure can re-take per attempt.
         let query: Vec<(&'static str, String)> = query
             .iter()
-            .map(|(k, v)| (Self::query_key_static(k), v.clone()))
-            .collect();
+            .map(|(k, v)| Self::query_key_static(k).map(|key| (key, v.clone())))
+            .collect::<Result<_, _>>()?;
         let timeout = self.timeout;
 
         RetryLoop::execute(&ctx, &policy, move |attempt| {
@@ -264,12 +273,11 @@ impl WolframClient {
                         .and_then(|v| v.to_str().ok())
                         .and_then(|v| v.parse::<u64>().ok())
                         .map(Duration::from_secs);
+                    let retry_after_ms =
+                        u64::try_from(retry_after.unwrap_or(Duration::from_mins(1)).as_millis())
+                            .unwrap_or(u64::MAX);
                     return AttemptOutcome::Retryable {
-                        error: WolframError::RateLimited {
-                            retry_after_ms: retry_after
-                                .unwrap_or(Duration::from_secs(60))
-                                .as_millis() as u64,
-                        },
+                        error: WolframError::RateLimited { retry_after_ms },
                         retry_after,
                     };
                 }
@@ -302,21 +310,24 @@ impl WolframClient {
 
     /// Map a small fixed set of query-parameter names onto static
     /// string slices so the per-attempt query Vec can carry
-    /// `&'static str` keys (which reqwest's query() needs to
+    /// `&'static str` keys (which reqwest's `query()` needs to
     /// borrow) while values stay owned. Wolfram's parameter set is
     /// closed (`input`, `appid`, `output`, `format`, `i`) so this
-    /// is safe; an unknown key panics so the constraint is visible.
-    const fn query_key_static(name: &str) -> &'static str {
+    /// is safe; an unknown key returns an internal error so the
+    /// constraint is visible without unwinding production code.
+    fn query_key_static(name: &str) -> Result<&'static str, WolframError> {
         // const-context byte comparison (no string ops in const fn yet
         // for stable nightly comparisons of &str).
         let bytes = name.as_bytes();
         match bytes {
-            b"input" => "input",
-            b"appid" => "appid",
-            b"output" => "output",
-            b"format" => "format",
-            b"i" => "i",
-            _ => panic!("unsupported wolfram query key — extend query_key_static"),
+            b"input" => Ok("input"),
+            b"appid" => Ok("appid"),
+            b"output" => Ok("output"),
+            b"format" => Ok("format"),
+            b"i" => Ok("i"),
+            _ => Err(WolframError::Internal {
+                message: format!("unsupported Wolfram query key: {name}"),
+            }),
         }
     }
 }
@@ -401,7 +412,6 @@ mod tests {
             initial_delay_ms: 5,
             max_delay_ms: 20,
             jitter_enabled: false,
-            ..HttpRetryConfig::default()
         }
     }
 
@@ -416,6 +426,38 @@ mod tests {
             timeout,
             runtime: ConnectorRuntime::new(ConnectorRuntimeConfig::default()),
             retry_config,
+        }
+    }
+
+    struct FlakyResponder {
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Respond for FlakyResponder {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            let n = self.counter.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                ResponseTemplate::new(503).set_body_string("Service Unavailable")
+            } else {
+                ResponseTemplate::new(200).set_body_string("OK")
+            }
+        }
+    }
+
+    struct RateLimitResponder {
+        counter: Arc<AtomicUsize>,
+    }
+
+    impl Respond for RateLimitResponder {
+        fn respond(&self, _: &Request) -> ResponseTemplate {
+            let n = self.counter.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "0")
+                    .set_body_string("Too Many Requests")
+            } else {
+                ResponseTemplate::new(200).set_body_string("after backoff")
+            }
         }
     }
 
@@ -509,10 +551,16 @@ mod tests {
 
         let client = WolframClient::with_base_url_and_retry(server.uri(), no_retry());
         let err = client.query("test", "bad-id").await.unwrap_err();
-        match err {
-            WolframError::Api { status_code, .. } => assert_eq!(status_code, 403),
-            other => panic!("expected Api 403, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                WolframError::Api {
+                    status_code: 403,
+                    ..
+                }
+            ),
+            "expected Api 403, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -523,19 +571,6 @@ mod tests {
         let server = MockServer::start().await;
         let counter = Arc::new(AtomicUsize::new(0));
 
-        struct FlakyResponder {
-            counter: Arc<AtomicUsize>,
-        }
-        impl Respond for FlakyResponder {
-            fn respond(&self, _: &Request) -> ResponseTemplate {
-                let n = self.counter.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    ResponseTemplate::new(503).set_body_string("Service Unavailable")
-                } else {
-                    ResponseTemplate::new(200).set_body_string("OK")
-                }
-            }
-        }
         Mock::given(method("GET"))
             .and(path("/v1/result"))
             .respond_with(FlakyResponder {
@@ -561,21 +596,6 @@ mod tests {
         let server = MockServer::start().await;
         let counter = Arc::new(AtomicUsize::new(0));
 
-        struct RateLimitResponder {
-            counter: Arc<AtomicUsize>,
-        }
-        impl Respond for RateLimitResponder {
-            fn respond(&self, _: &Request) -> ResponseTemplate {
-                let n = self.counter.fetch_add(1, Ordering::SeqCst);
-                if n == 0 {
-                    ResponseTemplate::new(429)
-                        .insert_header("retry-after", "0")
-                        .set_body_string("Too Many Requests")
-                } else {
-                    ResponseTemplate::new(200).set_body_string("after backoff")
-                }
-            }
-        }
         Mock::given(method("GET"))
             .and(path("/v1/result"))
             .respond_with(RateLimitResponder {
@@ -611,10 +631,10 @@ mod tests {
 
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(1));
         let err = client.short_answer("test", "test-id").await.unwrap_err();
-        match err {
-            WolframError::RateLimited { .. } => (),
-            other => panic!("expected RateLimited, got {other:?}"),
-        }
+        assert!(
+            matches!(err, WolframError::RateLimited { .. }),
+            "expected RateLimited, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -628,12 +648,16 @@ mod tests {
 
         let client = WolframClient::with_base_url_and_retry(server.uri(), fast_retry(1));
         let err = client.query("test", "id").await.unwrap_err();
-        match err {
-            WolframError::Api {
-                status_code: 503, ..
-            } => (),
-            other => panic!("expected Api 503, got {other:?}"),
-        }
+        assert!(
+            matches!(
+                err,
+                WolframError::Api {
+                    status_code: 503,
+                    ..
+                }
+            ),
+            "expected Api 503, got {err:?}"
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -719,8 +743,11 @@ mod tests {
     }
 
     #[test]
-    fn query_key_static_panics_on_unknown_key() {
-        let result = std::panic::catch_unwind(|| WolframClient::query_key_static("evil"));
-        assert!(result.is_err(), "unsupported key must panic");
+    fn query_key_static_rejects_unknown_key() {
+        let err = WolframClient::query_key_static("evil").expect_err("unsupported key");
+        assert!(
+            matches!(err, WolframError::Internal { ref message } if message.contains("unsupported Wolfram query key")),
+            "unsupported key should return internal error, got {err:?}"
+        );
     }
 }

@@ -154,8 +154,9 @@ fn suite(server: &MockServer) -> ConnectorSuite {
     ConnectorSuite {
         test_name: "wolfram_short_answer_connector_suite_happy_path".into(),
         config: json!({
-            "credential_id": "11223344-5566-7788-99aa-bbccddeeff00",
-            "base_url": server.uri()
+            "credential_id": fcp_core::CredentialId::new(),
+            "base_url": server.uri(),
+            "allow_mock_base_url": true
         }),
         handshake: handshake_request(),
         invoke: Some(short_answer_invoke("wolfram-short-answer-suite")),

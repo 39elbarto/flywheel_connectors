@@ -10,8 +10,11 @@ use std::{
 };
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+#[cfg(feature = "otlp")]
 use opentelemetry::KeyValue;
+#[cfg(feature = "otlp")]
 use opentelemetry_otlp::WithExportConfig;
+#[cfg(feature = "otlp")]
 use opentelemetry_sdk::{
     Resource,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
@@ -100,7 +103,15 @@ pub fn init_otlp_tracer_with_sample_rate(
     sample_rate: f64,
 ) -> Result<(), TelemetryError> {
     validate_otlp_endpoint(endpoint)?;
+    init_otlp_tracer_with_sample_rate_impl(service_name, endpoint, sample_rate)
+}
 
+#[cfg(feature = "otlp")]
+fn init_otlp_tracer_with_sample_rate_impl(
+    service_name: &str,
+    endpoint: &str,
+    sample_rate: f64,
+) -> Result<(), TelemetryError> {
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint)
@@ -143,6 +154,17 @@ pub fn init_otlp_tracer_with_sample_rate(
     );
 
     Ok(())
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_otlp_tracer_with_sample_rate_impl(
+    _service_name: &str,
+    _endpoint: &str,
+    _sample_rate: f64,
+) -> Result<(), TelemetryError> {
+    Err(TelemetryError::Config(
+        "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
+    ))
 }
 
 fn otlp_endpoint_log_label(endpoint: &str) -> String {
@@ -365,6 +387,20 @@ mod tests {
         assert_eq!(
             otlp_endpoint_log_label("grpc://collector.example.com:4317"),
             "[invalid-otlp-endpoint]"
+        );
+    }
+
+    #[cfg(not(feature = "otlp"))]
+    #[test]
+    fn test_otlp_exporter_requires_feature_flag() {
+        let result = init_otlp_tracer_with_sample_rate(
+            "fcp-test",
+            "https://collector.example.com:4317",
+            1.0,
+        );
+
+        assert!(
+            matches!(result, Err(TelemetryError::Config(message)) if message.contains("`otlp` feature"))
         );
     }
 

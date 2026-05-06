@@ -26,6 +26,10 @@ use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const OP_CHATS_LIST: &str = "feishu.chats.list";
+const OP_COMMENTS_CONTEXT_GET: &str = "feishu.comments.context.get";
+const OP_COMMENTS_PAIRINGS_MANAGE: &str = "feishu.comments.pairings.manage";
+const OP_COMMENTS_REACTION: &str = "feishu.comments.reaction";
+const OP_COMMENTS_REPLY: &str = "feishu.comments.reply";
 const OP_MESSAGES_SEND: &str = "feishu.messages.send";
 const OP_WEBHOOK_INGEST_REQUEST: &str = "feishu.webhook.ingest_request";
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/feishu_connector_verification.sh";
@@ -49,6 +53,8 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
             CapabilityId::from_static("feishu.docs.read"),
             CapabilityId::from_static("feishu.calendar.read"),
             CapabilityId::from_static("feishu.webhook.ingest"),
+            CapabilityId::from_static("feishu.comments.read"),
+            CapabilityId::from_static("feishu.comments.write"),
         ],
         host: None,
         transport_caps: None,
@@ -64,6 +70,11 @@ fn generate_valid_token(
     let capability = match op {
         OP_CHATS_LIST => "feishu.chats.read",
         OP_MESSAGES_SEND => "feishu.messages.write",
+        OP_WEBHOOK_INGEST_REQUEST => "feishu.webhook.ingest",
+        OP_COMMENTS_CONTEXT_GET => "feishu.comments.read",
+        OP_COMMENTS_PAIRINGS_MANAGE | OP_COMMENTS_REPLY | OP_COMMENTS_REACTION => {
+            "feishu.comments.write"
+        }
         _ => "feishu.webhook.ingest",
     };
     let now = Utc::now();
@@ -463,6 +474,226 @@ async fn invoke_webhook_ingest_validates_and_normalizes_event_evidence() {
     assert_eq!(duplicate["state_summary"]["finalized_entries"], 1);
 }
 
+#[fcp_async_core::runtime::test]
+async fn invoke_comment_automation_operations_emit_evidence() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/drive/v1/metas/batch_query"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "metas": [{
+                    "doc_token": "doc_context",
+                    "doc_type": "docx",
+                    "title": "Incident Runbook",
+                    "url": "https://example.feishu.cn/docx/doc_context"
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/open-apis/drive/v1/files/doc_context/comments/batch_query",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(query_param("user_id_type", "open_id"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "items": [{
+                    "comment_id": "comment_context",
+                    "user_id": "ou_commenter",
+                    "is_whole": false,
+                    "quote": "restart failed",
+                    "reply_list": {
+                        "replies": [{
+                            "reply_id": "reply_root",
+                            "user_id": "ou_commenter",
+                            "content": {
+                                "elements": [{
+                                    "type": "text_run",
+                                    "text_run": { "text": "Can you check this?" }
+                                }]
+                            }
+                        }]
+                    }
+                }]
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/open-apis/drive/v1/files/doc_context/comments/comment_context/replies",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(query_param("page_size", "100"))
+        .and(query_param("user_id_type", "open_id"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "items": [{
+                    "reply_id": "reply_current",
+                    "user_id": "ou_commenter",
+                    "content": {
+                        "elements": [{
+                            "type": "text_run",
+                            "text_run": { "text": "Stack trace is in the linked doc" }
+                        }]
+                    }
+                }],
+                "has_more": false
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/open-apis/drive/v1/files/doc_context/comments/comment_context/replies",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 1069302,
+            "msg": "reply is not allowed for whole-comment fallback"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/open-apis/drive/v1/files/doc_context/new_comments"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "comment_id": "comment_fallback"
+            }
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path(
+            "/open-apis/drive/v2/files/doc_context/comments/reaction",
+        ))
+        .and(query_param("file_type", "docx"))
+        .and(header("authorization", &format!("Bearer {TENANT_TOKEN}")))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "code": 0,
+            "msg": "success",
+            "data": {
+                "reaction_id": "reaction_typing"
+            }
+        })))
+        .mount(&server)
+        .await;
+
+    let (connector, signing_key) = setup_connector(&server).await;
+
+    let pairing = connector
+        .invoke(invoke_req(
+            OP_COMMENTS_PAIRINGS_MANAGE,
+            json!({
+                "action": "add",
+                "actor_open_id": "ou_commenter"
+            }),
+            generate_valid_token(
+                &signing_key,
+                OP_COMMENTS_PAIRINGS_MANAGE,
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .unwrap()
+        .result
+        .expect("pairing result");
+    assert_eq!(pairing["changed"], true);
+    assert_eq!(pairing["paired_open_ids"][0], "ou_commenter");
+
+    let context = connector
+        .invoke(invoke_req(
+            OP_COMMENTS_CONTEXT_GET,
+            json!({
+                "file_token": "doc_context",
+                "file_type": "docx",
+                "comment_id": "comment_context",
+                "reply_id": "reply_current"
+            }),
+            generate_valid_token(
+                &signing_key,
+                OP_COMMENTS_CONTEXT_GET,
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .unwrap()
+        .result
+        .expect("context result");
+    assert_eq!(context["document"]["title"], "Incident Runbook");
+    assert_eq!(context["root_comment_text"], "Can you check this?");
+    assert_eq!(
+        context["target_reply_text"],
+        "Stack trace is in the linked doc"
+    );
+    assert_eq!(context["raw_payload_included"], false);
+
+    let reply = connector
+        .invoke(invoke_req(
+            OP_COMMENTS_REPLY,
+            json!({
+                "file_token": "doc_context",
+                "file_type": "docx",
+                "comment_id": "comment_context",
+                "content": "Investigating <safe>",
+                "fallback_to_whole_comment": true
+            }),
+            generate_valid_token(&signing_key, OP_COMMENTS_REPLY, connector.instance_id()),
+        ))
+        .await
+        .unwrap()
+        .result
+        .expect("reply result");
+    assert_eq!(reply["delivered"], true);
+    assert_eq!(reply["delivery_mode"], "whole_comment");
+    assert_eq!(reply["fallback_used"], true);
+
+    let reaction = connector
+        .invoke(invoke_req(
+            OP_COMMENTS_REACTION,
+            json!({
+                "file_token": "doc_context",
+                "file_type": "docx",
+                "reply_id": "reply_current",
+                "action": "add",
+                "reaction_type": "Typing"
+            }),
+            generate_valid_token(&signing_key, OP_COMMENTS_REACTION, connector.instance_id()),
+        ))
+        .await
+        .unwrap()
+        .result
+        .expect("reaction result");
+    assert_eq!(reaction["action"], "add");
+    assert_eq!(reaction["reaction_type"], "Typing");
+
+    println!(
+        "feishu_comment_automation_evidence={}",
+        serde_json::to_string_pretty(&json!({
+            "pairing": pairing,
+            "context": context,
+            "reply": reply,
+            "reaction": reaction
+        }))
+        .unwrap()
+    );
+}
+
 #[test]
 fn introspection_emits_v3_compliance_evidence() {
     let connector = FeishuConnector::new();
@@ -470,7 +701,7 @@ fn introspection_emits_v3_compliance_evidence() {
     let value = serde_json::to_value(&introspection).unwrap();
     let operations = value["operations"].as_array().expect("operations array");
 
-    assert_eq!(operations.len(), 11);
+    assert_eq!(operations.len(), 15);
     assert!(operations.iter().all(|operation| {
         operation["ai_hints"]["when_to_use"]
             .as_str()
@@ -498,6 +729,14 @@ fn introspection_emits_v3_compliance_evidence() {
     assert_eq!(
         webhook["idempotency"],
         serde_json::to_value(IdempotencyClass::BestEffort).unwrap()
+    );
+    let comment_context = operations
+        .iter()
+        .find(|operation| operation["id"] == OP_COMMENTS_CONTEXT_GET)
+        .expect("comment context operation");
+    assert_eq!(
+        comment_context["safety_tier"],
+        serde_json::to_value(SafetyTier::Safe).unwrap()
     );
     assert!(value["event_caps"]["replay"].as_bool().unwrap());
     assert!(

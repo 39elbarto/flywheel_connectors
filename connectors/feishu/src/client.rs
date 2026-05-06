@@ -16,8 +16,9 @@ use tracing::{debug, warn};
 use crate::error::{FeishuError, FeishuResult};
 use crate::types::{
     ApiResponse, CalendarEventsResponse, ChatInfo, ChatListResponse, DocumentContent,
-    MessageResponse, ReplyMessageRequest, SendMessageRequest, SpreadsheetInfo,
-    TenantAccessTokenResponse, UserInfo,
+    DriveCommentBatchQueryResponse, DriveCommentRepliesResponse, DriveDocumentMeta,
+    DriveMetaBatchQueryResponse, MessageResponse, ReplyMessageRequest, SendMessageRequest,
+    SpreadsheetInfo, TenantAccessTokenResponse, UserInfo,
 };
 
 /// Feishu API client with retry and runtime integration.
@@ -319,6 +320,192 @@ impl FeishuClient {
         self.get_api(runtime, &url).await
     }
 
+    /// Build a redaction-safe document-comment turn context.
+    pub async fn get_comment_context(
+        &self,
+        runtime: &ConnectorRuntime,
+        file_token: &str,
+        file_type: &str,
+        comment_id: &str,
+        reply_id: Option<&str>,
+    ) -> FeishuResult<serde_json::Value> {
+        let file_token = Self::sanitize_path_segment(file_token)?;
+        let comment_id = Self::sanitize_path_segment(comment_id)?;
+        let meta_url = self.build_url(&["open-apis", "drive", "v1", "metas", "batch_query"])?;
+        let meta_body = serde_json::json!({
+            "request_docs": [{
+                "doc_token": file_token,
+                "doc_type": file_type,
+            }],
+            "with_url": true,
+        });
+        let meta: DriveMetaBatchQueryResponse =
+            self.post_api(runtime, &meta_url, &meta_body).await?;
+        let document = meta.metas.first().cloned().unwrap_or(DriveDocumentMeta {
+            doc_token: Some(file_token.to_owned()),
+            doc_type: Some(file_type.to_owned()),
+            title: None,
+            url: None,
+        });
+
+        let mut comment_url = self.build_url(&[
+            "open-apis",
+            "drive",
+            "v1",
+            "files",
+            file_token,
+            "comments",
+            "batch_query",
+        ])?;
+        {
+            let mut query = comment_url.query_pairs_mut();
+            query.append_pair("file_type", file_type);
+            query.append_pair("user_id_type", "open_id");
+        }
+        let comment_batch: DriveCommentBatchQueryResponse = self
+            .post_api(
+                runtime,
+                &comment_url,
+                &serde_json::json!({ "comment_ids": [comment_id] }),
+            )
+            .await?;
+        let comment = comment_batch.items.first().cloned();
+
+        let mut replies_url = self.build_url(&[
+            "open-apis",
+            "drive",
+            "v1",
+            "files",
+            file_token,
+            "comments",
+            comment_id,
+            "replies",
+        ])?;
+        {
+            let mut query = replies_url.query_pairs_mut();
+            query.append_pair("file_type", file_type);
+            query.append_pair("page_size", "100");
+            query.append_pair("user_id_type", "open_id");
+        }
+        let replies: DriveCommentRepliesResponse = self.get_api(runtime, &replies_url).await?;
+        let target_reply = reply_id.and_then(|target| {
+            replies
+                .items
+                .iter()
+                .find(|reply| reply.reply_id.as_deref() == Some(target))
+        });
+        let root_reply = comment
+            .as_ref()
+            .and_then(|comment| comment.reply_list.as_ref())
+            .and_then(|list| list.replies.first());
+
+        Ok(serde_json::json!({
+            "file_token": file_token,
+            "file_type": file_type,
+            "comment_id": comment_id,
+            "reply_id": reply_id,
+            "document": document,
+            "comment": comment,
+            "is_whole_comment": comment.as_ref().and_then(|comment| comment.is_whole).unwrap_or(false),
+            "quote_text": comment.as_ref().and_then(|comment| comment.quote.as_deref()),
+            "root_comment_text": root_reply.map(Self::extract_comment_reply_text).unwrap_or_default(),
+            "target_reply_text": target_reply.map(Self::extract_comment_reply_text).unwrap_or_default(),
+            "replies": replies.items,
+            "has_more_replies": replies.has_more,
+            "raw_payload_included": false,
+        }))
+    }
+
+    /// Reply to an existing Feishu Drive comment thread.
+    pub async fn reply_to_comment(
+        &self,
+        runtime: &ConnectorRuntime,
+        file_token: &str,
+        file_type: &str,
+        comment_id: &str,
+        text: &str,
+    ) -> FeishuResult<serde_json::Value> {
+        let file_token = Self::sanitize_path_segment(file_token)?;
+        let comment_id = Self::sanitize_path_segment(comment_id)?;
+        let mut url = self.build_url(&[
+            "open-apis",
+            "drive",
+            "v1",
+            "files",
+            file_token,
+            "comments",
+            comment_id,
+            "replies",
+        ])?;
+        url.query_pairs_mut().append_pair("file_type", file_type);
+        let body = serde_json::json!({
+            "content": {
+                "elements": [{
+                    "type": "text_run",
+                    "text_run": { "text": Self::escape_comment_text(text) },
+                }],
+            },
+        });
+        self.post_api(runtime, &url, &body).await
+    }
+
+    /// Add a whole-document Feishu Drive comment.
+    pub async fn add_whole_comment(
+        &self,
+        runtime: &ConnectorRuntime,
+        file_token: &str,
+        file_type: &str,
+        text: &str,
+    ) -> FeishuResult<serde_json::Value> {
+        let file_token = Self::sanitize_path_segment(file_token)?;
+        let url = self.build_url(&[
+            "open-apis",
+            "drive",
+            "v1",
+            "files",
+            file_token,
+            "new_comments",
+        ])?;
+        let body = serde_json::json!({
+            "file_type": file_type,
+            "reply_elements": [{
+                "type": "text",
+                "text": Self::escape_comment_text(text),
+            }],
+        });
+        self.post_api(runtime, &url, &body).await
+    }
+
+    /// Add or delete a Feishu Drive comment reaction.
+    pub async fn update_comment_reaction(
+        &self,
+        runtime: &ConnectorRuntime,
+        file_token: &str,
+        file_type: &str,
+        reply_id: &str,
+        action: &str,
+        reaction_type: &str,
+    ) -> FeishuResult<serde_json::Value> {
+        let file_token = Self::sanitize_path_segment(file_token)?;
+        let reply_id = Self::sanitize_path_segment(reply_id)?;
+        let mut url = self.build_url(&[
+            "open-apis",
+            "drive",
+            "v2",
+            "files",
+            file_token,
+            "comments",
+            "reaction",
+        ])?;
+        url.query_pairs_mut().append_pair("file_type", file_type);
+        let body = serde_json::json!({
+            "action": action,
+            "reply_id": reply_id,
+            "reaction_type": reaction_type,
+        });
+        self.post_api(runtime, &url, &body).await
+    }
+
     /// Health check: verify the Feishu API is reachable via token request.
     pub async fn health_check(&self) -> FeishuResult<()> {
         // Use the auth endpoint as health check (it's always available)
@@ -364,6 +551,59 @@ impl FeishuClient {
     /// Check if credentials are configured.
     pub fn has_credentials(&self) -> bool {
         !self.app_id.trim().is_empty() && !self.app_secret.trim().is_empty()
+    }
+
+    fn escape_comment_text(text: &str) -> String {
+        text.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    }
+
+    fn extract_comment_reply_text(reply: &crate::types::DriveCommentReply) -> String {
+        let Some(content) = &reply.content else {
+            return String::new();
+        };
+        let elements = content
+            .get("elements")
+            .and_then(serde_json::Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let mut parts = Vec::new();
+        for element in elements {
+            match element.get("type").and_then(serde_json::Value::as_str) {
+                Some("text_run") => {
+                    if let Some(text) = element
+                        .pointer("/text_run/text")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        parts.push(text.to_owned());
+                    }
+                }
+                Some("text") => {
+                    if let Some(text) = element.get("text").and_then(serde_json::Value::as_str) {
+                        parts.push(text.to_owned());
+                    }
+                }
+                Some("docs_link") => {
+                    if let Some(url) = element
+                        .pointer("/docs_link/url")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        parts.push(url.to_owned());
+                    }
+                }
+                Some("person") => {
+                    if let Some(name) = element
+                        .pointer("/person/name")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        parts.push(name.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        parts.join("")
     }
 
     /// Generic POST with API response extraction and retry.

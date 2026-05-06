@@ -51,6 +51,11 @@ const FEISHU_WEBHOOK_DEDUPE_TTL_SECONDS: u64 = 24 * 60 * 60;
 const FEISHU_WEBHOOK_DEDUPE_MAX_ENTRIES: usize = 10_000;
 const ALLOWED_RECEIVE_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id", "email", "chat_id"];
 const ALLOWED_USER_ID_TYPES: &[&str] = &["open_id", "user_id", "union_id"];
+const ALLOWED_COMMENT_FILE_TYPES: &[&str] = &["doc", "docx", "file", "sheet", "slides"];
+const ALLOWED_COMMENT_NOTICE_TYPES: &[&str] = &["add_comment", "add_reply"];
+const ALLOWED_COMMENT_PAIRING_ACTIONS: &[&str] = &["add", "remove", "list"];
+const ALLOWED_COMMENT_REACTION_ACTIONS: &[&str] = &["add", "delete"];
+const DEFAULT_COMMENT_REACTION_TYPE: &str = "Typing";
 
 // Operation IDs
 const OP_MESSAGES_SEND: &str = "feishu.messages.send";
@@ -63,6 +68,10 @@ const OP_DOCS_GET: &str = "feishu.docs.get";
 const OP_SHEETS_GET: &str = "feishu.sheets.get";
 const OP_CALENDAR_EVENTS: &str = "feishu.calendar.events";
 const OP_WEBHOOK_INGEST_REQUEST: &str = "feishu.webhook.ingest_request";
+const OP_COMMENTS_PAIRINGS_MANAGE: &str = "feishu.comments.pairings.manage";
+const OP_COMMENTS_CONTEXT_GET: &str = "feishu.comments.context.get";
+const OP_COMMENTS_REPLY: &str = "feishu.comments.reply";
+const OP_COMMENTS_REACTION: &str = "feishu.comments.reaction";
 const OP_HEALTH: &str = "feishu.health";
 
 // Capability IDs
@@ -73,6 +82,8 @@ const CAP_USERS_READ: &str = "feishu.users.read";
 const CAP_DOCS_READ: &str = "feishu.docs.read";
 const CAP_CALENDAR_READ: &str = "feishu.calendar.read";
 const CAP_WEBHOOK_INGEST: &str = "feishu.webhook.ingest";
+const CAP_COMMENTS_READ: &str = "feishu.comments.read";
+const CAP_COMMENTS_WRITE: &str = "feishu.comments.write";
 
 /// Feishu connector configuration.
 #[derive(Clone, Deserialize)]
@@ -476,6 +487,59 @@ impl FeishuWebhookStateStore {
         self.persist_locked(&snapshot)
     }
 
+    fn paired_open_ids(&self) -> FcpResult<Vec<String>> {
+        let state = self.lock_state()?;
+        Ok(state.paired_open_ids.iter().cloned().collect())
+    }
+
+    fn manage_pairing(&self, action: &str, actor_open_id: Option<&str>) -> FcpResult<Value> {
+        let (changed, pairings, snapshot) = {
+            let mut state = self.lock_state()?;
+            let changed = match action {
+                "add" => {
+                    let actor = actor_open_id.ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "actor_open_id is required for comment pairing add".into(),
+                    })?;
+                    state.paired_open_ids.insert(actor.to_owned())
+                }
+                "remove" => {
+                    let actor = actor_open_id.ok_or_else(|| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: "actor_open_id is required for comment pairing remove".into(),
+                    })?;
+                    state.paired_open_ids.remove(actor)
+                }
+                "list" => false,
+                _ => {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!(
+                            "action must be one of: {}",
+                            ALLOWED_COMMENT_PAIRING_ACTIONS.join(", ")
+                        ),
+                    });
+                }
+            };
+            if changed {
+                state.policy_cache_generation = state.policy_cache_generation.saturating_add(1);
+            }
+            (
+                changed,
+                state.paired_open_ids.iter().cloned().collect::<Vec<_>>(),
+                state.clone(),
+            )
+        };
+        self.persist_locked(&snapshot)?;
+        Ok(json!({
+            "action": action,
+            "changed": changed,
+            "actor_open_id": actor_open_id,
+            "paired_open_ids": pairings,
+            "state_summary": self.summary()?,
+        }))
+    }
+
     fn summary(&self) -> FcpResult<FeishuWebhookStateSummary> {
         let state = self.lock_state()?;
         Ok(self.summary_locked(&state))
@@ -551,16 +615,8 @@ impl FeishuWebhookStateStore {
             .and_then(Value::as_str)
             .unwrap_or("unknown")
             .to_owned();
-        let document_ref = event
-            .get("file_token")
-            .and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["file", "token"]))
-            .map(str::to_owned);
-        let comment_id = event
-            .get("comment_id")
-            .and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["comment", "comment_id"]))
-            .map(str::to_owned);
+        let document_ref = comment_file_token(event).map(str::to_owned);
+        let comment_id = comment_id(event).map(str::to_owned);
         let session_key = match (&document_ref, &comment_id) {
             (Some(document_ref), Some(comment_id)) => format!("{document_ref}:{comment_id}"),
             (Some(document_ref), None) => document_ref.clone(),
@@ -577,17 +633,9 @@ impl FeishuWebhookStateStore {
             session_key,
             FeishuCommentSessionEntry {
                 file_token: document_ref,
-                file_type: event
-                    .get("file_type")
-                    .and_then(Value::as_str)
-                    .or_else(|| string_at_path(event, &["file", "type"]))
-                    .map(str::to_owned),
+                file_type: comment_file_type(event).map(str::to_owned),
                 comment_id,
-                reply_id: event
-                    .get("reply_id")
-                    .and_then(Value::as_str)
-                    .or_else(|| string_at_path(event, &["comment", "reply_id"]))
-                    .map(str::to_owned),
+                reply_id: comment_reply_id(event).map(str::to_owned),
                 actor_open_id,
                 last_seen_at_ms: now_ms,
                 policy_reason_code: reason_code,
@@ -702,6 +750,48 @@ fn validate_chats_page_size(page_size: u64) -> FcpResult<u32> {
     Ok(page_size as u32)
 }
 
+fn validate_comment_file_type(file_type: &str) -> FcpResult<&str> {
+    if ALLOWED_COMMENT_FILE_TYPES.contains(&file_type) {
+        Ok(file_type)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "file_type must be one of: {}",
+                ALLOWED_COMMENT_FILE_TYPES.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_comment_pairing_action(action: &str) -> FcpResult<&str> {
+    if ALLOWED_COMMENT_PAIRING_ACTIONS.contains(&action) {
+        Ok(action)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "action must be one of: {}",
+                ALLOWED_COMMENT_PAIRING_ACTIONS.join(", ")
+            ),
+        })
+    }
+}
+
+fn validate_comment_reaction_action(action: &str) -> FcpResult<&str> {
+    if ALLOWED_COMMENT_REACTION_ACTIONS.contains(&action) {
+        Ok(action)
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1005,
+            message: format!(
+                "action must be one of: {}",
+                ALLOWED_COMMENT_REACTION_ACTIONS.join(", ")
+            ),
+        })
+    }
+}
+
 fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
     let capability = match operation {
         OP_MESSAGES_SEND | OP_MESSAGES_REPLY => CAP_MSG_WRITE,
@@ -711,6 +801,10 @@ fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId>
         OP_DOCS_GET | OP_SHEETS_GET => CAP_DOCS_READ,
         OP_CALENDAR_EVENTS => CAP_CALENDAR_READ,
         OP_WEBHOOK_INGEST_REQUEST => CAP_WEBHOOK_INGEST,
+        OP_COMMENTS_CONTEXT_GET => CAP_COMMENTS_READ,
+        OP_COMMENTS_PAIRINGS_MANAGE | OP_COMMENTS_REPLY | OP_COMMENTS_REACTION => {
+            CAP_COMMENTS_WRITE
+        }
         _ => {
             return Err(FcpError::InvalidRequest {
                 code: 1004,
@@ -811,6 +905,31 @@ fn validate_operation_input(operation: &str, input: &serde_json::Value) -> FcpRe
         }
         OP_WEBHOOK_INGEST_REQUEST => {
             validate_webhook_input(input)?;
+        }
+        OP_COMMENTS_PAIRINGS_MANAGE => {
+            let action = required_string_input(input, "action")?;
+            validate_comment_pairing_action(action)?;
+            if action != "list" {
+                required_string_input(input, "actor_open_id")?;
+            }
+        }
+        OP_COMMENTS_CONTEXT_GET => {
+            required_string_input(input, "file_token")?;
+            validate_comment_file_type(required_string_input(input, "file_type")?)?;
+            required_string_input(input, "comment_id")?;
+        }
+        OP_COMMENTS_REPLY => {
+            required_string_input(input, "file_token")?;
+            validate_comment_file_type(required_string_input(input, "file_type")?)?;
+            required_string_input(input, "comment_id")?;
+            required_string_input(input, "content")?;
+        }
+        OP_COMMENTS_REACTION => {
+            required_string_input(input, "file_token")?;
+            validate_comment_file_type(required_string_input(input, "file_type")?)?;
+            required_string_input(input, "reply_id")?;
+            let action = input.get("action").and_then(Value::as_str).unwrap_or("add");
+            validate_comment_reaction_action(action)?;
         }
         OP_HEALTH => {}
         _ => {
@@ -1024,6 +1143,50 @@ fn message_id(event: &Value) -> Option<&str> {
         .or_else(|| string_at_path(event, &["message_id"]))
 }
 
+fn comment_file_token(event: &Value) -> Option<&str> {
+    event
+        .get("file_token")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["file", "token"]))
+        .or_else(|| string_at_path(event, &["notice_meta", "file_token"]))
+}
+
+fn comment_file_type(event: &Value) -> Option<&str> {
+    event
+        .get("file_type")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["file", "type"]))
+        .or_else(|| string_at_path(event, &["notice_meta", "file_type"]))
+}
+
+fn comment_notice_type(event: &Value) -> Option<&str> {
+    event
+        .get("notice_type")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["notice_meta", "notice_type"]))
+}
+
+fn comment_id(event: &Value) -> Option<&str> {
+    event
+        .get("comment_id")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["comment", "comment_id"]))
+}
+
+fn comment_reply_id(event: &Value) -> Option<&str> {
+    event
+        .get("reply_id")
+        .and_then(Value::as_str)
+        .or_else(|| string_at_path(event, &["comment", "reply_id"]))
+}
+
+fn comment_is_mentioned(event: &Value) -> bool {
+    event
+        .get("is_mentioned")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn mentions_bot(event: &Value, bot_open_id: &str) -> bool {
     let Some(mentions) = value_at_path(event, &["message", "mentions"]).and_then(Value::as_array)
     else {
@@ -1087,15 +1250,14 @@ fn normalize_comment_event(event_type: &str, event_id: &str, event: &Value) -> V
         "topic": feishu_topic_for_event_type(event_type),
         "event_type": event_type,
         "event_id": event_id,
-        "file_token": event.get("file_token").and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["file", "token"])),
-        "file_type": event.get("file_type").and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["file", "type"])),
-        "comment_id": event.get("comment_id").and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["comment", "comment_id"])),
-        "reply_id": event.get("reply_id").and_then(Value::as_str)
-            .or_else(|| string_at_path(event, &["comment", "reply_id"])),
+        "file_token": comment_file_token(event),
+        "file_type": comment_file_type(event),
+        "comment_id": comment_id(event),
+        "reply_id": comment_reply_id(event),
+        "notice_type": comment_notice_type(event),
+        "is_mentioned": comment_is_mentioned(event),
         "actor_open_id": actor_open_id(event),
+        "raw_content_included": false,
     })
 }
 
@@ -1120,6 +1282,48 @@ fn normalize_webhook_event(event_type: &str, event_id: &str, event: &Value) -> V
 
 fn policy_array_contains(policy: &Value, field: &str, value: Option<&str>) -> bool {
     value.is_some_and(|needle| array_contains_string(policy, field, needle))
+}
+
+fn policy_with_connector_pairings(
+    policy: &Map<String, Value>,
+    paired_open_ids: &[String],
+) -> Value {
+    let mut policy = Value::Object(policy.clone());
+    if paired_open_ids.is_empty() {
+        return policy;
+    }
+    let Some(policy_object) = policy.as_object_mut() else {
+        return policy;
+    };
+    let target_key = if policy_object.contains_key("comment") {
+        "comment"
+    } else if policy_object.contains_key("comment_rules") {
+        "comment_rules"
+    } else {
+        "comment"
+    };
+    let Some(comment_policy) = policy_object
+        .entry(target_key.to_owned())
+        .or_insert_with(|| json!({}))
+        .as_object_mut()
+    else {
+        return policy;
+    };
+    let existing = comment_policy
+        .get("paired_open_ids")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let mut merged = existing
+        .into_iter()
+        .filter_map(|value| value.as_str().map(str::to_owned))
+        .collect::<BTreeSet<_>>();
+    merged.extend(paired_open_ids.iter().cloned());
+    comment_policy.insert(
+        "paired_open_ids".to_owned(),
+        Value::Array(merged.into_iter().map(Value::String).collect()),
+    );
+    policy
 }
 
 fn comment_policy_decision(policy: &Value, event: &Value) -> (bool, Value) {
@@ -1148,15 +1352,80 @@ fn comment_policy_decision(policy: &Value, event: &Value) -> (bool, Value) {
     }
 
     let actor = actor_open_id(event);
-    let document_ref = event
-        .get("file_token")
-        .and_then(Value::as_str)
-        .or_else(|| string_at_path(event, &["file", "token"]));
+    let document_ref = comment_file_token(event);
+    let Some(document_ref) = document_ref else {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_missing_file_token",
+            }),
+        );
+    };
+    let Some(file_type) = comment_file_type(event) else {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_missing_file_type",
+            }),
+        );
+    };
+    if !ALLOWED_COMMENT_FILE_TYPES.contains(&file_type) {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_file_type_not_supported",
+                "file_type": file_type,
+            }),
+        );
+    }
+    if comment_id(event).is_none() {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_missing_comment_id",
+            }),
+        );
+    }
+    if actor.is_none() {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_missing_actor",
+            }),
+        );
+    }
+    if let Some(notice_type) = comment_notice_type(event)
+        && !ALLOWED_COMMENT_NOTICE_TYPES.contains(&notice_type)
+    {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_notice_type_not_supported",
+                "notice_type": notice_type,
+            }),
+        );
+    }
+    if optional_bool(comment_policy, "require_mention") && !comment_is_mentioned(event) {
+        return (
+            false,
+            json!({
+                "allowed": false,
+                "reason_code": "comment_mention_required",
+                "actor_open_id": actor,
+            }),
+        );
+    }
     if comment_policy
         .get("document_allowlist")
         .and_then(Value::as_array)
         .is_some_and(|items| !items.is_empty())
-        && !policy_array_contains(comment_policy, "document_allowlist", document_ref)
+        && !policy_array_contains(comment_policy, "document_allowlist", Some(document_ref))
     {
         return (
             false,
@@ -1496,8 +1765,12 @@ fn invoke_webhook_ingest_request_with_state(
     }
 
     let normalized_event = normalize_webhook_event(event_type, &event_id, event);
-    let (allowed, policy_decision) =
-        webhook_policy_decision(event_type, event, &Value::Object(policy.clone()));
+    let paired_open_ids = webhook_state
+        .map(FeishuWebhookStateStore::paired_open_ids)
+        .transpose()?
+        .unwrap_or_default();
+    let effective_policy = policy_with_connector_pairings(policy, &paired_open_ids);
+    let (allowed, policy_decision) = webhook_policy_decision(event_type, event, &effective_policy);
     if !allowed {
         logs.push(json!({"layer": "policy", "code": "event_denied"}));
         let state_summary = webhook_state
@@ -1703,6 +1976,7 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
                 "The connector is bound to one installed tenant app and uses the tenant access token internal auth endpoint.",
                 "Read operations cover messages, chats, users, known docs, known spreadsheets, and known calendar event lists.",
                 "Webhook support is a host-forwarded request ingestion operation; this connector does not open a listening socket.",
+                "Document-comment automation is exposed as explicit request/response operations for pairing, context fetch, reply delivery, and typing/OK reaction lifecycle.",
             ],
         },
         "auth_boundary": {
@@ -1724,12 +1998,17 @@ fn contract_details(config: Option<&FeishuConfig>) -> serde_json::Value {
             "docs": [OP_DOCS_GET, OP_SHEETS_GET],
             "calendar": [OP_CALENDAR_EVENTS],
             "webhook": [OP_WEBHOOK_INGEST_REQUEST],
+            "comments": [
+                OP_COMMENTS_PAIRINGS_MANAGE,
+                OP_COMMENTS_CONTEXT_GET,
+                OP_COMMENTS_REPLY,
+                OP_COMMENTS_REACTION
+            ],
             "health": [OP_HEALTH],
         },
         "non_goals": [
             "Embedded webhook listener lifecycle and websocket event delivery",
             "Encrypted Feishu webhook payload decryption",
-            "Automated document-comment reply workflow",
             "Cross-tenant brokering or arbitrary user impersonation",
             "Drive search, export, folder traversal, and write operations",
             "Calendar mutation or subscription setup"
@@ -1800,6 +2079,9 @@ impl FeishuConnector {
                     OP_MESSAGES_SEND,
                     OP_MESSAGES_REPLY,
                     OP_WEBHOOK_INGEST_REQUEST,
+                    OP_COMMENTS_PAIRINGS_MANAGE,
+                    OP_COMMENTS_REPLY,
+                    OP_COMMENTS_REACTION,
                 ],
                 supported_hosts: vec![FEISHU_CN_HOST, FEISHU_GLOBAL_HOST],
                 tenant_app_boundary: FEISHU_TENANT_APP_BOUNDARY,
@@ -2426,6 +2708,150 @@ pub fn operations_info() -> Vec<OperationInfo> {
             requires_approval: Some(ApprovalMode::None),
         },
         OperationInfo {
+            id: OperationId::from_static(OP_COMMENTS_PAIRINGS_MANAGE),
+            summary: "Manage Feishu comment pairing state".into(),
+            description: Some(
+                "Adds, removes, or lists connector-owned Feishu Drive comment paired open_ids used by the host-forwarded comment policy before event emission.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["action"],
+                "properties": {
+                    "action": { "type": "string", "enum": ALLOWED_COMMENT_PAIRING_ACTIONS },
+                    "actor_open_id": { "type": "string", "description": "Required for add/remove; Feishu sender open_id to pair or unpair" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["action", "changed", "paired_open_ids", "state_summary"]
+            }),
+            capability: CapabilityId::from_static(CAP_COMMENTS_WRITE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When an operator approves or revokes a Feishu Drive comment sender for pairing-gated comment automation.".into(),
+                common_mistakes: vec![
+                    "Pairing state is tenant-app local and must not be treated as cross-tenant authorization.".into(),
+                    "Use action=list before changing state if you need an audit snapshot.".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(CAP_COMMENTS_WRITE)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_COMMENTS_CONTEXT_GET),
+            summary: "Fetch Feishu Drive comment context".into(),
+            description: Some(
+                "Fetches document metadata, the target comment card, and comment-thread replies for an accepted Feishu Drive comment notice so an agent turn can route safely without raw webhook payload leakage.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["file_token", "file_type", "comment_id"],
+                "properties": {
+                    "file_token": { "type": "string" },
+                    "file_type": { "type": "string", "enum": ALLOWED_COMMENT_FILE_TYPES },
+                    "comment_id": { "type": "string" },
+                    "reply_id": { "type": "string", "description": "Optional current reply id from a comment notice" }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["file_token", "file_type", "comment_id", "document", "replies", "raw_payload_included"]
+            }),
+            capability: CapabilityId::from_static(CAP_COMMENTS_READ),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "After a document-comment webhook has passed policy and you need enough thread/document context to build the Feishu comment turn.".into(),
+                common_mistakes: vec![
+                    "Call this only after webhook policy has accepted the sender/document.".into(),
+                    "The connector returns redaction-aware extracted text plus structured reply metadata; do not log full operation output in shared artifacts.".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(CAP_COMMENTS_READ)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_COMMENTS_REPLY),
+            summary: "Reply to a Feishu Drive comment thread".into(),
+            description: Some(
+                "Posts a bot-authored Feishu Drive comment reply, optionally falling back to a whole-document comment when Feishu rejects threaded replies for whole-comment semantics.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["file_token", "file_type", "comment_id", "content"],
+                "properties": {
+                    "file_token": { "type": "string" },
+                    "file_type": { "type": "string", "enum": ALLOWED_COMMENT_FILE_TYPES },
+                    "comment_id": { "type": "string" },
+                    "content": { "type": "string" },
+                    "is_whole_comment": { "type": "boolean", "default": false },
+                    "fallback_to_whole_comment": { "type": "boolean", "default": true }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["delivered", "delivery_mode", "fallback_used", "result"]
+            }),
+            capability: CapabilityId::from_static(CAP_COMMENTS_WRITE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "When an authorized agent turn must produce a visible reply in the originating Feishu Drive comment context.".into(),
+                common_mistakes: vec![
+                    "Only call after webhook/comment policy has accepted the sender and document.".into(),
+                    "content is escaped for Feishu comment text elements before delivery.".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(CAP_COMMENTS_WRITE)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
+            id: OperationId::from_static(OP_COMMENTS_REACTION),
+            summary: "Add or delete a Feishu comment reaction".into(),
+            description: Some(
+                "Adds or deletes a Feishu Drive comment reply reaction such as Typing or OK, scoped to the same file/comment reply context as the accepted comment turn.".into(),
+            ),
+            input_schema: json!({
+                "type": "object",
+                "required": ["file_token", "file_type", "reply_id"],
+                "properties": {
+                    "file_token": { "type": "string" },
+                    "file_type": { "type": "string", "enum": ALLOWED_COMMENT_FILE_TYPES },
+                    "reply_id": { "type": "string" },
+                    "action": { "type": "string", "enum": ALLOWED_COMMENT_REACTION_ACTIONS, "default": "add" },
+                    "reaction_type": { "type": "string", "default": DEFAULT_COMMENT_REACTION_TYPE }
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "required": ["action", "reaction_type", "result"]
+            }),
+            capability: CapabilityId::from_static(CAP_COMMENTS_WRITE),
+            risk_level: RiskLevel::Medium,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::BestEffort,
+            ai_hints: AgentHint {
+                when_to_use: "When showing or cleaning up an in-progress Feishu Drive comment turn reaction.".into(),
+                common_mistakes: vec![
+                    "Use action=delete during cancellation or after final reply delivery to avoid stale Typing reactions.".into(),
+                ],
+                examples: Vec::new(),
+                related: vec![CapabilityId::from_static(CAP_COMMENTS_WRITE)],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::None),
+        },
+        OperationInfo {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Feishu API health check".into(),
             description: Some(
@@ -2961,6 +3387,109 @@ impl FeishuConnector {
             OP_WEBHOOK_INGEST_REQUEST => {
                 invoke_webhook_ingest_request_with_state(&req.input, Some(&self.webhook_state))?
             }
+            OP_COMMENTS_PAIRINGS_MANAGE => {
+                let action =
+                    validate_comment_pairing_action(required_string_input(&req.input, "action")?)?;
+                let actor_open_id = req.input.get("actor_open_id").and_then(Value::as_str);
+                self.webhook_state.manage_pairing(action, actor_open_id)?
+            }
+            OP_COMMENTS_CONTEXT_GET => {
+                let file_token = required_string_input(&req.input, "file_token")?;
+                let file_type =
+                    validate_comment_file_type(required_string_input(&req.input, "file_type")?)?;
+                let comment_id = required_string_input(&req.input, "comment_id")?;
+                let reply_id = req.input.get("reply_id").and_then(Value::as_str);
+                client
+                    .get_comment_context(runtime, file_token, file_type, comment_id, reply_id)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?
+            }
+            OP_COMMENTS_REPLY => {
+                let file_token = required_string_input(&req.input, "file_token")?;
+                let file_type =
+                    validate_comment_file_type(required_string_input(&req.input, "file_type")?)?;
+                let comment_id = required_string_input(&req.input, "comment_id")?;
+                let content = required_string_input(&req.input, "content")?;
+                let is_whole_comment = optional_bool(&req.input, "is_whole_comment");
+                let fallback_to_whole_comment = req
+                    .input
+                    .get("fallback_to_whole_comment")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+
+                let (delivery_mode, fallback_used, result) = if is_whole_comment {
+                    (
+                        "whole_comment",
+                        false,
+                        client
+                            .add_whole_comment(runtime, file_token, file_type, content)
+                            .await
+                            .map_err(|e| e.to_fcp_error())?,
+                    )
+                } else {
+                    match client
+                        .reply_to_comment(runtime, file_token, file_type, comment_id, content)
+                        .await
+                    {
+                        Ok(result) => ("thread_reply", false, result),
+                        Err(crate::error::FeishuError::Api { code: 1069302, .. })
+                            if fallback_to_whole_comment =>
+                        {
+                            (
+                                "whole_comment",
+                                true,
+                                client
+                                    .add_whole_comment(runtime, file_token, file_type, content)
+                                    .await
+                                    .map_err(|e| e.to_fcp_error())?,
+                            )
+                        }
+                        Err(error) => return Err(error.to_fcp_error()),
+                    }
+                };
+
+                json!({
+                    "delivered": true,
+                    "delivery_mode": delivery_mode,
+                    "fallback_used": fallback_used,
+                    "result": result,
+                    "raw_content_logged": false,
+                })
+            }
+            OP_COMMENTS_REACTION => {
+                let file_token = required_string_input(&req.input, "file_token")?;
+                let file_type =
+                    validate_comment_file_type(required_string_input(&req.input, "file_type")?)?;
+                let reply_id = required_string_input(&req.input, "reply_id")?;
+                let action = req
+                    .input
+                    .get("action")
+                    .and_then(Value::as_str)
+                    .unwrap_or("add");
+                let action = validate_comment_reaction_action(action)?;
+                let reaction_type = req
+                    .input
+                    .get("reaction_type")
+                    .and_then(Value::as_str)
+                    .unwrap_or(DEFAULT_COMMENT_REACTION_TYPE);
+                let result = client
+                    .update_comment_reaction(
+                        runtime,
+                        file_token,
+                        file_type,
+                        reply_id,
+                        action,
+                        reaction_type,
+                    )
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                json!({
+                    "action": action,
+                    "reaction_type": reaction_type,
+                    "result": result,
+                    "raw_content_logged": false,
+                })
+            }
             OP_HEALTH => {
                 client.health_check().await.map_err(|e| e.to_fcp_error())?;
                 json!({ "status": "healthy" })
@@ -3062,6 +3591,8 @@ mod tests {
                 CapabilityId::from_static(CAP_DOCS_READ),
                 CapabilityId::from_static(CAP_CALENDAR_READ),
                 CapabilityId::from_static(CAP_WEBHOOK_INGEST),
+                CapabilityId::from_static(CAP_COMMENTS_READ),
+                CapabilityId::from_static(CAP_COMMENTS_WRITE),
             ],
             host: None,
             transport_caps: None,
@@ -3333,7 +3864,7 @@ mod tests {
     fn test_introspection_operations() {
         let connector = FeishuConnector::new();
         let intro = connector.introspect();
-        assert_eq!(intro.operations.len(), 11);
+        assert_eq!(intro.operations.len(), 15);
         let op_ids: Vec<&str> = intro.operations.iter().map(|op| op.id.as_str()).collect();
         assert!(op_ids.contains(&OP_MESSAGES_SEND));
         assert!(op_ids.contains(&OP_MESSAGES_REPLY));
@@ -3345,13 +3876,17 @@ mod tests {
         assert!(op_ids.contains(&OP_SHEETS_GET));
         assert!(op_ids.contains(&OP_CALENDAR_EVENTS));
         assert!(op_ids.contains(&OP_WEBHOOK_INGEST_REQUEST));
+        assert!(op_ids.contains(&OP_COMMENTS_PAIRINGS_MANAGE));
+        assert!(op_ids.contains(&OP_COMMENTS_CONTEXT_GET));
+        assert!(op_ids.contains(&OP_COMMENTS_REPLY));
+        assert!(op_ids.contains(&OP_COMMENTS_REACTION));
         assert!(op_ids.contains(&OP_HEALTH));
     }
 
     #[test]
     fn test_operations_info_count() {
         let ops = operations_info();
-        assert_eq!(ops.len(), 11);
+        assert_eq!(ops.len(), 15);
     }
 
     #[test]
@@ -3526,12 +4061,56 @@ mod tests {
         assert_eq!(ug.capability, CapabilityId::from_static(CAP_USERS_READ));
     }
 
+    #[test]
+    fn test_comment_operations_capabilities_and_safety() {
+        let ops = operations_info();
+        let pairings = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_COMMENTS_PAIRINGS_MANAGE)
+            .unwrap();
+        assert_eq!(
+            pairings.capability,
+            CapabilityId::from_static(CAP_COMMENTS_WRITE)
+        );
+        assert_eq!(pairings.safety_tier, SafetyTier::Risky);
+
+        let context = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_COMMENTS_CONTEXT_GET)
+            .unwrap();
+        assert_eq!(
+            context.capability,
+            CapabilityId::from_static(CAP_COMMENTS_READ)
+        );
+        assert_eq!(context.safety_tier, SafetyTier::Safe);
+
+        let reply = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_COMMENTS_REPLY)
+            .unwrap();
+        assert_eq!(
+            reply.capability,
+            CapabilityId::from_static(CAP_COMMENTS_WRITE)
+        );
+        assert_eq!(reply.idempotency, IdempotencyClass::None);
+
+        let reaction = ops
+            .iter()
+            .find(|op| op.id.as_str() == OP_COMMENTS_REACTION)
+            .unwrap();
+        assert_eq!(
+            reaction.capability,
+            CapabilityId::from_static(CAP_COMMENTS_WRITE)
+        );
+        assert_eq!(reaction.idempotency, IdempotencyClass::BestEffort);
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_handshake_grants_capabilities() {
         let mut connector = FeishuConnector::new();
         configure_for_tests(&mut connector).await;
         let result = connector.handshake(base_handshake()).await.unwrap();
-        assert_eq!(result.capabilities_granted.len(), 7);
+        assert_eq!(result.capabilities_granted.len(), 9);
         assert!(result.event_caps.unwrap().replay);
         assert!(result.auth_caps.is_some());
     }
@@ -3595,6 +4174,7 @@ mod tests {
             OP_DOCS_GET,
             OP_SHEETS_GET,
             OP_CALENDAR_EVENTS,
+            OP_COMMENTS_CONTEXT_GET,
             OP_HEALTH,
         ] {
             let op = ops
@@ -3656,6 +4236,23 @@ mod tests {
         assert!(validate_chats_page_size(0).is_err());
         assert!(validate_chats_page_size(201).is_err());
         assert_eq!(validate_chats_page_size(200).unwrap(), 200);
+    }
+
+    #[test]
+    fn test_validate_comment_file_type_rejects_unknown_value() {
+        assert!(validate_comment_file_type("wiki").is_err());
+        assert_eq!(validate_comment_file_type("docx").unwrap(), "docx");
+    }
+
+    #[test]
+    fn test_validate_comment_pairing_and_reaction_actions() {
+        assert!(validate_comment_pairing_action("replace").is_err());
+        assert_eq!(validate_comment_pairing_action("add").unwrap(), "add");
+        assert!(validate_comment_reaction_action("toggle").is_err());
+        assert_eq!(
+            validate_comment_reaction_action("delete").unwrap(),
+            "delete"
+        );
     }
 
     fn signed_webhook_input(raw_body: String, policy: Value) -> Value {
@@ -3972,6 +4569,8 @@ mod tests {
                 "file_token": "doc_1",
                 "file_type": "docx",
                 "comment_id": "comment_1",
+                "notice_type": "add_comment",
+                "is_mentioned": true,
                 "user_id": { "open_id": "ou_commenter" }
             }
         }))
@@ -4000,6 +4599,140 @@ mod tests {
             allowed["normalized_event"]["topic"],
             "feishu.webhook.document_comment_added"
         );
+    }
+
+    #[test]
+    fn test_comment_pairing_state_manage_add_list_remove() {
+        let store = FeishuWebhookStateStore::memory();
+        let added = store
+            .manage_pairing("add", Some("ou_commenter"))
+            .expect("pairing add should succeed");
+        assert_eq!(added["changed"], true);
+        assert_eq!(added["paired_open_ids"], json!(["ou_commenter"]));
+
+        let listed = store
+            .manage_pairing("list", None)
+            .expect("pairing list should succeed");
+        assert_eq!(listed["changed"], false);
+        assert_eq!(listed["paired_open_ids"], json!(["ou_commenter"]));
+
+        let removed = store
+            .manage_pairing("remove", Some("ou_commenter"))
+            .expect("pairing remove should succeed");
+        assert_eq!(removed["changed"], true);
+        assert_eq!(removed["paired_open_ids"], json!([]));
+    }
+
+    #[test]
+    fn test_webhook_comment_policy_uses_connector_pairings_with_comment_rules() {
+        let store = FeishuWebhookStateStore::memory();
+        store
+            .manage_pairing("add", Some("ou_commenter"))
+            .expect("pairing add should persist");
+        let raw_body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-comment-paired-state-1",
+                "event_type": "drive.notice.comment_add_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "file_token": "doc_state_pair",
+                "file_type": "docx",
+                "comment_id": "comment_state_pair",
+                "notice_type": "add_reply",
+                "is_mentioned": true,
+                "user_id": { "open_id": "ou_commenter" }
+            }
+        }))
+        .unwrap();
+
+        let output = invoke_webhook_ingest_request_with_state(
+            &signed_webhook_input(
+                raw_body,
+                json!({
+                    "comment_rules": {
+                        "enabled": true,
+                        "policy": "pairing",
+                        "require_mention": true,
+                        "document_allowlist": ["doc_state_pair"]
+                    }
+                }),
+            ),
+            Some(&store),
+        )
+        .expect("connector-owned pairing should merge into comment_rules");
+
+        assert_eq!(output["reason_code"], "event_accepted");
+        assert_eq!(output["event_emitted"], true);
+        assert_eq!(
+            output["policy_decision"]["reason_code"],
+            "comment_pairing_match"
+        );
+    }
+
+    #[test]
+    fn test_webhook_comment_policy_rejects_unsupported_notice_and_missing_mention() {
+        let raw_body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-comment-denied-1",
+                "event_type": "drive.notice.comment_add_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "file_token": "doc_1",
+                "file_type": "docx",
+                "comment_id": "comment_1",
+                "notice_type": "resolve_comment",
+                "user_id": { "open_id": "ou_commenter" }
+            }
+        }))
+        .unwrap();
+
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(
+            raw_body,
+            json!({
+                "comment": {
+                    "enabled": true,
+                    "policy": "pairing",
+                    "paired_open_ids": ["ou_commenter"]
+                }
+            }),
+        ))
+        .expect("unsupported notice type should deny");
+        assert_eq!(output["reason_code"], "comment_notice_type_not_supported");
+
+        let mention_body = serde_json::to_string(&json!({
+            "schema": "2.0",
+            "header": {
+                "event_id": "evt-comment-denied-2",
+                "event_type": "drive.notice.comment_add_v1",
+                "token": "verify-token",
+            },
+            "event": {
+                "file_token": "doc_1",
+                "file_type": "docx",
+                "comment_id": "comment_1",
+                "notice_type": "add_comment",
+                "is_mentioned": false,
+                "user_id": { "open_id": "ou_commenter" }
+            }
+        }))
+        .unwrap();
+        let output = invoke_webhook_ingest_request(&signed_webhook_input(
+            mention_body,
+            json!({
+                "comment": {
+                    "enabled": true,
+                    "policy": "pairing",
+                    "require_mention": true,
+                    "paired_open_ids": ["ou_commenter"]
+                }
+            }),
+        ))
+        .expect("missing mention should deny");
+        assert_eq!(output["reason_code"], "comment_mention_required");
     }
 
     #[test]

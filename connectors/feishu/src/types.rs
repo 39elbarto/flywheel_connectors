@@ -272,6 +272,95 @@ pub struct CalendarEventsResponse {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Drive comment types
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Feishu Drive document metadata returned by batch query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveDocumentMeta {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub doc_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+}
+
+/// Feishu Drive metadata batch query response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveMetaBatchQueryResponse {
+    #[serde(default)]
+    pub metas: Vec<DriveDocumentMeta>,
+}
+
+/// A reply inside a Feishu Drive comment thread.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveCommentReply {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<serde_json::Value>,
+}
+
+/// Inline reply list embedded in a Feishu Drive comment card.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DriveCommentReplyList {
+    #[serde(default)]
+    pub replies: Vec<DriveCommentReply>,
+}
+
+/// A Feishu Drive comment card.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveCommentCard {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub comment_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub create_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_solved: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub is_whole: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quote: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub has_more: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_list: Option<DriveCommentReplyList>,
+}
+
+/// Feishu Drive comment batch-query response.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveCommentBatchQueryResponse {
+    #[serde(default)]
+    pub items: Vec<DriveCommentCard>,
+}
+
+/// Paginated Feishu Drive comment replies.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DriveCommentRepliesResponse {
+    #[serde(default)]
+    pub items: Vec<DriveCommentReply>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page_token: Option<String>,
+    #[serde(default)]
+    pub has_more: bool,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Common API response wrapper
 // ─────────────────────────────────────────────────────────────────────────────
 

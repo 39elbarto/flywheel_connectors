@@ -5,13 +5,13 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:ae0157b5814918fac9c9622c7c0a72110f86c3c1c307c5e8257711be40900bcd"
+interface_hash = "blake3-256:fcp.interface.v2:537dba64300907c10e0750b96cc7ad3a36aa36bdce88ae045ffbfb06cb24b021"
 
 [connector]
 id = "fcp.feishu"
 name = "Feishu/Lark"
 version = "0.1.0"
-description = "Tenant-scoped Feishu/Lark connector for first-slice bot messaging, chat discovery, directory reads, known docs and sheets reads, calendar reads, host-forwarded webhook ingestion, and connectivity verification"
+description = "Tenant-scoped Feishu/Lark connector for bot messaging, chat discovery, directory reads, known docs and sheets reads, calendar reads, host-forwarded webhook ingestion, document-comment automation, and connectivity verification"
 archetypes = ["operational"]
 format = "native"
 
@@ -30,12 +30,15 @@ migration_hint = "One connector instance binds to one installed Feishu/Lark tena
 #   https://open.larksuite.com.
 # - Localhost and 127.0.0.1 are allowed only for deterministic verification harnesses.
 # - Host-forwarded webhook request ingestion validates Feishu challenge/token/signature,
-#   claims connector-owned dedupe state, and normalizes plaintext events without opening
-#   a listener socket.
+#   claims connector-owned dedupe state, normalizes plaintext events, and can use
+#   connector-owned comment pairing state without opening a listener socket.
+# - Document-comment automation is explicit operation-driven request/response work:
+#   pairing management, context fetch, comment reply/add-comment fallback, and
+#   Typing/OK reaction lifecycle.
 # - User-delegated OAuth, cross-tenant brokering, embedded listener lifecycle,
 #   websocket event delivery, encrypted webhook payload decryption, Drive
-#   search/export/write, and calendar mutations are explicit non-goals for this
-#   first slice.
+#   search/export, broad Drive writes outside comment replies, and calendar
+#   mutations are explicit non-goals for this slice.
 
 [zones]
 home = "z:work"
@@ -53,6 +56,8 @@ optional = [
     "feishu.docs.read",
     "feishu.calendar.read",
     "feishu.webhook.ingest",
+    "feishu.comments.read",
+    "feishu.comments.write",
 ]
 forbidden = ["system.exec", "system.privileged", "network.listen"]
 
@@ -238,6 +243,74 @@ when_to_use = "Use when host ingress forwards a Feishu/Lark webhook request and 
 common_mistakes = ["Pass the exact raw JSON body string used for Feishu signature verification.", "Do not use this operation as an embedded HTTP listener; network.listen remains forbidden.", "Configure webhook_state.dedupe_state_path when restart replay suppression is required.", "Encrypted Feishu webhook payloads are rejected by this slice."]
 examples = []
 related = []
+
+[provides.operations."feishu.comments.pairings.manage"]
+description = "Add, remove, or list connector-owned Feishu Drive comment pairing state used by comment webhook policy."
+capability = "feishu.comments.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["action"] }
+output_schema = { type = "object", required = ["action", "changed", "paired_open_ids", "state_summary"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."feishu.comments.pairings.manage".ai_hints]
+when_to_use = "Use when an operator approves or revokes a Feishu Drive comment sender for pairing-gated comment automation."
+common_mistakes = ["Pairing is tenant-app-local authorization state, not cross-tenant identity.", "Use action=list before changing state when an audit snapshot is needed."]
+examples = []
+related = ["feishu.webhook.ingest_request"]
+
+[provides.operations."feishu.comments.context.get"]
+description = "Fetch Feishu Drive document/comment/reply context for an accepted document-comment notice."
+capability = "feishu.comments.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["file_token", "file_type", "comment_id"] }
+output_schema = { type = "object", required = ["file_token", "file_type", "comment_id", "document", "replies", "raw_payload_included"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."feishu.comments.context.get".ai_hints]
+when_to_use = "Use after a document-comment webhook passes policy and the agent turn needs thread/document context."
+common_mistakes = ["Do not call this before policy accepts the sender and document.", "Treat returned comment text as tenant-sensitive and avoid logging it in shared artifacts."]
+examples = []
+related = ["feishu.webhook.ingest_request", "feishu.comments.reply"]
+
+[provides.operations."feishu.comments.reply"]
+description = "Post a bot-authored Feishu Drive comment reply, falling back to a whole-document comment when configured and required by Feishu semantics."
+capability = "feishu.comments.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["file_token", "file_type", "comment_id", "content"] }
+output_schema = { type = "object", required = ["delivered", "delivery_mode", "fallback_used", "result"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."feishu.comments.reply".ai_hints]
+when_to_use = "Use when an authorized Feishu document-comment agent turn must produce a visible comment-thread reply."
+common_mistakes = ["Only call after webhook/comment policy has accepted the sender and document.", "The connector escapes Feishu comment text before delivery."]
+examples = []
+related = ["feishu.comments.context.get", "feishu.comments.reaction"]
+
+[provides.operations."feishu.comments.reaction"]
+description = "Add or delete a Feishu Drive comment reply reaction such as Typing or OK."
+capability = "feishu.comments.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["file_token", "file_type", "reply_id"] }
+output_schema = { type = "object", required = ["action", "reaction_type", "result"] }
+network_constraints = { host_allow = ["open.feishu.cn", "open.larksuite.com", "localhost", "127.0.0.1"], port_allow = [443, 80], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = true, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 1048576 }
+
+[provides.operations."feishu.comments.reaction".ai_hints]
+when_to_use = "Use to show or clean up an in-progress Feishu Drive comment turn reaction."
+common_mistakes = ["Delete the Typing reaction on cancellation or after final reply delivery.", "reply_id is the Feishu comment reply id, not a chat message id."]
+examples = []
+related = ["feishu.comments.reply"]
 
 [provides.operations."feishu.health"]
 description = "Probe the internal tenant access token endpoint to verify host reachability and credential validity."

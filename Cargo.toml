@@ -44,6 +44,7 @@ members = [
     "connectors/deepseek",
     "connectors/discord",
     "connectors/duckduckgo",
+    "connectors/fal",
     "connectors/glm",
     "connectors/groq",
     "connectors/openai",

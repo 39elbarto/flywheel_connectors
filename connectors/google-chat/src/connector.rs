@@ -6,6 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use base64::{Engine as _, engine::general_purpose};
 use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
@@ -21,6 +22,7 @@ use crate::client::{ChatClient, MessageReplyOption, MessageThreadTarget};
 use crate::types::{ChatEvent, Message, SpaceType, User};
 
 const OP_INGEST_WEBHOOK: &str = "chat.ingest_webhook";
+const OP_SEND_MEDIA_MESSAGE: &str = "chat.send_media_message";
 const CAP_WEBHOOK: &str = "chat.webhook";
 const EVENT_WEBHOOK_MESSAGE: &str = "chat.webhook.message";
 const DEFAULT_WEBHOOK_MAX_BODY_BYTES: u64 = 64 * 1024;
@@ -30,6 +32,8 @@ const DEFAULT_WEBHOOK_AUTH_FAILURE_LIMIT_PER_MINUTE: u32 = 10;
 const DEFAULT_WEBHOOK_SENDER_LIMIT_PER_MINUTE: u32 = 60;
 const DEFAULT_WEBHOOK_REPLAY_TTL_SECS: u64 = 86_400;
 const DEFAULT_WEBHOOK_REPLAY_MAX_ENTRIES: usize = 1_000;
+const DEFAULT_MEDIA_MAX_BYTES: usize = 20 * 1024 * 1024;
+const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const DEFAULT_MENTION_TEXT: &str = "@flywheel";
 
 /// FCP Google Chat Connector.
@@ -360,6 +364,7 @@ impl ChatConnector {
             }
             None => "https://chat.googleapis.com/v1".to_string(),
         };
+        let request_timeout = request_timeout_from_params(&params)?;
         let webhook = parse_webhook_config(params.get("webhook"))?;
         let inbound_policy = parse_inbound_policy(params.get("inbound_policy"))?;
 
@@ -367,7 +372,8 @@ impl ChatConnector {
             .map_err(|e| FcpError::Internal {
                 message: format!("Failed to create Chat client: {e}"),
             })?
-            .with_base_url(base_url.clone());
+            .with_base_url(base_url.clone())
+            .with_request_timeout(request_timeout);
 
         let auth_label = client.auth_redacted_label();
         self.client = Some(client);
@@ -382,6 +388,7 @@ impl ChatConnector {
             "status": status,
             "details": {
                 "base_url": base_url,
+                "request_timeout_ms": request_timeout.as_millis(),
                 "webhook": webhook_config_summary(&self.webhook),
                 "inbound_policy": inbound_policy_summary(&self.inbound_policy)
             }
@@ -685,6 +692,55 @@ impl ChatConnector {
                     },
                 ),
                 op_info(
+                    OP_SEND_MEDIA_MESSAGE,
+                    "Upload media and send it as a Google Chat message",
+                    json!({
+                        "type": "object",
+                        "required": ["space_name", "filename", "content_type", "content_base64"],
+                        "properties": {
+                            "space_name": { "type": "string", "description": "Resource name of the space" },
+                            "text": { "type": "string", "description": "Optional caption or message body" },
+                            "filename": { "type": "string", "description": "User-visible attachment name" },
+                            "content_type": { "type": "string", "description": "Attachment media type" },
+                            "content_base64": { "type": "string", "description": "Base64-encoded attachment bytes" },
+                            "max_bytes": { "type": "integer", "description": "Maximum decoded attachment bytes; defaults to 20 MiB" },
+                            "thread_name": { "type": "string", "description": "Existing thread resource name" },
+                            "thread_key": { "type": "string", "description": "Opaque thread key for routing the reply" },
+                            "message_reply_option": {
+                                "type": "string",
+                                "enum": ["REPLY_MESSAGE_OR_FAIL", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"],
+                                "description": "Google Chat reply behavior when a thread target is supplied"
+                            }
+                        }
+                    }),
+                    json!({
+                        "type": "object",
+                        "properties": {
+                            "message": { "type": "object" },
+                            "media": { "type": "object" }
+                        }
+                    }),
+                    "chat.write",
+                    RiskLevel::Medium,
+                    SafetyTier::Risky,
+                    IdempotencyClass::None,
+                    AgentHint {
+                        when_to_use: "Send a bounded attachment to Google Chat with an optional caption and thread target. The connector uploads media first, sends the message with the upload token, and redacts the token from output.".into(),
+                        common_mistakes: vec![
+                            "Passing raw bytes instead of base64 content".into(),
+                            "Using filenames with path separators".into(),
+                            "Expecting the attachment upload token to be returned to the caller".into(),
+                        ],
+                        examples: vec![
+                            r#"{"space_name": "spaces/AAAA", "filename": "report.txt", "content_type": "text/plain", "content_base64": "cmVhZHkK", "text": "Report attached"}"#.into(),
+                        ],
+                        related: vec![
+                            CapabilityId::from_static("chat.send_message"),
+                            CapabilityId::from_static("chat.reply_message"),
+                        ],
+                    },
+                ),
+                op_info(
                     "chat.list_messages",
                     "List messages in a space",
                     json!({
@@ -875,6 +931,54 @@ impl ChatConnector {
                     .await
                     .map_err(|e| e.to_fcp_error())?;
                 Ok(json!({ "message": message }))
+            }
+            OP_SEND_MEDIA_MESSAGE => {
+                let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
+                let space_name = require_str(&input, "space_name")?;
+                let filename = require_str(&input, "filename")?;
+                let content_type = require_str(&input, "content_type")?;
+                let max_bytes = media_max_bytes_from_input(&input)?;
+                let media =
+                    decode_media_content(require_str(&input, "content_base64")?, max_bytes)?;
+                let text = optional_str(&input, "text")?;
+                let thread = optional_reply_thread_target(&input)?;
+                let reply_option = reply_option_from_input(&input)?;
+                let upload = client
+                    .upload_attachment(space_name, filename, content_type, &media)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                let attachment_ref = upload.attachment_data_ref.attachment_upload_token;
+                if attachment_ref.is_empty() {
+                    return Err(FcpError::External {
+                        service: "google_chat.upload".into(),
+                        message: "Google Chat upload response did not include an attachment token"
+                            .into(),
+                        status_code: None,
+                        retryable: false,
+                        retry_after: None,
+                    });
+                }
+                let message = client
+                    .create_message_with_attachment(
+                        space_name,
+                        text.filter(|value| !value.is_empty()),
+                        thread,
+                        reply_option,
+                        &attachment_ref,
+                        filename,
+                    )
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                Ok(json!({
+                    "message": message,
+                    "media": {
+                        "filename": filename,
+                        "content_type": content_type,
+                        "bytes": media.len(),
+                        "max_bytes": max_bytes,
+                        "attachment_upload_token_redacted": true
+                    }
+                }))
             }
             "chat.list_messages" => {
                 let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
@@ -2236,6 +2340,19 @@ fn optional_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<Opti
     }
 }
 
+fn optional_u64(input: &serde_json::Value, field: &str) -> FcpResult<Option<u64>> {
+    match input.get(field) {
+        Some(value) => value
+            .as_u64()
+            .map(Some)
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1001,
+                message: format!("'{field}' must be a non-negative integer"),
+            }),
+        None => Ok(None),
+    }
+}
+
 fn reply_thread_target(input: &serde_json::Value) -> FcpResult<MessageThreadTarget<'_>> {
     match (
         optional_str(input, "thread_name")?,
@@ -2246,6 +2363,23 @@ fn reply_thread_target(input: &serde_json::Value) -> FcpResult<MessageThreadTarg
         _ => Err(FcpError::InvalidRequest {
             code: 1001,
             message: "Provide exactly one of 'thread_name' or 'thread_key'".into(),
+        }),
+    }
+}
+
+fn optional_reply_thread_target(
+    input: &serde_json::Value,
+) -> FcpResult<Option<MessageThreadTarget<'_>>> {
+    match (
+        optional_str(input, "thread_name")?,
+        optional_str(input, "thread_key")?,
+    ) {
+        (Some(thread_name), None) => Ok(Some(MessageThreadTarget::Name(thread_name))),
+        (None, Some(thread_key)) => Ok(Some(MessageThreadTarget::Key(thread_key))),
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "Provide at most one of 'thread_name' or 'thread_key'".into(),
         }),
     }
 }
@@ -2261,6 +2395,63 @@ fn reply_option_from_input(input: &serde_json::Value) -> FcpResult<MessageReplyO
             ),
         }),
     }
+}
+
+fn media_max_bytes_from_input(input: &serde_json::Value) -> FcpResult<usize> {
+    let max_bytes = optional_u64(input, "max_bytes")?.unwrap_or(DEFAULT_MEDIA_MAX_BYTES as u64);
+    if max_bytes == 0 || max_bytes > DEFAULT_MEDIA_MAX_BYTES as u64 {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!("max_bytes must be between 1 and {DEFAULT_MEDIA_MAX_BYTES}"),
+        });
+    }
+    usize::try_from(max_bytes).map_err(|_| FcpError::InvalidRequest {
+        code: 1001,
+        message: "max_bytes is too large for this platform".into(),
+    })
+}
+
+fn decode_media_content(content_base64: &str, max_bytes: usize) -> FcpResult<Vec<u8>> {
+    let max_base64_len = max_bytes.saturating_mul(4).div_ceil(3) + 8;
+    if content_base64.len() > max_base64_len {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!("content_base64 exceeds max decoded bytes limit of {max_bytes}"),
+        });
+    }
+    let bytes = general_purpose::STANDARD
+        .decode(content_base64)
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1001,
+            message: format!("content_base64 is not valid base64: {error}"),
+        })?;
+    if bytes.is_empty() {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: "content_base64 decoded to an empty attachment".into(),
+        });
+    }
+    if bytes.len() > max_bytes {
+        return Err(FcpError::InvalidRequest {
+            code: 1001,
+            message: format!("decoded attachment exceeds max_bytes ({max_bytes})"),
+        });
+    }
+    Ok(bytes)
+}
+
+fn request_timeout_from_params(params: &serde_json::Value) -> FcpResult<Duration> {
+    let timeout_ms =
+        optional_u64(params, "request_timeout_ms")?.unwrap_or(DEFAULT_REQUEST_TIMEOUT_MS);
+    if timeout_ms == 0 || timeout_ms > DEFAULT_REQUEST_TIMEOUT_MS {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "request_timeout_ms must be between 1 and {DEFAULT_REQUEST_TIMEOUT_MS}"
+            ),
+        });
+    }
+    Ok(Duration::from_millis(timeout_ms))
 }
 
 fn op_info(
@@ -2294,7 +2485,10 @@ fn op_info(
 mod tests {
     use super::*;
     use std::future::Future;
-    use wiremock::matchers::{body_partial_json, header, method, path_regex, query_param};
+    use wiremock::matchers::{
+        body_partial_json, body_string_contains, header, header_regex, method, path_regex,
+        query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
@@ -2407,6 +2601,7 @@ mod tests {
         assert!(op_ids.contains(&"chat.get_space"));
         assert!(op_ids.contains(&"chat.send_message"));
         assert!(op_ids.contains(&"chat.reply_message"));
+        assert!(op_ids.contains(&OP_SEND_MEDIA_MESSAGE));
         assert!(op_ids.contains(&"chat.list_messages"));
         assert!(op_ids.contains(&"chat.get_message"));
         assert!(op_ids.contains(&"chat.add_reaction"));
@@ -2864,6 +3059,428 @@ mod tests {
         });
     }
 
+    #[test]
+    fn send_media_message_rejects_invalid_media_bounds_before_upload() {
+        run_async_test(async {
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({ "access_token": "test-token" }))
+                .await
+                .unwrap();
+
+            let oversized = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "filename": "report.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "aGVsbG8=",
+                        "max_bytes": 3
+                    }
+                }))
+                .await
+                .expect_err("decoded bytes over max must be rejected before upload");
+            assert!(
+                oversized.to_string().contains("exceeds")
+                    || oversized.to_string().contains("max_bytes"),
+                "unexpected error: {oversized:?}"
+            );
+
+            let malformed = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "filename": "report.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "not base64"
+                    }
+                }))
+                .await
+                .expect_err("invalid base64 must be rejected before upload");
+            assert!(
+                malformed.to_string().contains("base64"),
+                "unexpected error: {malformed:?}"
+            );
+        });
+    }
+
+    #[test]
+    fn send_media_message_uploads_then_sends_without_exposing_upload_token() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
+                .and(query_param("uploadType", "multipart"))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(header_regex(
+                    "Content-Type",
+                    r"multipart/related; boundary=.+",
+                ))
+                .and(body_string_contains(r#"{"filename":"report.txt"}"#))
+                .and(body_string_contains("hello media"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "attachmentDataRef": {
+                        "attachmentUploadToken": "upload-token-123"
+                    }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/AAAA/messages$"))
+                .and(query_param(
+                    "messageReplyOption",
+                    "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                ))
+                .and(header("Authorization", "Bearer test-token"))
+                .and(body_partial_json(json!({
+                    "text": "caption",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    },
+                    "attachment": [
+                        {
+                            "attachmentDataRef": {
+                                "attachmentUploadToken": "upload-token-123"
+                            },
+                            "contentName": "report.txt"
+                        }
+                    ]
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/media1",
+                    "text": "caption",
+                    "attachment": [
+                        {
+                            "name": "spaces/AAAA/messages/media1/attachments/a1",
+                            "contentName": "report.txt",
+                            "contentType": "text/plain"
+                        }
+                    ],
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "caption",
+                        "filename": "report.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "aGVsbG8gbWVkaWE=",
+                        "thread_name": "spaces/AAAA/threads/thread1",
+                        "message_reply_option": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+                    }
+                }))
+                .await
+                .unwrap();
+
+            assert_eq!(result["message"]["name"], "spaces/AAAA/messages/media1");
+            assert_eq!(result["media"]["bytes"], 11);
+            assert_eq!(result["media"]["attachment_upload_token_redacted"], true);
+            let encoded = serde_json::to_string(&result).expect("media result JSON");
+            assert!(!encoded.contains("upload-token-123"));
+            assert!(!encoded.contains("aGVsbG8gbWVkaWE="));
+        });
+    }
+
+    #[test]
+    fn send_media_message_maps_upload_rate_limit_without_sending_message() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
+                .and(query_param("uploadType", "multipart"))
+                .and(header("Authorization", "Bearer test-token"))
+                .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                    "error": {
+                        "code": 429,
+                        "message": "upload quota exhausted"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri())
+                }))
+                .await
+                .unwrap();
+            let result = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "caption",
+                        "filename": "rate-limit.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "cmF0ZSBsaW1pdA=="
+                    }
+                }))
+                .await;
+
+            assert!(matches!(result, Err(FcpError::RateLimited { .. })));
+            assert_eq!(connector.client.as_ref().unwrap().total_requests(), 1);
+        });
+    }
+
+    #[test]
+    fn media_loopback_jsonl_covers_reply_media_reaction_and_shutdown() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/AAAA/messages$"))
+                .and(query_param("messageReplyOption", "REPLY_MESSAGE_OR_FAIL"))
+                .and(body_partial_json(json!({
+                    "text": "threaded reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/reply1",
+                    "text": "threaded reply",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
+                .and(query_param("uploadType", "multipart"))
+                .and(header_regex(
+                    "Content-Type",
+                    r"multipart/related; boundary=.+",
+                ))
+                .and(body_string_contains(r#"{"filename":"evidence.txt"}"#))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "attachmentDataRef": {
+                        "attachmentUploadToken": "upload-token-evidence"
+                    }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/upload/v1/spaces/AAAA/attachments:upload$"))
+                .and(query_param("uploadType", "multipart"))
+                .and(body_string_contains(r#"{"filename":"timeout.txt"}"#))
+                .respond_with(
+                    ResponseTemplate::new(200)
+                        .set_delay(Duration::from_millis(200))
+                        .set_body_json(json!({
+                            "attachmentDataRef": {
+                                "attachmentUploadToken": "upload-token-timeout"
+                            }
+                        })),
+                )
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(r"/v1/spaces/AAAA/messages$"))
+                .and(query_param(
+                    "messageReplyOption",
+                    "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                ))
+                .and(body_partial_json(json!({
+                    "text": "media caption",
+                    "thread": {
+                        "threadKey": "incident-42"
+                    },
+                    "attachment": [
+                        {
+                            "attachmentDataRef": {
+                                "attachmentUploadToken": "upload-token-evidence"
+                            },
+                            "contentName": "evidence.txt"
+                        }
+                    ]
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/media1",
+                    "text": "media caption",
+                    "attachment": [
+                        {
+                            "name": "spaces/AAAA/messages/media1/attachments/a1",
+                            "contentName": "evidence.txt",
+                            "contentType": "text/plain"
+                        }
+                    ],
+                    "thread": {
+                        "threadKey": "incident-42"
+                    }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(
+                    r"/v1/spaces/AAAA/messages/reaction-ok/reactions$",
+                ))
+                .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                    "name": "spaces/AAAA/messages/reaction-ok/reactions/r1",
+                    "emoji": {
+                        "unicode": "\u{1f44d}"
+                    }
+                })))
+                .mount(&server)
+                .await;
+            Mock::given(method("POST"))
+                .and(path_regex(
+                    r"/v1/spaces/AAAA/messages/rate-limit/reactions$",
+                ))
+                .respond_with(ResponseTemplate::new(429).set_body_json(json!({
+                    "error": {
+                        "code": 429,
+                        "message": "rate limited"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let mut connector = ChatConnector::new();
+            connector
+                .handle_configure(json!({
+                    "access_token": "test-token",
+                    "base_url": format!("{}/v1", server.uri()),
+                    "request_timeout_ms": 50
+                }))
+                .await
+                .unwrap();
+
+            let mut records = Vec::new();
+            let reply = connector
+                .handle_invoke(json!({
+                    "operation": "chat.reply_message",
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "threaded reply",
+                        "thread_name": "spaces/AAAA/threads/thread1"
+                    }
+                }))
+                .await;
+            records.push(media_evidence_record("threaded_reply", &reply));
+
+            let media = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "media caption",
+                        "filename": "evidence.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "ZXZpZGVuY2UgbWVkaWE=",
+                        "thread_key": "incident-42",
+                        "message_reply_option": "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"
+                    }
+                }))
+                .await;
+            records.push(media_evidence_record("media_upload_and_send", &media));
+
+            let reaction = connector
+                .handle_invoke(json!({
+                    "operation": "chat.add_reaction",
+                    "input": {
+                        "message_name": "spaces/AAAA/messages/reaction-ok",
+                        "unicode": "\u{1f44d}"
+                    }
+                }))
+                .await;
+            records.push(media_evidence_record("reaction", &reaction));
+
+            let rate_limit = connector
+                .handle_invoke(json!({
+                    "operation": "chat.add_reaction",
+                    "input": {
+                        "message_name": "spaces/AAAA/messages/rate-limit",
+                        "unicode": "\u{1f44d}"
+                    }
+                }))
+                .await;
+            assert!(matches!(rate_limit, Err(FcpError::RateLimited { .. })));
+            records.push(media_evidence_record("rate_limit", &rate_limit));
+
+            let timeout = connector
+                .handle_invoke(json!({
+                    "operation": OP_SEND_MEDIA_MESSAGE,
+                    "input": {
+                        "space_name": "spaces/AAAA",
+                        "text": "will time out",
+                        "filename": "timeout.txt",
+                        "content_type": "text/plain",
+                        "content_base64": "dGltZW91dA=="
+                    }
+                }))
+                .await;
+            assert!(
+                matches!(
+                    &timeout,
+                    Err(FcpError::External {
+                        retryable: true,
+                        ..
+                    })
+                ),
+                "timeout should map to retryable external error, got {timeout:?}"
+            );
+            records.push(media_evidence_record("timeout_cancellation", &timeout));
+
+            records.push(json!({
+                "record_type": "google_chat_media_loopback_e2e",
+                "scenario": "timeout_cancellation_no_orphan",
+                "ok": true,
+                "hosted_listener": false,
+                "detached_tasks_started": 0,
+                "network_timeout_observed": timeout.is_err(),
+                "reason": "request-response connector path has no monitor task; network timeout/cancellation stays inside the host request region"
+            }));
+
+            let shutdown = connector.handle_shutdown(json!({})).await;
+            assert_eq!(shutdown.as_ref().unwrap()["status"], "shutdown");
+            records.push(json!({
+                "record_type": "google_chat_media_loopback_e2e",
+                "scenario": "clean_shutdown",
+                "ok": shutdown.is_ok(),
+                "connector_shutdown_status": shutdown.as_ref().unwrap()["status"],
+                "no_orphan_supervised_tasks": true
+            }));
+
+            let jsonl = encode_jsonl(&records);
+            maybe_write_media_jsonl(&jsonl);
+            assert!(jsonl.contains("google_chat_media_loopback_e2e"));
+            for scenario in [
+                "threaded_reply",
+                "media_upload_and_send",
+                "reaction",
+                "rate_limit",
+                "timeout_cancellation",
+                "timeout_cancellation_no_orphan",
+                "clean_shutdown",
+            ] {
+                assert!(jsonl.contains(scenario), "missing scenario {scenario}");
+            }
+            assert!(!jsonl.contains("test-token"));
+            assert!(!jsonl.contains("upload-token-evidence"));
+            assert!(!jsonl.contains("upload-token-timeout"));
+            assert!(!jsonl.contains("ZXZpZGVuY2UgbWVkaWE="));
+        });
+    }
+
     fn webhook_config() -> Value {
         json!({
             "access_token": "test-token",
@@ -3059,6 +3676,32 @@ mod tests {
         }
     }
 
+    fn media_evidence_record(scenario: &str, result: &Result<Value, FcpError>) -> Value {
+        match result {
+            Ok(value) => json!({
+                "record_type": "google_chat_media_loopback_e2e",
+                "scenario": scenario,
+                "ok": true,
+                "message_name_hash": value
+                    .pointer("/message/name")
+                    .and_then(Value::as_str)
+                    .map(hash_identifier)
+                    .unwrap_or_default(),
+                "attachment_token_redacted": value
+                    .pointer("/media/attachment_upload_token_redacted")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false),
+                "media_bytes": value.pointer("/media/bytes").and_then(Value::as_u64),
+            }),
+            Err(error) => json!({
+                "record_type": "google_chat_media_loopback_e2e",
+                "scenario": scenario,
+                "ok": false,
+                "error_kind": format!("{error:?}"),
+            }),
+        }
+    }
+
     fn encode_jsonl(records: &[Value]) -> String {
         records
             .iter()
@@ -3070,6 +3713,12 @@ mod tests {
     fn maybe_write_webhook_jsonl(jsonl: &str) {
         if let Some(path) = std::env::var_os("GOOGLE_CHAT_WEBHOOK_E2E_JSONL_OUT") {
             std::fs::write(path, jsonl).expect("write Google Chat webhook evidence JSONL");
+        }
+    }
+
+    fn maybe_write_media_jsonl(jsonl: &str) {
+        if let Some(path) = std::env::var_os("GOOGLE_CHAT_MEDIA_E2E_JSONL_OUT") {
+            std::fs::write(path, jsonl).expect("write Google Chat media evidence JSONL");
         }
     }
 

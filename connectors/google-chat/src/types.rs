@@ -156,6 +156,24 @@ pub struct Attachment {
     pub content_type: String,
 }
 
+/// Google Chat attachment upload response.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentUpload {
+    /// Upload token reference returned by Google Chat.
+    #[serde(default)]
+    pub attachment_data_ref: AttachmentDataRef,
+}
+
+/// Google Chat attachment upload token wrapper.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentDataRef {
+    /// Opaque token used to attach uploaded media to a message.
+    #[serde(default)]
+    pub attachment_upload_token: String,
+}
+
 /// An emoji used as a Google Chat reaction.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

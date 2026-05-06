@@ -11,11 +11,13 @@ use tracing::{instrument, warn};
 
 use crate::error::{ChatError, ChatResult};
 use crate::types::{
-    ApiErrorDetail, ApiErrorResponse, ListMembershipsResponse, ListMessagesResponse,
-    ListSpacesResponse, Membership, Message, Reaction, Space,
+    ApiErrorDetail, ApiErrorResponse, AttachmentUpload, ListMembershipsResponse,
+    ListMessagesResponse, ListSpacesResponse, Membership, Message, Reaction, Space,
 };
 
 const DEFAULT_BASE_URL: &str = "https://chat.googleapis.com/v1";
+const DEFAULT_UPLOAD_BASE_URL: &str = "https://chat.googleapis.com/upload/v1";
+const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Thread target for creating a Google Chat reply.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -92,6 +94,7 @@ pub struct ChatClient {
     client: Client,
     auth: GoogleMaterializedAuth,
     base_url: String,
+    upload_base_url: String,
     total_requests: AtomicU64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
@@ -101,6 +104,7 @@ impl std::fmt::Debug for ChatClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ChatClient")
             .field("base_url", &self.base_url)
+            .field("upload_base_url", &self.upload_base_url)
             .field("total_requests", &self.total_requests)
             .field("auth", &"[REDACTED]")
             .finish_non_exhaustive()
@@ -111,7 +115,7 @@ impl ChatClient {
     /// Create a new Chat client with the shared Google auth.
     pub fn new_with_auth(auth: GoogleMaterializedAuth) -> ChatResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(30))
+            .timeout(DEFAULT_REQUEST_TIMEOUT)
             .user_agent("fcp-google-chat/0.1.0")
             .build()
             .map_err(ChatError::Http)?;
@@ -120,9 +124,10 @@ impl ChatClient {
             client,
             auth,
             base_url: DEFAULT_BASE_URL.to_string(),
+            upload_base_url: DEFAULT_UPLOAD_BASE_URL.to_string(),
             total_requests: AtomicU64::new(0),
             runtime: ConnectorRuntime::new(
-                ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_secs(30)),
+                ConnectorRuntimeConfig::default().with_request_timeout(DEFAULT_REQUEST_TIMEOUT),
             ),
             retry_config: HttpRetryConfig {
                 max_retries: 2,
@@ -140,6 +145,14 @@ impl ChatClient {
     #[must_use]
     pub(crate) fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         self.base_url = base_url.into().trim_end_matches('/').to_string();
+        self.upload_base_url = derive_upload_base_url(&self.base_url);
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_request_timeout(mut self, timeout: Duration) -> Self {
+        self.runtime =
+            ConnectorRuntime::new(ConnectorRuntimeConfig::default().with_request_timeout(timeout));
         self
     }
 
@@ -211,6 +224,68 @@ impl ChatClient {
         self.post_json(&url, &body).await
     }
 
+    /// Upload media bytes to a Google Chat space and return the upload token wrapper.
+    #[instrument(skip(self, media), fields(space_name, content_len = media.len()))]
+    pub async fn upload_attachment(
+        &self,
+        space_name: &str,
+        filename: &str,
+        content_type: &str,
+        media: &[u8],
+    ) -> ChatResult<AttachmentUpload> {
+        validate_resource_name(space_name, "space_name")?;
+        validate_upload_filename(filename)?;
+        validate_content_type(content_type)?;
+        let boundary = multipart_boundary(space_name, filename, media);
+        let body = multipart_upload_body(&boundary, filename, content_type, media);
+        let url = format!(
+            "{}/{space_name}/attachments:upload?uploadType=multipart",
+            self.upload_base_url
+        );
+        self.post_multipart_upload(&url, &boundary, body).await
+    }
+
+    /// Send a Google Chat message with one previously uploaded attachment.
+    #[instrument(skip(self), fields(space_name))]
+    pub async fn create_message_with_attachment(
+        &self,
+        space_name: &str,
+        text: Option<&str>,
+        thread: Option<MessageThreadTarget<'_>>,
+        reply_option: MessageReplyOption,
+        attachment_upload_token: &str,
+        content_name: &str,
+    ) -> ChatResult<Message> {
+        validate_resource_name(space_name, "space_name")?;
+        validate_upload_token(attachment_upload_token)?;
+        validate_upload_filename(content_name)?;
+
+        let mut body = serde_json::json!({
+            "attachment": [
+                {
+                    "attachmentDataRef": {
+                        "attachmentUploadToken": attachment_upload_token
+                    },
+                    "contentName": content_name
+                }
+            ]
+        });
+        if let Some(text) = text.filter(|value| !value.is_empty()) {
+            body["text"] = serde_json::json!(text);
+        }
+        let mut url = format!("{}/{space_name}/messages", self.base_url);
+        if let Some(thread) = thread {
+            body["thread"] = thread_json(thread)?;
+            url = format!(
+                "{}?messageReplyOption={}",
+                url,
+                reply_option.as_query_value()
+            );
+        }
+
+        self.post_json(&url, &body).await
+    }
+
     /// List messages in a space.
     #[instrument(skip(self), fields(space_name))]
     pub async fn list_messages(&self, space_name: &str) -> ChatResult<Vec<Message>> {
@@ -279,6 +354,7 @@ impl ChatClient {
         self.total_requests.fetch_add(1, Ordering::Relaxed);
         let resp = self
             .apply_auth_headers(self.client.get(url))
+            .timeout(self.runtime.request_timeout())
             .send()
             .await
             .map_err(ChatError::Http)?;
@@ -294,6 +370,28 @@ impl ChatClient {
         let resp = self
             .apply_auth_headers(self.client.post(url))
             .json(body)
+            .timeout(self.runtime.request_timeout())
+            .send()
+            .await
+            .map_err(ChatError::Http)?;
+        self.handle_response(resp).await
+    }
+
+    async fn post_multipart_upload<T: DeserializeOwned>(
+        &self,
+        url: &str,
+        boundary: &str,
+        body: Vec<u8>,
+    ) -> ChatResult<T> {
+        self.total_requests.fetch_add(1, Ordering::Relaxed);
+        let resp = self
+            .apply_auth_headers(self.client.post(url))
+            .header(
+                "Content-Type",
+                format!("multipart/related; boundary={boundary}"),
+            )
+            .body(body)
+            .timeout(self.runtime.request_timeout())
             .send()
             .await
             .map_err(ChatError::Http)?;
@@ -318,6 +416,101 @@ impl ChatClient {
             })
         }
     }
+}
+
+fn derive_upload_base_url(base_url: &str) -> String {
+    if let Some(prefix) = base_url.strip_suffix("/v1") {
+        format!("{prefix}/upload/v1")
+    } else {
+        DEFAULT_UPLOAD_BASE_URL.to_string()
+    }
+}
+
+fn thread_json(thread: MessageThreadTarget<'_>) -> ChatResult<serde_json::Value> {
+    match thread {
+        MessageThreadTarget::Name(thread_name) => {
+            validate_resource_name(thread_name, "thread_name")?;
+            Ok(serde_json::json!({ "name": thread_name }))
+        }
+        MessageThreadTarget::Key(thread_key) => {
+            validate_thread_key(thread_key)?;
+            Ok(serde_json::json!({ "threadKey": thread_key }))
+        }
+    }
+}
+
+fn validate_upload_filename(filename: &str) -> ChatResult<()> {
+    if filename.trim().is_empty()
+        || filename.len() > 255
+        || filename.contains('/')
+        || filename.contains('\\')
+        || filename.chars().any(char::is_control)
+    {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: "filename must be non-empty, at most 255 bytes, and contain no path separators or control characters".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_content_type(content_type: &str) -> ChatResult<()> {
+    if content_type.trim().is_empty()
+        || content_type.len() > 255
+        || !content_type.contains('/')
+        || content_type.chars().any(char::is_control)
+    {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: "content_type must be a valid media type and contain no control characters"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_upload_token(token: &str) -> ChatResult<()> {
+    if token.trim().is_empty() || token.len() > 4096 || token.chars().any(char::is_control) {
+        return Err(ChatError::Api {
+            status_code: 0,
+            message: "attachment upload token must be non-empty and contain no control characters"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+fn multipart_boundary(space_name: &str, filename: &str, media: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(space_name.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(filename.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(media);
+    let hash = hasher.finalize();
+    format!("fcp-google-chat-{}", &hash.to_hex()[..24])
+}
+
+fn multipart_upload_body(
+    boundary: &str,
+    filename: &str,
+    content_type: &str,
+    media: &[u8],
+) -> Vec<u8> {
+    let metadata = serde_json::json!({ "filename": filename }).to_string();
+    let header = format!(
+        "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n"
+    );
+    let media_header = format!("--{boundary}\r\nContent-Type: {content_type}\r\n\r\n");
+    let footer = format!("\r\n--{boundary}--\r\n");
+
+    let mut body =
+        Vec::with_capacity(header.len() + media_header.len() + media.len() + footer.len());
+    body.extend_from_slice(header.as_bytes());
+    body.extend_from_slice(media_header.as_bytes());
+    body.extend_from_slice(media);
+    body.extend_from_slice(footer.as_bytes());
+    body
 }
 
 fn map_api_error(error: ApiErrorDetail) -> ChatError {
@@ -346,7 +539,9 @@ mod tests {
         FCP_CREDENTIAL_ID_HEADER, GOOGLE_AUTHORIZATION_HEADER, GoogleAuthSourceKind,
     };
     use std::future::Future;
-    use wiremock::matchers::{body_partial_json, header, method, path, query_param};
+    use wiremock::matchers::{
+        body_partial_json, body_string_contains, header, header_regex, method, path, query_param,
+    };
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn run_async_test<F>(future: F) -> F::Output
@@ -628,6 +823,123 @@ mod tests {
 
             assert_eq!(reaction.name, "spaces/AAAA/messages/msg1/reactions/r1");
             assert_eq!(reaction.emoji.unicode, "\u{1f44d}");
+        });
+    }
+
+    #[test]
+    fn upload_attachment_posts_multipart_to_derived_upload_base() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/upload/v1/spaces/AAAA/attachments:upload"))
+                .and(query_param("uploadType", "multipart"))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .and(header_regex(
+                    "Content-Type",
+                    r"multipart/related; boundary=.+",
+                ))
+                .and(body_string_contains(r#"{"filename":"report.txt"}"#))
+                .and(body_string_contains("Content-Type: text/plain"))
+                .and(body_string_contains("hello attachment"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "attachmentDataRef": {
+                        "attachmentUploadToken": "upload-token-123"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v1", server.uri()));
+
+            let upload = client
+                .upload_attachment(
+                    "spaces/AAAA",
+                    "report.txt",
+                    "text/plain",
+                    b"hello attachment",
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(
+                upload.attachment_data_ref.attachment_upload_token,
+                "upload-token-123"
+            );
+        });
+    }
+
+    #[test]
+    fn create_message_with_attachment_posts_redactable_token_payload() {
+        run_async_test(async {
+            let server = MockServer::start().await;
+            Mock::given(method("POST"))
+                .and(path("/v1/spaces/AAAA/messages"))
+                .and(query_param(
+                    "messageReplyOption",
+                    "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD",
+                ))
+                .and(header(GOOGLE_AUTHORIZATION_HEADER, "Bearer test-token"))
+                .and(body_partial_json(serde_json::json!({
+                    "text": "media caption",
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    },
+                    "attachment": [
+                        {
+                            "attachmentDataRef": {
+                                "attachmentUploadToken": "upload-token-123"
+                            },
+                            "contentName": "report.txt"
+                        }
+                    ]
+                })))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "name": "spaces/AAAA/messages/msg4",
+                    "text": "media caption",
+                    "attachment": [
+                        {
+                            "name": "spaces/AAAA/messages/msg4/attachments/a1",
+                            "contentName": "report.txt",
+                            "contentType": "text/plain"
+                        }
+                    ],
+                    "thread": {
+                        "name": "spaces/AAAA/threads/thread1"
+                    }
+                })))
+                .mount(&server)
+                .await;
+
+            let client = ChatClient::new_with_auth(GoogleMaterializedAuth::BearerToken {
+                access_token: "test-token".into(),
+                source: GoogleAuthSourceKind::AccessToken,
+                granted_scopes: Vec::new(),
+                quota_project_id: None,
+            })
+            .unwrap()
+            .with_base_url(format!("{}/v1", server.uri()));
+
+            let message = client
+                .create_message_with_attachment(
+                    "spaces/AAAA",
+                    Some("media caption"),
+                    Some(MessageThreadTarget::Name("spaces/AAAA/threads/thread1")),
+                    MessageReplyOption::FallbackToNewThread,
+                    "upload-token-123",
+                    "report.txt",
+                )
+                .await
+                .unwrap();
+
+            assert_eq!(message.name, "spaces/AAAA/messages/msg4");
+            assert_eq!(message.attachments[0].content_name, "report.txt");
         });
     }
 

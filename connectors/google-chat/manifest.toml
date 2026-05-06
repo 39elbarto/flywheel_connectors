@@ -292,6 +292,68 @@ related = ["chat.send_message", "chat.list_messages"]
 
 # ------------------------------------------------------------------------------
 
+[provides.operations."chat.send_media_message"]
+description = "Upload media and send it as a Google Chat message"
+capability = "chat.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."chat.send_media_message".input_schema]
+required = ["space_name", "filename", "content_type", "content_base64"]
+type = "object"
+[provides.operations."chat.send_media_message".input_schema.properties.space_name]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.text]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.filename]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.content_type]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.content_base64]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.max_bytes]
+type = "integer"
+[provides.operations."chat.send_media_message".input_schema.properties.thread_name]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.thread_key]
+type = "string"
+[provides.operations."chat.send_media_message".input_schema.properties.message_reply_option]
+type = "string"
+enum = ["REPLY_MESSAGE_OR_FAIL", "REPLY_MESSAGE_FALLBACK_TO_NEW_THREAD"]
+
+[provides.operations."chat.send_media_message".output_schema]
+required = ["message", "media"]
+type = "object"
+[provides.operations."chat.send_media_message".output_schema.properties.message]
+type = "object"
+[provides.operations."chat.send_media_message".output_schema.properties.media]
+type = "object"
+
+[provides.operations."chat.send_media_message".network_constraints]
+host_allow = ["chat.googleapis.com"]
+port_allow = [443]
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."chat.send_media_message".ai_hints]
+when_to_use = "Send a bounded attachment to Google Chat with an optional caption and thread target. The connector redacts the attachment upload token from output."
+common_mistakes = ["Pass base64 media content, not raw bytes", "Do not include path separators in filename", "Do not expect the attachment upload token to be returned"]
+examples = ['{"space_name":"spaces/AAAA","text":"Report attached","filename":"report.txt","content_type":"text/plain","content_base64":"cmVhZHkK"}']
+related = ["chat.send_message", "chat.reply_message"]
+
+# ------------------------------------------------------------------------------
+
 [provides.operations."chat.list_messages"]
 description = "List messages in a space"
 capability = "chat.read"
@@ -512,6 +574,7 @@ scope = "instance"
 "chat.get_space" = ["chat.read"]
 "chat.send_message" = ["chat.write"]
 "chat.reply_message" = ["chat.write"]
+"chat.send_media_message" = ["chat.write"]
 "chat.list_messages" = ["chat.read"]
 "chat.get_message" = ["chat.read"]
 "chat.add_reaction" = ["chat.write"]

@@ -2225,11 +2225,11 @@ pub struct SwarmBatchFairnessBucket {
 pub struct SwarmBatchResourceSample {
     /// Resident set size observed or bounded for the run.
     pub rss_bytes: u64,
-    /// CPU usage in microunits, where 1_000_000 is one full core.
+    /// CPU usage in microunits, where `1_000_000` is one full core.
     pub cpu_microunits: u64,
     /// Maximum queue depth observed during the run.
     pub max_queue_depth: u64,
-    /// Retry amplification in microunits, where 1_000_000 means one retry per op.
+    /// Retry amplification in microunits, where `1_000_000` means one retry per op.
     pub retry_amplification_microunits: u64,
 }
 

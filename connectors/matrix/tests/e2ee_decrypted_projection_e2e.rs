@@ -119,6 +119,281 @@ fn body_hash(candidate: &MatrixVerifiedDecryptedMessageEvent) -> String {
     hex::encode(Sha256::digest(candidate.body.as_bytes()))
 }
 
+fn hash_str(value: &str) -> String {
+    hex::encode(Sha256::digest(value.as_bytes()))
+}
+
+fn hash_opt(value: Option<&str>) -> Option<String> {
+    value.map(hash_str)
+}
+
+fn projection_log_details(
+    projection: &fcp_matrix::crypto::MatrixTrustGatedDecryptedProjection,
+    input: &MatrixEncryptedEventProjectionContext,
+    candidate: Option<&MatrixVerifiedDecryptedMessageEvent>,
+) -> Value {
+    let metadata = &projection.metadata_event;
+    json!({
+        "fixture_id": "verified_crypto_result_boundary",
+        "room_id_hash": hash_str(&input.room_id),
+        "event_id_hash": hash_opt(input.event_id.as_deref()),
+        "sender_id_hash": hash_opt(input.sender.as_deref()),
+        "sender_device_hash": candidate.map(|event| hash_str(&event.sender_device_id)),
+        "session_id_hash": hash_opt(input.session_id.as_deref()),
+        "candidate_session_id_hash": candidate.map(|event| hash_str(&event.session_id)),
+        "candidate_replay_key_hash": candidate.map(|event| hash_str(&event.replay_key)),
+        "algorithm": input.algorithm,
+        "redaction_state": input.redaction_state.label(),
+        "decryption_status": metadata["decryption_status"],
+        "decryption_reason": metadata["decryption_reason"],
+        "denial_reason_codes": metadata["denial_reason_codes"],
+        "fcp_error_mapping": metadata["fcp_error_mapping"],
+        "trust_decision_codes": {
+            "own_device": metadata["trust_state"]["own_device"],
+            "device_keys": metadata["trust_state"]["device_keys"],
+            "device_list": metadata["trust_state"]["device_list"],
+            "cross_signing": metadata["trust_state"]["cross_signing"],
+            "room_key_backup": metadata["trust_state"]["room_key_backup"],
+            "recovery": metadata["trust_state"]["recovery"],
+            "sender_device": candidate.map(|event| event.sender_device_trust.label()),
+            "sender_cross_signing": candidate.map(|event| event.cross_signing_trust.label()),
+            "session": candidate.map(|event| event.session_trust.label()),
+        },
+        "undecrypted_retry": metadata["undecrypted_retry"],
+        "plaintext_emitted": metadata["plaintext_emitted"],
+        "ciphertext_redacted": metadata["ciphertext_redacted"],
+        "contains_secret_material": metadata["contains_secret_material"],
+    })
+}
+
+fn log_start(logs: &mut File) {
+    log_step(
+        logs,
+        "start",
+        "ok",
+        &json!({
+            "command_line": std::env::args().collect::<Vec<_>>(),
+            "git_revision": current_git_revision(),
+            "matrix_sdk_crypto_backend": cfg!(feature = "matrix-sdk-crypto-backend"),
+            "fixture": "verified_crypto_result_boundary",
+            "external_crypto_material_available": false,
+        }),
+    );
+    if !cfg!(feature = "matrix-sdk-crypto-backend") {
+        log_step(
+            logs,
+            "structured_skip_external_crypto_fixture",
+            "skipped",
+            &json!({
+                "reason_code": "external_matrix_crypto_fixture_unavailable",
+                "deterministic_projection_fixture_still_exercised": true,
+            }),
+        );
+    }
+}
+
+fn log_verified_success(
+    logs: &mut File,
+    input: &MatrixEncryptedEventProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedDecryptedMessageEvent,
+) {
+    let success = project_trust_gated_decrypted_event(input, Some(candidate), e2ee, state, &[]);
+    log_step(
+        logs,
+        "verified_decrypt_success",
+        "ok",
+        &json!({
+            "projection": projection_log_details(&success, input, Some(candidate)),
+            "event_topics": ["matrix.message.decrypted", "matrix.encrypted"],
+            "body_sha256": body_hash(candidate),
+        }),
+    );
+    assert!(success.authorized_event.is_some());
+}
+
+fn log_denial(
+    logs: &mut File,
+    step: &str,
+    projection: &fcp_matrix::crypto::MatrixTrustGatedDecryptedProjection,
+    input: &MatrixEncryptedEventProjectionContext,
+    candidate: Option<&MatrixVerifiedDecryptedMessageEvent>,
+    expected: &'static str,
+) {
+    log_step(
+        logs,
+        step,
+        "ok",
+        &projection_log_details(projection, input, candidate),
+    );
+    assert_eq!(projection.dropped_reason, Some(expected));
+}
+
+fn log_identity_and_trust_denials(
+    logs: &mut File,
+    input: &MatrixEncryptedEventProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedDecryptedMessageEvent,
+) {
+    let mut wrong_room = candidate.clone();
+    wrong_room.session_room_id = "!other:matrix.example".into();
+    let wrong_room_projection =
+        project_trust_gated_decrypted_event(input, Some(&wrong_room), e2ee, state, &[]);
+    log_denial(
+        logs,
+        "wrong_room_denial",
+        &wrong_room_projection,
+        input,
+        Some(&wrong_room),
+        "wrong_room",
+    );
+
+    let mut untrusted_sender = candidate.clone();
+    untrusted_sender.sender_device_trust = MatrixProjectionVerificationStatus::Unverified;
+    let untrusted_projection =
+        project_trust_gated_decrypted_event(input, Some(&untrusted_sender), e2ee, state, &[]);
+    log_denial(
+        logs,
+        "wrong_sender_device_denial",
+        &untrusted_projection,
+        input,
+        Some(&untrusted_sender),
+        "sender_device_untrusted",
+    );
+
+    let mut missing_cross_signing = e2ee.clone();
+    missing_cross_signing.trust_state.cross_signing = MatrixE2eeMaterialStatus::Missing;
+    let cross_signing_projection = project_trust_gated_decrypted_event(
+        input,
+        Some(candidate),
+        &missing_cross_signing,
+        state,
+        &[],
+    );
+    log_denial(
+        logs,
+        "missing_cross_signing_denial",
+        &cross_signing_projection,
+        input,
+        Some(candidate),
+        "cross_signing_unverified",
+    );
+}
+
+fn log_backup_redaction_algorithm_and_replay_denials(
+    logs: &mut File,
+    input: &MatrixEncryptedEventProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedDecryptedMessageEvent,
+) {
+    let mut backup_mismatch = e2ee.clone();
+    backup_mismatch.room_key_backup.status = MatrixE2eeMaterialStatus::PresentUnverified;
+    let backup_projection =
+        project_trust_gated_decrypted_event(input, Some(candidate), &backup_mismatch, state, &[]);
+    log_denial(
+        logs,
+        "backup_mismatch_denial",
+        &backup_projection,
+        input,
+        Some(candidate),
+        "room_key_backup_unverified",
+    );
+
+    let mut redacted_input = input.clone();
+    redacted_input.redaction_state = MatrixEncryptedEventRedactionState::Redacted;
+    let redacted_projection =
+        project_trust_gated_decrypted_event(&redacted_input, Some(candidate), e2ee, state, &[]);
+    log_denial(
+        logs,
+        "redacted_event_denial",
+        &redacted_projection,
+        &redacted_input,
+        Some(candidate),
+        "redacted_event_denied",
+    );
+
+    let mut unsupported_input = input.clone();
+    unsupported_input.algorithm = Some("m.olm.v1.curve25519-aes-sha2".into());
+    let unsupported_projection =
+        project_trust_gated_decrypted_event(&unsupported_input, Some(candidate), e2ee, state, &[]);
+    log_denial(
+        logs,
+        "unsupported_algorithm_denial",
+        &unsupported_projection,
+        &unsupported_input,
+        Some(candidate),
+        "unsupported_algorithm",
+    );
+
+    let replay_projection = project_trust_gated_decrypted_event(
+        input,
+        Some(candidate),
+        e2ee,
+        state,
+        std::slice::from_ref(&candidate.replay_key),
+    );
+    log_denial(
+        logs,
+        "replay_duplicate_denial",
+        &replay_projection,
+        input,
+        Some(candidate),
+        "replay_duplicate",
+    );
+}
+
+fn log_retry_fallback_and_parity(
+    logs: &mut File,
+    input: &MatrixEncryptedEventProjectionContext,
+    e2ee: &MatrixE2eeConfig,
+    state: &MatrixStatePersistenceConfig,
+    candidate: &MatrixVerifiedDecryptedMessageEvent,
+) {
+    let mut final_retry_input = input.clone();
+    final_retry_input.retry_attempts_used = 2;
+    let final_retry_projection =
+        project_trust_gated_decrypted_event(&final_retry_input, None, e2ee, state, &[]);
+    log_denial(
+        logs,
+        "undecrypted_final_failure",
+        &final_retry_projection,
+        &final_retry_input,
+        None,
+        "undecrypted_retry_budget_exhausted",
+    );
+
+    let mut fallback_e2ee = e2ee.clone();
+    fallback_e2ee.verified_decryption_requested = false;
+    let fallback_projection =
+        project_trust_gated_decrypted_event(input, Some(candidate), &fallback_e2ee, state, &[]);
+    log_denial(
+        logs,
+        "policy_fallback_not_requested",
+        &fallback_projection,
+        input,
+        Some(candidate),
+        "verified_e2ee_decryption_not_requested",
+    );
+
+    let manual_projection =
+        project_trust_gated_decrypted_event(input, Some(candidate), e2ee, state, &[]);
+    let supervised_projection =
+        project_trust_gated_decrypted_event(input, Some(candidate), e2ee, state, &[]);
+    log_step(
+        logs,
+        "supervised_manual_sync_parity",
+        "ok",
+        &json!({
+            "manual": projection_log_details(&manual_projection, input, Some(candidate)),
+            "supervised": projection_log_details(&supervised_projection, input, Some(candidate)),
+            "topics": ["matrix.message.decrypted", "matrix.encrypted", "matrix.event.dropped"],
+        }),
+    );
+}
+
 #[test]
 fn e2ee_decrypted_projection_logs_success_denials_parity_and_shutdown() {
     let log_path = unique_log_path();
@@ -137,210 +412,17 @@ fn e2ee_decrypted_projection_logs_success_denials_parity_and_shutdown() {
     let input = encrypted_input();
     let candidate = verified_candidate();
 
-    log_step(
-        &mut logs,
-        "start",
-        "ok",
-        json!({
-            "command_line": std::env::args().collect::<Vec<_>>(),
-            "git_revision": current_git_revision(),
-            "matrix_sdk_crypto_backend": cfg!(feature = "matrix-sdk-crypto-backend"),
-            "fixture": "verified_crypto_result_boundary",
-            "external_crypto_material_available": false,
-        }),
-    );
-    if !cfg!(feature = "matrix-sdk-crypto-backend") {
-        log_step(
-            &mut logs,
-            "structured_skip_external_crypto_fixture",
-            "skipped",
-            json!({
-                "reason_code": "external_matrix_crypto_fixture_unavailable",
-                "deterministic_projection_fixture_still_exercised": true,
-            }),
-        );
-    }
-
-    let success = project_trust_gated_decrypted_event(&input, Some(&candidate), &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "verified_decrypt_success",
-        "ok",
-        json!({
-            "metadata": success.metadata_event,
-            "event_topics": ["matrix.message.decrypted", "matrix.encrypted"],
-            "body_sha256": body_hash(&candidate),
-        }),
-    );
-    assert!(success.authorized_event.is_some());
-
-    let mut wrong_room = candidate.clone();
-    wrong_room.session_room_id = "!other:matrix.example".into();
-    let wrong_room_projection =
-        project_trust_gated_decrypted_event(&input, Some(&wrong_room), &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "wrong_room_denial",
-        "ok",
-        wrong_room_projection.metadata_event.clone(),
-    );
-    assert_eq!(wrong_room_projection.dropped_reason, Some("wrong_room"));
-
-    let mut untrusted_sender = candidate.clone();
-    untrusted_sender.sender_device_trust = MatrixProjectionVerificationStatus::Unverified;
-    let untrusted_projection =
-        project_trust_gated_decrypted_event(&input, Some(&untrusted_sender), &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "wrong_sender_device_denial",
-        "ok",
-        untrusted_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        untrusted_projection.dropped_reason,
-        Some("sender_device_untrusted")
-    );
-
-    let mut missing_cross_signing = e2ee.clone();
-    missing_cross_signing.trust_state.cross_signing = MatrixE2eeMaterialStatus::Missing;
-    let cross_signing_projection = project_trust_gated_decrypted_event(
-        &input,
-        Some(&candidate),
-        &missing_cross_signing,
-        &state,
-        &[],
-    );
-    log_step(
-        &mut logs,
-        "missing_cross_signing_denial",
-        "ok",
-        cross_signing_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        cross_signing_projection.dropped_reason,
-        Some("cross_signing_unverified")
-    );
-
-    let mut backup_mismatch = e2ee.clone();
-    backup_mismatch.room_key_backup.status = MatrixE2eeMaterialStatus::PresentUnverified;
-    let backup_projection = project_trust_gated_decrypted_event(
-        &input,
-        Some(&candidate),
-        &backup_mismatch,
-        &state,
-        &[],
-    );
-    log_step(
-        &mut logs,
-        "backup_mismatch_denial",
-        "ok",
-        backup_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        backup_projection.dropped_reason,
-        Some("room_key_backup_unverified")
-    );
-
-    let mut redacted_input = input.clone();
-    redacted_input.redaction_state = MatrixEncryptedEventRedactionState::Redacted;
-    let redacted_projection =
-        project_trust_gated_decrypted_event(&redacted_input, Some(&candidate), &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "redacted_event_denial",
-        "ok",
-        redacted_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        redacted_projection.dropped_reason,
-        Some("redacted_event_denied")
-    );
-
-    let mut unsupported_input = input.clone();
-    unsupported_input.algorithm = Some("m.olm.v1.curve25519-aes-sha2".into());
-    let unsupported_projection = project_trust_gated_decrypted_event(
-        &unsupported_input,
-        Some(&candidate),
-        &e2ee,
-        &state,
-        &[],
-    );
-    log_step(
-        &mut logs,
-        "unsupported_algorithm_denial",
-        "ok",
-        unsupported_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        unsupported_projection.dropped_reason,
-        Some("unsupported_algorithm")
-    );
-
-    let replay_projection = project_trust_gated_decrypted_event(
-        &input,
-        Some(&candidate),
-        &e2ee,
-        &state,
-        &[candidate.replay_key.clone()],
-    );
-    log_step(
-        &mut logs,
-        "replay_duplicate_denial",
-        "ok",
-        replay_projection.metadata_event.clone(),
-    );
-    assert_eq!(replay_projection.dropped_reason, Some("replay_duplicate"));
-
-    let mut final_retry_input = input.clone();
-    final_retry_input.retry_attempts_used = 2;
-    let final_retry_projection =
-        project_trust_gated_decrypted_event(&final_retry_input, None, &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "undecrypted_final_failure",
-        "ok",
-        final_retry_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        final_retry_projection.dropped_reason,
-        Some("undecrypted_retry_budget_exhausted")
-    );
-
-    let mut fallback_e2ee = e2ee.clone();
-    fallback_e2ee.verified_decryption_requested = false;
-    let fallback_projection =
-        project_trust_gated_decrypted_event(&input, Some(&candidate), &fallback_e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "policy_fallback_not_requested",
-        "ok",
-        fallback_projection.metadata_event.clone(),
-    );
-    assert_eq!(
-        fallback_projection.dropped_reason,
-        Some("verified_e2ee_decryption_not_requested")
-    );
-
-    let manual_projection =
-        project_trust_gated_decrypted_event(&input, Some(&candidate), &e2ee, &state, &[]);
-    let supervised_projection =
-        project_trust_gated_decrypted_event(&input, Some(&candidate), &e2ee, &state, &[]);
-    log_step(
-        &mut logs,
-        "supervised_manual_sync_parity",
-        "ok",
-        json!({
-            "manual": manual_projection.metadata_event,
-            "supervised": supervised_projection.metadata_event,
-            "topics": ["matrix.message.decrypted", "matrix.encrypted", "matrix.event.dropped"],
-        }),
-    );
+    log_start(&mut logs);
+    log_verified_success(&mut logs, &input, &e2ee, &state, &candidate);
+    log_identity_and_trust_denials(&mut logs, &input, &e2ee, &state, &candidate);
+    log_backup_redaction_algorithm_and_replay_denials(&mut logs, &input, &e2ee, &state, &candidate);
+    log_retry_fallback_and_parity(&mut logs, &input, &e2ee, &state, &candidate);
 
     log_step(
         &mut logs,
         "shutdown",
         "ok",
-        json!({
+        &json!({
             "log_path": log_path,
             "ciphertext_emitted": false,
             "secret_material_logged": false,

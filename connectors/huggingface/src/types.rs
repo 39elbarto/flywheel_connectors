@@ -95,6 +95,17 @@ pub struct ModelInfo {
     pub gated: Option<serde_json::Value>,
 }
 
+/// Query parameters for the Hugging Face Hub model catalog.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ModelListRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pipeline_tag: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
 // ── API error envelope ──
 
 /// Error response from Hugging Face APIs.
@@ -164,6 +175,19 @@ mod tests {
         assert_eq!(info.pipeline_tag.as_deref(), Some("summarization"));
         assert_eq!(info.author.as_deref(), Some("facebook"));
         assert_eq!(info.tags.len(), 2);
+    }
+
+    #[test]
+    fn model_list_request_serializes_filters() {
+        let req = ModelListRequest {
+            search: Some("bart".into()),
+            pipeline_tag: Some("summarization".into()),
+            limit: Some(5),
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["search"], "bart");
+        assert_eq!(json["pipeline_tag"], "summarization");
+        assert_eq!(json["limit"], 5);
     }
 
     #[test]

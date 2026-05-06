@@ -35,5 +35,6 @@ tracing-subscriber.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+blake3.workspace = true
 fcp-testkit = { path = "../../crates/fcp-testkit" }
 wiremock.workspace = true

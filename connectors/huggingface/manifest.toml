@@ -5,21 +5,20 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:huggingface-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:c3184ae5afdd2b1686edcc9d4a61083fde2797b5c152bf1d197e768704e3e6cc"
 
 [connector]
 id = "fcp.huggingface"
 name = "Hugging Face"
-version = "0.1.0"
-status = "incubating"
-description = "Hugging Face inference router connector for OpenAI-compatible chat completions and model discovery"
-archetypes = ["request-response"]
+version = "0.2.0"
+description = "Incubating Hugging Face Inference API and Hub catalog connector with bounded model discovery"
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
 model = "stateless"
 state_schema_version = "1"
-migration_hint = "First slice: OpenAI-compatible chat completions plus model discovery."
+migration_hint = "Catalog slice: text generation, summarization, Hub model info/listing, api_token or credential_id configuration."
 
 [zones]
 home = "z:work"
@@ -31,6 +30,214 @@ required = ["network.dns", "network.egress", "network.tls.sni"]
 optional = []
 forbidden = ["network.listen", "system.exec"]
 
+[provides.operations."huggingface.inference.text_generation"]
+description = "Run text generation through the Hugging Face Inference API for a caller-selected model."
+capability = "huggingface.inference"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."huggingface.inference.text_generation".input_schema]
+required = ["prompt"]
+type = "object"
+
+[provides.operations."huggingface.inference.text_generation".input_schema.properties.model_id]
+type = "string"
+
+[provides.operations."huggingface.inference.text_generation".input_schema.properties.prompt]
+type = "string"
+
+[provides.operations."huggingface.inference.text_generation".input_schema.properties.max_new_tokens]
+type = "integer"
+
+[provides.operations."huggingface.inference.text_generation".input_schema.properties.temperature]
+type = "number"
+
+[provides.operations."huggingface.inference.text_generation".input_schema.properties.return_full_text]
+type = "boolean"
+
+[provides.operations."huggingface.inference.text_generation".output_schema]
+type = "array"
+
+[provides.operations."huggingface.inference.text_generation".network_constraints]
+host_allow = ["api-inference.huggingface.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."huggingface.inference.text_generation".ai_hints]
+when_to_use = "Use for bounded text generation against a selected Hugging Face model."
+common_mistakes = ["Do not send secrets in prompts.", "Use models.list or models.info before invoking unfamiliar models."]
+examples = ['{"prompt":"hello","model_id":"gpt2","max_new_tokens":32}']
+related = ["huggingface.models.list", "huggingface.models.info"]
+
+[provides.operations."huggingface.inference.summarization"]
+description = "Run summarization through the Hugging Face Inference API for a caller-selected model."
+capability = "huggingface.inference"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."huggingface.inference.summarization".input_schema]
+required = ["text"]
+type = "object"
+
+[provides.operations."huggingface.inference.summarization".input_schema.properties.model_id]
+type = "string"
+
+[provides.operations."huggingface.inference.summarization".input_schema.properties.text]
+type = "string"
+
+[provides.operations."huggingface.inference.summarization".input_schema.properties.max_length]
+type = "integer"
+
+[provides.operations."huggingface.inference.summarization".input_schema.properties.min_length]
+type = "integer"
+
+[provides.operations."huggingface.inference.summarization".input_schema.properties.do_sample]
+type = "boolean"
+
+[provides.operations."huggingface.inference.summarization".output_schema]
+type = "array"
+
+[provides.operations."huggingface.inference.summarization".network_constraints]
+host_allow = ["api-inference.huggingface.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."huggingface.inference.summarization".ai_hints]
+when_to_use = "Use for bounded summarization against a selected Hugging Face model."
+common_mistakes = ["The connector does not persist source text.", "Prefer explicit model_id when reproducibility matters."]
+examples = ['{"text":"Long text to summarize","model_id":"facebook/bart-large-cnn"}']
+related = ["huggingface.models.list", "huggingface.models.info"]
+
+[provides.operations."huggingface.models.list"]
+description = "List Hugging Face Hub models with bounded search and pipeline filters."
+capability = "huggingface.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."huggingface.models.list".input_schema]
+required = []
+type = "object"
+
+[provides.operations."huggingface.models.list".input_schema.properties.search]
+type = "string"
+
+[provides.operations."huggingface.models.list".input_schema.properties.pipeline_tag]
+type = "string"
+
+[provides.operations."huggingface.models.list".input_schema.properties.limit]
+type = "integer"
+
+[provides.operations."huggingface.models.list".output_schema]
+required = ["models", "catalog", "limit"]
+type = "object"
+
+[provides.operations."huggingface.models.list".output_schema.properties.models]
+type = "array"
+
+[provides.operations."huggingface.models.list".output_schema.properties.catalog]
+type = "string"
+
+[provides.operations."huggingface.models.list".output_schema.properties.limit]
+type = "integer"
+
+[provides.operations."huggingface.models.list".network_constraints]
+host_allow = ["huggingface.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."huggingface.models.list".ai_hints]
+when_to_use = "Use before inference when you need to discover public Hub models by task or search term."
+common_mistakes = ["The operation is capped by connector validation; do not request an unbounded catalog."]
+examples = ['{"search":"bart","pipeline_tag":"summarization","limit":5}']
+related = ["huggingface.models.info"]
+
+[provides.operations."huggingface.models.info"]
+description = "Get metadata for one Hugging Face Hub model."
+capability = "huggingface.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."huggingface.models.info".input_schema]
+required = ["model_id"]
+type = "object"
+
+[provides.operations."huggingface.models.info".input_schema.properties.model_id]
+type = "string"
+
+[provides.operations."huggingface.models.info".output_schema]
+type = "object"
+
+[provides.operations."huggingface.models.info".network_constraints]
+host_allow = ["huggingface.co"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."huggingface.models.info".ai_hints]
+when_to_use = "Use to inspect a specific Hub model before invoking it."
+common_mistakes = ["model_id is caller-selected; there is no global default for metadata lookup."]
+examples = ['{"model_id":"facebook/bart-large-cnn"}']
+related = ["huggingface.models.list", "huggingface.inference.text_generation"]
+
 [sandbox]
 profile = "strict"
 memory_mb = 96
@@ -38,4 +245,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
-

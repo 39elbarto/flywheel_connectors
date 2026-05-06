@@ -3,14 +3,15 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
+use fcp_prelude::{BaseConnector, ConnectorId, CredentialId, FcpError, FcpResult};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use serde_json::{Value, json};
 use tracing::info;
 
 use crate::client::HuggingfaceClient;
 use crate::types::{
-    SummarizationParameters, SummarizationRequest, TextGenerationParameters, TextGenerationRequest,
+    ModelListRequest, SummarizationParameters, SummarizationRequest, TextGenerationParameters,
+    TextGenerationRequest,
 };
 
 const CONNECTOR_ID: &str = "fcp.huggingface";
@@ -18,10 +19,12 @@ const CONNECTOR_VERSION: &str = "0.2.0";
 
 const OP_TEXT_GENERATION: &str = "huggingface.inference.text_generation";
 const OP_SUMMARIZATION: &str = "huggingface.inference.summarization";
+const OP_MODEL_LIST: &str = "huggingface.models.list";
 const OP_MODEL_INFO: &str = "huggingface.models.info";
 
 const DEFAULT_TEXT_GEN_MODEL: &str = "gpt2";
 const DEFAULT_SUMMARIZATION_MODEL: &str = "facebook/bart-large-cnn";
+const MAX_MODEL_LIST_LIMIT: u32 = 100;
 
 pub struct HuggingfaceConnector {
     base: Arc<BaseConnector>,
@@ -36,6 +39,8 @@ pub struct HuggingfaceConnector {
 pub struct HuggingfaceConfig {
     #[serde(default)]
     pub api_token: String,
+    #[serde(default)]
+    pub credential_id: Option<String>,
     #[serde(default = "default_inference_url")]
     pub inference_url: String,
     #[serde(default = "default_hub_url")]
@@ -57,11 +62,63 @@ impl std::fmt::Debug for HuggingfaceConfig {
                     "[REDACTED]"
                 },
             )
+            .field(
+                "credential_id",
+                &self
+                    .credential_id
+                    .as_ref()
+                    .map_or("<empty>", |_| "[REDACTED]"),
+            )
             .field("inference_url", &self.inference_url)
             .field("hub_url", &self.hub_url)
             .field("retry", &self.retry)
             .field("request_timeout_ms", &self.request_timeout_ms)
             .finish()
+    }
+}
+
+impl HuggingfaceConfig {
+    fn validate(&self) -> FcpResult<()> {
+        let has_direct_auth = !self.api_token.trim().is_empty();
+        let credential_id = self
+            .credential_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+
+        if has_direct_auth && credential_id.is_some() {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Provide api_token or credential_id, not both".into(),
+            });
+        }
+
+        if let Some(raw) = credential_id {
+            CredentialId::parse(raw).map_err(|_| FcpError::InvalidRequest {
+                code: 1003,
+                message: "credential_id must be a valid UUID".into(),
+            })?;
+        }
+
+        if self.request_timeout_ms == 0 {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: "request_timeout_ms must be greater than zero".into(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn has_direct_token(&self) -> bool {
+        !self.api_token.trim().is_empty()
+    }
+
+    fn has_credential_id(&self) -> bool {
+        self.credential_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty())
     }
 }
 
@@ -100,6 +157,7 @@ impl HuggingfaceConnector {
                 code: 1001,
                 message: format!("Invalid configuration: {e}"),
             })?;
+        config.validate()?;
 
         let timeout = Duration::from_millis(config.request_timeout_ms);
         self.runtime = Some(ConnectorRuntime::new(
@@ -113,9 +171,7 @@ impl HuggingfaceConnector {
             config.retry.clone(),
             timeout,
         )
-        .map_err(|e| FcpError::Internal {
-            message: format!("Client init: {e}"),
-        })?;
+        .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(client);
         self.config = Some(config);
@@ -148,8 +204,15 @@ impl HuggingfaceConnector {
     }
 
     pub async fn handle_health(&self) -> FcpResult<Value> {
-        let has_token = self.client.as_ref().is_some_and(|c| !c.is_secretless());
-        let status = if self.configured && has_token {
+        let has_direct_auth = self
+            .config
+            .as_ref()
+            .is_some_and(HuggingfaceConfig::has_direct_token);
+        let has_credential_id = self
+            .config
+            .as_ref()
+            .is_some_and(HuggingfaceConfig::has_credential_id);
+        let status = if self.configured && has_direct_auth {
             "ready"
         } else if self.configured {
             "degraded"
@@ -160,6 +223,13 @@ impl HuggingfaceConnector {
             "status": status,
             "configured": self.configured,
             "handshaken": self.handshaken,
+            "auth_mode": if has_direct_auth {
+                "api_token"
+            } else if has_credential_id {
+                "credential_id"
+            } else {
+                "anonymous"
+            },
             "live_requests_supported": self.configured,
         }))
     }
@@ -171,6 +241,20 @@ impl HuggingfaceConnector {
             json!({ "name": "client_initialized", "passed": self.client.is_some(), "critical": true }),
             json!({ "name": "runtime_initialized", "passed": self.runtime.is_some(), "critical": true }),
         ];
+        if let Some(config) = &self.config {
+            checks.push(json!({
+                "name": "auth_source",
+                "passed": config.has_direct_token() || config.has_credential_id(),
+                "critical": false,
+                "message": if config.has_direct_token() {
+                    "API token configured"
+                } else if config.has_credential_id() {
+                    "credential_id configured; host or egress proxy injection required for live requests"
+                } else {
+                    "No auth configured; public models may work but gated models will fail"
+                }
+            }));
+        }
         if let Some(client) = &self.client {
             checks.push(json!({
                 "name": "auth_token",
@@ -212,6 +296,18 @@ impl HuggingfaceConnector {
                 "status": "degraded",
                 "reason_code": "not_handshaken",
                 "message": "Connector configured but handshake not completed"
+            }));
+        }
+
+        if self
+            .config
+            .as_ref()
+            .is_some_and(HuggingfaceConfig::has_credential_id)
+        {
+            return Ok(json!({
+                "status": "degraded",
+                "reason_code": "credential_injection_required",
+                "message": "Configured with credential_id; host or egress proxy injection required for live checks"
             }));
         }
 
@@ -267,6 +363,15 @@ impl HuggingfaceConnector {
                     "implemented": true
                 },
                 {
+                    "id": OP_MODEL_LIST,
+                    "summary": "List Hugging Face Hub models with bounded catalog filters",
+                    "capability": "huggingface.models",
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "strict",
+                    "implemented": true
+                },
+                {
                     "id": OP_MODEL_INFO,
                     "summary": "Get model metadata from Hugging Face Hub",
                     "capability": "huggingface.models",
@@ -306,6 +411,7 @@ impl HuggingfaceConnector {
         let output = match operation {
             OP_TEXT_GENERATION => self.invoke_text_generation(client, runtime, &input).await?,
             OP_SUMMARIZATION => self.invoke_summarization(client, runtime, &input).await?,
+            OP_MODEL_LIST => self.invoke_model_list(client, runtime, &input).await?,
             OP_MODEL_INFO => self.invoke_model_info(client, runtime, &input).await?,
             _ => {
                 return Err(FcpError::InvalidRequest {
@@ -454,6 +560,63 @@ impl HuggingfaceConnector {
         })
     }
 
+    async fn invoke_model_list(
+        &self,
+        client: &HuggingfaceClient,
+        runtime: &ConnectorRuntime,
+        input: &Value,
+    ) -> FcpResult<Value> {
+        let limit = match input.get("limit").and_then(Value::as_u64) {
+            Some(0) => {
+                return Err(FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "limit must be greater than zero".into(),
+                });
+            }
+            Some(value) => {
+                let parsed = safe_u32(value).ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1005,
+                    message: "limit exceeds u32 range".into(),
+                })?;
+                if parsed > MAX_MODEL_LIST_LIMIT {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("limit must be <= {MAX_MODEL_LIST_LIMIT}"),
+                    });
+                }
+                Some(parsed)
+            }
+            None => Some(25),
+        };
+
+        let request = ModelListRequest {
+            search: input
+                .get("search")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            pipeline_tag: input
+                .get("pipeline_tag")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
+            limit,
+        };
+
+        let models = client
+            .list_models(runtime, &request)
+            .await
+            .map_err(|e| e.to_fcp_error())?;
+
+        Ok(json!({
+            "models": models,
+            "catalog": "hub",
+            "limit": request.limit
+        }))
+    }
+
     pub async fn handle_simulate(&self, params: Value) -> FcpResult<Value> {
         let operation = params
             .get("operation_id")
@@ -463,7 +626,7 @@ impl HuggingfaceConnector {
 
         let known = matches!(
             operation,
-            OP_TEXT_GENERATION | OP_SUMMARIZATION | OP_MODEL_INFO
+            OP_TEXT_GENERATION | OP_SUMMARIZATION | OP_MODEL_LIST | OP_MODEL_INFO
         );
 
         Ok(json!({
@@ -536,6 +699,42 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn configure_rejects_api_token_and_credential_id_together() {
+        let mut connector = HuggingfaceConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .expect_err("mixed auth sources should fail");
+        assert!(err.to_string().contains("api_token or credential_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_credential_id() {
+        let mut connector = HuggingfaceConnector::new();
+        let err = connector
+            .handle_configure(json!({"credential_id": "not-a-uuid"}))
+            .await
+            .expect_err("invalid credential id should fail");
+        assert!(err.to_string().contains("valid UUID"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_base_url_query() {
+        let mut connector = HuggingfaceConnector::new();
+        let err = connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "inference_url": "https://api-inference.huggingface.co?x=bad"
+            }))
+            .await
+            .expect_err("base URL queries should fail");
+        assert!(err.to_string().contains("query or fragment"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn handshake_requires_configure() {
         let mut connector = HuggingfaceConnector::new();
         let err = connector
@@ -570,6 +769,20 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn health_reports_credential_id_mode() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+        let h = connector.handle_health().await.unwrap();
+        assert_eq!(h["status"], "degraded");
+        assert_eq!(h["auth_mode"], "credential_id");
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn doctor_checks() {
         let mut connector = HuggingfaceConnector::new();
         let d = connector.handle_doctor().await.unwrap();
@@ -591,8 +804,9 @@ mod tests {
         let intro = connector.handle_introspect().await.unwrap();
         assert_eq!(intro["surface_status"], "incubating");
         let ops = intro["operations"].as_array().unwrap();
-        assert_eq!(ops.len(), 3);
+        assert_eq!(ops.len(), 4);
         assert!(ops.iter().all(|o| o["implemented"] == true));
+        assert!(ops.iter().any(|o| o["id"] == OP_MODEL_LIST));
     }
 
     #[fcp_async_core::runtime::test]
@@ -695,6 +909,28 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn invoke_model_list_rejects_unbounded_limit() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "api_token": "hf_test",
+                "hub_url": "http://localhost:1"
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+
+        let err = connector
+            .handle_invoke(json!({
+                "operation_id": OP_MODEL_LIST,
+                "input": {"limit": 10_000}
+            }))
+            .await
+            .expect_err("oversized limit should fail before outbound HTTP");
+        assert!(err.to_string().contains("limit must be"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn simulate_known_operations() {
         let mut connector = HuggingfaceConnector::new();
         connector
@@ -717,6 +953,12 @@ mod tests {
 
         let sim = connector
             .handle_simulate(json!({"operation_id": OP_MODEL_INFO}))
+            .await
+            .unwrap();
+        assert_eq!(sim["allowed"], true);
+
+        let sim = connector
+            .handle_simulate(json!({"operation_id": OP_MODEL_LIST}))
             .await
             .unwrap();
         assert_eq!(sim["allowed"], true);
@@ -770,5 +1012,20 @@ mod tests {
         let sc = connector.handle_self_check().await.unwrap();
         assert_eq!(sc["status"], "degraded");
         assert_eq!(sc["reason_code"], "not_handshaken");
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_credential_id_requires_injection() {
+        let mut connector = HuggingfaceConnector::new();
+        connector
+            .handle_configure(json!({
+                "credential_id": "550e8400-e29b-41d4-a716-446655440000"
+            }))
+            .await
+            .unwrap();
+        connector.handle_handshake(json!({})).await.unwrap();
+        let sc = connector.handle_self_check().await.unwrap();
+        assert_eq!(sc["status"], "degraded");
+        assert_eq!(sc["reason_code"], "credential_injection_required");
     }
 }

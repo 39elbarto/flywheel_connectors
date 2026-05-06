@@ -1,3 +1,6 @@
+use std::time::Duration;
+
+use fcp_core::FcpError;
 use fcp_huggingface::connector::HuggingfaceConnector;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
@@ -5,6 +8,8 @@ use fcp_testkit::provider_contract::{
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::json;
+use wiremock::matchers::{bearer_token, body_json, method, path, query_param};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[fcp_async_core::runtime::test]
 async fn huggingface_provider_contract_is_advertised() {
@@ -31,6 +36,7 @@ async fn huggingface_provider_contract_is_advertised() {
         &ProviderContract::new("huggingface", "Hugging Face")
             .with_docs_path("/connectors/huggingface/manifest.toml")
             .with_config_key("api_token")
+            .with_config_key("credential_id")
             .with_config_key("inference_url")
             .with_config_key("hub_url")
             .with_config_key("retry")
@@ -38,6 +44,10 @@ async fn huggingface_provider_contract_is_advertised() {
             .with_auth_method(
                 ProviderAuthMethodContract::new("api_token", "API token")
                     .with_config_key("api_token"),
+            )
+            .with_auth_method(
+                ProviderAuthMethodContract::new("credential_id", "Host-injected credential")
+                    .with_config_key("credential_id"),
             )
             .with_model_picker_method("api_token")
             .with_default_model("gpt2")
@@ -56,6 +66,14 @@ async fn huggingface_provider_contract_is_advertised() {
                 ProviderOperationContract::new("huggingface.inference.summarization")
                     .with_catalog_id("inference")
                     .with_default_model("facebook/bart-large-cnn")
+                    .require_default_model(),
+            )
+            .with_operation(
+                ProviderOperationContract::new("huggingface.models.list")
+                    .with_catalog_id("inference")
+                    .with_default_model_deferral(
+                        "Hub catalog listing is filter-selected rather than tied to one model",
+                    )
                     .require_default_model(),
             )
             .with_operation(
@@ -84,4 +102,554 @@ async fn huggingface_provider_contract_is_advertised() {
                 "provider registry",
             )),
     );
+}
+
+async fn configured_loopback_connector(server: &MockServer) -> HuggingfaceConnector {
+    configured_loopback_connector_with(server, 5_000, 0).await
+}
+
+async fn configured_loopback_connector_with(
+    server: &MockServer,
+    request_timeout_ms: u64,
+    max_retries: u32,
+) -> HuggingfaceConnector {
+    let mut connector = HuggingfaceConnector::new();
+    connector
+        .handle_configure(json!({
+            "api_token": "hf_loopback_token",
+            "inference_url": server.uri(),
+            "hub_url": server.uri(),
+            "request_timeout_ms": request_timeout_ms,
+            "retry": {
+                "max_retries": max_retries,
+                "initial_delay_ms": 1,
+                "max_delay_ms": 1,
+                "jitter_enabled": false
+            }
+        }))
+        .await
+        .expect("loopback configure should succeed");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("loopback handshake should succeed");
+    connector
+}
+
+fn model_id_hash(model_id: &str) -> String {
+    format!("blake3:{}", blake3::hash(model_id.as_bytes()).to_hex())
+}
+
+fn emit_huggingface_e2e_jsonl(record: &serde_json::Value) {
+    println!(
+        "HUGGINGFACE_E2E_JSONL {}",
+        serde_json::to_string(&record).expect("record should serialize")
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn huggingface_model_list_loopback_catalog_filters() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("search", "bart"))
+        .and(query_param("pipeline_tag", "summarization"))
+        .and(query_param("limit", "2"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "_id": "model-1",
+                "modelId": "facebook/bart-large-cnn",
+                "pipeline_tag": "summarization",
+                "tags": ["summarization"],
+                "downloads": 123,
+                "likes": 4
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_loopback_connector(&server).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.list",
+            "input": {
+                "search": "bart",
+                "pipeline_tag": "summarization",
+                "limit": 2
+            }
+        }))
+        .await
+        .expect("model list should succeed");
+
+    assert_eq!(result["output"]["catalog"], "hub");
+    assert_eq!(result["output"]["limit"], 2);
+    assert_eq!(
+        result["output"]["models"][0]["modelId"],
+        "facebook/bart-large-cnn"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn huggingface_text_generation_loopback_request_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/models/gpt2"))
+        .and(bearer_token("hf_loopback_token"))
+        .and(body_json(json!({
+            "inputs": "hello",
+            "parameters": {
+                "max_new_tokens": 12,
+                "temperature": 0.7,
+                "return_full_text": false
+            }
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"generated_text": "hello world"}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_loopback_connector(&server).await;
+    let result = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.inference.text_generation",
+            "input": {
+                "model_id": "gpt2",
+                "prompt": "hello",
+                "max_new_tokens": 12,
+                "temperature": 0.7,
+                "return_full_text": false
+            }
+        }))
+        .await
+        .expect("text generation should succeed");
+
+    assert_eq!(result["output"][0]["generated_text"], "hello world");
+}
+
+#[fcp_async_core::runtime::test]
+async fn huggingface_model_info_auth_failure_maps_to_unauthorized() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/models/gated/model"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": "invalid token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let connector = configured_loopback_connector(&server).await;
+    let err = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.info",
+            "input": {"model_id": "gated/model"}
+        }))
+        .await
+        .expect_err("401 should map to an authorization failure");
+
+    assert!(err.to_string().contains("Authentication failed"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn huggingface_loopback_e2e_jsonl_matrix() {
+    let server = MockServer::start().await;
+
+    Mock::given(method("GET"))
+        .and(path("/whoami-v2"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "name": "loopback-user"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("search", "bart"))
+        .and(query_param("pipeline_tag", "summarization"))
+        .and(query_param("limit", "2"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {
+                "_id": "model-1",
+                "modelId": "facebook/bart-large-cnn",
+                "pipeline_tag": "summarization",
+                "tags": ["summarization"],
+                "downloads": 123,
+                "likes": 4
+            }
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models"))
+        .and(query_param("search", "broken"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_raw("{\"not\":\"a-list\"}", "application/json"),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/models/gpt2"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"generated_text": "hello world"}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models/gated/model"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "error": "invalid token"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models/missing/model"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "error": "not found"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/models/limited/model"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "0"))
+        .expect(2)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/models/slow/model"))
+        .and(bearer_token("hf_loopback_token"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(50))
+                .set_body_json(json!([{"generated_text": "slow"}])),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let mut connector = configured_loopback_connector_with(&server, 5_000, 1).await;
+    let git_revision =
+        std::env::var("HUGGINGFACE_E2E_GIT_REVISION").unwrap_or_else(|_| "test-worktree".into());
+    let health = connector
+        .handle_health()
+        .await
+        .expect("health should serialize");
+    assert_eq!(health["status"], "ready");
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "onboarding-readiness",
+        "operation": "health",
+        "model_id_hash": null,
+        "endpoint_class": "control",
+        "auth_decision": health["auth_mode"],
+        "request_bytes": 0,
+        "response_bytes": health.to_string().len(),
+        "capability_classification": "readiness",
+        "retry_decision": "none",
+        "http_status": null,
+        "fcp_error_mapping": null,
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let list_input = json!({
+        "operation_id": "huggingface.models.list",
+        "input": {
+            "search": "bart",
+            "pipeline_tag": "summarization",
+            "limit": 2
+        }
+    });
+    let list = connector
+        .handle_invoke(list_input.clone())
+        .await
+        .expect("model list should succeed");
+    assert_eq!(
+        list["output"]["models"][0]["modelId"],
+        "facebook/bart-large-cnn"
+    );
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "model-list-success",
+        "operation": "huggingface.models.list",
+        "model_id_hash": null,
+        "endpoint_class": "hub",
+        "auth_decision": "bearer",
+        "request_bytes": list_input.to_string().len(),
+        "response_bytes": list.to_string().len(),
+        "capability_classification": "catalog-read",
+        "retry_decision": "none",
+        "http_status": 200,
+        "fcp_error_mapping": null,
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let inference_input = json!({
+        "operation_id": "huggingface.inference.text_generation",
+        "input": {
+            "model_id": "gpt2",
+            "prompt": "hello",
+            "max_new_tokens": 12
+        }
+    });
+    let inference = connector
+        .handle_invoke(inference_input.clone())
+        .await
+        .expect("text generation should succeed");
+    assert_eq!(inference["output"][0]["generated_text"], "hello world");
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "inference-request-success",
+        "operation": "huggingface.inference.text_generation",
+        "model_id_hash": model_id_hash("gpt2"),
+        "endpoint_class": "inference-api",
+        "auth_decision": "bearer",
+        "request_bytes": inference_input.to_string().len(),
+        "response_bytes": inference.to_string().len(),
+        "capability_classification": "model-invoke",
+        "retry_decision": "none",
+        "http_status": 200,
+        "fcp_error_mapping": null,
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let auth_err = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.info",
+            "input": {"model_id": "gated/model"}
+        }))
+        .await
+        .expect_err("auth denial should fail");
+    assert!(auth_err.to_string().contains("Authentication failed"));
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "auth-denial",
+        "operation": "huggingface.models.info",
+        "model_id_hash": model_id_hash("gated/model"),
+        "endpoint_class": "hub",
+        "auth_decision": "bearer-denied",
+        "request_bytes": 90,
+        "response_bytes": 25,
+        "capability_classification": "catalog-read",
+        "retry_decision": "terminal",
+        "http_status": 401,
+        "fcp_error_mapping": "Unauthorized",
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let missing_err = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.info",
+            "input": {"model_id": "missing/model"}
+        }))
+        .await
+        .expect_err("missing model should fail");
+    assert!(missing_err.to_string().contains("not found"));
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "missing-model",
+        "operation": "huggingface.models.info",
+        "model_id_hash": model_id_hash("missing/model"),
+        "endpoint_class": "hub",
+        "auth_decision": "bearer",
+        "request_bytes": 91,
+        "response_bytes": 21,
+        "capability_classification": "catalog-read",
+        "retry_decision": "terminal",
+        "http_status": 404,
+        "fcp_error_mapping": "ResourceNotFound",
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let rate_err = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.info",
+            "input": {"model_id": "limited/model"}
+        }))
+        .await
+        .expect_err("rate limit should fail after retry budget");
+    assert!(rate_err.to_string().contains("Rate limited"));
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "rate-limit-retry",
+        "operation": "huggingface.models.info",
+        "model_id_hash": model_id_hash("limited/model"),
+        "endpoint_class": "hub",
+        "auth_decision": "bearer",
+        "request_bytes": 91,
+        "response_bytes": 0,
+        "capability_classification": "catalog-read",
+        "retry_decision": "retry-after",
+        "http_status": 429,
+        "fcp_error_mapping": "RateLimited",
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let malformed_err = connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.models.list",
+            "input": {"search": "broken", "limit": 1}
+        }))
+        .await
+        .expect_err("malformed model catalog should fail");
+    assert!(malformed_err.to_string().contains("JSON parse error"));
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "malformed-catalog",
+        "operation": "huggingface.models.list",
+        "model_id_hash": null,
+        "endpoint_class": "hub",
+        "auth_decision": "bearer",
+        "request_bytes": 88,
+        "response_bytes": 16,
+        "capability_classification": "catalog-read",
+        "retry_decision": "terminal",
+        "http_status": 200,
+        "fcp_error_mapping": "InternalJsonParse",
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let timeout_connector = configured_loopback_connector_with(&server, 5, 0).await;
+    let timeout_err = timeout_connector
+        .handle_invoke(json!({
+            "operation_id": "huggingface.inference.text_generation",
+            "input": {"model_id": "slow/model", "prompt": "hello"}
+        }))
+        .await
+        .expect_err("slow response should hit timeout");
+    let timeout_like = match &timeout_err {
+        FcpError::External {
+            service, retryable, ..
+        } => service == "huggingface" && *retryable,
+        FcpError::Internal { message } => {
+            message.contains("deadline") || message.contains("timeout")
+        }
+        _ => false,
+    };
+    assert!(
+        timeout_like,
+        "Expected timeout-like failure, got {timeout_err:?}"
+    );
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "timeout-cancellation",
+        "operation": "huggingface.inference.text_generation",
+        "model_id_hash": model_id_hash("slow/model"),
+        "endpoint_class": "inference-api",
+        "auth_decision": "bearer",
+        "request_bytes": 112,
+        "response_bytes": 0,
+        "capability_classification": "model-invoke",
+        "retry_decision": "deadline",
+        "http_status": null,
+        "fcp_error_mapping": "ExternalTimeout",
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let self_check = connector
+        .handle_self_check()
+        .await
+        .expect("self-check should use loopback whoami");
+    assert_eq!(self_check["status"], "ready");
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "self-check",
+        "operation": "self_check",
+        "model_id_hash": null,
+        "endpoint_class": "control",
+        "auth_decision": "bearer",
+        "request_bytes": 0,
+        "response_bytes": self_check.to_string().len(),
+        "capability_classification": "readiness",
+        "retry_decision": "none",
+        "http_status": 200,
+        "fcp_error_mapping": null,
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "not_applicable",
+        "skip_reason": null,
+        "status": "passed"
+    }));
+
+    let shutdown = connector
+        .handle_shutdown(json!({}))
+        .await
+        .expect("shutdown should succeed");
+    assert_eq!(shutdown, json!({}));
+    emit_huggingface_e2e_jsonl(&json!({
+        "event": "huggingface_loopback_fixture",
+        "command_line": "cargo test -p fcp-huggingface --test provider_contract huggingface_loopback_e2e_jsonl_matrix -- --nocapture",
+        "git_revision": git_revision.as_str(),
+        "fixture_id": "shutdown-cleanup",
+        "operation": "shutdown",
+        "model_id_hash": null,
+        "endpoint_class": "control",
+        "auth_decision": "not_applicable",
+        "request_bytes": 0,
+        "response_bytes": shutdown.to_string().len(),
+        "capability_classification": "cleanup",
+        "retry_decision": "none",
+        "http_status": null,
+        "fcp_error_mapping": null,
+        "artifact_path": "connectors/huggingface/tests/provider_contract.rs",
+        "cleanup_result": "completed",
+        "skip_reason": null,
+        "status": "passed"
+    }));
 }

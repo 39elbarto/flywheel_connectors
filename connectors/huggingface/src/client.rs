@@ -4,13 +4,14 @@ use std::time::Duration;
 
 use reqwest::{Client, RequestBuilder};
 use tracing::debug;
+use url::Url;
 
 use fcp_sdk::migration::{AttemptOutcome, ConnectorRuntime, HttpRetryConfig, RetryLoop};
 
 use crate::error::{HuggingfaceError, HuggingfaceResult};
 use crate::types::{
-    HfApiError, ModelInfo, SummarizationRequest, SummarizationResponse, TextGenerationRequest,
-    TextGenerationResponse,
+    HfApiError, ModelInfo, ModelListRequest, SummarizationRequest, SummarizationResponse,
+    TextGenerationRequest, TextGenerationResponse,
 };
 
 /// Default Inference API base URL.
@@ -43,6 +44,31 @@ fn sanitize_model_id(value: &str) -> HuggingfaceResult<&str> {
         ));
     }
     Ok(value)
+}
+
+fn normalize_api_base_url(value: &str, field: &str) -> HuggingfaceResult<String> {
+    let trimmed = value.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        return Err(HuggingfaceError::InvalidInput(format!(
+            "{field} must not be empty"
+        )));
+    }
+
+    let parsed = Url::parse(trimmed).map_err(|e| {
+        HuggingfaceError::InvalidInput(format!("{field} must be an absolute URL: {e}"))
+    })?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(HuggingfaceError::InvalidInput(format!(
+            "{field} must use http or https"
+        )));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(HuggingfaceError::InvalidInput(format!(
+            "{field} must not contain query or fragment components"
+        )));
+    }
+
+    Ok(trimmed.to_string())
 }
 
 /// Hugging Face API client with retry support.
@@ -93,14 +119,11 @@ impl HuggingfaceClient {
 
         Ok(Self {
             client,
-            inference_url: inference_url
-                .unwrap_or(DEFAULT_INFERENCE_URL)
-                .trim_end_matches('/')
-                .to_string(),
-            hub_url: hub_url
-                .unwrap_or(DEFAULT_HUB_URL)
-                .trim_end_matches('/')
-                .to_string(),
+            inference_url: normalize_api_base_url(
+                inference_url.unwrap_or(DEFAULT_INFERENCE_URL),
+                "inference_url",
+            )?,
+            hub_url: normalize_api_base_url(hub_url.unwrap_or(DEFAULT_HUB_URL), "hub_url")?,
             api_token: api_token.to_string(),
             retry_config,
             timeout,
@@ -227,6 +250,63 @@ impl HuggingfaceClient {
                     client.get(&url).bearer_auth(&token)
                 };
                 handle_json_response::<ModelInfo>(req, attempt).await
+            }
+        })
+        .await
+    }
+
+    /// List Hub models with bounded catalog filters.
+    ///
+    /// # Errors
+    ///
+    /// Returns `HuggingfaceError` on invalid query parameters, HTTP, auth, rate-limit,
+    /// or parse failures.
+    pub async fn list_models(
+        &self,
+        runtime: &ConnectorRuntime,
+        request: &ModelListRequest,
+    ) -> HuggingfaceResult<Vec<ModelInfo>> {
+        let mut url = Url::parse(&format!("{}/models", self.hub_url)).map_err(|e| {
+            HuggingfaceError::InvalidInput(format!("hub_url cannot form models URL: {e}"))
+        })?;
+        {
+            let mut query = url.query_pairs_mut();
+            if let Some(search) = request
+                .search
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                query.append_pair("search", search);
+            }
+            if let Some(pipeline_tag) = request
+                .pipeline_tag
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                query.append_pair("pipeline_tag", pipeline_tag);
+            }
+            if let Some(limit) = request.limit {
+                query.append_pair("limit", &limit.to_string());
+            }
+        }
+
+        let ctx = runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let url = url.clone();
+            let client = self.client.clone();
+            let token = self.api_token.clone();
+            async move {
+                debug!(attempt, "Model catalog list request");
+                let req = if token.is_empty() {
+                    client.get(url.clone())
+                } else {
+                    client.get(url.clone()).bearer_auth(&token)
+                };
+                handle_json_response::<Vec<ModelInfo>>(req, attempt).await
             }
         })
         .await
@@ -516,6 +596,19 @@ mod tests {
         .unwrap();
         assert!(!client.inference_url().ends_with('/'));
         assert!(!client.hub_url().ends_with('/'));
+    }
+
+    #[test]
+    fn custom_urls_reject_query_or_fragment() {
+        let err = HuggingfaceClient::new(
+            Some("https://example.test/hf?x=bad"),
+            None,
+            "t",
+            HttpRetryConfig::default(),
+            Duration::from_secs(30),
+        )
+        .expect_err("query strings should be rejected");
+        assert!(err.to_string().contains("query or fragment"));
     }
 
     #[test]

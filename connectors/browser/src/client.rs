@@ -370,7 +370,7 @@ impl CdpScreenshotResponse {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 struct CdpCookieResponse {
     cookies: Vec<Cookie>,
 }

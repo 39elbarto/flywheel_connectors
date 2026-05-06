@@ -5008,6 +5008,7 @@ dependencies = [
  "fcp-core",
  "fcp-prelude",
  "fcp-sdk",
+ "regex",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

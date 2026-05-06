@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+interface_hash = "blake3-256:fcp.interface.v2:7641c4d323456be37407868ce9f161c119505f9c64cf6538d538ae7b45b86ba2"
 
 [connector]
 id = "fcp.mcp-bridge"
@@ -17,6 +17,7 @@ archetypes = [
     "operational",
 ]
 format = "wasi"
+status = "ready"
 
 [connector.state]
 model = "singleton_writer"
@@ -48,6 +49,8 @@ optional = [
     "mcp.resources.read",
     "mcp.tools.write",
     "mcp.tools.read",
+    "mcp.sampling.handle",
+    "mcp.server.metrics",
 ]
 forbidden = [
     "system.exec",
@@ -62,6 +65,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."mcp.prompts.list".input_schema]
 required = []
@@ -98,9 +102,7 @@ max_response_bytes = 10485760
 
 [provides.operations."mcp.prompts.list".ai_hints]
 when_to_use = "List prompts exposed by an MCP server."
-common_mistakes = [
-    "Assuming prompt names are stable across server restarts — always re-list prompts before referencing them by name",
-]
+common_mistakes = ["Assuming prompt names are stable across server restarts — always re-list prompts before referencing them by name"]
 examples = ["{}"]
 related = [
     "mcp.tools.list",
@@ -114,6 +116,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."mcp.resources.list".input_schema]
 required = []
@@ -150,9 +153,7 @@ max_response_bytes = 10485760
 
 [provides.operations."mcp.resources.list".ai_hints]
 when_to_use = "List resources exposed by an MCP server."
-common_mistakes = [
-    "Not accounting for paginated results — some MCP servers return partial resource lists and require a cursor for subsequent pages",
-]
+common_mistakes = ["Not accounting for paginated results — some MCP servers return partial resource lists and require a cursor for subsequent pages"]
 examples = ["{}"]
 related = [
     "mcp.resources.read",
@@ -166,6 +167,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."mcp.resources.read".input_schema]
 required = ["uri"]
@@ -206,11 +208,155 @@ max_response_bytes = 52428800
 
 [provides.operations."mcp.resources.read".ai_hints]
 when_to_use = "Read content from an MCP resource by URI."
-common_mistakes = [
-    "Assuming all resources return text content — some resources return binary data or structured JSON depending on the MCP server implementation",
-]
+common_mistakes = ["Assuming all resources return text content — some resources return binary data or structured JSON depending on the MCP server implementation"]
 examples = ['{"uri": "file:///tmp/data.txt"}']
 related = ["mcp.resources.list"]
+
+[provides.operations."mcp.sampling.handle"]
+description = "Convert an MCP sampling/createMessage request into a host- or agent-dispatched FCP event"
+capability = "mcp.sampling.handle"
+risk_level = "high"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mcp.sampling.handle".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mcp.sampling.handle".input_schema.properties.params]
+description = "MCP sampling/createMessage params when no request envelope is supplied"
+type = "object"
+
+[provides.operations."mcp.sampling.handle".input_schema.properties.request]
+description = "Full MCP sampling/createMessage JSON-RPC request"
+type = "object"
+
+[provides.operations."mcp.sampling.handle".output_schema]
+required = [
+    "event",
+    "dispatch",
+    "request",
+]
+type = "object"
+
+[provides.operations."mcp.sampling.handle".output_schema.properties.dispatch]
+type = "string"
+
+[provides.operations."mcp.sampling.handle".output_schema.properties.event]
+type = "string"
+
+[provides.operations."mcp.sampling.handle".output_schema.properties.request]
+type = "object"
+
+[provides.operations."mcp.sampling.handle".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."mcp.sampling.handle".ai_hints]
+when_to_use = "Use only when an MCP server asks for sampling/createMessage and sampling.enabled is explicitly configured."
+common_mistakes = [
+    "Do not treat this as direct connector-to-connector dispatch; it returns an event fallback for host or agent orchestration.",
+    "Never log prompt, response, or metadata content from sampling requests.",
+]
+examples = ['{"request": {"method": "sampling/createMessage", "params": {"messages": [], "maxTokens": 128}}}']
+related = ["mcp.server.metrics"]
+
+[provides.operations."mcp.server.metrics"]
+description = "Expose MCP bridge security, sampling, auth-retry, and session counters"
+capability = "mcp.server.metrics"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."mcp.server.metrics".input_schema]
+required = []
+type = "object"
+
+[provides.operations."mcp.server.metrics".output_schema]
+required = [
+    "requests",
+    "errors",
+    "injection_scans",
+    "injection_findings",
+    "sampling_requests",
+    "auth_retries",
+    "session_expired_retries",
+]
+type = "object"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.auth_retries]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.errors]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.injection_findings]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.injection_scans]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.requests]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.sampling_requests]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".output_schema.properties.session_expired_retries]
+type = "integer"
+
+[provides.operations."mcp.server.metrics".network_constraints]
+host_allow = ["localhost.localdomain"]
+port_allow = [
+    3000,
+    8080,
+    8443,
+]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 4
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."mcp.server.metrics".ai_hints]
+when_to_use = "Use to inspect prompt-injection scan, sampling, auth retry, and session-expiry counters."
+common_mistakes = []
+examples = ["{}"]
+related = [
+    "mcp.tools.list",
+    "mcp.sampling.handle",
+]
 
 [provides.operations."mcp.tools.call"]
 description = "Invoke an MCP tool"
@@ -219,6 +365,7 @@ risk_level = "high"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+revocation_freshness = "safe"
 
 [provides.operations."mcp.tools.call".input_schema]
 required = [
@@ -280,6 +427,7 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
 [provides.operations."mcp.tools.list".input_schema]
 required = []
@@ -316,9 +464,7 @@ max_response_bytes = 10485760
 
 [provides.operations."mcp.tools.list".ai_hints]
 when_to_use = "List tools exposed by a connected MCP server."
-common_mistakes = [
-    "Caching the tool list indefinitely — MCP servers may add or remove tools dynamically, so re-list periodically",
-]
+common_mistakes = ["Caching the tool list indefinitely — MCP servers may add or remove tools dynamically, so re-list periodically"]
 examples = ["{}"]
 related = [
     "mcp.tools.call",
@@ -366,9 +512,35 @@ window_ms = 60000
 burst = 20
 scope = "instance"
 
+[[rate_limits.pools]]
+id = "mcp.sampling.handle"
+requests = 10
+window_ms = 60000
+burst = 2
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "mcp.server.metrics"
+requests = 120
+window_ms = 60000
+burst = 20
+scope = "instance"
+
 [rate_limits.operation_pools]
-"mcp.resources.list" = ["mcp.resources.read"]
-"mcp.resources.read" = ["mcp.resources.read"]
-"mcp.tools.list" = ["mcp.tools.read"]
-"mcp.prompts.list" = ["mcp.prompts.read"]
+"mcp.sampling.handle" = ["mcp.sampling.handle"]
 "mcp.tools.call" = ["mcp.tools.write"]
+"mcp.prompts.list" = ["mcp.prompts.read"]
+"mcp.resources.read" = ["mcp.resources.read"]
+"mcp.server.metrics" = ["mcp.server.metrics"]
+"mcp.tools.list" = ["mcp.tools.read"]
+"mcp.resources.list" = ["mcp.resources.read"]
+
+[security]
+description_scan = "warn"
+
+[sampling]
+enabled = false
+max_rpm = 10
+timeout_secs = 30
+max_tokens_cap = 4096
+max_tool_rounds = 5

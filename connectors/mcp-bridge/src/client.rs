@@ -5,10 +5,12 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
+use fcp_sdk::migration::{
+    AttemptOutcome, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig, RetryLoop,
+};
 use reqwest::{Client, Response, StatusCode};
 use serde_json::json;
-use tracing::{debug, instrument};
+use tracing::{debug, info, instrument};
 
 use crate::{
     error::{McpBridgeError, McpBridgeResult},
@@ -41,6 +43,12 @@ impl fmt::Debug for McpAuth {
 }
 
 /// MCP JSON-RPC client that communicates with an MCP server over HTTP.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct McpClientMetrics {
+    pub auth_retry_count: u64,
+    pub session_expired_retry_count: u64,
+}
+
 pub struct McpClient {
     client: Client,
     auth: McpAuth,
@@ -48,6 +56,8 @@ pub struct McpClient {
     request_id: AtomicU64,
     runtime: ConnectorRuntime,
     retry_config: HttpRetryConfig,
+    auth_retry_count: AtomicU64,
+    session_expired_retry_count: AtomicU64,
 }
 
 impl fmt::Debug for McpClient {
@@ -81,6 +91,8 @@ impl McpClient {
                 max_retries: 2,
                 ..HttpRetryConfig::default()
             },
+            auth_retry_count: AtomicU64::new(0),
+            session_expired_retry_count: AtomicU64::new(0),
         })
     }
 
@@ -98,6 +110,15 @@ impl McpClient {
             req.header("Authorization", format!("Bearer {key}"))
         } else {
             req
+        }
+    }
+
+    /// Snapshot retry/session metrics.
+    #[must_use]
+    pub fn metrics(&self) -> McpClientMetrics {
+        McpClientMetrics {
+            auth_retry_count: self.auth_retry_count.load(Ordering::Relaxed),
+            session_expired_retry_count: self.session_expired_retry_count.load(Ordering::Relaxed),
         }
     }
 
@@ -150,10 +171,60 @@ impl McpClient {
         let url = format!("{}/mcp", self.base_url);
         debug!(url = %redact_url(&url), method = %mcp_method, id, "MCP JSON-RPC request");
 
+        let ctx = self.runtime.request_context();
+        let policy = self.retry_config.to_retry_policy();
+        RetryLoop::execute(&ctx, &policy, |attempt| {
+            let request = request.clone();
+            let url = url.clone();
+            async move {
+                match self.rpc_call_once(&url, &request).await {
+                    Ok(value) => AttemptOutcome::Success(value),
+                    Err(error) if self.should_retry_rpc_error(&error, attempt) => {
+                        if matches!(error, McpBridgeError::Unauthorized) {
+                            self.auth_retry_count.fetch_add(1, Ordering::Relaxed);
+                            info!(
+                                event = "mcp_auth_retry",
+                                method = %mcp_method,
+                                retry_count = attempt + 1,
+                                "retrying MCP request after auth error"
+                            );
+                        } else if error.is_session_expired() {
+                            self.session_expired_retry_count
+                                .fetch_add(1, Ordering::Relaxed);
+                            info!(
+                                event = "mcp_session_reopened",
+                                method = %mcp_method,
+                                reason = "session_expired",
+                                retry_count = attempt + 1,
+                                "retrying MCP request after session expiry"
+                            );
+                        }
+                        AttemptOutcome::Retryable {
+                            retry_after: error.retry_after(),
+                            error,
+                        }
+                    }
+                    Err(error) if error.is_retryable() => AttemptOutcome::Retryable {
+                        retry_after: error.retry_after(),
+                        error,
+                    },
+                    Err(error) => AttemptOutcome::Terminal(error),
+                }
+            }
+        })
+        .await
+    }
+
+    async fn rpc_call_once(
+        &self,
+        url: &str,
+        request: &JsonRpcRequest,
+    ) -> McpBridgeResult<serde_json::Value> {
         let req = self
-            .add_auth(self.client.post(&url))
+            .add_auth(self.client.post(url))
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
+            .header("Accept", "application/json, text/event-stream")
+            .header("MCP-Protocol-Version", "2025-06-18")
             .json(&request);
 
         let resp = req.send().await?;
@@ -174,6 +245,12 @@ impl McpClient {
         }
 
         Ok(rpc_response.result.unwrap_or(serde_json::Value::Null))
+    }
+
+    fn should_retry_rpc_error(&self, error: &McpBridgeError, attempt: u32) -> bool {
+        attempt == 0
+            && ((matches!(error, McpBridgeError::Unauthorized) && self.auth.api_key.is_some())
+                || error.is_session_expired())
     }
 
     // -- MCP Operations --

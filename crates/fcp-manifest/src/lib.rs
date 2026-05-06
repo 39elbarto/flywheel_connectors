@@ -109,6 +109,10 @@ pub struct ConnectorManifest {
     pub supply_chain: Option<SupplyChainSection>,
     #[serde(default)]
     pub policy: Option<PolicySection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<ConnectorSecuritySection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<ConnectorSamplingSection>,
 }
 
 impl ConnectorManifest {
@@ -142,40 +146,7 @@ impl ConnectorManifest {
         self.zones.validate()?;
         self.capabilities.validate()?;
         self.provides.validate()?;
-        if let Some(ref caps) = self.event_caps {
-            caps.validate()?;
-        }
-        if let Some(ref timeouts) = self.timeouts {
-            timeouts.validate()?;
-        }
-        self.sandbox.validate()?;
-        if let Some(ref rate_limits) = self.rate_limits {
-            rate_limits.validate()?;
-        }
-        if let Some(ref sigs) = self.signatures {
-            sigs.validate()?;
-        }
-        if let Some(ref supply_chain) = self.supply_chain {
-            supply_chain.validate()?;
-        }
-        if let Some(ref policy) = self.policy {
-            policy.validate()?;
-        }
-
-        if self
-            .policy
-            .as_ref()
-            .is_some_and(|policy| policy.require_transparency_log)
-            && self
-                .signatures
-                .as_ref()
-                .is_none_or(|signatures| signatures.transparency_log_entry.is_none())
-        {
-            return Err(ManifestError::Invalid {
-                field: "signatures.transparency_log_entry",
-                message: "required when policy.require_transparency_log is true".into(),
-            });
-        }
+        self.validate_extended_sections()?;
 
         if self.zones.forbidden.iter().any(|z| z == &self.zones.home) {
             return Err(ManifestError::Invalid {
@@ -243,6 +214,51 @@ impl ConnectorManifest {
             return Err(ManifestError::InterfaceHashMismatch {
                 expected: expected.to_string(),
                 found: self.manifest.interface_hash.to_string(),
+            });
+        }
+
+        Ok(())
+    }
+
+    fn validate_extended_sections(&self) -> Result<(), ManifestError> {
+        if let Some(ref caps) = self.event_caps {
+            caps.validate()?;
+        }
+        if let Some(ref timeouts) = self.timeouts {
+            timeouts.validate()?;
+        }
+        self.sandbox.validate()?;
+        if let Some(ref rate_limits) = self.rate_limits {
+            rate_limits.validate()?;
+        }
+        if let Some(ref sigs) = self.signatures {
+            sigs.validate()?;
+        }
+        if let Some(ref supply_chain) = self.supply_chain {
+            supply_chain.validate()?;
+        }
+        if let Some(ref policy) = self.policy {
+            policy.validate()?;
+        }
+        if let Some(ref security) = self.security {
+            security.validate()?;
+        }
+        if let Some(ref sampling) = self.sampling {
+            sampling.validate()?;
+        }
+
+        if self
+            .policy
+            .as_ref()
+            .is_some_and(|policy| policy.require_transparency_log)
+            && self
+                .signatures
+                .as_ref()
+                .is_none_or(|signatures| signatures.transparency_log_entry.is_none())
+        {
+            return Err(ManifestError::Invalid {
+                field: "signatures.transparency_log_entry",
+                message: "required when policy.require_transparency_log is true".into(),
             });
         }
 
@@ -438,6 +454,92 @@ impl ManifestError {
             _ => None,
         }
     }
+}
+
+/// Optional connector-local security controls.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorSecuritySection {
+    #[serde(default = "default_description_scan_mode")]
+    pub description_scan: String,
+}
+
+impl ConnectorSecuritySection {
+    fn validate(&self) -> Result<(), ManifestError> {
+        match self.description_scan.as_str() {
+            "warn" | "block" | "off" => Ok(()),
+            other => Err(ManifestError::Invalid {
+                field: "security.description_scan",
+                message: format!("must be one of warn, block, off; got {other}"),
+            }),
+        }
+    }
+}
+
+fn default_description_scan_mode() -> String {
+    "warn".to_string()
+}
+
+/// Optional MCP sampling policy for connectors that receive server-side sampling requests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConnectorSamplingSection {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub llm_connector: Option<String>,
+    #[serde(default = "default_sampling_max_rpm")]
+    pub max_rpm: u32,
+    #[serde(default = "default_sampling_timeout_secs")]
+    pub timeout_secs: u32,
+    #[serde(default = "default_sampling_max_tokens_cap")]
+    pub max_tokens_cap: u32,
+    #[serde(default = "default_sampling_max_tool_rounds")]
+    pub max_tool_rounds: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_override: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_models: Vec<String>,
+}
+
+impl ConnectorSamplingSection {
+    fn validate(&self) -> Result<(), ManifestError> {
+        if self.max_rpm == 0 {
+            return Err(ManifestError::Invalid {
+                field: "sampling.max_rpm",
+                message: "must be greater than zero".into(),
+            });
+        }
+        if self.timeout_secs == 0 {
+            return Err(ManifestError::Invalid {
+                field: "sampling.timeout_secs",
+                message: "must be greater than zero".into(),
+            });
+        }
+        if self.max_tokens_cap == 0 {
+            return Err(ManifestError::Invalid {
+                field: "sampling.max_tokens_cap",
+                message: "must be greater than zero".into(),
+            });
+        }
+        Ok(())
+    }
+}
+
+const fn default_sampling_max_rpm() -> u32 {
+    10
+}
+
+const fn default_sampling_timeout_secs() -> u32 {
+    30
+}
+
+const fn default_sampling_max_tokens_cap() -> u32 {
+    4096
+}
+
+const fn default_sampling_max_tool_rounds() -> u32 {
+    5
 }
 
 /// `[manifest]` section (NORMATIVE).

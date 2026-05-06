@@ -81,7 +81,7 @@
         {"id": "logseq",          "ops": 4,  "cohort": "Knowledge"},
         {"id": "mailchimp",       "ops": 5,  "cohort": "Messaging"},
         {"id": "make",            "ops": 3,  "cohort": "Automation"},
-        {"id": "mcp-bridge",      "ops": 5,  "cohort": "Infra"},
+        {"id": "mcp-bridge",      "ops": 7,  "cohort": "Infra"},
         {"id": "metabase",        "ops": 3,  "cohort": "Analytics"},
         {"id": "mixpanel",        "ops": 3,  "cohort": "Analytics"},
         {"id": "monday",          "ops": 4,  "cohort": "Productivity"},

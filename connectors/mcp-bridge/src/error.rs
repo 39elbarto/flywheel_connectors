@@ -57,6 +57,26 @@ impl McpBridgeError {
     }
 
     #[must_use]
+    pub fn is_session_expired(&self) -> bool {
+        match self {
+            Self::NotFound { resource }
+            | Self::Api {
+                message: resource, ..
+            }
+            | Self::McpError {
+                message: resource, ..
+            } => {
+                let lower = resource.to_ascii_lowercase();
+                lower.contains("session expired")
+                    || lower.contains("invalid session")
+                    || lower.contains("unknown session")
+                    || lower.contains("session not found")
+            }
+            _ => false,
+        }
+    }
+
+    #[must_use]
     pub const fn retry_after(&self) -> Option<Duration> {
         match self {
             Self::RateLimited { retry_after_ms } => Some(Duration::from_millis(*retry_after_ms)),
@@ -207,6 +227,27 @@ mod tests {
     #[test]
     fn unauthorized_not_retryable() {
         assert!(!McpBridgeError::Unauthorized.is_retryable());
+    }
+
+    #[test]
+    fn session_expired_detected_from_not_found() {
+        assert!(
+            McpBridgeError::NotFound {
+                resource: "session expired".into()
+            }
+            .is_session_expired()
+        );
+    }
+
+    #[test]
+    fn session_expired_detected_from_mcp_error() {
+        assert!(
+            McpBridgeError::McpError {
+                code: -32001,
+                message: "Invalid session id".into()
+            }
+            .is_session_expired()
+        );
     }
 
     #[test]

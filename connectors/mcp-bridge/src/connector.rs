@@ -16,6 +16,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{McpAuth, McpClient},
     error::McpBridgeError,
+    security::{
+        DescriptionScanMode, Severity, finding_log_payload, scan_description,
+        tool_name_collides_with_builtin,
+    },
 };
 
 /// Parsed and validated MCP Bridge connector configuration.
@@ -23,6 +27,82 @@ use crate::{
 struct McpBridgeConfig {
     mcp_url: String,
     auth: McpAuth,
+    description_scan: DescriptionScanMode,
+    sampling: SamplingConfig,
+}
+
+#[derive(Debug, Clone)]
+struct SamplingConfig {
+    enabled: bool,
+    llm_connector: Option<String>,
+    max_rpm: u32,
+    timeout_secs: u32,
+    max_tokens_cap: u32,
+    max_tool_rounds: u32,
+    model_override: Option<String>,
+    allowed_models: Vec<String>,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            llm_connector: None,
+            max_rpm: 10,
+            timeout_secs: 30,
+            max_tokens_cap: 4096,
+            max_tool_rounds: 5,
+            model_override: None,
+            allowed_models: Vec::new(),
+        }
+    }
+}
+
+impl SamplingConfig {
+    fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
+        let Some(raw_sampling) = params.get("sampling") else {
+            return Ok(Self::default());
+        };
+        let sampling = raw_sampling
+            .as_object()
+            .ok_or_else(|| FcpError::InvalidRequest {
+                code: 1003,
+                message: "sampling must be an object".into(),
+            })?;
+
+        Ok(Self {
+            enabled: sampling
+                .get("enabled")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
+            llm_connector: optional_string(
+                sampling.get("llm_connector"),
+                "sampling.llm_connector",
+            )?,
+            max_rpm: optional_u32(sampling.get("max_rpm"), "sampling.max_rpm")?.unwrap_or(10),
+            timeout_secs: optional_u32(sampling.get("timeout_secs"), "sampling.timeout_secs")?
+                .unwrap_or(30),
+            max_tokens_cap: optional_u32(
+                sampling.get("max_tokens_cap"),
+                "sampling.max_tokens_cap",
+            )?
+            .unwrap_or(4096),
+            max_tool_rounds: optional_u32(
+                sampling.get("max_tool_rounds"),
+                "sampling.max_tool_rounds",
+            )?
+            .unwrap_or(5),
+            model_override: optional_string(
+                sampling.get("model_override"),
+                "sampling.model_override",
+            )?,
+            allowed_models: optional_string_vec(
+                sampling.get("allowed_models"),
+                "sampling.allowed_models",
+            )?
+            .unwrap_or_default(),
+        })
+    }
 }
 
 impl McpBridgeConfig {
@@ -48,6 +128,8 @@ impl McpBridgeConfig {
         Ok(Self {
             mcp_url,
             auth: McpAuth { api_key },
+            description_scan: description_scan_mode_from_params(params)?,
+            sampling: SamplingConfig::from_params(params)?,
         })
     }
 
@@ -64,6 +146,8 @@ impl McpBridgeConfig {
             network_ok,
             network_message,
             mcp_url: self.mcp_url.clone(),
+            description_scan: self.description_scan,
+            sampling_enabled: self.sampling.enabled,
         }
     }
 }
@@ -75,6 +159,8 @@ struct ProvisioningReadiness {
     network_ok: bool,
     network_message: String,
     mcp_url: String,
+    description_scan: DescriptionScanMode,
+    sampling_enabled: bool,
 }
 
 /// Doctor check result.
@@ -125,6 +211,9 @@ pub struct McpBridgeConnector {
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
+    injection_scan_count: AtomicU64,
+    injection_finding_count: AtomicU64,
+    sampling_request_count: AtomicU64,
 }
 
 impl McpBridgeConnector {
@@ -137,6 +226,9 @@ impl McpBridgeConnector {
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
+            injection_scan_count: AtomicU64::new(0),
+            injection_finding_count: AtomicU64::new(0),
+            sampling_request_count: AtomicU64::new(0),
         }
     }
 }
@@ -193,7 +285,9 @@ impl McpBridgeConnector {
                 "mcp.tools.read",
                 "mcp.tools.write",
                 "mcp.resources.read",
-                "mcp.prompts.read"
+                "mcp.prompts.read",
+                "mcp.sampling.handle",
+                "mcp.server.metrics"
             ]
         }))
     }
@@ -217,6 +311,9 @@ impl McpBridgeConnector {
             "handshaken": handshaken,
             "requests": self.request_count.load(Ordering::Relaxed),
             "errors": self.error_count.load(Ordering::Relaxed),
+            "injection_scans": self.injection_scan_count.load(Ordering::Relaxed),
+            "injection_findings": self.injection_finding_count.load(Ordering::Relaxed),
+            "sampling_requests": self.sampling_request_count.load(Ordering::Relaxed),
         }))
     }
 
@@ -333,6 +430,8 @@ impl McpBridgeConnector {
             "mcp.resources.list" => self.invoke_resources_list(client).await,
             "mcp.resources.read" => self.invoke_resources_read(client, &input).await,
             "mcp.prompts.list" => self.invoke_prompts_list(client).await,
+            "mcp.sampling.handle" => self.invoke_sampling_handle(&input).await,
+            "mcp.server.metrics" => self.invoke_server_metrics(client).await,
             _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1002,
@@ -388,7 +487,7 @@ impl McpBridgeConnector {
         client: &McpClient,
     ) -> Result<serde_json::Value, McpBridgeError> {
         let data = client.tools_list().await?;
-        Ok(data)
+        self.annotate_catalog(data, "tools", "tool", true)
     }
 
     async fn invoke_tools_call(
@@ -421,7 +520,7 @@ impl McpBridgeConnector {
         client: &McpClient,
     ) -> Result<serde_json::Value, McpBridgeError> {
         let data = client.resources_list().await?;
-        Ok(data)
+        self.annotate_catalog(data, "resources", "resource", false)
     }
 
     async fn invoke_resources_read(
@@ -439,6 +538,203 @@ impl McpBridgeConnector {
         client: &McpClient,
     ) -> Result<serde_json::Value, McpBridgeError> {
         let data = client.prompts_list().await?;
+        self.annotate_catalog(data, "prompts", "prompt", false)
+    }
+
+    async fn invoke_sampling_handle(
+        &self,
+        input: &serde_json::Value,
+    ) -> Result<serde_json::Value, McpBridgeError> {
+        let config = self
+            .config
+            .as_ref()
+            .ok_or_else(|| McpBridgeError::McpError {
+                code: -32090,
+                message: "Connector not configured".into(),
+            })?;
+        if !config.sampling.enabled {
+            return Err(McpBridgeError::McpError {
+                code: -32091,
+                message: "MCP sampling is disabled; configure sampling.enabled=true".into(),
+            });
+        }
+
+        let request = normalize_sampling_request(input);
+        let params = request
+            .get("params")
+            .ok_or_else(|| McpBridgeError::McpError {
+                code: -32602,
+                message: "sampling request missing params".into(),
+            })?;
+        let max_tokens = params
+            .get("maxTokens")
+            .and_then(serde_json::Value::as_u64)
+            .ok_or_else(|| McpBridgeError::McpError {
+                code: -32602,
+                message: "sampling params.maxTokens must be an integer".into(),
+            })?;
+        if max_tokens > u64::from(config.sampling.max_tokens_cap) {
+            return Err(McpBridgeError::McpError {
+                code: -32602,
+                message: format!(
+                    "sampling maxTokens {max_tokens} exceeds configured cap {}",
+                    config.sampling.max_tokens_cap
+                ),
+            });
+        }
+
+        let messages_count = params
+            .get("messages")
+            .and_then(serde_json::Value::as_array)
+            .map_or(0, Vec::len);
+        self.sampling_request_count.fetch_add(1, Ordering::Relaxed);
+        info!(
+            event = "mcp_sampling_request_received",
+            messages_count,
+            max_tokens,
+            llm_connector = config
+                .sampling
+                .llm_connector
+                .as_deref()
+                .unwrap_or("agent-selected"),
+            "MCP sampling request converted to FCP event fallback"
+        );
+
+        Ok(json!({
+            "event": "mcp_sampling_request_received",
+            "dispatch": "agent_event",
+            "host_orchestrated": false,
+            "requires_human_approval": true,
+            "llm_connector": config.sampling.llm_connector.clone(),
+            "limits": {
+                "max_rpm": config.sampling.max_rpm,
+                "timeout_secs": config.sampling.timeout_secs,
+                "max_tokens_cap": config.sampling.max_tokens_cap,
+                "max_tool_rounds": config.sampling.max_tool_rounds,
+                "model_override": config.sampling.model_override.clone(),
+                "allowed_models": config.sampling.allowed_models.clone(),
+            },
+            "request": request,
+            "redaction": {
+                "prompt_logged": false,
+                "response_logged": false,
+                "metadata_logged": false,
+            }
+        }))
+    }
+
+    async fn invoke_server_metrics(
+        &self,
+        client: &McpClient,
+    ) -> Result<serde_json::Value, McpBridgeError> {
+        let client_metrics = client.metrics();
+        Ok(json!({
+            "requests": self.request_count.load(Ordering::Relaxed),
+            "errors": self.error_count.load(Ordering::Relaxed),
+            "injection_scans": self.injection_scan_count.load(Ordering::Relaxed),
+            "injection_findings": self.injection_finding_count.load(Ordering::Relaxed),
+            "sampling_requests": self.sampling_request_count.load(Ordering::Relaxed),
+            "auth_retries": client_metrics.auth_retry_count,
+            "session_expired_retries": client_metrics.session_expired_retry_count,
+        }))
+    }
+
+    fn annotate_catalog(
+        &self,
+        mut data: serde_json::Value,
+        array_key: &str,
+        catalog_kind: &str,
+        filter_builtin_collisions: bool,
+    ) -> Result<serde_json::Value, McpBridgeError> {
+        let Some(config) = &self.config else {
+            return Ok(data);
+        };
+        let Some(items) = data
+            .get_mut(array_key)
+            .and_then(serde_json::Value::as_array_mut)
+        else {
+            return Ok(data);
+        };
+
+        if filter_builtin_collisions {
+            items.retain(|item| {
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let collides = tool_name_collides_with_builtin(name);
+                if collides {
+                    info!(
+                        event = "mcp_tool_collision_skipped",
+                        server = %config.mcp_url,
+                        name,
+                        "Skipping MCP tool that collides with bridge operation namespace"
+                    );
+                }
+                !collides
+            });
+        }
+
+        for item in items {
+            let Some(object) = item.as_object_mut() else {
+                continue;
+            };
+            let name = object
+                .get("name")
+                .or_else(|| object.get("uri"))
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("<unnamed>")
+                .to_string();
+            let description = object
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+
+            let findings = if config.description_scan.scans() {
+                self.injection_scan_count.fetch_add(1, Ordering::Relaxed);
+                scan_description(&config.mcp_url, &name, &description)
+            } else {
+                Vec::new()
+            };
+            self.injection_finding_count.fetch_add(
+                u64::try_from(findings.len()).unwrap_or(u64::MAX),
+                Ordering::Relaxed,
+            );
+            let max_severity = max_severity_label(&findings);
+            info!(
+                event = "mcp_description_scanned",
+                server = %config.mcp_url,
+                catalog_kind,
+                name = %name,
+                finding_count = findings.len(),
+                max_severity,
+                "MCP catalog description scanned"
+            );
+            for finding in &findings {
+                let payload = finding_log_payload(
+                    &config.mcp_url,
+                    catalog_kind,
+                    &name,
+                    &description,
+                    finding,
+                );
+                tracing::warn!(event = "mcp_injection_finding", payload = %payload);
+            }
+
+            if config.description_scan == DescriptionScanMode::Block && !findings.is_empty() {
+                return Err(McpBridgeError::McpError {
+                    code: -32092,
+                    message: format!("MCP {catalog_kind} {name} blocked by description scanner"),
+                });
+            }
+
+            object.insert(
+                "injection_findings".to_string(),
+                serde_json::to_value(&findings).unwrap_or_else(|_| json!([])),
+            );
+        }
+
         Ok(data)
     }
 
@@ -465,6 +761,112 @@ fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> Result<&'a str,
             code: -32602,
             message: format!("Missing required field: {field}"),
         })
+}
+
+fn description_scan_mode_from_params(params: &serde_json::Value) -> FcpResult<DescriptionScanMode> {
+    let raw = params
+        .get("description_scan")
+        .or_else(|| {
+            params
+                .get("security")
+                .and_then(|security| security.get("description_scan"))
+        })
+        .and_then(serde_json::Value::as_str);
+    let Some(raw) = raw else {
+        return Ok(DescriptionScanMode::Warn);
+    };
+    DescriptionScanMode::parse(raw).map_err(|message| FcpError::InvalidRequest {
+        code: 1003,
+        message,
+    })
+}
+
+fn optional_string(value: Option<&serde_json::Value>, field: &str) -> FcpResult<Option<String>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be a string"),
+    })?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
+}
+
+fn optional_u32(value: Option<&serde_json::Value>, field: &str) -> FcpResult<Option<u32>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let raw = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an unsigned integer"),
+    })?;
+    u32::try_from(raw)
+        .map(Some)
+        .map_err(|_| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} exceeds u32 range"),
+        })
+}
+
+fn optional_string_vec(
+    value: Option<&serde_json::Value>,
+    field: &str,
+) -> FcpResult<Option<Vec<String>>> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let values = value.as_array().ok_or_else(|| FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("{field} must be an array of strings"),
+    })?;
+    let mut out = Vec::with_capacity(values.len());
+    for item in values {
+        let raw = item.as_str().ok_or_else(|| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{field} must contain only strings"),
+        })?;
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(Some(out))
+}
+
+fn normalize_sampling_request(input: &serde_json::Value) -> serde_json::Value {
+    let candidate = input.get("request").unwrap_or(input);
+    if candidate.get("method").and_then(serde_json::Value::as_str) == Some("sampling/createMessage")
+    {
+        return candidate.clone();
+    }
+    if candidate.get("params").is_some() {
+        return json!({
+            "method": "sampling/createMessage",
+            "params": candidate["params"].clone(),
+        });
+    }
+    json!({
+        "method": "sampling/createMessage",
+        "params": candidate.clone(),
+    })
+}
+
+fn max_severity_label(findings: &[crate::security::InjectionFinding]) -> &'static str {
+    if findings
+        .iter()
+        .any(|finding| finding.severity == Severity::Block)
+    {
+        "block"
+    } else if findings.is_empty() {
+        "none"
+    } else {
+        "warn"
+    }
 }
 
 /// Build typed operations info for introspection.
@@ -571,6 +973,72 @@ fn typed_operations_info() -> Vec<OperationInfo> {
                 common_mistakes: vec![],
                 examples: vec![],
                 related: vec![CapabilityId::from_static("mcp.prompts.read")],
+            },
+            rate_limit: None,
+            requires_approval: None,
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.sampling.handle"),
+            summary: "Convert an MCP sampling/createMessage request into an FCP event fallback"
+                .into(),
+            description: None,
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "request": {"type": "object"},
+                    "params": {"type": "object"}
+                }
+            }),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "event": {"type": "string"},
+                    "dispatch": {"type": "string"},
+                    "request": {"type": "object"}
+                }
+            }),
+            capability: CapabilityId::from_static("mcp.sampling.handle"),
+            risk_level: RiskLevel::High,
+            safety_tier: SafetyTier::Risky,
+            idempotency: IdempotencyClass::None,
+            ai_hints: AgentHint {
+                when_to_use: "Use when an MCP server returns a sampling/createMessage request and sampling is explicitly enabled".into(),
+                common_mistakes: vec![
+                    "Treating sampling as direct connector-to-connector dispatch; this operation returns an event fallback for host or agent orchestration".into(),
+                    "Logging prompt or response content from the sampling request".into(),
+                ],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("mcp.sampling.handle")],
+            },
+            rate_limit: None,
+            requires_approval: Some(ApprovalMode::Policy),
+        },
+        OperationInfo {
+            id: OperationId::from_static("mcp.server.metrics"),
+            summary: "Return MCP bridge security, retry, and sampling counters".into(),
+            description: None,
+            input_schema: json!({"type": "object", "properties": {}}),
+            output_schema: json!({
+                "type": "object",
+                "properties": {
+                    "requests": {"type": "integer"},
+                    "errors": {"type": "integer"},
+                    "injection_scans": {"type": "integer"},
+                    "injection_findings": {"type": "integer"},
+                    "sampling_requests": {"type": "integer"},
+                    "auth_retries": {"type": "integer"},
+                    "session_expired_retries": {"type": "integer"}
+                }
+            }),
+            capability: CapabilityId::from_static("mcp.server.metrics"),
+            risk_level: RiskLevel::Low,
+            safety_tier: SafetyTier::Safe,
+            idempotency: IdempotencyClass::Strict,
+            ai_hints: AgentHint {
+                when_to_use: "Use to inspect MCP bridge retry, session, sampling, and description-scan counters".into(),
+                common_mistakes: vec![],
+                examples: vec![],
+                related: vec![CapabilityId::from_static("mcp.server.metrics")],
             },
             rate_limit: None,
             requires_approval: None,
@@ -807,10 +1275,10 @@ mod tests {
     }
 
     #[test]
-    fn operations_info_has_5_operations() {
+    fn operations_info_has_7_operations() {
         let ops = operations_info();
         let arr = ops.as_array().unwrap();
-        assert_eq!(arr.len(), 5);
+        assert_eq!(arr.len(), 7);
     }
 
     #[test]
@@ -897,6 +1365,8 @@ mod tests {
         assert!(ids.contains(&"mcp.resources.list"));
         assert!(ids.contains(&"mcp.resources.read"));
         assert!(ids.contains(&"mcp.prompts.list"));
+        assert!(ids.contains(&"mcp.sampling.handle"));
+        assert!(ids.contains(&"mcp.server.metrics"));
     }
 
     #[test]
@@ -1455,6 +1925,83 @@ mod tests {
         .unwrap();
         let readiness = config.provisioning_readiness();
         assert!(readiness.network_message.contains("accepted"));
+    }
+
+    #[test]
+    fn config_defaults_security_warn_and_sampling_disabled() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+        }))
+        .unwrap();
+        assert_eq!(config.description_scan, DescriptionScanMode::Warn);
+        assert!(!config.sampling.enabled);
+        assert_eq!(config.sampling.max_tokens_cap, 4096);
+    }
+
+    #[test]
+    fn config_accepts_nested_security_scan_mode() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+            "security": {"description_scan": "block"},
+        }))
+        .unwrap();
+        assert_eq!(config.description_scan, DescriptionScanMode::Block);
+    }
+
+    #[test]
+    fn config_rejects_invalid_security_scan_mode() {
+        let result = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+            "description_scan": "audit",
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn config_parses_sampling_settings() {
+        let config = McpBridgeConfig::from_params(&json!({
+            "mcp_url": "http://localhost:3000",
+            "sampling": {
+                "enabled": true,
+                "llm_connector": "groq",
+                "max_rpm": 7,
+                "timeout_secs": 11,
+                "max_tokens_cap": 512,
+                "max_tool_rounds": 2,
+                "model_override": "llama",
+                "allowed_models": ["llama", "mixtral"]
+            },
+        }))
+        .unwrap();
+        assert!(config.sampling.enabled);
+        assert_eq!(config.sampling.llm_connector.as_deref(), Some("groq"));
+        assert_eq!(config.sampling.max_rpm, 7);
+        assert_eq!(config.sampling.timeout_secs, 11);
+        assert_eq!(config.sampling.max_tokens_cap, 512);
+        assert_eq!(config.sampling.max_tool_rounds, 2);
+        assert_eq!(config.sampling.model_override.as_deref(), Some("llama"));
+        assert_eq!(config.sampling.allowed_models.len(), 2);
+    }
+
+    #[test]
+    fn normalize_sampling_request_wraps_params() {
+        let normalized = normalize_sampling_request(&json!({
+            "messages": [],
+            "maxTokens": 128
+        }));
+        assert_eq!(normalized["method"], "sampling/createMessage");
+        assert_eq!(normalized["params"]["maxTokens"], 128);
+    }
+
+    #[test]
+    fn normalize_sampling_request_preserves_request_envelope() {
+        let normalized = normalize_sampling_request(&json!({
+            "request": {
+                "method": "sampling/createMessage",
+                "params": {"messages": [], "maxTokens": 64}
+            }
+        }));
+        assert_eq!(normalized["params"]["maxTokens"], 64);
     }
 
     // -- is_local_test_host tests ------------------------------------------------

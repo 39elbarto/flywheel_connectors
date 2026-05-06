@@ -21,7 +21,7 @@ use axum::{
     },
     middleware::{Next, from_fn_with_state},
     response::Response,
-    routing::{get, post},
+    routing::{delete, get, post},
 };
 use base64::Engine;
 use chrono::{DateTime, Utc};
@@ -61,14 +61,17 @@ use fcp_host::{
     ConnectorConfigSnapshotSource, ConnectorConfigValidateRequest, ConnectorConfigValidateResponse,
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
-    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, DiscoveryEndpoint,
-    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
-    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
-    GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
-    HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
-    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
-    LogQueryResponse, ManagedConnectorConfig, MeshQuorumSignals, OperationResult,
-    OperationResultStatus, PreflightRequest, PreflightResponse, ReceiptQueryRequest,
+    ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, CredentialCooldown,
+    CredentialMutationOutcome, CredentialPoolAuditOperation, CredentialPoolError,
+    CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView,
+    CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
+    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
+    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
+    HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
+    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
+    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
+    MeshQuorumSignals, OperationResult, OperationResultStatus, PoolExhaustedBehavior,
+    PooledCredentialInput, PreflightRequest, PreflightResponse, ProviderKey, ReceiptQueryRequest,
     ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
     RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
     RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
@@ -94,7 +97,7 @@ use fcp_policy::{
 };
 use fcp_prelude::{
     ApprovalToken, CapabilityConstraints, CapabilityVerifier, CorrelationId,
-    CostEstimateConfidence, Decision, LeasePurpose as CoreLeasePurpose, ObjectId,
+    CostEstimateConfidence, CredentialId, Decision, LeasePurpose as CoreLeasePurpose, ObjectId,
     PolicySimulationInput, ResourceAvailability, RolloutPolicy, SafetyTier, TailscaleNodeId,
     TransportMode, UsageMetric, UsageMetricKind, ZoneId, ZonePolicyObject,
     simulate_policy_decision,
@@ -1831,6 +1834,7 @@ struct AppState {
     registry: Arc<SubprocessRegistry>,
     doctor: DoctorService<SubprocessRegistry>,
     budget: Arc<BudgetPolicyEngine>,
+    credential_pools: Arc<Mutex<CredentialPoolRegistry>>,
     discovery: Arc<DiscoveryEndpoint<SubprocessRegistry, BudgetPolicyEngine>>,
     cancellation: Arc<CancellationController>,
     lifecycle: Arc<HostAdminStateStore>,
@@ -4222,6 +4226,7 @@ async fn async_main() -> HostResult<()> {
         registry,
         doctor,
         budget,
+        credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
         discovery,
         cancellation,
         lifecycle,
@@ -4318,6 +4323,38 @@ async fn async_main() -> HostResult<()> {
         .route(
             "/rpc/admin/events/acknowledge",
             post(event_acknowledge_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools",
+            get(credential_pool_list_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}",
+            get(credential_pool_get_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials",
+            post(credential_pool_add_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}",
+            delete(credential_pool_remove_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/strategy",
+            post(credential_pool_strategy_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/max-concurrent",
+            post(credential_pool_max_concurrent_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior",
+            post(credential_pool_exhausted_behavior_handler),
+        )
+        .route(
+            "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
+            post(credential_pool_cooldown_handler),
         )
         .route("/rpc/budget/report", post(budget_report_handler))
         // br-71lku: /rpc/cancel and /rpc/operations/cancel were
@@ -4603,6 +4640,221 @@ async fn doctor_handler(
             Err(map_host_error(err))
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialPoolAddRequest {
+    credential: PooledCredentialInput,
+    #[serde(default = "default_credential_upsert_mode")]
+    mode: CredentialUpsertMode,
+    #[serde(default = "default_credential_pool_strategy")]
+    strategy_for_new_pool: CredentialPoolStrategy,
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialPoolStrategyRequest {
+    strategy: CredentialPoolStrategy,
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialPoolMaxConcurrentRequest {
+    max_concurrent_per_credential: u32,
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialPoolExhaustedBehaviorRequest {
+    exhausted_behavior: PoolExhaustedBehavior,
+}
+
+#[derive(Debug, Deserialize)]
+struct CredentialPoolCooldownRequest {
+    #[serde(default)]
+    cooldown: Option<CredentialCooldown>,
+}
+
+#[derive(Debug, Serialize)]
+struct CredentialPoolListResponse {
+    pools: Vec<CredentialPoolView>,
+}
+
+#[derive(Debug, Serialize)]
+struct CredentialPoolResponse {
+    pool: CredentialPoolView,
+}
+
+#[derive(Debug, Serialize)]
+struct CredentialPoolMutationResponse {
+    outcome: CredentialMutationOutcome,
+    pool: CredentialPoolView,
+}
+
+const fn default_credential_upsert_mode() -> CredentialUpsertMode {
+    CredentialUpsertMode::RejectExisting
+}
+
+const fn default_credential_pool_strategy() -> CredentialPoolStrategy {
+    CredentialPoolStrategy::RoundRobin
+}
+
+fn credential_pool_key_from_path(
+    provider: String,
+    zone_id: String,
+) -> Result<CredentialPoolKey, (StatusCode, String)> {
+    let provider = ProviderKey::new(provider).map_err(map_credential_pool_error)?;
+    let zone_id = zone_id.parse().map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid credential pool zone_id: {error}"),
+        )
+    })?;
+    Ok(CredentialPoolKey::new(provider, zone_id))
+}
+
+fn credential_id_from_path(raw: String) -> Result<CredentialId, (StatusCode, String)> {
+    CredentialId::parse(&raw).map_err(|error| {
+        (
+            StatusCode::BAD_REQUEST,
+            format!("invalid credential_id '{raw}': {error}"),
+        )
+    })
+}
+
+fn map_credential_pool_error(error: CredentialPoolError) -> (StatusCode, String) {
+    let status = match error {
+        CredentialPoolError::InvalidProviderKey
+        | CredentialPoolError::DuplicateCredential { .. }
+        | CredentialPoolError::InvalidMaxConcurrentPerCredential { .. } => StatusCode::BAD_REQUEST,
+        CredentialPoolError::PoolNotFound { .. }
+        | CredentialPoolError::CredentialNotFound { .. }
+        | CredentialPoolError::UnknownLease { .. } => StatusCode::NOT_FOUND,
+        CredentialPoolError::PoolExhausted { .. }
+        | CredentialPoolError::WaitNotImplemented { .. } => StatusCode::CONFLICT,
+        CredentialPoolError::SelectionIndexInvalid { .. } => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, error.to_string())
+}
+
+async fn credential_pool_list_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<CredentialPoolListResponse>, (StatusCode, String)> {
+    let registry = state.credential_pools.lock().await;
+    Ok(Json(CredentialPoolListResponse {
+        pools: registry.redacted_views(Utc::now()),
+    }))
+}
+
+async fn credential_pool_get_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let registry = state.credential_pools.lock().await;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
+}
+
+async fn credential_pool_add_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+    Json(request): Json<CredentialPoolAddRequest>,
+) -> Result<Json<CredentialPoolMutationResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    let outcome = registry
+        .add_credential(
+            key.clone(),
+            request.strategy_for_new_pool,
+            request.credential.into_credential(),
+            request.mode,
+        )
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolMutationResponse { outcome, pool }))
+}
+
+async fn credential_pool_remove_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id, credential_id)): Path<(String, String, String)>,
+) -> Result<Json<CredentialPoolMutationResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let credential_id = credential_id_from_path(credential_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    let outcome = registry
+        .remove_credential(&key, credential_id)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolMutationResponse { outcome, pool }))
+}
+
+async fn credential_pool_strategy_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+    Json(request): Json<CredentialPoolStrategyRequest>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    registry
+        .set_strategy(&key, request.strategy)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
+}
+
+async fn credential_pool_max_concurrent_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+    Json(request): Json<CredentialPoolMaxConcurrentRequest>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    registry
+        .set_max_concurrent_per_credential(&key, request.max_concurrent_per_credential)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
+}
+
+async fn credential_pool_exhausted_behavior_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id)): Path<(String, String)>,
+    Json(request): Json<CredentialPoolExhaustedBehaviorRequest>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    registry
+        .set_exhausted_behavior(&key, request.exhausted_behavior)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
+}
+
+async fn credential_pool_cooldown_handler(
+    State(state): State<Arc<AppState>>,
+    Path((provider, zone_id, credential_id)): Path<(String, String, String)>,
+    Json(request): Json<CredentialPoolCooldownRequest>,
+) -> Result<Json<CredentialPoolResponse>, (StatusCode, String)> {
+    let key = credential_pool_key_from_path(provider, zone_id)?;
+    let credential_id = credential_id_from_path(credential_id)?;
+    let mut registry = state.credential_pools.lock().await;
+    registry
+        .set_cooldown(&key, credential_id, request.cooldown)
+        .map_err(map_credential_pool_error)?;
+    let pool = registry
+        .redacted_view(&key, Utc::now())
+        .map_err(map_credential_pool_error)?;
+    Ok(Json(CredentialPoolResponse { pool }))
 }
 
 async fn budget_report_handler(
@@ -8262,6 +8514,7 @@ mod tests {
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle: Arc::clone(&lifecycle),
@@ -9015,6 +9268,7 @@ mod tests {
             registry,
             doctor,
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle,
@@ -9945,6 +10199,7 @@ mod tests {
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle: Arc::clone(&lifecycle),
@@ -10327,6 +10582,7 @@ mod tests {
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle: Arc::clone(&lifecycle),
@@ -14071,6 +14327,7 @@ done"#;
             registry: Arc::new(empty_registry(1)),
             doctor: DoctorService::new(Arc::new(empty_registry(1))),
             budget: Arc::new(BudgetPolicyEngine::new()),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::new(empty_registry(1)),
                 Arc::new(BudgetPolicyEngine::new()),
@@ -14107,6 +14364,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14148,6 +14406,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14189,6 +14448,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14247,6 +14507,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14292,6 +14553,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14408,6 +14670,7 @@ done"#;
             registry,
             doctor,
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle,
@@ -14459,6 +14722,7 @@ done"#;
             registry,
             doctor,
             budget,
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery,
             cancellation: Arc::new(CancellationController::new()),
             lifecycle: Arc::clone(&lifecycle),
@@ -14844,6 +15108,7 @@ done"#;
             registry: Arc::clone(&registry),
             doctor: DoctorService::new(Arc::clone(&registry)),
             budget: Arc::clone(&budget),
+            credential_pools: Arc::new(Mutex::new(CredentialPoolRegistry::new())),
             discovery: Arc::new(DiscoveryEndpoint::new(
                 Arc::clone(&registry),
                 Arc::clone(&budget),
@@ -14957,6 +15222,49 @@ done"#;
             .with_state(Arc::clone(&state))
     }
 
+    fn credential_pool_admin_test_app(state: Arc<AppState>) -> axum::Router {
+        let protected = axum::Router::new()
+            .route(
+                "/rpc/admin/credentials/pools",
+                get(credential_pool_list_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}",
+                get(credential_pool_get_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials",
+                post(credential_pool_add_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}",
+                delete(credential_pool_remove_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/strategy",
+                post(credential_pool_strategy_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/max-concurrent",
+                post(credential_pool_max_concurrent_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior",
+                post(credential_pool_exhausted_behavior_handler),
+            )
+            .route(
+                "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
+                post(credential_pool_cooldown_handler),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                Arc::clone(&state),
+                admin_auth_middleware,
+            ));
+        axum::Router::new()
+            .merge(protected)
+            .with_state(Arc::clone(&state))
+    }
+
     async fn send_cancel_request(
         app: axum::Router,
         path: &str,
@@ -14979,6 +15287,41 @@ done"#;
             .expect("build cancel request");
 
         app.oneshot(req).await.expect("router response")
+    }
+
+    async fn send_json_request(
+        app: axum::Router,
+        method: axum::http::Method,
+        path: &str,
+        body: serde_json::Value,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<axum::response::Response, Box<dyn std::error::Error + Send + Sync>> {
+        use axum::body::Body;
+        use axum::http::{Request, header::CONTENT_TYPE};
+        use tower::util::ServiceExt;
+
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(CONTENT_TYPE, "application/json");
+        for (key, value) in extra_headers {
+            builder = builder.header(*key, *value);
+        }
+        let req = builder.body(Body::from(body.to_string()))?;
+
+        match app.oneshot(req).await {
+            Ok(response) => Ok(response),
+            Err(error) => match error {},
+        }
+    }
+
+    async fn response_body_json(
+        response: axum::response::Response,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .map_err(Box::<dyn std::error::Error + Send + Sync>::from)?;
+        serde_json::from_slice(&bytes).map_err(Box::<dyn std::error::Error + Send + Sync>::from)
     }
 
     async fn post_cancel_with_headers(
@@ -15042,6 +15385,233 @@ done"#;
         .await;
 
         assert_eq!(status, axum::http::StatusCode::OK);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn credential_pool_admin_routes_reject_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/credentials/pools/openai/z:owner/credentials",
+            json!({
+                "credential": {
+                    "credential_id": "openai-primary",
+                    "source": "manual",
+                    "priority": 1,
+                    "label": "primary",
+                    "payload": {"api_key": "sk-secret"}
+                }
+            }),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn credential_pool_admin_routes_mutate_and_redact_pool_state()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(Arc::clone(&state));
+        let auth = [
+            ("Authorization", "Bearer topsecret"),
+            (ADMIN_ZONE_HEADER, "z:owner"),
+        ];
+        let pool_path = "/rpc/admin/credentials/pools/OpenAI/z:owner";
+        let credential_id = "11111111-1111-1111-1111-111111111111";
+
+        let added = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{pool_path}/credentials"),
+            json!({
+                "credential": {
+                    "credential_id": credential_id,
+                    "source": "manual",
+                    "priority": 1,
+                    "label": "primary",
+                    "payload": {"api_key": "sk-live-primary"}
+                },
+                "strategy_for_new_pool": "priority"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(added.status(), axum::http::StatusCode::OK);
+        let added_body = response_body_json(added).await?;
+        assert_eq!(added_body["outcome"], "added");
+        assert_eq!(added_body["pool"]["key"]["provider"], "openai");
+        assert_eq!(added_body["pool"]["entries"][0]["label"], "primary");
+        let added_text = added_body.to_string();
+        assert!(!added_text.contains("payload"));
+        assert!(!added_text.contains("sk-live-primary"));
+
+        let duplicate = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{pool_path}/credentials"),
+            json!({
+                "credential": {
+                    "credential_id": credential_id,
+                    "source": "manual",
+                    "priority": 2,
+                    "label": "duplicate",
+                    "payload": {"api_key": "sk-duplicate"}
+                }
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(duplicate.status(), axum::http::StatusCode::BAD_REQUEST);
+
+        let replaced = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{pool_path}/credentials"),
+            json!({
+                "mode": "replace_existing",
+                "credential": {
+                    "credential_id": credential_id,
+                    "source": "config",
+                    "priority": 7,
+                    "label": "rotated",
+                    "payload": {"api_key": "sk-rotated"}
+                }
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(replaced.status(), axum::http::StatusCode::OK);
+        let replaced_body = response_body_json(replaced).await?;
+        assert_eq!(replaced_body["outcome"], "replaced");
+        assert_eq!(replaced_body["pool"]["entries"][0]["label"], "rotated");
+        assert!(!replaced_body.to_string().contains("sk-rotated"));
+
+        for (path, body) in [
+            (
+                format!("{pool_path}/strategy"),
+                json!({"strategy": "sticky"}),
+            ),
+            (
+                format!("{pool_path}/max-concurrent"),
+                json!({"max_concurrent_per_credential": 1}),
+            ),
+            (
+                format!("{pool_path}/exhausted-behavior"),
+                json!({"exhausted_behavior": "wait"}),
+            ),
+            (
+                format!("{pool_path}/credentials/{credential_id}/cooldown"),
+                json!({"cooldown": {"kind": "permanent"}}),
+            ),
+        ] {
+            let response =
+                send_json_request(app.clone(), axum::http::Method::POST, &path, body, &auth)
+                    .await?;
+            assert_eq!(response.status(), axum::http::StatusCode::OK);
+        }
+
+        let snapshot = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            pool_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(snapshot.status(), axum::http::StatusCode::OK);
+        let snapshot_body = response_body_json(snapshot).await?;
+        assert_eq!(snapshot_body["pool"]["strategy"], "sticky");
+        assert_eq!(snapshot_body["pool"]["max_concurrent_per_credential"], 1);
+        assert_eq!(snapshot_body["pool"]["exhausted_behavior"], "wait");
+        assert_eq!(
+            snapshot_body["pool"]["entries"][0]["cooldown"]["kind"],
+            "permanent"
+        );
+
+        let list = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            "/rpc/admin/credentials/pools",
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(list.status(), axum::http::StatusCode::OK);
+        let list_body = response_body_json(list).await?;
+        assert_eq!(list_body["pools"].as_array().expect("pools array").len(), 1);
+        assert!(!list_body.to_string().contains("sk-rotated"));
+
+        let removed = send_json_request(
+            app,
+            axum::http::Method::DELETE,
+            &format!("{pool_path}/credentials/{credential_id}"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(removed.status(), axum::http::StatusCode::OK);
+        let removed_body = response_body_json(removed).await?;
+        assert_eq!(removed_body["outcome"], "removed");
+        assert_eq!(
+            removed_body["pool"]["entries"]
+                .as_array()
+                .expect("entries array")
+                .len(),
+            0
+        );
+
+        let audit_events = {
+            let registry = state.credential_pools.lock().await;
+            registry.audit_events().to_vec()
+        };
+        let operations: Vec<_> = audit_events.iter().map(|event| event.operation).collect();
+        assert_eq!(
+            operations,
+            vec![
+                CredentialPoolAuditOperation::CredentialUpsert,
+                CredentialPoolAuditOperation::CredentialUpsert,
+                CredentialPoolAuditOperation::StrategySet,
+                CredentialPoolAuditOperation::MaxConcurrentSet,
+                CredentialPoolAuditOperation::ExhaustedBehaviorSet,
+                CredentialPoolAuditOperation::CooldownSet,
+                CredentialPoolAuditOperation::CredentialRemove,
+            ]
+        );
+        assert_eq!(
+            audit_events[0].outcome,
+            Some(CredentialMutationOutcome::Added)
+        );
+        assert_eq!(
+            audit_events[1].outcome,
+            Some(CredentialMutationOutcome::Replaced)
+        );
+        assert_eq!(
+            audit_events[2].strategy,
+            Some(CredentialPoolStrategy::Sticky)
+        );
+        assert_eq!(audit_events[3].max_concurrent_per_credential, Some(1));
+        assert_eq!(
+            audit_events[4].exhausted_behavior,
+            Some(PoolExhaustedBehavior::Wait)
+        );
+        assert!(audit_events[5].cooldown.is_some());
+
+        let audit_text = serde_json::to_string(&audit_events)?;
+        assert!(audit_text.contains("credential_pool.admin_mutation"));
+        assert!(audit_text.contains(credential_id));
+        assert!(!audit_text.contains("payload"));
+        assert!(!audit_text.contains("api_key"));
+        assert!(!audit_text.contains("sk-live-primary"));
+        assert!(!audit_text.contains("sk-duplicate"));
+        assert!(!audit_text.contains("sk-rotated"));
+        Ok(())
     }
 
     #[fcp_async_core::runtime::test]

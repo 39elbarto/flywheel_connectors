@@ -325,9 +325,9 @@ struct M365GraphNotification {
 }
 
 impl M365NotificationIngestRequest {
-    fn parse(input: serde_json::Value) -> FcpResult<Self> {
+    fn parse(input: &serde_json::Value) -> FcpResult<Self> {
         let validation_token =
-            notification_string_field(&input, &["validation_token", "validationToken"])
+            notification_string_field(input, &["validation_token", "validationToken"])
                 .or_else(|| {
                     input.get("query").and_then(|query| {
                         notification_string_field(query, &["validationToken", "validation_token"])
@@ -344,9 +344,9 @@ impl M365NotificationIngestRequest {
         }
 
         let expected_client_state =
-            notification_string_field(&input, &["expected_client_state", "expectedClientState"])
+            notification_string_field(input, &["expected_client_state", "expectedClientState"])
                 .map(|value| value.to_string());
-        let retry_after_seconds = retry_after_seconds_from_input(&input)?;
+        let retry_after_seconds = retry_after_seconds_from_input(input)?;
         let ack_timeout_ms = input
             .get("ack_timeout_ms")
             .or_else(|| input.get("ackTimeoutMs"))
@@ -1034,6 +1034,12 @@ impl M365Connector {
             session_id: None,
             zone_dir: None,
         }
+    }
+
+    /// Return this connector instance identifier for host-scoped capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     fn manifest_hash() -> String {
@@ -2650,7 +2656,7 @@ impl M365Connector {
         &self,
         input: serde_json::Value,
     ) -> FcpResult<serde_json::Value> {
-        let request = M365NotificationIngestRequest::parse(input)?;
+        let request = M365NotificationIngestRequest::parse(&input)?;
         if request.cancelled {
             return Err(FcpError::ConnectorUnavailable {
                 code: 5003,

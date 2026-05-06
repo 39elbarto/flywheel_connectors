@@ -75,7 +75,12 @@ fn capability_for_operation(op: &str) -> &str {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::CapabilityToken {
+struct TokenIssuer {
+    signing_key: Ed25519SigningKey,
+    instance_id: String,
+}
+
+fn generate_valid_token(issuer: &TokenIssuer, op: &str) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -91,9 +96,10 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> fcp_core::
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(&issuer.instance_id)
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
-        .sign(signing_key)
+        .sign(&issuer.signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
 }
@@ -104,7 +110,7 @@ fn unique_zone_dir(label: &str) -> String {
     path.to_string_lossy().into_owned()
 }
 
-async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> Ed25519SigningKey {
+async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> TokenIssuer {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
     let zone_dir = unique_zone_dir("handshake");
@@ -125,7 +131,10 @@ async fn setup_handshake(connector: &mut M365Connector, caps: &[&str]) -> Ed2551
         .await
         .expect("handshake should succeed");
 
-    signing_key
+    TokenIssuer {
+        signing_key,
+        instance_id: connector.instance_id().to_string(),
+    }
 }
 
 fn make_jwt_token(scopes: &[&str], roles: &[&str]) -> String {
@@ -167,8 +176,8 @@ async fn setup_configure_credential_id(connector: &mut M365Connector, base_url: 
 }
 
 async fn seed_subscription_state(
-    connector: &mut M365Connector,
-    signing_key: &Ed25519SigningKey,
+    connector: &M365Connector,
+    signing_key: &TokenIssuer,
     subscription_id: &str,
     client_state: &str,
 ) {
@@ -1585,7 +1594,7 @@ async fn notifications_ingest_validates_client_state_and_deduplicates() {
         &["m365.subscriptions.create", "m365.notifications.ingest"],
     )
     .await;
-    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+    seed_subscription_state(&connector, &signing_key, "sub-123", "secret-state").await;
 
     let payload = json!({
         "value": [{
@@ -1655,7 +1664,7 @@ async fn notifications_ingest_rejects_mismatch_unknown_and_malformed() {
         &["m365.subscriptions.create", "m365.notifications.ingest"],
     )
     .await;
-    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+    seed_subscription_state(&connector, &signing_key, "sub-123", "secret-state").await;
 
     let mismatch_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
     let mismatch = connector
@@ -1740,7 +1749,7 @@ async fn notifications_ingest_lifecycle_and_renewal_actions() {
         &["m365.subscriptions.create", "m365.notifications.ingest"],
     )
     .await;
-    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+    seed_subscription_state(&connector, &signing_key, "sub-123", "secret-state").await;
     let token = generate_valid_token(&signing_key, "m365.notifications.ingest");
 
     let result = connector
@@ -2196,8 +2205,9 @@ async fn introspect_lists_all_operations() {
     assert!(op_ids.contains(&"m365.tasks.list_task_lists"));
     assert!(op_ids.contains(&"m365.tasks.create_task"));
     assert!(op_ids.contains(&"m365.subscriptions.create"));
+    assert!(op_ids.contains(&"m365.notifications.ingest"));
     assert!(op_ids.contains(&"m365.delta.sync"));
-    assert_eq!(ops.len(), 43);
+    assert_eq!(ops.len(), 44);
 }
 
 #[fcp_async_core::runtime::test]

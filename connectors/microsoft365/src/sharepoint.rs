@@ -152,14 +152,11 @@ impl DriveItem {
         if self.is_folder {
             return None;
         }
-        self.name.rsplit('.').next().and_then(|ext| {
-            // Only return extension if there was an actual dot
-            if ext.len() == self.name.len() {
-                None
-            } else {
-                Some(ext)
-            }
-        })
+        self.name
+            .rsplit('.')
+            .next()
+            // Only return extension if there was an actual dot.
+            .filter(|ext| ext.len() != self.name.len())
     }
 }
 

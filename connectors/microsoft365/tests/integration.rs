@@ -69,6 +69,7 @@ fn capability_for_operation(op: &str) -> &str {
         "m365.subscriptions.create" | "m365.subscriptions.renew" | "m365.subscriptions.delete" => {
             "m365.subscriptions.write"
         }
+        "m365.notifications.ingest" => "m365.notifications.ingest",
         "m365.delta.sync" => "m365.delta.read",
         _ => "m365.mail.read",
     }
@@ -163,6 +164,30 @@ async fn setup_configure_credential_id(connector: &mut M365Connector, base_url: 
         }))
         .await
         .expect("configure should succeed");
+}
+
+async fn seed_subscription_state(
+    connector: &mut M365Connector,
+    signing_key: &Ed25519SigningKey,
+    subscription_id: &str,
+    client_state: &str,
+) {
+    let create_token = generate_valid_token(signing_key, "m365.subscriptions.create");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.subscriptions.create",
+            "input": {
+                "change_type": "created,updated",
+                "notification_url": "https://hooks.example.test/m365",
+                "resource": "/me/messages",
+                "expiration_datetime": "2026-03-10T00:00:00Z",
+                "client_state": client_state
+            },
+            "capability_token": create_token
+        }))
+        .await
+        .expect("subscription state seed should succeed");
+    assert_eq!(result["subscription"]["id"], subscription_id);
 }
 
 fn sample_docx_bytes(text: &str) -> Vec<u8> {
@@ -1506,6 +1531,296 @@ async fn subscriptions_create_happy_path() {
         .expect("create subscription should succeed");
 
     assert_eq!(result["subscription"]["id"], "sub-123");
+}
+
+#[fcp_async_core::runtime::test]
+async fn notifications_validation_challenge_returns_plain_text_ack() {
+    let _ctx = AsyncTestContext::for_scenario("m365.notifications.validation_challenge");
+    let mock_server = MockServer::start().await;
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Mail.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.notifications.ingest"]).await;
+    let token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "query": { "validationToken": "opaque%2Btoken" },
+                "headers": { "Retry-After": "7" }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("validation challenge should succeed");
+
+    assert_eq!(result["status"], "validation_challenge");
+    assert_eq!(result["ack"]["http_status"], 200);
+    assert_eq!(result["ack"]["content_type"], "text/plain");
+    assert_eq!(result["ack"]["body"], "opaque+token");
+    assert_eq!(result["retry_after_seconds"], 7);
+}
+
+#[fcp_async_core::runtime::test]
+async fn notifications_ingest_validates_client_state_and_deduplicates() {
+    let _ctx = AsyncTestContext::for_scenario("m365.notifications.ingest.dedupe");
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "sub-123",
+            "resource": "/me/messages",
+            "changeType": "created,updated",
+            "notificationUrl": "https://hooks.example.test/m365",
+            "expirationDateTime": "2026-03-10T00:00:00Z"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Mail.Read"]).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &["m365.subscriptions.create", "m365.notifications.ingest"],
+    )
+    .await;
+    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+
+    let payload = json!({
+        "value": [{
+            "id": "notification-1",
+            "subscriptionId": "sub-123",
+            "clientState": "secret-state",
+            "changeType": "updated",
+            "resource": "users/user-1/messages/msg-1",
+            "tenantId": "tenant-1",
+            "resourceData": { "id": "msg-1" },
+            "subscriptionExpirationDateTime": "2026-03-10T00:00:00Z"
+        }]
+    });
+    let token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let first = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": { "payload": payload.clone() },
+            "capability_token": token
+        }))
+        .await
+        .expect("notification ingest should accept valid payload");
+
+    assert_eq!(first["status"], "accepted");
+    assert_eq!(first["ack"]["http_status"], 202);
+    assert_eq!(first["accepted"].as_array().unwrap().len(), 1);
+    assert_eq!(first["duplicates"].as_array().unwrap().len(), 0);
+    assert_eq!(first["delta_handoffs"][0]["operation"], "m365.delta.sync");
+    assert_eq!(first["delta_handoffs"][0]["resource"], "/me/messages");
+
+    let token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let second = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": { "payload": payload },
+            "capability_token": token
+        }))
+        .await
+        .expect("duplicate notification should be acknowledged");
+
+    assert_eq!(second["accepted"].as_array().unwrap().len(), 0);
+    assert_eq!(second["duplicates"].as_array().unwrap().len(), 1);
+    assert_eq!(second["delta_handoffs"].as_array().unwrap().len(), 0);
+}
+
+#[fcp_async_core::runtime::test]
+async fn notifications_ingest_rejects_mismatch_unknown_and_malformed() {
+    let _ctx = AsyncTestContext::for_scenario("m365.notifications.ingest.rejects");
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "sub-123",
+            "resource": "/me/messages",
+            "changeType": "updated",
+            "notificationUrl": "https://hooks.example.test/m365",
+            "expirationDateTime": "2026-03-10T00:00:00Z"
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Mail.Read"]).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &["m365.subscriptions.create", "m365.notifications.ingest"],
+    )
+    .await;
+    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+
+    let mismatch_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let mismatch = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "payload": {
+                    "value": [{
+                        "subscriptionId": "sub-123",
+                        "clientState": "wrong-secret",
+                        "changeType": "updated",
+                        "resourceData": { "id": "msg-1" }
+                    }]
+                }
+            },
+            "capability_token": mismatch_token
+        }))
+        .await;
+    assert!(matches!(
+        mismatch.unwrap_err(),
+        fcp_core::FcpError::Unauthorized { .. }
+    ));
+
+    let unknown_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let unknown = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "payload": {
+                    "value": [{
+                        "subscriptionId": "sub-missing",
+                        "clientState": "secret-state",
+                        "changeType": "updated",
+                        "resourceData": { "id": "msg-1" }
+                    }]
+                }
+            },
+            "capability_token": unknown_token
+        }))
+        .await;
+    assert!(matches!(
+        unknown.unwrap_err(),
+        fcp_core::FcpError::ResourceNotFound { .. }
+    ));
+
+    let malformed_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let malformed = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": { "payload": { "value": [] } },
+            "capability_token": malformed_token
+        }))
+        .await;
+    assert!(matches!(
+        malformed.unwrap_err(),
+        fcp_core::FcpError::InvalidRequest { .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn notifications_ingest_lifecycle_and_renewal_actions() {
+    let _ctx = AsyncTestContext::for_scenario("m365.notifications.ingest.lifecycle");
+    let mock_server = MockServer::start().await;
+    let expires_soon = (Utc::now() + Duration::minutes(30)).to_rfc3339();
+    Mock::given(method("POST"))
+        .and(path("/subscriptions"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "id": "sub-123",
+            "resource": "/me/messages",
+            "changeType": "updated",
+            "notificationUrl": "https://hooks.example.test/m365",
+            "expirationDateTime": expires_soon
+        })))
+        .expect(1)
+        .mount(&mock_server)
+        .await;
+
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Mail.Read"]).await;
+    let signing_key = setup_handshake(
+        &mut connector,
+        &["m365.subscriptions.create", "m365.notifications.ingest"],
+    )
+    .await;
+    seed_subscription_state(&mut connector, &signing_key, "sub-123", "secret-state").await;
+    let token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "payload": {
+                    "value": [
+                        {
+                            "subscriptionId": "sub-123",
+                            "clientState": "secret-state",
+                            "lifecycleEvent": "reauthorizationRequired",
+                            "tenantId": "tenant-1",
+                            "subscriptionExpirationDateTime": expires_soon
+                        },
+                        {
+                            "subscriptionId": "sub-123",
+                            "clientState": "secret-state",
+                            "lifecycleEvent": "missed",
+                            "tenantId": "tenant-1",
+                            "subscriptionExpirationDateTime": expires_soon
+                        }
+                    ]
+                }
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("lifecycle notifications should be accepted");
+
+    let lifecycle_actions = result["lifecycle_actions"].as_array().unwrap();
+    assert!(lifecycle_actions.iter().any(|action| {
+        action["type"] == "reauthorize_and_renew"
+            && action["operation"] == "m365.subscriptions.renew"
+    }));
+    assert!(lifecycle_actions.iter().any(|action| {
+        action["type"] == "run_delta_sync" && action["operation"] == "m365.delta.sync"
+    }));
+    assert_eq!(result["renewal_actions"].as_array().unwrap().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn notifications_ingest_timeout_and_cancel_are_explicit() {
+    let _ctx = AsyncTestContext::for_scenario("m365.notifications.ingest.timeout_cancel");
+    let mock_server = MockServer::start().await;
+    let mut connector = M365Connector::new();
+    setup_configure_access_token(&mut connector, &mock_server.uri(), &["Mail.Read"]).await;
+    let signing_key = setup_handshake(&mut connector, &["m365.notifications.ingest"]).await;
+
+    let timeout_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let timeout = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "validation_token": "opaque-token",
+                "ack_timeout_ms": 0
+            },
+            "capability_token": timeout_token
+        }))
+        .await;
+    assert!(matches!(
+        timeout.unwrap_err(),
+        fcp_core::FcpError::UpstreamTimeout { .. }
+    ));
+
+    let cancel_token = generate_valid_token(&signing_key, "m365.notifications.ingest");
+    let cancelled = connector
+        .handle_invoke(json!({
+            "operation": "m365.notifications.ingest",
+            "input": {
+                "validation_token": "opaque-token",
+                "cancelled": true
+            },
+            "capability_token": cancel_token
+        }))
+        .await;
+    assert!(matches!(
+        cancelled.unwrap_err(),
+        fcp_core::FcpError::ConnectorUnavailable { .. }
+    ));
 }
 
 // ============================================================================

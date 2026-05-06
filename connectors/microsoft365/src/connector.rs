@@ -20,6 +20,7 @@ use fcp_prelude::{
     IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
+use percent_encoding::percent_decode_str;
 use quick_xml::{Reader, escape::unescape, events::Event};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -43,6 +44,10 @@ const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const M365_SYNC_STATE_FILE: &str = "m365_sync_state.json";
 const M365_SYNC_LEASE_FILE: &str = "m365_sync_lease.json";
 const M365_SYNC_LEASE_TTL_SECONDS: u64 = 120;
+const M365_NOTIFICATION_REPLAY_MAX_ENTRIES: usize = 1024;
+const M365_NOTIFICATION_VALIDATION_TOKEN_MAX_BYTES: usize = 2048;
+const M365_NOTIFICATION_DEFAULT_ACK_TIMEOUT_MS: u64 = 10_000;
+const M365_NOTIFICATION_RENEWAL_WINDOW_SECONDS: i64 = 60 * 60;
 const WORD_EXTRACT_DEFAULT_MAX_CHARS: usize = 20_000;
 const WORD_EXTRACT_MAX_CHARS_LIMIT: usize = 100_000;
 const WORD_EXTRACT_MAX_BYTES: usize = 8 * 1024 * 1024;
@@ -249,6 +254,8 @@ struct M365SyncState {
     delta_tokens: BTreeMap<String, String>,
     #[serde(default)]
     subscriptions: BTreeMap<String, M365SubscriptionState>,
+    #[serde(default)]
+    seen_notification_keys: BTreeMap<String, u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -256,6 +263,7 @@ struct M365SubscriptionState {
     resource: Option<String>,
     change_type: Option<String>,
     notification_url: Option<String>,
+    client_state: Option<String>,
     expiration_datetime: Option<String>,
 }
 
@@ -274,12 +282,388 @@ impl M365SubscriptionState {
                 .get("notificationUrl")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
+            client_state: payload
+                .get("clientState")
+                .and_then(|value| value.as_str())
+                .map(str::to_string),
             expiration_datetime: payload
                 .get("expirationDateTime")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
         }
     }
+
+    fn with_client_state(mut self, client_state: Option<&str>) -> Self {
+        if let Some(client_state) = client_state {
+            self.client_state = Some(client_state.to_string());
+        }
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+struct M365NotificationIngestRequest {
+    validation_token: Option<String>,
+    payload: Option<serde_json::Value>,
+    expected_client_state: Option<String>,
+    retry_after_seconds: Option<u64>,
+    ack_timeout_ms: u64,
+    cancelled: bool,
+}
+
+#[derive(Debug, Clone)]
+struct M365GraphNotification {
+    subscription_id: String,
+    client_state: String,
+    change_type: Option<String>,
+    lifecycle_event: Option<String>,
+    resource: Option<String>,
+    resource_id: Option<String>,
+    tenant_id: Option<String>,
+    expiration_datetime: Option<String>,
+    replay_key: String,
+}
+
+impl M365NotificationIngestRequest {
+    fn parse(input: serde_json::Value) -> FcpResult<Self> {
+        let validation_token = notification_string_field(&input, &[
+            "validation_token",
+            "validationToken",
+        ])
+        .or_else(|| {
+            input
+                .get("query")
+                .and_then(|query| notification_string_field(query, &[
+                    "validationToken",
+                    "validation_token",
+                ]))
+        })
+        .map(normalize_validation_token)
+        .transpose()?;
+
+        let payload = input
+            .get("payload")
+            .or_else(|| input.get("body"))
+            .cloned();
+        if validation_token.is_some() == payload.is_some() {
+            return Err(invalid_request(
+                "m365.notifications.ingest requires exactly one of validation_token or payload",
+            ));
+        }
+
+        let expected_client_state = notification_string_field(&input, &[
+            "expected_client_state",
+            "expectedClientState",
+        ])
+        .map(|value| value.to_string());
+        let retry_after_seconds = retry_after_seconds_from_input(&input)?;
+        let ack_timeout_ms = input
+            .get("ack_timeout_ms")
+            .or_else(|| input.get("ackTimeoutMs"))
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or(M365_NOTIFICATION_DEFAULT_ACK_TIMEOUT_MS);
+        let cancelled = input
+            .get("cancelled")
+            .or_else(|| input.get("cancellation_requested"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+
+        Ok(Self {
+            validation_token,
+            payload,
+            expected_client_state,
+            retry_after_seconds,
+            ack_timeout_ms,
+            cancelled,
+        })
+    }
+}
+
+impl M365GraphNotification {
+    fn parse(
+        value: &serde_json::Value,
+        state: &M365SyncState,
+        expected_client_state: Option<&str>,
+    ) -> FcpResult<Self> {
+        let object = value.as_object().ok_or_else(|| {
+            invalid_request("Graph notification entries must be JSON objects")
+        })?;
+        let subscription_id = object
+            .get("subscriptionId")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| invalid_request("Graph notification missing subscriptionId"))?;
+        let known_subscription =
+            state
+                .subscriptions
+                .get(subscription_id)
+                .ok_or_else(|| FcpError::ResourceNotFound {
+                    resource: format!("m365 subscription '{subscription_id}'"),
+                })?;
+
+        let state_client_state = known_subscription.client_state.as_deref();
+        if let (Some(stored), Some(provided)) = (state_client_state, expected_client_state)
+            && stored != provided
+        {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: "expected_client_state does not match stored subscription clientState"
+                    .into(),
+            });
+        }
+        let expected = state_client_state
+            .or(expected_client_state)
+            .ok_or_else(|| FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "No clientState secret is available for subscription '{subscription_id}'"
+                ),
+            })?;
+        let client_state = object
+            .get("clientState")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                FcpError::Unauthorized {
+                    code: 2001,
+                    message: format!(
+                        "Graph notification for subscription '{subscription_id}' missing clientState"
+                    ),
+                }
+            })?;
+        if client_state != expected {
+            return Err(FcpError::Unauthorized {
+                code: 2001,
+                message: format!(
+                    "Graph notification clientState mismatch for subscription '{subscription_id}'"
+                ),
+            });
+        }
+
+        let change_type = notification_string_field(value, &["changeType"]).map(str::to_string);
+        let lifecycle_event =
+            notification_string_field(value, &["lifecycleEvent"]).map(str::to_string);
+        match (change_type.as_ref(), lifecycle_event.as_ref()) {
+            (None, None) => {
+                return Err(invalid_request(
+                    "Graph notification requires changeType or lifecycleEvent",
+                ));
+            }
+            (Some(_), Some(_)) => {
+                return Err(invalid_request(
+                    "Graph notification cannot include both changeType and lifecycleEvent",
+                ));
+            }
+            (Some(_), None) | (None, Some(_)) => {}
+        }
+        if let Some(event) = lifecycle_event.as_deref() {
+            validate_lifecycle_event(event)?;
+        }
+
+        let resource = notification_string_field(value, &["resource"])
+            .map(str::to_string)
+            .or_else(|| known_subscription.resource.clone());
+        let resource_id = value
+            .get("resourceData")
+            .and_then(|resource_data| notification_string_field(resource_data, &["id"]))
+            .map(str::to_string);
+        let tenant_id = notification_string_field(value, &["tenantId"]).map(str::to_string);
+        let expiration_datetime =
+            notification_string_field(value, &["subscriptionExpirationDateTime"])
+                .map(str::to_string)
+                .or_else(|| known_subscription.expiration_datetime.clone());
+        let replay_key = notification_replay_key(
+            subscription_id,
+            change_type.as_deref(),
+            lifecycle_event.as_deref(),
+            resource.as_deref(),
+            resource_id.as_deref(),
+            tenant_id.as_deref(),
+            value,
+        );
+
+        Ok(Self {
+            subscription_id: subscription_id.to_string(),
+            client_state: client_state.to_string(),
+            change_type,
+            lifecycle_event,
+            resource,
+            resource_id,
+            tenant_id,
+            expiration_datetime,
+            replay_key,
+        })
+    }
+}
+
+fn notification_string_field<'a>(
+    value: &'a serde_json::Value,
+    fields: &[&str],
+) -> Option<&'a str> {
+    fields
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn normalize_validation_token(raw: &str) -> FcpResult<String> {
+    if raw.len() > M365_NOTIFICATION_VALIDATION_TOKEN_MAX_BYTES {
+        return Err(invalid_request("validation_token exceeds maximum length"));
+    }
+    let decoded = percent_decode_str(raw)
+        .decode_utf8()
+        .map_err(|_| invalid_request("validation_token is not valid UTF-8 after URL decoding"))?;
+    if decoded.trim().is_empty() {
+        return Err(invalid_request("validation_token must not be empty"));
+    }
+    if decoded.chars().any(char::is_control) {
+        return Err(invalid_request(
+            "validation_token must not contain control characters",
+        ));
+    }
+    Ok(decoded.into_owned())
+}
+
+fn retry_after_seconds_from_input(input: &serde_json::Value) -> FcpResult<Option<u64>> {
+    if let Some(retry_after) = input
+        .get("retry_after_seconds")
+        .or_else(|| input.get("retryAfterSeconds"))
+    {
+        return retry_after.as_u64().map(Some).ok_or_else(|| {
+            invalid_request("retry_after_seconds must be an unsigned integer")
+        });
+    }
+
+    let Some(headers) = input.get("headers").and_then(serde_json::Value::as_object) else {
+        return Ok(None);
+    };
+    let retry_after = headers
+        .iter()
+        .find(|(key, _)| key.eq_ignore_ascii_case("retry-after"))
+        .and_then(|(_, value)| value.as_str());
+    retry_after
+        .map(|value| {
+            value.parse::<u64>().map_err(|_| {
+                invalid_request("Retry-After header must be an unsigned integer number of seconds")
+            })
+        })
+        .transpose()
+}
+
+fn validate_lifecycle_event(event: &str) -> FcpResult<()> {
+    match event {
+        "reauthorizationRequired" | "subscriptionRemoved" | "missed" => Ok(()),
+        other => Err(invalid_request(format!(
+            "Unsupported Graph lifecycleEvent: {other}"
+        ))),
+    }
+}
+
+fn notification_replay_key(
+    subscription_id: &str,
+    change_type: Option<&str>,
+    lifecycle_event: Option<&str>,
+    resource: Option<&str>,
+    resource_id: Option<&str>,
+    tenant_id: Option<&str>,
+    raw: &serde_json::Value,
+) -> String {
+    if let Some(id) = notification_string_field(raw, &["id"]) {
+        return format!("{subscription_id}|id:{id}");
+    }
+
+    let mut hasher = Sha256::new();
+    hasher.update(subscription_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(change_type.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(lifecycle_event.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(resource.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(resource_id.unwrap_or("").as_bytes());
+    hasher.update(b"|");
+    hasher.update(tenant_id.unwrap_or("").as_bytes());
+    if resource_id.is_none() {
+        hasher.update(b"|");
+        hasher.update(raw.to_string().as_bytes());
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn prune_notification_replay_cache(cache: &mut BTreeMap<String, u64>) {
+    if cache.len() <= M365_NOTIFICATION_REPLAY_MAX_ENTRIES {
+        return;
+    }
+    let remove_count = cache.len() - M365_NOTIFICATION_REPLAY_MAX_ENTRIES;
+    let mut entries = cache
+        .iter()
+        .map(|(key, seen_at)| (key.clone(), *seen_at))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(_, seen_at)| *seen_at);
+    for (key, _) in entries.into_iter().take(remove_count) {
+        cache.remove(&key);
+    }
+}
+
+fn notification_delta_resource(
+    notification: &M365GraphNotification,
+    state: &M365SyncState,
+) -> FcpResult<String> {
+    state
+        .subscriptions
+        .get(&notification.subscription_id)
+        .and_then(|subscription| subscription.resource.clone())
+        .or_else(|| notification.resource.clone())
+        .ok_or_else(|| {
+            invalid_request(format!(
+                "No delta resource available for subscription '{}'",
+                notification.subscription_id
+            ))
+        })
+}
+
+fn lifecycle_action(
+    notification: &M365GraphNotification,
+    state: &M365SyncState,
+) -> FcpResult<Option<serde_json::Value>> {
+    let Some(event) = notification.lifecycle_event.as_deref() else {
+        return Ok(None);
+    };
+    let resource = notification_delta_resource(notification, state)?;
+    let action = match event {
+        "reauthorizationRequired" => json!({
+            "type": "reauthorize_and_renew",
+            "operation": "m365.subscriptions.renew",
+            "subscription_id": notification.subscription_id,
+            "resource": resource,
+            "expiration_datetime": notification.expiration_datetime,
+        }),
+        "subscriptionRemoved" => json!({
+            "type": "recreate_subscription",
+            "operation": "m365.subscriptions.create",
+            "subscription_id": notification.subscription_id,
+            "resource": resource,
+        }),
+        "missed" => json!({
+            "type": "run_delta_sync",
+            "operation": "m365.delta.sync",
+            "subscription_id": notification.subscription_id,
+            "resource": resource,
+        }),
+        _ => return Ok(None),
+    };
+    Ok(Some(action))
+}
+
+fn renewal_due(expiration_datetime: Option<&str>) -> bool {
+    let Some(expiration_datetime) = expiration_datetime else {
+        return false;
+    };
+    chrono::DateTime::parse_from_rfc3339(expiration_datetime).is_ok_and(|expiration| {
+        let now = chrono::Utc::now();
+        let expires_at = expiration.with_timezone(&chrono::Utc);
+        expires_at <= now + chrono::Duration::seconds(M365_NOTIFICATION_RENEWAL_WINDOW_SECONDS)
+    })
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1360,6 +1744,8 @@ impl M365Connector {
             "m365.subscriptions.create" => self.invoke_create_subscription(input).await,
             "m365.subscriptions.renew" => self.invoke_renew_subscription(input).await,
             "m365.subscriptions.delete" => self.invoke_delete_subscription(input).await,
+            // ── Notifications ────────────────────────────────
+            "m365.notifications.ingest" => self.invoke_ingest_notification(input).await,
             // ── Delta ────────────────────────────────────────
             "m365.delta.sync" => self.invoke_delta_sync(input).await,
             _ => Err(FcpError::OperationNotGranted {
@@ -2172,13 +2558,17 @@ impl M365Connector {
         let notification_url = require_str(&input, "notification_url")?;
         let resource = require_str(&input, "resource")?;
         let expiration = require_str(&input, "expiration_datetime")?;
+        let client_state = input.get("client_state").and_then(|value| value.as_str());
         let result = async {
-            let sub = json!({
+            let mut sub = json!({
                 "changeType": change_type,
                 "notificationUrl": notification_url,
                 "resource": resource,
                 "expirationDateTime": expiration,
             });
+            if let Some(client_state) = client_state {
+                sub["clientState"] = json!(client_state);
+            }
             let created = client
                 .create_subscription(&sub)
                 .await
@@ -2188,7 +2578,8 @@ impl M365Connector {
                 let mut state = Self::load_sync_state(&state_path)?;
                 state.subscriptions.insert(
                     subscription_id.to_string(),
-                    M365SubscriptionState::from_graph_payload(&created),
+                    M365SubscriptionState::from_graph_payload(&created)
+                        .with_client_state(client_state),
                 );
                 Self::persist_sync_state(&state_path, &state)?;
             }
@@ -2222,9 +2613,14 @@ impl M365Connector {
                 .get("id")
                 .and_then(|value| value.as_str())
                 .unwrap_or(subscription_id);
+            let existing_client_state = state
+                .subscriptions
+                .get(subscription_id)
+                .and_then(|subscription| subscription.client_state.as_deref());
             state.subscriptions.insert(
                 state_key.to_string(),
-                M365SubscriptionState::from_graph_payload(&renewed),
+                M365SubscriptionState::from_graph_payload(&renewed)
+                    .with_client_state(existing_client_state),
             );
             Self::persist_sync_state(&state_path, &state)?;
 
@@ -2262,6 +2658,156 @@ impl M365Connector {
             warn!(error = %err, "Failed to release m365 sync lease after delete_subscription");
         }
         result
+    }
+
+    async fn invoke_ingest_notification(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let request = M365NotificationIngestRequest::parse(input)?;
+        if request.cancelled {
+            return Err(FcpError::ConnectorUnavailable {
+                code: 5003,
+                message: "Host cancelled Microsoft Graph notification delivery".into(),
+            });
+        }
+        if request.ack_timeout_ms == 0 {
+            return Err(FcpError::UpstreamTimeout {
+                service: "microsoft_graph_notification_delivery".into(),
+            });
+        }
+
+        if let Some(validation_token) = request.validation_token {
+            return Ok(json!({
+                "status": "validation_challenge",
+                "ack": {
+                    "http_status": 200,
+                    "content_type": "text/plain",
+                    "body": validation_token,
+                    "timeout_ms": request.ack_timeout_ms,
+                },
+                "retry_after_seconds": request.retry_after_seconds,
+            }));
+        }
+
+        let payload = request.payload.ok_or_else(|| {
+            invalid_request("m365.notifications.ingest missing notification payload")
+        })?;
+        let state_path = self.sync_state_path()?;
+        let sync_lease = self.acquire_sync_lease()?;
+        let result = Self::ingest_notification_payload(
+            &state_path,
+            &payload,
+            request.expected_client_state.as_deref(),
+            request.retry_after_seconds,
+            request.ack_timeout_ms,
+        );
+        if let Err(err) = sync_lease.release() {
+            warn!(error = %err, "Failed to release m365 sync lease after notifications.ingest");
+        }
+        result
+    }
+
+    fn ingest_notification_payload(
+        state_path: &Path,
+        payload: &serde_json::Value,
+        expected_client_state: Option<&str>,
+        retry_after_seconds: Option<u64>,
+        ack_timeout_ms: u64,
+    ) -> FcpResult<serde_json::Value> {
+        let notifications = payload
+            .get("value")
+            .and_then(serde_json::Value::as_array)
+            .ok_or_else(|| {
+                invalid_request("Graph notification payload must contain a value array")
+            })?;
+        if notifications.is_empty() {
+            return Err(invalid_request(
+                "Graph notification payload value array must not be empty",
+            ));
+        }
+
+        let mut state = Self::load_sync_state(state_path)?;
+        let parsed = notifications
+            .iter()
+            .map(|notification| {
+                M365GraphNotification::parse(notification, &state, expected_client_state)
+            })
+            .collect::<FcpResult<Vec<_>>>()?;
+        let now = current_unix_timestamp_secs();
+
+        let mut accepted = Vec::new();
+        let mut duplicates = Vec::new();
+        let mut delta_handoffs = Vec::new();
+        let mut lifecycle_actions = Vec::new();
+        let mut renewal_actions = Vec::new();
+
+        for notification in parsed {
+            if state
+                .seen_notification_keys
+                .contains_key(&notification.replay_key)
+            {
+                duplicates.push(json!({
+                    "subscription_id": notification.subscription_id,
+                    "replay_key": notification.replay_key,
+                }));
+                continue;
+            }
+
+            let delta_resource = notification_delta_resource(&notification, &state)?;
+            if notification.change_type.is_some() {
+                delta_handoffs.push(json!({
+                    "operation": "m365.delta.sync",
+                    "subscription_id": notification.subscription_id.clone(),
+                    "resource": delta_resource,
+                    "reason": notification.change_type.clone(),
+                    "resource_id": notification.resource_id.clone(),
+                    "tenant_id": notification.tenant_id.clone(),
+                }));
+            }
+            if let Some(action) = lifecycle_action(&notification, &state)? {
+                lifecycle_actions.push(action);
+            }
+            if renewal_due(notification.expiration_datetime.as_deref()) {
+                renewal_actions.push(json!({
+                    "operation": "m365.subscriptions.renew",
+                    "subscription_id": notification.subscription_id.clone(),
+                    "expiration_datetime": notification.expiration_datetime.clone(),
+                }));
+            }
+
+            state
+                .seen_notification_keys
+                .insert(notification.replay_key.clone(), now);
+            accepted.push(json!({
+                "subscription_id": notification.subscription_id,
+                "change_type": notification.change_type,
+                "lifecycle_event": notification.lifecycle_event,
+                "resource": notification.resource,
+                "resource_id": notification.resource_id,
+                "tenant_id": notification.tenant_id,
+                "client_state_validated": !notification.client_state.is_empty(),
+                "replay_key": notification.replay_key,
+            }));
+        }
+
+        prune_notification_replay_cache(&mut state.seen_notification_keys);
+        Self::persist_sync_state(state_path, &state)?;
+
+        Ok(json!({
+            "status": "accepted",
+            "ack": {
+                "http_status": 202,
+                "content_type": "application/json",
+                "timeout_ms": ack_timeout_ms,
+            },
+            "accepted": accepted,
+            "duplicates": duplicates,
+            "delta_handoffs": delta_handoffs,
+            "lifecycle_actions": lifecycle_actions,
+            "renewal_actions": renewal_actions,
+            "retry_after_seconds": retry_after_seconds,
+        }))
     }
 
     // ── Delta operation implementations ──────────────────────────
@@ -4263,6 +4809,7 @@ fn build_operations() -> Vec<OperationInfo> {
                 "required": ["change_type", "notification_url", "resource", "expiration_datetime"],
                 "properties": {
                     "change_type": { "type": "string" },
+                    "client_state": { "type": "string" },
                     "notification_url": { "type": "string" },
                     "resource": { "type": "string" },
                     "expiration_datetime": { "type": "string" }
@@ -4331,6 +4878,67 @@ fn build_operations() -> Vec<OperationInfo> {
                 related: vec![
                     CapabilityId::from_static("m365.subscriptions.create"),
                     CapabilityId::from_static("m365.subscriptions.renew"),
+                ],
+            },
+        ),
+        // ── Notification ingress operations ─────────────────────
+        op_info(
+            "m365.notifications.ingest",
+            "Process a host-forwarded Microsoft Graph notification or validation challenge",
+            json!({
+                "type": "object",
+                "properties": {
+                    "validation_token": { "type": "string" },
+                    "validationToken": { "type": "string" },
+                    "query": { "type": "object" },
+                    "payload": { "type": "object" },
+                    "body": { "type": "object" },
+                    "expected_client_state": { "type": "string" },
+                    "retry_after_seconds": { "type": "integer", "minimum": 0 },
+                    "headers": { "type": "object" },
+                    "ack_timeout_ms": { "type": "integer", "minimum": 0 },
+                    "cancelled": { "type": "boolean" }
+                },
+                "anyOf": [
+                    { "required": ["validation_token"] },
+                    { "required": ["validationToken"] },
+                    { "required": ["query"] },
+                    { "required": ["payload"] },
+                    { "required": ["body"] }
+                ]
+            }),
+            json!({
+                "type": "object",
+                "required": ["status", "ack"],
+                "properties": {
+                    "status": { "type": "string" },
+                    "ack": { "type": "object" },
+                    "accepted": { "type": "array" },
+                    "duplicates": { "type": "array" },
+                    "delta_handoffs": { "type": "array" },
+                    "lifecycle_actions": { "type": "array" },
+                    "renewal_actions": { "type": "array" },
+                    "retry_after_seconds": { "type": ["integer", "null"] }
+                }
+            }),
+            "m365.notifications.ingest",
+            RiskLevel::Low,
+            SafetyTier::Safe,
+            IdempotencyClass::BestEffort,
+            AgentHint {
+                when_to_use: "Use when the host has already accepted a Microsoft Graph webhook request and needs the connector to validate clientState, suppress duplicate notifications, and schedule delta handoff work.".into(),
+                common_mistakes: vec![
+                    "Letting the connector listen on a public socket; this operation is host-forwarded and keeps network.listen forbidden.".into(),
+                    "Processing notifications before validating clientState against the persisted subscription secret.".into(),
+                    "Treating resource change payloads as complete state instead of using m365.delta.sync for the authoritative catch-up.".into(),
+                ],
+                examples: vec![
+                    r#"{"validation_token": "opaque-token-from-query"}"#.into(),
+                    r#"{"payload": {"value": [{"subscriptionId": "sub-123", "clientState": "secret", "changeType": "updated", "resource": "/me/messages/msg-1", "resourceData": {"id": "msg-1"}}]}}"#.into(),
+                ],
+                related: vec![
+                    CapabilityId::from_static("m365.subscriptions.create"),
+                    CapabilityId::from_static("m365.delta.sync"),
                 ],
             },
         ),
@@ -5130,10 +5738,12 @@ mod tests {
         assert!(op_ids.contains(&"m365.subscriptions.create"));
         assert!(op_ids.contains(&"m365.subscriptions.renew"));
         assert!(op_ids.contains(&"m365.subscriptions.delete"));
+        // Notifications (1)
+        assert!(op_ids.contains(&"m365.notifications.ingest"));
         // Delta (1)
         assert!(op_ids.contains(&"m365.delta.sync"));
 
-        assert_eq!(ops.len(), 43);
+        assert_eq!(ops.len(), 44);
     }
 
     #[fcp_async_core::runtime::test]
@@ -5294,6 +5904,7 @@ mod tests {
             "m365.calendar.get_freebusy",
             "m365.tasks.list_task_lists",
             "m365.tasks.list_tasks",
+            "m365.notifications.ingest",
             "m365.delta.sync",
         ];
         for op in &ops {
@@ -5354,8 +5965,8 @@ mod tests {
     #[test]
     fn operation_count_matches_expected() {
         let ops = build_operations();
-        // Mail: 10, Files: 7, Word: 6, OneNote: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Delta: 1 = 43
-        assert_eq!(ops.len(), 43);
+        // Mail: 10, Files: 7, Word: 6, OneNote: 7, Calendar: 6, Tasks: 3, Subscriptions: 3, Notifications: 1, Delta: 1 = 44
+        assert_eq!(ops.len(), 44);
     }
 
     // ── Helper function tests ─────────────────────────────────────

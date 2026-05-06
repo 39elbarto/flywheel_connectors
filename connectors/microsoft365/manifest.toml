@@ -57,6 +57,7 @@ optional = [
     "m365.delta.read",
     "m365.files.write",
     "m365.files.read",
+    "m365.notifications.ingest",
     "m365.mail.write",
     "m365.mail.send",
     "m365.mail.read",
@@ -2164,6 +2165,10 @@ type = "object"
 description = "Comma-separated change types: created, updated, deleted"
 type = "string"
 
+[provides.operations."m365.subscriptions.create".input_schema.properties.client_state]
+description = "Secret value Graph will echo in each change notification for authenticity checks"
+type = "string"
+
 [provides.operations."m365.subscriptions.create".input_schema.properties.expiration_datetime]
 description = "ISO 8601 subscription expiry (max varies by resource)"
 type = "string"
@@ -2321,6 +2326,101 @@ when_to_use = "Renew a webhook subscription before it expires to maintain contin
 common_mistakes = ["Letting subscriptions expire; implement proactive renewal timers."]
 examples = ['{"subscription_id": "sub-123", "expiration_datetime": "2026-03-07T00:00:00Z"}']
 related = ["m365.subscriptions.create"]
+
+[provides.operations."m365.notifications.ingest"]
+description = "Process a host-forwarded Microsoft Graph notification or validation challenge"
+capability = "m365.notifications.ingest"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."m365.notifications.ingest".input_schema]
+type = "object"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.validation_token]
+description = "URL-decoded Graph validationToken value from the webhook query string"
+type = "string"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.validationToken]
+description = "Graph validationToken alias for host-forwarded query objects"
+type = "string"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.query]
+description = "Host-forwarded query object; may contain validationToken"
+type = "object"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.payload]
+description = "Graph changeNotificationCollection payload"
+type = "object"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.body]
+description = "Alias for payload when the host forwards the HTTP body as body"
+type = "object"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.expected_client_state]
+description = "ClientState secret for legacy subscription state that did not persist clientState"
+type = "string"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.headers]
+description = "Host-forwarded delivery headers; Retry-After is parsed when present"
+type = "object"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.retry_after_seconds]
+description = "Retry-After value in seconds when the host is surfacing backpressure"
+type = "integer"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.ack_timeout_ms]
+description = "Host acknowledgement budget; Graph validation requires a 10-second response"
+type = "integer"
+
+[provides.operations."m365.notifications.ingest".input_schema.properties.cancelled]
+description = "Set by the host when the delivery was cancelled before connector processing"
+type = "boolean"
+
+[provides.operations."m365.notifications.ingest".output_schema]
+required = ["status", "ack"]
+type = "object"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.status]
+type = "string"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.ack]
+type = "object"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.accepted]
+type = "array"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.duplicates]
+type = "array"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.delta_handoffs]
+type = "array"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.lifecycle_actions]
+type = "array"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.renewal_actions]
+type = "array"
+
+[provides.operations."m365.notifications.ingest".output_schema.properties.retry_after_seconds]
+type = "integer"
+
+[provides.operations."m365.notifications.ingest".ai_hints]
+when_to_use = "Use after the FCP host receives a Microsoft Graph webhook POST and needs the connector to validate clientState, suppress duplicates, acknowledge lifecycle events, and produce delta-sync handoff work."
+common_mistakes = [
+    "Letting this connector open a public listener; webhook HTTP receipt is host-owned and network.listen stays forbidden.",
+    "Skipping clientState validation before processing notification payloads.",
+    "Treating notification resourceData as complete state instead of running m365.delta.sync for catch-up.",
+]
+examples = [
+    '{"validation_token": "opaque-token-from-query"}',
+    '{"payload": {"value": [{"subscriptionId": "sub-123", "clientState": "secret", "changeType": "updated", "resourceData": {"id": "msg-1"}}]}}',
+]
+related = [
+    "m365.subscriptions.create",
+    "m365.delta.sync",
+]
 
 [provides.operations."m365.tasks.create_task"]
 description = "Create a new task in a To Do list"
@@ -3075,6 +3175,14 @@ burst = 10
 scope = "instance"
 
 [[rate_limits.pools]]
+id = "m365.notifications.ingest"
+description = "Host-forwarded Microsoft Graph notification ingress"
+requests = 1000
+window_ms = 600000
+burst = 50
+scope = "instance"
+
+[[rate_limits.pools]]
 id = "m365.delta.read"
 description = "Delta query / incremental sync operations"
 requests = 5000
@@ -3089,6 +3197,7 @@ scope = "instance"
 "m365.calendar.list_events" = ["m365.calendar.read"]
 "m365.files.list_items" = ["m365.files.read"]
 "m365.subscriptions.delete" = ["m365.subscriptions.write"]
+"m365.notifications.ingest" = ["m365.notifications.ingest"]
 "m365.onenote.list_sections" = ["m365.onenote.read"]
 "m365.subscriptions.renew" = ["m365.subscriptions.write"]
 "m365.files.create_share_link" = ["m365.files.write"]

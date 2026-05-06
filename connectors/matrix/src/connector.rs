@@ -1,32 +1,44 @@
 //! Matrix connector implementation.
 
-use std::collections::{BTreeMap, HashMap};
-use std::sync::RwLock;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use base64::Engine as _;
-use fcp_async_core::channel::broadcast;
+use fcp_async_core::channel::{broadcast, watch};
+use fcp_async_core::task::JoinHandle;
 use fcp_prelude::{
     AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
     ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
-    InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy, Principal,
-    ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId, ShutdownRequest,
-    SimulateRequest, SimulateResponse, SubscribeResult, ThreadInfo, ThreadKind, TrustLevel, ZoneId,
+    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
+    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
+    Principal, ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResult, ThreadInfo, ThreadKind,
+    TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use fcp_sdk::runtime::SupervisorConfig;
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::client::MatrixClient;
+use crate::crypto::{
+    MATRIX_MEGOLM_ALGORITHM, MatrixCryptoEngine, MatrixEncryptedEventProjectionContext,
+    MatrixEncryptedEventRedactionState, MatrixTrustGatedDecryptedProjection,
+    MatrixVerifiedDecryptedMessageEvent, key_share_after_initial_sync_snapshot,
+    maintenance_driver_snapshot, project_trust_gated_decrypted_event, recovery_guidance_snapshot,
+    undecrypted_retry_decision_snapshot,
+};
 use crate::error::MatrixError;
 use crate::types::{
     CreateRoomRequest, Event, InvitedSyncRoom, JoinedSyncRoom, LeftSyncRoom, MatrixAuth,
-    MatrixEncryptedEventPolicy, MatrixInboundPolicy, SyncResponse,
+    MatrixConfig, MatrixE2eeConfig, MatrixE2eeDeviceListStatus, MatrixE2eeMaterialStatus,
+    MatrixEncryptedEventPolicy, MatrixInboundPolicy, MatrixStatePersistenceBackend,
+    MatrixStatePersistenceConfig, MatrixSupervisedSyncConfig, SyncResponse,
 };
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
@@ -48,6 +60,7 @@ const CAP_WRITE: &str = "matrix.write";
 const CAP_MANAGE: &str = "matrix.manage";
 
 const EVENT_MESSAGE_AUTHORIZED: &str = "matrix.message.authorized";
+const EVENT_MESSAGE_DECRYPTED: &str = "matrix.message.decrypted";
 const EVENT_DROPPED: &str = "matrix.event.dropped";
 const EVENT_REACTION: &str = "matrix.reaction";
 const EVENT_ENCRYPTED: &str = "matrix.encrypted";
@@ -61,6 +74,7 @@ struct MatrixRoomSummary {
     avatar_url: Option<String>,
     member_count: Option<usize>,
     last_event_ts: Option<u64>,
+    joined_user_ids: BTreeSet<String>,
 }
 
 impl MatrixRoomSummary {
@@ -101,6 +115,24 @@ impl MatrixRoomSummary {
                     .and_then(serde_json::Value::as_str)
                     .map(ToOwned::to_owned);
             }
+            "m.room.member" => {
+                if let Some(user_id) = event.state_key.as_deref() {
+                    match event
+                        .content
+                        .get("membership")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        Some("join") => {
+                            self.joined_user_ids.insert(user_id.to_string());
+                        }
+                        Some("ban" | "invite" | "knock" | "leave") => {
+                            self.joined_user_ids.remove(user_id);
+                        }
+                        _ => {}
+                    }
+                    self.member_count = Some(self.joined_user_ids.len());
+                }
+            }
             _ => {}
         }
     }
@@ -125,10 +157,13 @@ struct SyncProjection {
     membership_changes: Vec<serde_json::Value>,
     state_changes: Vec<serde_json::Value>,
     authorized_message_events: Vec<serde_json::Value>,
+    decrypted_message_events: Vec<serde_json::Value>,
     dropped_events: Vec<serde_json::Value>,
     reaction_events: Vec<serde_json::Value>,
     encrypted_events: Vec<serde_json::Value>,
     tracked_updates: BTreeMap<String, MatrixRoomSummary>,
+    dynamic_direct_message_rooms: BTreeSet<String>,
+    thread_participation_roots: BTreeSet<String>,
 }
 
 #[derive(Debug, Default)]
@@ -146,6 +181,7 @@ struct MatrixSyncTelemetry {
     last_membership_change_count: usize,
     last_state_change_count: usize,
     last_authorized_message_count: usize,
+    last_decrypted_message_count: usize,
     last_dropped_event_count: usize,
     last_reaction_event_count: usize,
     last_encrypted_event_count: usize,
@@ -156,7 +192,49 @@ struct MatrixSyncTelemetry {
 struct MatrixSyncState {
     last_sync_token: Option<String>,
     rooms: BTreeMap<String, MatrixRoomSummary>,
+    dynamic_direct_message_rooms: BTreeSet<String>,
+    thread_participation_roots: BTreeSet<String>,
+    emitted_event_keys: BTreeSet<String>,
     telemetry: MatrixSyncTelemetry,
+}
+
+#[derive(Debug, Default)]
+struct MatrixSupervisedSyncStatus {
+    configured_enabled: bool,
+    running: bool,
+    total_polls: u64,
+    successful_polls: u64,
+    failed_polls: u64,
+    emitted_events: u64,
+    consecutive_failures: u32,
+    last_status: Option<String>,
+    last_error: Option<String>,
+    last_used_since: Option<String>,
+    last_next_batch: Option<String>,
+    last_duration_ms: Option<u64>,
+    last_stop_reason: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct MatrixSupervisedSyncControl {
+    shutdown_tx: Option<watch::Sender<bool>>,
+    task: Option<JoinHandle<()>>,
+}
+
+#[derive(Debug, Clone)]
+struct MatrixSupervisedSyncWorker {
+    connector_id: ConnectorId,
+    instance_id: InstanceId,
+    client: MatrixClient,
+    policy: MatrixInboundPolicy,
+    e2ee: MatrixE2eeConfig,
+    state_persistence: MatrixStatePersistenceConfig,
+    config: MatrixSupervisedSyncConfig,
+    sync_state: Arc<RwLock<MatrixSyncState>>,
+    status: Arc<RwLock<MatrixSupervisedSyncStatus>>,
+    event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
+    next_event_seq: Arc<AtomicU64>,
+    subscribed_topics: Arc<RwLock<Vec<String>>>,
 }
 
 const fn auth_mode_label(auth: &MatrixAuth) -> &'static str {
@@ -164,6 +242,27 @@ const fn auth_mode_label(auth: &MatrixAuth) -> &'static str {
         MatrixAuth::AccessToken { .. } => "access_token",
         MatrixAuth::CredentialId { .. } => "credential_id",
     }
+}
+
+const fn state_persistence_backend_label(backend: MatrixStatePersistenceBackend) -> &'static str {
+    match backend {
+        MatrixStatePersistenceBackend::InMemory => "in_memory",
+        MatrixStatePersistenceBackend::HostManagedSnapshot => "host_managed_snapshot",
+    }
+}
+
+fn redacted_identifier_snapshot(value: Option<&str>) -> serde_json::Value {
+    value.map_or_else(
+        || json!({ "configured": false }),
+        |value| {
+            let mut hasher = Sha256::new();
+            hasher.update(value.as_bytes());
+            json!({
+                "configured": true,
+                "sha256": format!("sha256:{}", hex::encode(hasher.finalize())),
+            })
+        },
+    )
 }
 
 fn is_loopback_host(host: Option<&str>) -> bool {
@@ -225,16 +324,18 @@ fn doctor_check(
 #[derive(Debug)]
 pub struct MatrixConnector {
     base: BaseConnector,
-    config: Option<crate::types::MatrixConfig>,
+    config: Option<MatrixConfig>,
     client: Option<MatrixClient>,
     runtime: Option<ConnectorRuntime>,
     retry_config: HttpRetryConfig,
     started_at: Instant,
     verifier: Option<CapabilityVerifier>,
-    sync_state: RwLock<MatrixSyncState>,
+    sync_state: Arc<RwLock<MatrixSyncState>>,
+    supervised_sync_status: Arc<RwLock<MatrixSupervisedSyncStatus>>,
+    supervised_sync_control: Mutex<MatrixSupervisedSyncControl>,
     event_tx: broadcast::Sender<FcpResult<EventEnvelope>>,
-    next_event_seq: AtomicU64,
-    subscribed_topics: RwLock<Vec<String>>,
+    next_event_seq: Arc<AtomicU64>,
+    subscribed_topics: Arc<RwLock<Vec<String>>>,
 }
 
 impl MatrixConnector {
@@ -250,10 +351,12 @@ impl MatrixConnector {
             retry_config: HttpRetryConfig::default(),
             started_at: Instant::now(),
             verifier: None,
-            sync_state: RwLock::new(MatrixSyncState::default()),
+            sync_state: Arc::new(RwLock::new(MatrixSyncState::default())),
+            supervised_sync_status: Arc::new(RwLock::new(MatrixSupervisedSyncStatus::default())),
+            supervised_sync_control: Mutex::new(MatrixSupervisedSyncControl::default()),
             event_tx,
-            next_event_seq: AtomicU64::new(1),
-            subscribed_topics: RwLock::new(Vec::new()),
+            next_event_seq: Arc::new(AtomicU64::new(1)),
+            subscribed_topics: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -261,6 +364,12 @@ impl MatrixConnector {
     #[must_use]
     pub fn subscribe_events(&self) -> broadcast::Receiver<FcpResult<EventEnvelope>> {
         self.event_tx.subscribe()
+    }
+
+    /// Return the connector instance ID used for bound capability tokens and emitted events.
+    #[must_use]
+    pub const fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
     }
 
     fn manifest_hash() -> String {
@@ -279,8 +388,11 @@ impl MatrixConnector {
                 "transport_policy_ok": transport_ok,
                 "transport_policy_message": transport_message,
                 "credential_injection_required": matches!(&config.auth, MatrixAuth::CredentialId { .. }),
-                "sync_delivery_model": "manual_sync_event_fanout",
+                "sync_delivery_model": "manual_or_supervised_sync_event_fanout",
                 "inbound_policy": inbound_policy_snapshot(&config.inbound_policy),
+                "e2ee": e2ee_status_snapshot_for_config(config),
+                "state_persistence": state_persistence_snapshot(&config.state_persistence),
+                "supervised_sync": supervised_sync_config_snapshot(&config.supervised_sync),
                 "retry_config": self.retry_config.clone(),
             })
         })
@@ -303,6 +415,9 @@ impl MatrixConnector {
         json!({
             "last_sync_token": state.last_sync_token.clone(),
             "tracked_rooms": state.rooms.len(),
+            "dynamic_direct_message_rooms": state.dynamic_direct_message_rooms.iter().cloned().collect::<Vec<_>>(),
+            "thread_participation_roots": state.thread_participation_roots.iter().cloned().collect::<Vec<_>>(),
+            "emitted_event_dedupe_keys": state.emitted_event_keys.len(),
             "total_sync_calls": telemetry.successful_syncs + telemetry.failed_syncs,
             "successful_syncs": telemetry.successful_syncs,
             "failed_syncs": telemetry.failed_syncs,
@@ -317,10 +432,33 @@ impl MatrixConnector {
             "last_membership_change_count": telemetry.last_membership_change_count,
             "last_state_change_count": telemetry.last_state_change_count,
             "last_authorized_message_count": telemetry.last_authorized_message_count,
+            "last_decrypted_message_count": telemetry.last_decrypted_message_count,
             "last_dropped_event_count": telemetry.last_dropped_event_count,
             "last_reaction_event_count": telemetry.last_reaction_event_count,
             "last_encrypted_event_count": telemetry.last_encrypted_event_count,
             "last_emitted_event_count": telemetry.last_emitted_event_count,
+        })
+    }
+
+    fn supervised_sync_snapshot(&self) -> serde_json::Value {
+        let status = self
+            .supervised_sync_status
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        json!({
+            "configured_enabled": status.configured_enabled,
+            "running": status.running,
+            "total_polls": status.total_polls,
+            "successful_polls": status.successful_polls,
+            "failed_polls": status.failed_polls,
+            "emitted_events": status.emitted_events,
+            "consecutive_failures": status.consecutive_failures,
+            "last_status": status.last_status.clone(),
+            "last_error": status.last_error.clone(),
+            "last_used_since": status.last_used_since.clone(),
+            "last_next_batch": status.last_next_batch.clone(),
+            "last_duration_ms": status.last_duration_ms,
+            "last_stop_reason": status.last_stop_reason.clone(),
         })
     }
 
@@ -333,15 +471,21 @@ impl MatrixConnector {
             "manifest_hash": Self::manifest_hash(),
             "provisioning": self.provisioning_snapshot(),
             "sync_tracking": self.sync_observability_snapshot(),
+            "e2ee": e2ee_status_snapshot_for_optional_config(self.config.as_ref()),
+            "state_persistence": self.config.as_ref().map(|config| {
+                state_persistence_snapshot(&config.state_persistence)
+            }),
+            "supervised_sync": self.supervised_sync_snapshot(),
             "event_stream": {
-                "delivery_model": "manual_sync_persisted_events",
+                "delivery_model": "manual_or_supervised_sync_persisted_events",
                 "buffer_capacity": MATRIX_EVENT_BUFFER_CAPACITY,
                 "subscribed_topics": self.subscribed_topics_snapshot(),
             },
             "operator_guidance": {
                 "dedicated_environment": "Use a non-production homeserver account and disposable rooms when verifying create, join, leave, send_message, and media mutations.",
-                "sync_model": "This connector does not run a background receive loop. Invoke matrix.sync explicitly to advance the in-memory cursor, inspect room deltas, and fan out subscribed EventEnvelope items when persist=true.",
+                "sync_model": "Manual matrix.sync remains the fallback. If supervised_sync.enabled=true, a validated event subscription starts a bounded background sync worker that shares the same policy projection and EventEnvelope fanout.",
                 "credential_injection": "credential_id mode requires the host or egress proxy to inject a bearer token before self_check can prove live readiness.",
+                "state_persistence": "Durable Matrix state is host-managed: persist tracked_state outside the connector and restore it through state_persistence on configure. Connector-local disk writes remain disabled.",
                 "redaction": "Do not log raw access tokens or decoded media bytes. Prefer room IDs, event IDs, and retry metadata in diagnostics.",
                 "verification_commands": [
                     "rch exec -- cargo check -p fcp-matrix --all-targets",
@@ -407,6 +551,7 @@ impl MatrixConnector {
         state.telemetry.last_membership_change_count = projection.membership_changes.len();
         state.telemetry.last_state_change_count = projection.state_changes.len();
         state.telemetry.last_authorized_message_count = projection.authorized_message_events.len();
+        state.telemetry.last_decrypted_message_count = projection.decrypted_message_events.len();
         state.telemetry.last_dropped_event_count = projection.dropped_events.len();
         state.telemetry.last_reaction_event_count = projection.reaction_events.len();
         state.telemetry.last_encrypted_event_count = projection.encrypted_events.len();
@@ -437,6 +582,7 @@ impl MatrixConnector {
         state.telemetry.last_membership_change_count = 0;
         state.telemetry.last_state_change_count = 0;
         state.telemetry.last_authorized_message_count = 0;
+        state.telemetry.last_decrypted_message_count = 0;
         state.telemetry.last_dropped_event_count = 0;
         state.telemetry.last_reaction_event_count = 0;
         state.telemetry.last_encrypted_event_count = 0;
@@ -449,34 +595,14 @@ impl MatrixConnector {
         batch: &str,
         payload: &serde_json::Value,
     ) -> EventEnvelope {
-        let seq = self.next_event_seq.fetch_add(1, AtomicOrdering::Relaxed);
-        let event_id = payload
-            .get("event_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("event");
-        let event_data = EventData::new(
-            self.base.id.clone(),
-            self.base.instance_id.clone(),
-            ZoneId::community(),
-            matrix_event_principal(payload),
-            payload.clone(),
+        build_matrix_event_envelope(
+            &self.base.id,
+            &self.base.instance_id,
+            &self.next_event_seq,
+            topic,
+            batch,
+            payload,
         )
-        .with_resource_uris(matrix_event_resource_uris(payload));
-        let event_data = if let Some(thread_info) = matrix_event_thread_info(payload) {
-            event_data.with_thread_info(thread_info)
-        } else {
-            event_data
-        };
-        let mut envelope = EventEnvelope::new(topic, event_data)
-            .with_seq(seq)
-            .with_cursor(format!("{batch}:{event_id}:{seq}"))
-            .with_ordering(OrderingPolicy::PerKey);
-
-        if let Some(room_id) = payload.get("room_id").and_then(serde_json::Value::as_str) {
-            envelope = envelope.with_stream_key(room_id);
-        }
-
-        envelope
     }
 
     fn emit_projected_events(&self, batch: &str, projection: &SyncProjection) -> usize {
@@ -490,11 +616,19 @@ impl MatrixConnector {
                 EVENT_MESSAGE_AUTHORIZED,
                 projection.authorized_message_events.as_slice(),
             ),
+            (
+                EVENT_MESSAGE_DECRYPTED,
+                projection.decrypted_message_events.as_slice(),
+            ),
             (EVENT_DROPPED, projection.dropped_events.as_slice()),
             (EVENT_REACTION, projection.reaction_events.as_slice()),
             (EVENT_ENCRYPTED, projection.encrypted_events.as_slice()),
         ];
 
+        let mut state = self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut emitted = 0_usize;
         for (topic, payloads) in topic_groups {
             if !subscribed_topics
@@ -504,19 +638,26 @@ impl MatrixConnector {
                 continue;
             }
             for payload in payloads {
+                let dedupe_key = matrix_event_dedupe_key(topic, payload);
+                if state.emitted_event_keys.contains(&dedupe_key) {
+                    continue;
+                }
                 let envelope = self.build_event_envelope(topic, batch, payload);
                 if self.event_tx.send(Ok(envelope)).is_ok() {
+                    state.emitted_event_keys.insert(dedupe_key);
                     self.base.record_event();
                     emitted = emitted.saturating_add(1);
                 }
             }
         }
 
+        drop(state);
         emitted
     }
 
     /// Run diagnostics.
     #[must_use]
+    #[allow(clippy::too_many_lines)]
     pub fn doctor(&self) -> serde_json::Value {
         let mut checks = Vec::new();
 
@@ -584,9 +725,49 @@ impl MatrixConnector {
                 false,
             ));
             checks.push(doctor_check(
+                "state_persistence",
+                true,
+                if config.state_persistence.enabled {
+                    "Host-managed Matrix state snapshot restore configured; connector-local disk writes remain disabled and runtime tracking continues in memory"
+                } else {
+                    "State persistence disabled; configure resets Matrix sync cursor, dynamic DM rooms, and participated thread roots"
+                },
+                false,
+            ));
+            if config.state_persistence.enabled {
+                checks.push(doctor_check(
+                    "state_persistence_scope",
+                    true,
+                    "Restored state is explicitly scoped to zone/account/device metadata and scope identifiers are redacted in diagnostics",
+                    false,
+                ));
+            }
+            checks.push(doctor_check(
                 "sync_delivery_model",
                 true,
-                "No background receive loop is running; use matrix.sync with persist=true to advance the in-memory cursor and fan out subscribed events",
+                if config.supervised_sync.enabled {
+                    "Manual matrix.sync fallback remains available; a validated event subscription starts the supervised sync worker"
+                } else {
+                    "Supervised sync disabled; use matrix.sync with persist=true to advance the in-memory cursor and fan out subscribed events"
+                },
+                false,
+            ));
+            let supervised_status = self
+                .supervised_sync_status
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            checks.push(doctor_check(
+                "supervised_sync",
+                !config.supervised_sync.enabled || supervised_status.running,
+                if config.supervised_sync.enabled {
+                    if supervised_status.running {
+                        "Supervised sync worker is running"
+                    } else {
+                        "Supervised sync is enabled but idle until subscribe confirms an event topic"
+                    }
+                } else {
+                    "Supervised sync disabled by configuration"
+                },
                 false,
             ));
             checks.push(doctor_check(
@@ -596,6 +777,28 @@ impl MatrixConnector {
                     "Encrypted Matrix timeline events are projected as '{}' until verified E2EE/device verification is implemented",
                     encrypted_event_policy_label(config.inbound_policy.encrypted_events)
                 ),
+                false,
+            ));
+            checks.push(doctor_check(
+                "e2ee_verified_decryption",
+                !config.e2ee.verified_decryption_requested,
+                if config.e2ee.verified_decryption_requested {
+                    "Verified Matrix E2EE decryption was requested, but audited crypto/device trust support is not implemented; encrypted payloads remain blocked"
+                } else {
+                    "Verified Matrix E2EE decryption not requested; encrypted payloads remain fail-closed or metadata-only according to inbound policy"
+                },
+                false,
+            ));
+            checks.push(doctor_check(
+                "migration_recovery",
+                !config.e2ee.verified_decryption_requested
+                    || (config.e2ee.recovery.status == MatrixE2eeMaterialStatus::Verified
+                        && config.e2ee.room_key_backup.status == MatrixE2eeMaterialStatus::Verified),
+                if config.e2ee.verified_decryption_requested {
+                    "E2EE migration remains a structured skip until recovery material, room-key backup, device trust, and audited crypto verification are all available"
+                } else {
+                    "No encrypted-state migration requested; plain sync state can be restored from host-managed snapshots"
+                },
                 false,
             ));
         }
@@ -625,24 +828,33 @@ impl MatrixConnector {
             .sync_state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        Self::tracked_state_json_value(state.last_sync_token.as_deref(), &state.rooms)
+        Self::tracked_state_json_value(
+            state.last_sync_token.as_deref(),
+            &state.rooms,
+            &state.dynamic_direct_message_rooms,
+            &state.thread_participation_roots,
+        )
     }
 
     fn tracked_state_json_value(
         last_sync_token: Option<&str>,
         rooms: &BTreeMap<String, MatrixRoomSummary>,
+        dynamic_direct_message_rooms: &BTreeSet<String>,
+        thread_participation_roots: &BTreeSet<String>,
     ) -> serde_json::Value {
         json!({
             "last_sync_token": last_sync_token,
             "tracked_rooms": rooms.len(),
             "rooms": rooms.iter().map(|(room_id, summary)| summary.snapshot_json(room_id)).collect::<Vec<_>>(),
+            "dynamic_direct_message_rooms": dynamic_direct_message_rooms.iter().cloned().collect::<Vec<_>>(),
+            "thread_participation_roots": thread_participation_roots.iter().cloned().collect::<Vec<_>>(),
         })
     }
 
     fn preview_tracked_state_json(
         &self,
         next_batch: &str,
-        tracked_updates: &BTreeMap<String, MatrixRoomSummary>,
+        projection: &SyncProjection,
     ) -> serde_json::Value {
         let mut rooms = self
             .sync_state
@@ -650,10 +862,158 @@ impl MatrixConnector {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .rooms
             .clone();
-        for (room_id, summary) in tracked_updates {
+        for (room_id, summary) in &projection.tracked_updates {
             rooms.insert(room_id.clone(), summary.clone());
         }
-        Self::tracked_state_json_value(Some(next_batch), &rooms)
+        let state = self
+            .sync_state
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut dynamic_direct_message_rooms = state.dynamic_direct_message_rooms.clone();
+        dynamic_direct_message_rooms
+            .extend(projection.dynamic_direct_message_rooms.iter().cloned());
+        let mut thread_participation_roots = state.thread_participation_roots.clone();
+        thread_participation_roots.extend(projection.thread_participation_roots.iter().cloned());
+        drop(state);
+        Self::tracked_state_json_value(
+            Some(next_batch),
+            &rooms,
+            &dynamic_direct_message_rooms,
+            &thread_participation_roots,
+        )
+    }
+
+    fn validate_supervised_sync_config(config: &MatrixSupervisedSyncConfig) -> FcpResult<()> {
+        if !config.enabled {
+            return Ok(());
+        }
+        let mut errors = Vec::new();
+        if config.poll_interval_ms == 0 {
+            errors.push("supervised_sync.poll_interval_ms must be > 0".to_string());
+        }
+        if config.timeout_ms == 0 {
+            errors.push("supervised_sync.timeout_ms must be > 0".to_string());
+        }
+        if let Err(supervisor_errors) = config.supervisor.validate() {
+            errors.extend(
+                supervisor_errors
+                    .into_iter()
+                    .map(|error| format!("supervised_sync.supervisor.{error}")),
+            );
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(FcpError::InvalidRequest {
+                code: 1005,
+                message: errors.join("; "),
+            })
+        }
+    }
+
+    fn reset_supervised_sync_status(&self, config: &MatrixSupervisedSyncConfig) {
+        let mut status = self
+            .supervised_sync_status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *status = MatrixSupervisedSyncStatus {
+            configured_enabled: config.enabled,
+            running: false,
+            last_status: Some(
+                if config.enabled {
+                    "configured"
+                } else {
+                    "disabled"
+                }
+                .into(),
+            ),
+            ..MatrixSupervisedSyncStatus::default()
+        };
+    }
+
+    fn start_supervised_sync_if_enabled(&self) -> FcpResult<()> {
+        let Some(config) = &self.config else {
+            return Ok(());
+        };
+        if !config.supervised_sync.enabled {
+            return Ok(());
+        }
+        let client = self.client.clone().ok_or_else(|| FcpError::Internal {
+            message: "Matrix supervised sync enabled without initialized client".into(),
+        })?;
+
+        let mut control = self
+            .supervised_sync_control
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if control
+            .task
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return Ok(());
+        }
+        control.task = None;
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let worker = MatrixSupervisedSyncWorker {
+            connector_id: self.base.id.clone(),
+            instance_id: self.base.instance_id.clone(),
+            client,
+            policy: config.inbound_policy.clone(),
+            e2ee: config.e2ee.clone(),
+            state_persistence: config.state_persistence.clone(),
+            config: config.supervised_sync.clone(),
+            sync_state: Arc::clone(&self.sync_state),
+            status: Arc::clone(&self.supervised_sync_status),
+            event_tx: self.event_tx.clone(),
+            next_event_seq: Arc::clone(&self.next_event_seq),
+            subscribed_topics: Arc::clone(&self.subscribed_topics),
+        };
+        let task = fcp_async_core::task::spawn(async move {
+            worker.run(shutdown_rx).await;
+        });
+        control.shutdown_tx = Some(shutdown_tx);
+        control.task = Some(task);
+        drop(control);
+        Ok(())
+    }
+
+    async fn stop_supervised_sync(&self, reason: &str) {
+        let (shutdown_tx, task) = {
+            let mut control = self
+                .supervised_sync_control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            (control.shutdown_tx.take(), control.task.take())
+        };
+
+        if let Some(shutdown_tx) = shutdown_tx {
+            let _ = shutdown_tx.send(true);
+        }
+
+        if let Some(task) = task {
+            let timeout = self
+                .config
+                .as_ref()
+                .map_or(Duration::from_secs(5), |config| {
+                    config.supervised_sync.supervisor.shutdown_timeout()
+                });
+            if fcp_async_core::time::timeout(timeout, task).await.is_err() {
+                warn!(
+                    event = "matrix.supervised_sync.stop_timeout",
+                    reason, "Matrix supervised sync worker did not stop before timeout"
+                );
+            }
+        }
+
+        let mut status = self
+            .supervised_sync_status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.running = false;
+        status.last_status = Some("stopped".into());
+        status.last_stop_reason = Some(reason.to_string());
     }
 }
 
@@ -661,6 +1021,292 @@ impl Default for MatrixConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+impl MatrixSupervisedSyncWorker {
+    async fn run(self, shutdown: watch::Receiver<bool>) {
+        self.mark_started();
+        let outcome = self.run_loop(shutdown).await;
+        self.mark_stopped(&outcome);
+        info!(
+            event = "matrix.supervised_sync.stopped",
+            outcome, "Matrix supervised sync worker stopped"
+        );
+    }
+
+    async fn run_loop(&self, mut shutdown: watch::Receiver<bool>) -> String {
+        let mut consecutive_failures = 0_u32;
+
+        loop {
+            if *shutdown.borrow() {
+                return "shutdown".into();
+            }
+
+            let (used_since, effective_policy) = {
+                let state = self
+                    .sync_state
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                (
+                    state.last_sync_token.clone(),
+                    inbound_policy_with_state(&self.policy, &state),
+                )
+            };
+            let sync_started = Instant::now();
+
+            match self
+                .client
+                .sync(used_since.as_deref(), self.config.timeout_ms)
+                .await
+            {
+                Ok(response) => {
+                    consecutive_failures = 0;
+                    let projection = project_sync_response_with_full_context(
+                        &response,
+                        &effective_policy,
+                        &self.e2ee,
+                        &self.state_persistence,
+                    );
+                    self.persist_projection(&response, &projection);
+                    let emitted = self.emit_projected_events(&response.next_batch, &projection);
+                    self.record_success(
+                        used_since.as_deref(),
+                        &response.next_batch,
+                        &projection,
+                        emitted,
+                        sync_started.elapsed(),
+                    );
+                    if fcp_async_core::shutdown::sleep_or_shutdown(
+                        Duration::from_millis(self.config.poll_interval_ms),
+                        &mut shutdown,
+                    )
+                    .await
+                    .is_err()
+                    {
+                        return "shutdown".into();
+                    }
+                }
+                Err(error) => {
+                    self.record_failure(used_since.as_deref(), &error, sync_started.elapsed());
+                    if !error.is_retryable() {
+                        return format!("fatal:{error}");
+                    }
+                    consecutive_failures = consecutive_failures.saturating_add(1);
+                    if consecutive_failures >= self.config.supervisor.max_consecutive_failures {
+                        return format!("max_failures:{consecutive_failures}");
+                    }
+                    let delay = supervised_sync_backoff(
+                        &self.config.supervisor,
+                        &error,
+                        consecutive_failures,
+                    );
+                    if fcp_async_core::shutdown::sleep_or_shutdown(delay, &mut shutdown)
+                        .await
+                        .is_err()
+                    {
+                        return "shutdown".into();
+                    }
+                }
+            }
+        }
+    }
+
+    fn mark_started(&self) {
+        let mut status = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.configured_enabled = true;
+        status.running = true;
+        status.last_status = Some("running".into());
+        status.last_error = None;
+        status.last_stop_reason = None;
+    }
+
+    fn mark_stopped(&self, reason: &str) {
+        let mut status = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.running = false;
+        status.last_status = Some("stopped".into());
+        status.last_stop_reason = Some(reason.to_string());
+    }
+
+    fn persist_projection(&self, response: &SyncResponse, projection: &SyncProjection) {
+        let mut state = self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        persist_projection_state(&mut state, &response.next_batch, projection);
+    }
+
+    fn emit_projected_events(&self, batch: &str, projection: &SyncProjection) -> usize {
+        let subscribed_topics = self
+            .subscribed_topics
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        if subscribed_topics.is_empty() {
+            return 0;
+        }
+
+        let topic_groups = [
+            (
+                EVENT_MESSAGE_AUTHORIZED,
+                projection.authorized_message_events.as_slice(),
+            ),
+            (
+                EVENT_MESSAGE_DECRYPTED,
+                projection.decrypted_message_events.as_slice(),
+            ),
+            (EVENT_DROPPED, projection.dropped_events.as_slice()),
+            (EVENT_REACTION, projection.reaction_events.as_slice()),
+            (EVENT_ENCRYPTED, projection.encrypted_events.as_slice()),
+        ];
+
+        let mut state = self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut emitted = 0_usize;
+        for (topic, payloads) in topic_groups {
+            if !subscribed_topics
+                .iter()
+                .any(|subscribed| subscribed == topic)
+            {
+                continue;
+            }
+            for payload in payloads {
+                let dedupe_key = matrix_event_dedupe_key(topic, payload);
+                if state.emitted_event_keys.contains(&dedupe_key) {
+                    continue;
+                }
+                let envelope = build_matrix_event_envelope(
+                    &self.connector_id,
+                    &self.instance_id,
+                    &self.next_event_seq,
+                    topic,
+                    batch,
+                    payload,
+                );
+                if self.event_tx.send(Ok(envelope)).is_ok() {
+                    state.emitted_event_keys.insert(dedupe_key);
+                    emitted = emitted.saturating_add(1);
+                }
+            }
+        }
+
+        drop(state);
+        emitted
+    }
+
+    fn record_success(
+        &self,
+        used_since: Option<&str>,
+        next_batch: &str,
+        projection: &SyncProjection,
+        emitted_event_count: usize,
+        duration: Duration,
+    ) {
+        {
+            let mut state = self
+                .sync_state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.telemetry.successful_syncs = state.telemetry.successful_syncs.saturating_add(1);
+            state.telemetry.last_status = Some("supervised_success".into());
+            state.telemetry.last_error = None;
+            state.telemetry.last_duration_ms =
+                Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+            state.telemetry.last_used_since = used_since.map(ToOwned::to_owned);
+            state.telemetry.last_next_batch = Some(next_batch.to_string());
+            state.telemetry.last_persisted = Some(true);
+            state.telemetry.last_room_summary_count = projection.room_summaries.len();
+            state.telemetry.last_message_event_count = projection.message_events.len();
+            state.telemetry.last_membership_change_count = projection.membership_changes.len();
+            state.telemetry.last_state_change_count = projection.state_changes.len();
+            state.telemetry.last_authorized_message_count =
+                projection.authorized_message_events.len();
+            state.telemetry.last_decrypted_message_count =
+                projection.decrypted_message_events.len();
+            state.telemetry.last_dropped_event_count = projection.dropped_events.len();
+            state.telemetry.last_reaction_event_count = projection.reaction_events.len();
+            state.telemetry.last_encrypted_event_count = projection.encrypted_events.len();
+            state.telemetry.last_emitted_event_count = emitted_event_count;
+        }
+
+        let mut status = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.total_polls = status.total_polls.saturating_add(1);
+        status.successful_polls = status.successful_polls.saturating_add(1);
+        status.consecutive_failures = 0;
+        status.emitted_events = status
+            .emitted_events
+            .saturating_add(u64::try_from(emitted_event_count).unwrap_or(u64::MAX));
+        status.last_status = Some("success".into());
+        status.last_error = None;
+        status.last_used_since = used_since.map(ToOwned::to_owned);
+        status.last_next_batch = Some(next_batch.to_string());
+        status.last_duration_ms = Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    }
+
+    fn record_failure(&self, used_since: Option<&str>, error: &MatrixError, duration: Duration) {
+        {
+            let mut state = self
+                .sync_state
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state.telemetry.failed_syncs = state.telemetry.failed_syncs.saturating_add(1);
+            state.telemetry.last_status = Some("supervised_failed".into());
+            state.telemetry.last_error = Some(error.to_string());
+            state.telemetry.last_duration_ms =
+                Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+            state.telemetry.last_used_since = used_since.map(ToOwned::to_owned);
+            state.telemetry.last_next_batch = None;
+            state.telemetry.last_persisted = Some(true);
+            state.telemetry.last_room_summary_count = 0;
+            state.telemetry.last_message_event_count = 0;
+            state.telemetry.last_membership_change_count = 0;
+            state.telemetry.last_state_change_count = 0;
+            state.telemetry.last_authorized_message_count = 0;
+            state.telemetry.last_decrypted_message_count = 0;
+            state.telemetry.last_dropped_event_count = 0;
+            state.telemetry.last_reaction_event_count = 0;
+            state.telemetry.last_encrypted_event_count = 0;
+            state.telemetry.last_emitted_event_count = 0;
+        }
+
+        let mut status = self
+            .status
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        status.total_polls = status.total_polls.saturating_add(1);
+        status.failed_polls = status.failed_polls.saturating_add(1);
+        status.consecutive_failures = status.consecutive_failures.saturating_add(1);
+        status.last_status = Some("failed".into());
+        status.last_error = Some(error.to_string());
+        status.last_used_since = used_since.map(ToOwned::to_owned);
+        status.last_next_batch = None;
+        status.last_duration_ms = Some(u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    }
+}
+
+fn supervised_sync_backoff(
+    config: &SupervisorConfig,
+    error: &MatrixError,
+    consecutive_failures: u32,
+) -> Duration {
+    let attempt = consecutive_failures.saturating_sub(1);
+    let backoff_ms = config.compute_backoff(attempt);
+    let retry_after_ms = error
+        .retry_after()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+    Duration::from_millis(
+        retry_after_ms.map_or(backoff_ms, |retry_after| retry_after.max(backoff_ms)),
+    )
 }
 
 /// Build the typed operations catalog.
@@ -843,14 +1489,14 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SYNC),
             summary: "Run a sync cycle".into(),
             description: Some(
-                "Long-polls the homeserver sync endpoint, translates room/message/member deltas, and optionally updates the connector's in-memory sync cursor".into(),
+                "Long-polls the homeserver sync endpoint, translates room/message/member deltas, and optionally updates the connector's tracked state for in-memory delivery or host-managed snapshot persistence".into(),
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "since": { "type": "string", "description": "Optional explicit sync token. Falls back to the tracked token when omitted." },
                     "timeout_ms": { "type": "integer", "default": 30000, "minimum": 0 },
-                    "persist": { "type": "boolean", "default": true, "description": "Whether to persist the returned next_batch token and tracked room summaries." }
+                    "persist": { "type": "boolean", "default": true, "description": "Whether to update the connector's tracked state. Hosts that need durable resume should persist the returned tracked_state and restore it through state_persistence on configure." }
                 }
             }),
             output_schema: json!({
@@ -861,6 +1507,7 @@ pub fn operations_info() -> Vec<OperationInfo> {
                     "rooms": { "type": "array" },
                     "message_events": { "type": "array" },
                     "authorized_message_events": { "type": "array" },
+                    "decrypted_message_events": { "type": "array" },
                     "dropped_events": { "type": "array" },
                     "reaction_events": { "type": "array" },
                     "encrypted_events": { "type": "array" },
@@ -1165,6 +1812,33 @@ fn normalize_message_event(room_id: &str, event: &Event) -> serde_json::Value {
     })
 }
 
+fn normalize_authorized_message_event(
+    room_id: &str,
+    event: &Event,
+    policy: &MatrixInboundPolicy,
+    context: MatrixRoomPolicyContext,
+) -> serde_json::Value {
+    let mut value = normalize_message_event(room_id, event);
+    let raw_body = event
+        .content
+        .get("body")
+        .and_then(serde_json::Value::as_str);
+    let mentioned_bot = event_mentions_bot(event, policy);
+    value["delivery_body"] = json!(strip_bot_mention(raw_body, policy));
+    value["mentioned_bot"] = json!(mentioned_bot);
+    value["delivery_context"] = json!({
+        "require_mention": policy.require_mention,
+        "mention_present": mentioned_bot,
+        "free_response_room": room_allows_free_response(policy, room_id),
+        "direct_message_room": room_is_configured_direct_message(policy, room_id),
+        "dynamic_direct_message": context.dynamic_direct_message,
+        "thread_participated": event_is_participated_thread(policy, event),
+        "bot_mentions_stripped": policy.workflow.strip_bot_mentions && mentioned_bot,
+    });
+    value["media"] = json!(normalize_media_context(event, policy));
+    value
+}
+
 fn normalize_membership_event(room_id: &str, event: &Event) -> serde_json::Value {
     json!({
         "room_id": room_id,
@@ -1204,15 +1878,505 @@ fn inbound_policy_snapshot(policy: &MatrixInboundPolicy) -> serde_json::Value {
         "require_mention": policy.require_mention,
         "free_response_rooms": policy.free_response_rooms.clone(),
         "direct_message_rooms": policy.direct_message_rooms.clone(),
+        "dynamic_direct_message_detection": policy.workflow.dynamic_direct_message_detection,
+        "direct_message_member_limit": policy.workflow.direct_message_member_limit,
         "thread_participation_roots": policy.thread_participation_roots.clone(),
+        "strip_bot_mentions": policy.workflow.strip_bot_mentions,
         "process_reactions": policy.process_reactions,
+        "approval_reaction_keys": policy.workflow.approval_reaction_keys.clone(),
+        "media_max_bytes": policy.workflow.media_max_bytes,
         "encrypted_events": encrypted_event_policy_label(policy.encrypted_events),
     })
 }
 
-const fn matrix_event_topics() -> [&'static str; 4] {
+fn extend_policy_vec(values: &mut Vec<String>, updates: &BTreeSet<String>) {
+    for value in updates {
+        if !values.iter().any(|existing| existing == value) {
+            values.push(value.clone());
+        }
+    }
+}
+
+fn inbound_policy_with_state(
+    policy: &MatrixInboundPolicy,
+    state: &MatrixSyncState,
+) -> MatrixInboundPolicy {
+    let mut effective = policy.clone();
+    extend_policy_vec(
+        &mut effective.direct_message_rooms,
+        &state.dynamic_direct_message_rooms,
+    );
+    extend_policy_vec(
+        &mut effective.thread_participation_roots,
+        &state.thread_participation_roots,
+    );
+    effective
+}
+
+fn persist_projection_state(
+    state: &mut MatrixSyncState,
+    next_batch: &str,
+    projection: &SyncProjection,
+) {
+    state.last_sync_token = Some(next_batch.to_string());
+    for (room_id, summary) in &projection.tracked_updates {
+        state.rooms.insert(room_id.clone(), summary.clone());
+    }
+    state
+        .dynamic_direct_message_rooms
+        .extend(projection.dynamic_direct_message_rooms.iter().cloned());
+    state
+        .thread_participation_roots
+        .extend(projection.thread_participation_roots.iter().cloned());
+}
+
+fn sync_state_from_persistence_config(config: &MatrixStatePersistenceConfig) -> MatrixSyncState {
+    let mut state = MatrixSyncState::default();
+    if config.enabled {
+        state
+            .last_sync_token
+            .clone_from(&config.restore.last_sync_token);
+        state
+            .dynamic_direct_message_rooms
+            .extend(config.restore.dynamic_direct_message_rooms.iter().cloned());
+        state
+            .thread_participation_roots
+            .extend(config.restore.thread_participation_roots.iter().cloned());
+    }
+    state
+}
+
+fn supervised_sync_config_snapshot(config: &MatrixSupervisedSyncConfig) -> serde_json::Value {
+    json!({
+        "enabled": config.enabled,
+        "poll_interval_ms": config.poll_interval_ms,
+        "timeout_ms": config.timeout_ms,
+        "base_backoff_ms": config.supervisor.base_backoff_ms,
+        "max_backoff_ms": config.supervisor.max_backoff_ms,
+        "jitter_enabled": config.supervisor.jitter_enabled,
+        "max_consecutive_failures": config.supervisor.max_consecutive_failures,
+        "shutdown_timeout_ms": config.supervisor.shutdown_timeout_ms,
+    })
+}
+
+fn state_persistence_snapshot(config: &MatrixStatePersistenceConfig) -> serde_json::Value {
+    json!({
+        "enabled": config.enabled,
+        "backend": state_persistence_backend_label(config.backend),
+        "connector_local_durable_writes": false,
+        "effective_runtime_state": if config.enabled {
+            "host_managed_snapshot_restore_then_in_memory_tracking"
+        } else {
+            "in_memory_only"
+        },
+        "zone_scope": redacted_identifier_snapshot(config.zone_id.as_deref()),
+        "account_scope": redacted_identifier_snapshot(config.account_user_id.as_deref()),
+        "device_scope": redacted_identifier_snapshot(config.device_id.as_deref()),
+        "restore": {
+            "last_sync_token_configured": config.restore.last_sync_token.is_some(),
+            "dynamic_direct_message_room_count": config.restore.dynamic_direct_message_rooms.len(),
+            "thread_participation_root_count": config.restore.thread_participation_roots.len(),
+        },
+        "limits": {
+            "max_tracked_rooms": config.limits.max_tracked_rooms,
+            "max_thread_participation_roots": config.limits.max_thread_participation_roots,
+        },
+        "operator_note": if config.enabled {
+            "Host must persist the redaction-safe tracked_state returned by matrix.sync and pass it back through this restore config on next configure; this connector does not write Matrix state to local disk."
+        } else {
+            "Durable state persistence disabled; configure resets Matrix sync cursor, dynamic DM classifications, and participated thread roots."
+        },
+    })
+}
+
+const fn e2ee_material_status_label(status: MatrixE2eeMaterialStatus) -> &'static str {
+    match status {
+        MatrixE2eeMaterialStatus::Unknown => "unknown",
+        MatrixE2eeMaterialStatus::Missing => "missing",
+        MatrixE2eeMaterialStatus::PresentUnverified => "present_unverified",
+        MatrixE2eeMaterialStatus::Verified => "verified",
+    }
+}
+
+const fn e2ee_device_list_status_label(status: MatrixE2eeDeviceListStatus) -> &'static str {
+    match status {
+        MatrixE2eeDeviceListStatus::Unknown => "unknown",
+        MatrixE2eeDeviceListStatus::Missing => "missing",
+        MatrixE2eeDeviceListStatus::Stale => "stale",
+        MatrixE2eeDeviceListStatus::Fresh => "fresh",
+    }
+}
+
+fn matrix_user_id_valid(user_id: &str) -> bool {
+    user_id.starts_with('@')
+        && user_id.contains(':')
+        && !user_id.chars().any(char::is_whitespace)
+        && user_id.len() > 3
+}
+
+fn matrix_device_id_valid(device_id: &str) -> bool {
+    !device_id.is_empty() && device_id.len() <= 255 && !device_id.chars().any(char::is_whitespace)
+}
+
+fn matrix_scope_id_valid(scope_id: &str) -> bool {
+    !scope_id.trim().is_empty() && !scope_id.chars().any(char::is_whitespace)
+}
+
+fn matrix_restore_token_valid(token: &str) -> bool {
+    !token.trim().is_empty() && token.len() <= 4_096 && !token.chars().any(char::is_whitespace)
+}
+
+fn matrix_room_id_valid(room_id: &str) -> bool {
+    room_id.starts_with('!') && room_id.contains(':') && !room_id.chars().any(char::is_whitespace)
+}
+
+fn matrix_thread_root_valid(thread_root: &str) -> bool {
+    thread_root.starts_with('$') && !thread_root.chars().any(char::is_whitespace)
+}
+
+fn validate_e2ee_config(config: &MatrixE2eeConfig) -> FcpResult<()> {
+    let mut errors = Vec::new();
+
+    if let Some(user_id) = config.account_user_id.as_deref()
+        && !matrix_user_id_valid(user_id)
+    {
+        errors.push("e2ee.account_user_id must be a Matrix user ID like @user:server".to_string());
+    }
+
+    if let Some(device_id) = config.device_id.as_deref()
+        && !matrix_device_id_valid(device_id)
+    {
+        errors.push(
+            "e2ee.device_id must be non-empty, <=255 characters, and contain no whitespace"
+                .to_string(),
+        );
+    }
+    if config.verified_decryption_requested && config.account_user_id.is_none() {
+        errors.push(
+            "e2ee.account_user_id is required when verified_decryption_requested=true".to_string(),
+        );
+    }
+    if config.verified_decryption_requested && config.device_id.is_none() {
+        errors
+            .push("e2ee.device_id is required when verified_decryption_requested=true".to_string());
+    }
+    if config
+        .trust_state
+        .tracked_users
+        .iter()
+        .any(|user_id| !matrix_user_id_valid(user_id))
+    {
+        errors.push("e2ee.trust_state.tracked_users must contain Matrix user IDs".to_string());
+    }
+    if config
+        .trust_state
+        .tracked_rooms
+        .iter()
+        .any(|room_id| !matrix_room_id_valid(room_id))
+    {
+        errors.push("e2ee.trust_state.tracked_rooms must contain Matrix room IDs".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1006,
+            message: errors.join("; "),
+        })
+    }
+}
+
+fn validate_state_persistence_config(
+    config: &MatrixStatePersistenceConfig,
+    e2ee: &MatrixE2eeConfig,
+) -> FcpResult<()> {
+    let mut errors = Vec::new();
+    validate_state_persistence_limits(config, &mut errors);
+    validate_state_persistence_restore(config, &mut errors);
+    if config.enabled {
+        validate_state_persistence_scope(config, e2ee, &mut errors);
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1007,
+            message: errors.join("; "),
+        })
+    }
+}
+
+fn validate_state_persistence_limits(
+    config: &MatrixStatePersistenceConfig,
+    errors: &mut Vec<String>,
+) {
+    if config.limits.max_tracked_rooms == 0 {
+        errors.push("state_persistence.limits.max_tracked_rooms must be > 0".to_string());
+    }
+    if config.limits.max_thread_participation_roots == 0 {
+        errors.push(
+            "state_persistence.limits.max_thread_participation_roots must be > 0".to_string(),
+        );
+    }
+    if config.restore.dynamic_direct_message_rooms.len() > config.limits.max_tracked_rooms {
+        errors.push(
+            "state_persistence.restore.dynamic_direct_message_rooms exceeds state_persistence.limits.max_tracked_rooms"
+                .to_string(),
+        );
+    }
+    if config.restore.thread_participation_roots.len()
+        > config.limits.max_thread_participation_roots
+    {
+        errors.push(
+            "state_persistence.restore.thread_participation_roots exceeds state_persistence.limits.max_thread_participation_roots"
+                .to_string(),
+        );
+    }
+}
+
+fn validate_state_persistence_restore(
+    config: &MatrixStatePersistenceConfig,
+    errors: &mut Vec<String>,
+) {
+    if config
+        .restore
+        .dynamic_direct_message_rooms
+        .iter()
+        .any(|room_id| !matrix_room_id_valid(room_id))
+    {
+        errors.push(
+            "state_persistence.restore.dynamic_direct_message_rooms must contain Matrix room IDs"
+                .to_string(),
+        );
+    }
+    if config
+        .restore
+        .thread_participation_roots
+        .iter()
+        .any(|root| !matrix_thread_root_valid(root))
+    {
+        errors.push(
+            "state_persistence.restore.thread_participation_roots must contain Matrix event IDs"
+                .to_string(),
+        );
+    }
+    if let Some(token) = config.restore.last_sync_token.as_deref()
+        && !matrix_restore_token_valid(token)
+    {
+        errors.push(
+            "state_persistence.restore.last_sync_token must be non-empty, <=4096 bytes, and contain no whitespace"
+                .to_string(),
+        );
+    }
+}
+
+fn validate_state_persistence_scope(
+    config: &MatrixStatePersistenceConfig,
+    e2ee: &MatrixE2eeConfig,
+    errors: &mut Vec<String>,
+) {
+    if config.backend != MatrixStatePersistenceBackend::HostManagedSnapshot {
+        errors.push(
+            "state_persistence.enabled requires state_persistence.backend=host_managed_snapshot"
+                .to_string(),
+        );
+    }
+    match config.zone_id.as_deref() {
+        Some(zone_id) if matrix_scope_id_valid(zone_id) => {}
+        _ => errors.push(
+            "state_persistence.zone_id is required when state persistence is enabled".to_string(),
+        ),
+    }
+    match config.account_user_id.as_deref() {
+        Some(account_user_id) if matrix_user_id_valid(account_user_id) => {}
+        _ => errors.push(
+            "state_persistence.account_user_id must be a Matrix user ID when state persistence is enabled"
+                .to_string(),
+        ),
+    }
+    match config.device_id.as_deref() {
+        Some(device_id) if matrix_device_id_valid(device_id) => {}
+        _ => {
+            errors.push(
+                "state_persistence.device_id must be non-empty, <=255 characters, and contain no whitespace when state persistence is enabled"
+                    .to_string(),
+            );
+        }
+    }
+    if let (Some(state_account), Some(e2ee_account)) = (
+        config.account_user_id.as_deref(),
+        e2ee.account_user_id.as_deref(),
+    ) && state_account != e2ee_account
+    {
+        errors.push(
+            "state_persistence.account_user_id must match e2ee.account_user_id when both are configured"
+                .to_string(),
+        );
+    }
+    if let (Some(state_device), Some(e2ee_device)) =
+        (config.device_id.as_deref(), e2ee.device_id.as_deref())
+        && state_device != e2ee_device
+    {
+        errors.push(
+            "state_persistence.device_id must match e2ee.device_id when both are configured"
+                .to_string(),
+        );
+    }
+}
+
+fn validate_inbound_policy(policy: &MatrixInboundPolicy) -> FcpResult<()> {
+    let mut errors = Vec::new();
+
+    if policy.workflow.dynamic_direct_message_detection && policy.bot_user_id.is_none() {
+        errors.push(
+            "inbound_policy.dynamic_direct_message_detection requires inbound_policy.bot_user_id"
+                .to_string(),
+        );
+    }
+    if policy.workflow.dynamic_direct_message_detection
+        && policy.workflow.direct_message_member_limit < 2
+    {
+        errors.push(
+            "inbound_policy.direct_message_member_limit must be at least 2 when dynamic direct-message detection is enabled"
+                .to_string(),
+        );
+    }
+    if policy
+        .workflow
+        .approval_reaction_keys
+        .iter()
+        .any(|key| key.trim().is_empty())
+    {
+        errors.push("inbound_policy.approval_reaction_keys cannot contain empty keys".to_string());
+    }
+    if policy.workflow.media_max_bytes == Some(0) {
+        errors.push("inbound_policy.media_max_bytes must be greater than 0 when set".to_string());
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1006,
+            message: errors.join("; "),
+        })
+    }
+}
+
+const fn e2ee_undecrypted_classification(config: &MatrixE2eeConfig) -> &'static str {
+    if config.undecrypted_retry.max_attempts == 0 {
+        "final_failure"
+    } else {
+        "retryable_until_budget_exhausted"
+    }
+}
+
+fn e2ee_status_snapshot_for_config(config: &MatrixConfig) -> serde_json::Value {
+    let e2ee = &config.e2ee;
+    let crypto = MatrixCryptoEngine::new();
+    let decision = crypto.encrypted_event_decision(config.inbound_policy.encrypted_events, e2ee);
+    let trust_state = crypto.trust_state_snapshot(e2ee, &config.state_persistence);
+    let maintenance = maintenance_driver_snapshot(e2ee);
+    let requested_unavailable =
+        e2ee.verified_decryption_requested && !decision.verified_decryption_available;
+    json!({
+        "verified_decryption_requested": e2ee.verified_decryption_requested,
+        "verified_decryption_available": decision.verified_decryption_available,
+        "decryption_status": if requested_unavailable { decision.decryption_status } else { "not_requested" },
+        "denial_reason": if requested_unavailable {
+            Some(decision.reason_message)
+        } else {
+            None
+        },
+        "encrypted_event_delivery_policy": decision.delivery_policy,
+        "crypto_backend": crypto.status_snapshot(e2ee),
+        "trust_state": trust_state,
+        "maintenance": maintenance,
+        "recovery_guidance": recovery_guidance_snapshot(e2ee),
+        "ciphertext_redacted": true,
+        "account_identity": {
+            "configured": e2ee.account_user_id.is_some(),
+            "valid_shape": e2ee.account_user_id.as_deref().map(matrix_user_id_valid),
+            "verification": "not_verified",
+        },
+        "device_identity": {
+            "configured": e2ee.device_id.is_some(),
+            "valid_shape": e2ee.device_id.as_deref().map(matrix_device_id_valid),
+            "trust_required": e2ee.trust.require_verified_device_trust,
+            "trust_status": e2ee_material_status_label(e2ee.trust_state.own_device),
+            "trust_verified": e2ee.trust_state.own_device == MatrixE2eeMaterialStatus::Verified,
+        },
+        "device_keys": {
+            "status": e2ee_material_status_label(e2ee.trust_state.device_keys),
+            "verified": e2ee.trust_state.device_keys == MatrixE2eeMaterialStatus::Verified,
+        },
+        "device_list": {
+            "status": e2ee_device_list_status_label(e2ee.trust_state.device_list.status),
+            "last_refresh_age_ms": e2ee.trust_state.device_list.last_refresh_age_ms,
+            "fresh": e2ee.trust_state.device_list.status == MatrixE2eeDeviceListStatus::Fresh,
+        },
+        "cross_signing": {
+            "required": e2ee.trust.require_cross_signing,
+            "status": e2ee_material_status_label(e2ee.trust_state.cross_signing),
+            "verified": e2ee.trust_state.cross_signing == MatrixE2eeMaterialStatus::Verified,
+        },
+        "recovery": {
+            "status": e2ee_material_status_label(e2ee.recovery.status),
+            "verified": false,
+        },
+        "room_key_backup": {
+            "required": e2ee.trust.require_room_key_backup,
+            "status": e2ee_material_status_label(e2ee.room_key_backup.status),
+            "backup_version": e2ee.room_key_backup.backup_version.clone(),
+            "verified": false,
+        },
+        "undecrypted_retry": {
+            "max_attempts": e2ee.undecrypted_retry.max_attempts,
+            "retry_after_ms": e2ee.undecrypted_retry.retry_after_ms,
+            "classification": e2ee_undecrypted_classification(e2ee),
+            "driver": "host_persisted_retry_budget",
+        },
+        "key_share_after_initial_sync": key_share_after_initial_sync_snapshot(
+            config.state_persistence.restore.last_sync_token.is_some(),
+            e2ee.trust_state.tracked_rooms.len(),
+        ),
+        "structured_skip": {
+            "reason_code": decision.reason_code,
+            "covers": [
+                "verified_decrypt_success",
+                "wrong_device_denial",
+                "wrong_room_key_denial",
+                "backup_mismatch_denial"
+            ]
+        },
+    })
+}
+
+fn e2ee_status_snapshot_for_optional_config(config: Option<&MatrixConfig>) -> serde_json::Value {
+    config.map_or_else(
+        || {
+            json!({
+                "configured": false,
+                "verified_decryption_requested": false,
+                "verified_decryption_available": false,
+                "decryption_status": "not_configured",
+                "ciphertext_redacted": true,
+            })
+        },
+        |config| {
+            let mut snapshot = e2ee_status_snapshot_for_config(config);
+            snapshot["configured"] = json!(true);
+            snapshot
+        },
+    )
+}
+
+const fn matrix_event_topics() -> [&'static str; 5] {
     [
         EVENT_MESSAGE_AUTHORIZED,
+        EVENT_MESSAGE_DECRYPTED,
         EVENT_DROPPED,
         EVENT_REACTION,
         EVENT_ENCRYPTED,
@@ -1258,6 +2422,7 @@ fn matrix_event_caps() -> EventCaps {
 fn matrix_event_schema(topic: &str) -> serde_json::Value {
     let description = match topic {
         EVENT_MESSAGE_AUTHORIZED => "Policy-authorized Matrix room message",
+        EVENT_MESSAGE_DECRYPTED => "Trust-gated verified decrypted Matrix room message",
         EVENT_DROPPED => "Matrix timeline event dropped before agent delivery",
         EVENT_REACTION => "Matrix reaction event",
         EVENT_ENCRYPTED => "Matrix encrypted event metadata",
@@ -1316,6 +2481,15 @@ fn matrix_event_resource_uris(payload: &serde_json::Value) -> Vec<String> {
     {
         uris.push(format!("matrix:event:{target_event_id}"));
     }
+    if let Some(mxc_uri) = payload
+        .get("media")
+        .and_then(|media| media.get("mxc_uri"))
+        .and_then(serde_json::Value::as_str)
+        && let Some(rest) = mxc_uri.strip_prefix("mxc://")
+        && !rest.is_empty()
+    {
+        uris.push(format!("matrix:media:{rest}"));
+    }
     uris
 }
 
@@ -1325,6 +2499,73 @@ fn matrix_event_thread_info(payload: &serde_json::Value) -> Option<ThreadInfo> {
         .and_then(serde_json::Value::as_str)?;
     let room_id = payload.get("room_id").and_then(serde_json::Value::as_str)?;
     Some(ThreadInfo::new(thread_root_event_id, ThreadKind::Reply).with_parent_id(room_id))
+}
+
+fn matrix_event_dedupe_key(topic: &str, payload: &serde_json::Value) -> String {
+    let room_id = payload
+        .get("room_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let event_id = payload
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    if !event_id.is_empty() {
+        return format!("{topic}|{room_id}|{event_id}");
+    }
+
+    let fallback = serde_json::to_string(payload).unwrap_or_else(|_| "unserializable".into());
+    format!("{topic}|{room_id}|{fallback}")
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct MatrixRoomPolicyContext {
+    dynamic_direct_message: bool,
+}
+
+#[derive(Clone, Copy)]
+struct MatrixProjectionPolicyContext<'a> {
+    policy: &'a MatrixInboundPolicy,
+    e2ee: &'a MatrixE2eeConfig,
+    state_persistence: &'a MatrixStatePersistenceConfig,
+}
+
+fn build_matrix_event_envelope(
+    connector_id: &ConnectorId,
+    instance_id: &InstanceId,
+    next_event_seq: &AtomicU64,
+    topic: &'static str,
+    batch: &str,
+    payload: &serde_json::Value,
+) -> EventEnvelope {
+    let seq = next_event_seq.fetch_add(1, AtomicOrdering::Relaxed);
+    let event_id = payload
+        .get("event_id")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("event");
+    let event_data = EventData::new(
+        connector_id.clone(),
+        instance_id.clone(),
+        ZoneId::community(),
+        matrix_event_principal(payload),
+        payload.clone(),
+    )
+    .with_resource_uris(matrix_event_resource_uris(payload));
+    let event_data = if let Some(thread_info) = matrix_event_thread_info(payload) {
+        event_data.with_thread_info(thread_info)
+    } else {
+        event_data
+    };
+    let mut envelope = EventEnvelope::new(topic, event_data)
+        .with_seq(seq)
+        .with_cursor(format!("{batch}:{event_id}:{seq}"))
+        .with_ordering(OrderingPolicy::PerKey);
+
+    if let Some(room_id) = payload.get("room_id").and_then(serde_json::Value::as_str) {
+        envelope = envelope.with_stream_key(room_id);
+    }
+
+    envelope
 }
 
 fn sender_allowed(policy: &MatrixInboundPolicy, sender: Option<&str>) -> bool {
@@ -1344,7 +2585,19 @@ fn room_allows_free_response(policy: &MatrixInboundPolicy, room_id: &str) -> boo
         .any(|allowed_room| allowed_room == room_id)
 }
 
-fn room_is_direct_message(policy: &MatrixInboundPolicy, room_id: &str) -> bool {
+fn room_is_direct_message(
+    policy: &MatrixInboundPolicy,
+    room_id: &str,
+    context: MatrixRoomPolicyContext,
+) -> bool {
+    context.dynamic_direct_message
+        || policy
+            .direct_message_rooms
+            .iter()
+            .any(|direct_room| direct_room == room_id)
+}
+
+fn room_is_configured_direct_message(policy: &MatrixInboundPolicy, room_id: &str) -> bool {
     policy
         .direct_message_rooms
         .iter()
@@ -1379,13 +2632,60 @@ fn event_is_participated_thread(policy: &MatrixInboundPolicy, event: &Event) -> 
         .any(|known_root| known_root == thread_root_event_id)
 }
 
+fn room_is_dynamic_direct_message(
+    policy: &MatrixInboundPolicy,
+    summary: &MatrixRoomSummary,
+) -> bool {
+    if !policy.workflow.dynamic_direct_message_detection
+        || policy.workflow.direct_message_member_limit == 0
+    {
+        return false;
+    }
+    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+        return false;
+    };
+    let joined_members = summary.joined_user_ids.len();
+    joined_members >= 2
+        && joined_members <= policy.workflow.direct_message_member_limit
+        && summary.joined_user_ids.contains(bot_user_id)
+}
+
+fn record_thread_participation(
+    projection: &mut SyncProjection,
+    policy: &mut MatrixInboundPolicy,
+    event: &Event,
+) {
+    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+        return;
+    };
+    if event.sender.as_deref() != Some(bot_user_id) {
+        return;
+    }
+    let Some(thread_root_event_id) = matrix_thread_root_event_id(event) else {
+        return;
+    };
+    projection
+        .thread_participation_roots
+        .insert(thread_root_event_id.to_string());
+    if !policy
+        .thread_participation_roots
+        .iter()
+        .any(|known| known == thread_root_event_id)
+    {
+        policy
+            .thread_participation_roots
+            .push(thread_root_event_id.to_string());
+    }
+}
+
 fn event_allows_unmentioned_delivery(
     policy: &MatrixInboundPolicy,
     room_id: &str,
     event: &Event,
+    context: MatrixRoomPolicyContext,
 ) -> bool {
     room_allows_free_response(policy, room_id)
-        || room_is_direct_message(policy, room_id)
+        || room_is_direct_message(policy, room_id, context)
         || event_is_participated_thread(policy, event)
 }
 
@@ -1412,12 +2712,107 @@ fn event_mentions_bot(event: &Event, policy: &MatrixInboundPolicy) -> bool {
         .get("body")
         .and_then(serde_json::Value::as_str)
         .is_some_and(|body| body.contains(bot_user_id))
+        || event
+            .content
+            .get("formatted_body")
+            .and_then(serde_json::Value::as_str)
+            .is_some_and(|body| body.contains(bot_user_id))
+}
+
+fn strip_bot_mention(body: Option<&str>, policy: &MatrixInboundPolicy) -> Option<String> {
+    let body = body?;
+    if !policy.workflow.strip_bot_mentions {
+        return Some(body.to_string());
+    }
+    let Some(bot_user_id) = policy.bot_user_id.as_deref() else {
+        return Some(body.to_string());
+    };
+    let stripped = body
+        .replace(bot_user_id, "")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    Some(stripped)
+}
+
+fn matrix_media_size(event: &Event) -> Option<u64> {
+    event.content.get("info").and_then(|info| {
+        info.get("size")
+            .and_then(serde_json::Value::as_u64)
+            .or_else(|| info.get("size_bytes").and_then(serde_json::Value::as_u64))
+    })
+}
+
+fn matrix_media_msgtype(event: &Event) -> Option<&str> {
+    event
+        .content
+        .get("msgtype")
+        .and_then(serde_json::Value::as_str)
+}
+
+fn matrix_message_is_media(event: &Event) -> bool {
+    matches!(
+        matrix_media_msgtype(event),
+        Some("m.image" | "m.file" | "m.audio" | "m.video")
+    ) || event.content.get("url").is_some()
+}
+
+fn matrix_media_drop_reason(event: &Event, policy: &MatrixInboundPolicy) -> Option<&'static str> {
+    let max_bytes = policy.workflow.media_max_bytes?;
+    let size = matrix_media_size(event)?;
+    (size > max_bytes).then_some("media_too_large")
+}
+
+fn normalize_media_context(
+    event: &Event,
+    policy: &MatrixInboundPolicy,
+) -> Option<serde_json::Value> {
+    if !matrix_message_is_media(event) {
+        return None;
+    }
+    let size_bytes = matrix_media_size(event);
+    let max_bytes = policy.workflow.media_max_bytes;
+    let within_size_limit = max_bytes.zip(size_bytes).map(|(max, size)| size <= max);
+    Some(json!({
+        "msgtype": matrix_media_msgtype(event),
+        "mxc_uri": event.content.get("url").and_then(serde_json::Value::as_str),
+        "filename": event
+            .content
+            .get("filename")
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| event.content.get("body").and_then(serde_json::Value::as_str)),
+        "content_type": event
+            .content
+            .get("info")
+            .and_then(|info| info.get("mimetype"))
+            .and_then(serde_json::Value::as_str),
+        "size_bytes": size_bytes,
+        "width": event
+            .content
+            .get("info")
+            .and_then(|info| info.get("w"))
+            .and_then(serde_json::Value::as_u64),
+        "height": event
+            .content
+            .get("info")
+            .and_then(|info| info.get("h"))
+            .and_then(serde_json::Value::as_u64),
+        "duration_ms": event
+            .content
+            .get("info")
+            .and_then(|info| info.get("duration"))
+            .and_then(serde_json::Value::as_u64),
+        "media_max_bytes": max_bytes,
+        "within_size_limit": within_size_limit,
+        "raw_bytes_redacted": true,
+    }))
 }
 
 fn inbound_message_drop_reason(
     room_id: &str,
     event: &Event,
     policy: &MatrixInboundPolicy,
+    context: MatrixRoomPolicyContext,
 ) -> Option<&'static str> {
     let sender = event.sender.as_deref();
     if policy
@@ -1433,10 +2828,14 @@ fn inbound_message_drop_reason(
     }
 
     if policy.require_mention
-        && !event_allows_unmentioned_delivery(policy, room_id, event)
+        && !event_allows_unmentioned_delivery(policy, room_id, event, context)
         && !event_mentions_bot(event, policy)
     {
         return Some("mention_required");
+    }
+
+    if let Some(reason) = matrix_media_drop_reason(event, policy) {
+        return Some(reason);
     }
 
     None
@@ -1453,8 +2852,57 @@ fn policy_metadata_event(room_id: &str, event: &Event, reason: &str) -> serde_js
     })
 }
 
-fn normalize_reaction_event(room_id: &str, event: &Event) -> serde_json::Value {
+fn reaction_key(event: &Event) -> Option<&str> {
+    event
+        .content
+        .get("m.relates_to")
+        .and_then(|value| value.get("key"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn reaction_target_event_id(event: &Event) -> Option<&str> {
+    event
+        .content
+        .get("m.relates_to")
+        .and_then(|value| value.get("event_id"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn reaction_drop_reason(event: &Event, policy: &MatrixInboundPolicy) -> Option<&'static str> {
+    if !policy.process_reactions {
+        return Some("reactions_disabled");
+    }
+    let sender = event.sender.as_deref();
+    if policy
+        .bot_user_id
+        .as_deref()
+        .is_some_and(|bot| sender == Some(bot))
+    {
+        return Some("self_event");
+    }
+    if !sender_allowed(policy, sender) {
+        return Some("sender_not_allowed");
+    }
+    if reaction_target_event_id(event).is_none() || reaction_key(event).is_none() {
+        return Some("malformed_reaction");
+    }
+    None
+}
+
+fn normalize_reaction_event(
+    room_id: &str,
+    event: &Event,
+    policy: &MatrixInboundPolicy,
+) -> serde_json::Value {
     let relation = event.content.get("m.relates_to");
+    let key = reaction_key(event);
+    let approval_allowed = key.is_some_and(|key| {
+        policy
+            .workflow
+            .approval_reaction_keys
+            .iter()
+            .any(|approval_key| approval_key == key)
+    });
     json!({
         "room_id": room_id,
         "event_id": event.event_id,
@@ -1469,14 +2917,74 @@ fn normalize_reaction_event(room_id: &str, event: &Event) -> serde_json::Value {
         "key": relation
             .and_then(|value| value.get("key"))
             .and_then(serde_json::Value::as_str),
+        "approval": {
+            "approved": approval_allowed,
+            "reaction_key": key,
+            "allowed_keys": policy.workflow.approval_reaction_keys.clone(),
+            "denial_reason": if approval_allowed {
+                None
+            } else {
+                Some("reaction_key_not_configured_for_approval")
+            },
+        },
     })
+}
+
+fn encrypted_event_redaction_state(event: &Event) -> MatrixEncryptedEventRedactionState {
+    if event
+        .content
+        .get("unsigned")
+        .and_then(|value| value.get("redacted_because"))
+        .is_some()
+        || event.content.get("redacted_because").is_some()
+    {
+        MatrixEncryptedEventRedactionState::Redacted
+    } else {
+        MatrixEncryptedEventRedactionState::Clear
+    }
+}
+
+fn encrypted_projection_context(
+    room_id: &str,
+    event: &Event,
+    retry_attempts_used: u32,
+) -> MatrixEncryptedEventProjectionContext {
+    MatrixEncryptedEventProjectionContext {
+        room_id: room_id.to_string(),
+        event_id: event.event_id.clone(),
+        sender: event.sender.clone(),
+        origin_server_ts: event.origin_server_ts,
+        algorithm: event
+            .content
+            .get("algorithm")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        session_id: event
+            .content
+            .get("session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        redaction_state: encrypted_event_redaction_state(event),
+        retry_attempts_used,
+    }
 }
 
 fn normalize_encrypted_event(
     room_id: &str,
     event: &Event,
     policy: MatrixEncryptedEventPolicy,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+    decrypted_projection: &MatrixTrustGatedDecryptedProjection,
 ) -> serde_json::Value {
+    let crypto = MatrixCryptoEngine::new();
+    let decision = crypto.encrypted_event_decision(policy, e2ee);
+    let undecrypted_retry = undecrypted_retry_decision_snapshot(
+        event.event_id.as_deref(),
+        room_id,
+        0,
+        &e2ee.undecrypted_retry,
+    );
     json!({
         "room_id": room_id,
         "event_id": event.event_id,
@@ -1490,49 +2998,112 @@ fn normalize_encrypted_event(
             .content
             .get("session_id")
             .and_then(serde_json::Value::as_str),
-        "delivery_policy": encrypted_event_policy_label(policy),
+        "delivery_policy": decision.delivery_policy,
+        "ciphertext_redacted": true,
+        "verified_decryption_requested": e2ee.verified_decryption_requested,
+        "verified_decryption_available": decision.verified_decryption_available,
+        "decryption_status": decision.decryption_status,
+        "decryption_reason": decision.reason_code,
+        "crypto_backend": crypto.status_snapshot(e2ee),
+        "trust_state": crypto.trust_state_snapshot(e2ee, state_persistence),
+        "maintenance": maintenance_driver_snapshot(e2ee),
+        "recovery_guidance": recovery_guidance_snapshot(e2ee),
+        "account_user_id_configured": e2ee.account_user_id.is_some(),
+        "device_id_configured": e2ee.device_id.is_some(),
+        "device_trust_verified": e2ee.trust_state.own_device == MatrixE2eeMaterialStatus::Verified,
+        "device_keys_status": e2ee_material_status_label(e2ee.trust_state.device_keys),
+        "device_list_status": e2ee_device_list_status_label(e2ee.trust_state.device_list.status),
+        "cross_signing_status": e2ee_material_status_label(e2ee.trust_state.cross_signing),
+        "recovery_status": e2ee_material_status_label(e2ee.recovery.status),
+        "room_key_backup_status": e2ee_material_status_label(e2ee.room_key_backup.status),
+        "undecrypted_retry": undecrypted_retry,
+        "decrypted_projection": decrypted_projection.metadata_event.clone(),
     })
+}
+
+fn project_encrypted_event_with_candidate(
+    projection: &mut SyncProjection,
+    room_id: &str,
+    event: &Event,
+    projection_policy: MatrixProjectionPolicyContext<'_>,
+    candidate: Option<&MatrixVerifiedDecryptedMessageEvent>,
+) {
+    let context = encrypted_projection_context(room_id, event, 0);
+    let decrypted_projection = project_trust_gated_decrypted_event(
+        &context,
+        candidate,
+        projection_policy.e2ee,
+        projection_policy.state_persistence,
+        &[],
+    );
+    projection.encrypted_events.push(normalize_encrypted_event(
+        room_id,
+        event,
+        projection_policy.policy.encrypted_events,
+        projection_policy.e2ee,
+        projection_policy.state_persistence,
+        &decrypted_projection,
+    ));
+    if let Some(event) = decrypted_projection.authorized_event {
+        projection.decrypted_message_events.push(event);
+    } else if projection_policy.e2ee.verified_decryption_requested
+        && let Some(reason) = decrypted_projection.dropped_reason
+    {
+        projection
+            .dropped_events
+            .push(policy_metadata_event(room_id, event, reason));
+    }
 }
 
 fn project_inbound_policy_event(
     projection: &mut SyncProjection,
     room_id: &str,
     event: &Event,
-    policy: &MatrixInboundPolicy,
+    projection_policy: MatrixProjectionPolicyContext<'_>,
+    context: MatrixRoomPolicyContext,
 ) {
     match event.r#type.as_str() {
         "m.room.message" => {
-            if let Some(reason) = inbound_message_drop_reason(room_id, event, policy) {
+            if let Some(reason) =
+                inbound_message_drop_reason(room_id, event, projection_policy.policy, context)
+            {
                 projection
                     .dropped_events
                     .push(policy_metadata_event(room_id, event, reason));
             } else {
                 projection
                     .authorized_message_events
-                    .push(normalize_message_event(room_id, event));
+                    .push(normalize_authorized_message_event(
+                        room_id,
+                        event,
+                        projection_policy.policy,
+                        context,
+                    ));
             }
         }
         "m.reaction" => {
-            if policy.process_reactions {
+            if let Some(reason) = reaction_drop_reason(event, projection_policy.policy) {
                 projection
-                    .reaction_events
-                    .push(normalize_reaction_event(room_id, event));
+                    .dropped_events
+                    .push(policy_metadata_event(room_id, event, reason));
             } else {
-                projection.dropped_events.push(policy_metadata_event(
+                projection.reaction_events.push(normalize_reaction_event(
                     room_id,
                     event,
-                    "reactions_disabled",
+                    projection_policy.policy,
                 ));
             }
         }
         "m.room.encrypted" => {
-            projection.encrypted_events.push(normalize_encrypted_event(
+            project_encrypted_event_with_candidate(
+                projection,
                 room_id,
                 event,
-                policy.encrypted_events,
-            ));
+                projection_policy,
+                None,
+            );
             if matches!(
-                policy.encrypted_events,
+                projection_policy.policy.encrypted_events,
                 MatrixEncryptedEventPolicy::FailClosed
             ) {
                 projection.dropped_events.push(policy_metadata_event(
@@ -1542,32 +3113,37 @@ fn project_inbound_policy_event(
                 ));
             }
         }
+        "m.receipt" => {
+            projection.dropped_events.push(policy_metadata_event(
+                room_id,
+                event,
+                "read_receipt_not_delivered",
+            ));
+        }
+        "m.room.redaction" => {
+            projection.dropped_events.push(policy_metadata_event(
+                room_id,
+                event,
+                "redaction_event_not_delivered",
+            ));
+        }
         _ => {}
     }
 }
 
 fn summarize_room(room_id: &str, membership: &str, events: &[Event]) -> MatrixRoomSummary {
     let mut summary = MatrixRoomSummary::with_membership(membership);
-    let mut joined_members = 0_usize;
     let mut observed_membership = false;
 
     for event in events {
         summary.record_event(event);
         if event.r#type == "m.room.member" {
             observed_membership = true;
-            if event
-                .content
-                .get("membership")
-                .and_then(serde_json::Value::as_str)
-                == Some("join")
-            {
-                joined_members += 1;
-            }
         }
     }
 
     if observed_membership {
-        summary.member_count = Some(joined_members);
+        summary.member_count = Some(summary.joined_user_ids.len());
     }
 
     let _ = room_id;
@@ -1598,13 +3174,27 @@ fn project_timeline_events(
     summary: &mut MatrixRoomSummary,
     room_id: &str,
     events: &[Event],
-    policy: &MatrixInboundPolicy,
+    projection_policy: MatrixProjectionPolicyContext<'_>,
+    context: MatrixRoomPolicyContext,
 ) -> usize {
     let mut membership_events = 0_usize;
+    let mut room_policy = projection_policy.policy.clone();
 
     for event in events {
         summary.record_event(event);
-        project_inbound_policy_event(projection, room_id, event, policy);
+        record_thread_participation(projection, &mut room_policy, event);
+        let effective_projection_policy = MatrixProjectionPolicyContext {
+            policy: &room_policy,
+            e2ee: projection_policy.e2ee,
+            state_persistence: projection_policy.state_persistence,
+        };
+        project_inbound_policy_event(
+            projection,
+            room_id,
+            event,
+            effective_projection_policy,
+            context,
+        );
         match event.r#type.as_str() {
             "m.room.message" => projection
                 .message_events
@@ -1646,9 +3236,17 @@ fn project_joined_room(
     projection: &mut SyncProjection,
     room_id: &str,
     room: &JoinedSyncRoom,
-    policy: &MatrixInboundPolicy,
+    projection_policy: MatrixProjectionPolicyContext<'_>,
 ) {
     let mut summary = summarize_room(room_id, "join", &room.state.events);
+    let context = MatrixRoomPolicyContext {
+        dynamic_direct_message: room_is_dynamic_direct_message(projection_policy.policy, &summary),
+    };
+    if context.dynamic_direct_message {
+        projection
+            .dynamic_direct_message_rooms
+            .insert(room_id.to_string());
+    }
     let state_events = room.state.events.len();
     let timeline_events = room.timeline.events.len();
     let membership_events = project_state_events(projection, room_id, &room.state.events)
@@ -1657,7 +3255,8 @@ fn project_joined_room(
             &mut summary,
             room_id,
             &room.timeline.events,
-            policy,
+            projection_policy,
+            context,
         );
 
     projection.room_summaries.push(build_room_summary(
@@ -1696,7 +3295,7 @@ fn project_left_room(
     projection: &mut SyncProjection,
     room_id: &str,
     room: &LeftSyncRoom,
-    policy: &MatrixInboundPolicy,
+    projection_policy: MatrixProjectionPolicyContext<'_>,
 ) {
     let mut summary = summarize_room(room_id, "leave", &room.state.events);
     let state_events = room.state.events.len();
@@ -1707,7 +3306,8 @@ fn project_left_room(
             &mut summary,
             room_id,
             &room.timeline.events,
-            policy,
+            projection_policy,
+            MatrixRoomPolicyContext::default(),
         );
 
     projection.room_summaries.push(build_room_summary(
@@ -1729,14 +3329,43 @@ fn project_sync_response(sync: &SyncResponse) -> SyncProjection {
     project_sync_response_with_policy(sync, &MatrixInboundPolicy::default())
 }
 
+#[cfg(test)]
 fn project_sync_response_with_policy(
     sync: &SyncResponse,
     policy: &MatrixInboundPolicy,
 ) -> SyncProjection {
+    project_sync_response_with_context(sync, policy, &MatrixE2eeConfig::default())
+}
+
+#[cfg(test)]
+fn project_sync_response_with_context(
+    sync: &SyncResponse,
+    policy: &MatrixInboundPolicy,
+    e2ee: &MatrixE2eeConfig,
+) -> SyncProjection {
+    project_sync_response_with_full_context(
+        sync,
+        policy,
+        e2ee,
+        &MatrixStatePersistenceConfig::default(),
+    )
+}
+
+fn project_sync_response_with_full_context(
+    sync: &SyncResponse,
+    policy: &MatrixInboundPolicy,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+) -> SyncProjection {
     let mut projection = SyncProjection::default();
+    let projection_policy = MatrixProjectionPolicyContext {
+        policy,
+        e2ee,
+        state_persistence,
+    };
 
     for (room_id, room) in &sync.rooms.join {
-        project_joined_room(&mut projection, room_id, room, policy);
+        project_joined_room(&mut projection, room_id, room, projection_policy);
     }
 
     for (room_id, room) in &sync.rooms.invite {
@@ -1744,7 +3373,7 @@ fn project_sync_response_with_policy(
     }
 
     for (room_id, room) in &sync.rooms.leave {
-        project_left_room(&mut projection, room_id, room, policy);
+        project_left_room(&mut projection, room_id, room, projection_policy);
     }
 
     projection
@@ -1759,7 +3388,7 @@ impl FcpConnector for MatrixConnector {
     }
 
     async fn configure(&mut self, config: serde_json::Value) -> FcpResult<()> {
-        let config: crate::types::MatrixConfig =
+        let config: MatrixConfig =
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid Matrix config: {e}"),
@@ -1778,6 +3407,12 @@ impl FcpConnector for MatrixConnector {
             code: 1002,
             message: format!("homeserver_url is not a valid URL: {e}"),
         })?;
+        validate_inbound_policy(&config.inbound_policy)?;
+        validate_e2ee_config(&config.e2ee)?;
+        validate_state_persistence_config(&config.state_persistence, &config.e2ee)?;
+        Self::validate_supervised_sync_config(&config.supervised_sync)?;
+
+        self.stop_supervised_sync("reconfigure").await;
 
         self.retry_config = config.retry.clone();
         self.runtime = Some(ConnectorRuntime::new(
@@ -1797,14 +3432,21 @@ impl FcpConnector for MatrixConnector {
         .map_err(|e| FcpError::Internal {
             message: format!("Failed to create Matrix client: {e}"),
         })?;
+        let supervised_sync_config = config.supervised_sync.clone();
+        let restored_sync_state = sync_state_from_persistence_config(&config.state_persistence);
 
         self.client = Some(client);
         self.config = Some(config);
+        *self
+            .sync_state
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = restored_sync_state;
         self.subscribed_topics
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .clear();
         self.next_event_seq.store(1, AtomicOrdering::Relaxed);
+        self.reset_supervised_sync_status(&supervised_sync_config);
         self.base.set_configured(true);
         Ok(())
     }
@@ -1848,6 +3490,10 @@ impl FcpConnector for MatrixConnector {
                 homeserver_transport_policy(&config.homeserver_url);
             if !transport_ok {
                 HealthSnapshot::degraded(transport_message)
+            } else if config.e2ee.verified_decryption_requested {
+                HealthSnapshot::degraded(
+                    "verified Matrix E2EE decryption requested but unavailable",
+                )
             } else if self
                 .client
                 .as_ref()
@@ -1892,6 +3538,12 @@ impl FcpConnector for MatrixConnector {
                 "ConnectorRuntime not initialized; re-run configure",
             )));
         }
+        if config.e2ee.verified_decryption_requested {
+            return Ok(self.attach_self_check_details(SelfCheckReport::failed(
+                "e2ee_verified_decryption_unavailable",
+                "Verified Matrix E2EE decryption was requested, but this connector has no audited crypto/device-trust implementation yet; refusing decrypted or ciphertext delivery",
+            )));
+        }
         if client.is_secretless() {
             return Ok(self.attach_self_check_details(SelfCheckReport::degraded(
                 "credential_injection_required",
@@ -1921,6 +3573,7 @@ impl FcpConnector for MatrixConnector {
     }
 
     async fn shutdown(&mut self, _req: ShutdownRequest) -> FcpResult<()> {
+        self.stop_supervised_sync("shutdown").await;
         if let Some(runtime) = &self.runtime {
             runtime.shutdown();
         }
@@ -1980,6 +3633,7 @@ impl FcpConnector for MatrixConnector {
                 .map(|topic| (topic.clone(), cursor.clone()))
                 .collect()
         });
+        self.start_supervised_sync_if_enabled()?;
 
         Ok(SubscribeResponse {
             r#type: "response".into(),
@@ -2120,19 +3774,34 @@ impl MatrixConnector {
                 let explicit_since = optional_str(&req.input, "since")?;
                 let timeout_ms = optional_u32(&req.input, "timeout_ms", 30_000)?;
                 let persist = optional_bool(&req.input, "persist", true)?;
-                let inbound_policy = self
-                    .config
-                    .as_ref()
-                    .map_or_else(MatrixInboundPolicy::default, |config| {
-                        config.inbound_policy.clone()
-                    });
-                let used_since = explicit_since.or_else(|| {
-                    self.sync_state
+                let (configured_policy, e2ee_config, state_persistence_config) =
+                    self.config.as_ref().map_or_else(
+                        || {
+                            (
+                                MatrixInboundPolicy::default(),
+                                MatrixE2eeConfig::default(),
+                                MatrixStatePersistenceConfig::default(),
+                            )
+                        },
+                        |config| {
+                            (
+                                config.inbound_policy.clone(),
+                                config.e2ee.clone(),
+                                config.state_persistence.clone(),
+                            )
+                        },
+                    );
+                let (state_since, inbound_policy) = {
+                    let state = self
+                        .sync_state
                         .read()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
-                        .last_sync_token
-                        .clone()
-                });
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    (
+                        state.last_sync_token.clone(),
+                        inbound_policy_with_state(&configured_policy, &state),
+                    )
+                };
+                let used_since = explicit_since.or(state_since);
 
                 let sync_started = Instant::now();
                 let response = match client.sync(used_since.as_deref(), timeout_ms).await {
@@ -2147,24 +3816,23 @@ impl MatrixConnector {
                         return Err(error.to_fcp_error());
                     }
                 };
-                let projection = project_sync_response_with_policy(&response, &inbound_policy);
+                let projection = project_sync_response_with_full_context(
+                    &response,
+                    &inbound_policy,
+                    &e2ee_config,
+                    &state_persistence_config,
+                );
                 let tracked_state = if persist {
                     {
                         let mut state = self
                             .sync_state
                             .write()
                             .unwrap_or_else(std::sync::PoisonError::into_inner);
-                        state.last_sync_token = Some(response.next_batch.clone());
-                        for (room_id, summary) in &projection.tracked_updates {
-                            state.rooms.insert(room_id.clone(), summary.clone());
-                        }
+                        persist_projection_state(&mut state, &response.next_batch, &projection);
                     }
                     self.tracked_state_json()
                 } else {
-                    self.preview_tracked_state_json(
-                        &response.next_batch,
-                        &projection.tracked_updates,
-                    )
+                    self.preview_tracked_state_json(&response.next_batch, &projection)
                 };
                 let duration = sync_started.elapsed();
                 let emitted_event_count = if persist {
@@ -2187,6 +3855,7 @@ impl MatrixConnector {
                     room_summaries = projection.room_summaries.len(),
                     message_events = projection.message_events.len(),
                     authorized_message_events = projection.authorized_message_events.len(),
+                    decrypted_message_events = projection.decrypted_message_events.len(),
                     dropped_events = projection.dropped_events.len(),
                     reaction_events = projection.reaction_events.len(),
                     encrypted_events = projection.encrypted_events.len(),
@@ -2203,6 +3872,7 @@ impl MatrixConnector {
                     "rooms": projection.room_summaries,
                     "message_events": projection.message_events,
                     "authorized_message_events": projection.authorized_message_events,
+                    "decrypted_message_events": projection.decrypted_message_events,
                     "dropped_events": projection.dropped_events,
                     "reaction_events": projection.reaction_events,
                     "encrypted_events": projection.encrypted_events,
@@ -2210,6 +3880,10 @@ impl MatrixConnector {
                     "membership_changes": projection.membership_changes,
                     "state_changes": projection.state_changes,
                     "inbound_policy": inbound_policy_snapshot(&inbound_policy),
+                    "policy_context_updates": {
+                        "dynamic_direct_message_rooms": projection.dynamic_direct_message_rooms.iter().cloned().collect::<Vec<_>>(),
+                        "thread_participation_roots": projection.thread_participation_roots.iter().cloned().collect::<Vec<_>>(),
+                    },
                     "tracked_state": tracked_state,
                 })
             }
@@ -2317,6 +3991,7 @@ impl MatrixConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::MatrixWorkflowPolicy;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
 
@@ -2469,13 +4144,14 @@ mod tests {
         let intro = c.introspect();
         assert_eq!(intro.operations.len(), 11);
         assert!(intro.event_caps.as_ref().unwrap().streaming);
-        assert_eq!(intro.events.len(), 4);
+        assert_eq!(intro.events.len(), 5);
         let topics = intro
             .events
             .iter()
             .map(|event| event.topic.as_str())
             .collect::<Vec<_>>();
         assert!(topics.contains(&EVENT_MESSAGE_AUTHORIZED));
+        assert!(topics.contains(&EVENT_MESSAGE_DECRYPTED));
         assert!(topics.contains(&EVENT_DROPPED));
         assert!(topics.contains(&EVENT_REACTION));
         assert!(topics.contains(&EVENT_ENCRYPTED));
@@ -2487,6 +4163,7 @@ mod tests {
             confirm_matrix_event_topics(&[]).unwrap(),
             vec![
                 EVENT_MESSAGE_AUTHORIZED.to_string(),
+                EVENT_MESSAGE_DECRYPTED.to_string(),
                 EVENT_DROPPED.to_string(),
                 EVENT_REACTION.to_string(),
                 EVENT_ENCRYPTED.to_string(),
@@ -2597,6 +4274,140 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_e2ee_identities() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "e2ee": {
+                    "verified_decryption_requested": true,
+                    "account_user_id": "not-a-matrix-user",
+                    "device_id": "device with spaces"
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("e2ee.account_user_id"));
+        assert!(error.contains("e2ee.device_id"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_requested_e2ee_without_stable_account_and_device_scope() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "e2ee": {
+                    "verified_decryption_requested": true,
+                    "trust_state": {
+                        "tracked_users": ["@alice:matrix.org"],
+                        "tracked_rooms": ["!secure:matrix.org"]
+                    }
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("e2ee.account_user_id is required"));
+        assert!(error.contains("e2ee.device_id is required"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_e2ee_trust_state_tracking_scope() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "e2ee": {
+                    "account_user_id": "@bot:matrix.org",
+                    "device_id": "DEVICE123",
+                    "trust_state": {
+                        "tracked_users": ["alice"],
+                        "tracked_rooms": ["secure-room"]
+                    }
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("e2ee.trust_state.tracked_users"));
+        assert!(error.contains("e2ee.trust_state.tracked_rooms"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_inbound_workflow_policy() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "inbound_policy": {
+                    "dynamic_direct_message_detection": true,
+                    "direct_message_member_limit": 1,
+                    "approval_reaction_keys": ["approve", ""],
+                    "media_max_bytes": 0
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("dynamic_direct_message_detection"));
+        assert!(error.contains("direct_message_member_limit"));
+        assert!(error.contains("approval_reaction_keys"));
+        assert!(error.contains("media_max_bytes"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_state_persistence_config() {
+        let mut c = MatrixConnector::new();
+        let result = c
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "e2ee": {
+                    "account_user_id": "@bot:matrix.org",
+                    "device_id": "DEVICE123"
+                },
+                "state_persistence": {
+                    "enabled": true,
+                    "backend": "in_memory",
+                    "zone_id": "z:work",
+                    "account_user_id": "@other:matrix.org",
+                    "device_id": "OTHERDEVICE",
+                    "restore": {
+                        "last_sync_token": "bad token",
+                        "dynamic_direct_message_rooms": ["not-a-room"],
+                        "thread_participation_roots": ["not-a-thread"]
+                    },
+                    "limits": {
+                        "max_tracked_rooms": 0,
+                        "max_thread_participation_roots": 0
+                    }
+                }
+            }))
+            .await;
+
+        assert!(result.is_err());
+        let error = result.unwrap_err().to_string();
+        assert!(error.contains("state_persistence.enabled requires"));
+        assert!(error.contains("state_persistence.account_user_id must match"));
+        assert!(error.contains("state_persistence.device_id must match"));
+        assert!(error.contains("state_persistence.restore.last_sync_token"));
+        assert!(error.contains("state_persistence.restore.dynamic_direct_message_rooms"));
+        assert!(error.contains("state_persistence.restore.thread_participation_roots"));
+        assert!(error.contains("state_persistence.limits.max_tracked_rooms"));
+        assert!(error.contains("state_persistence.limits.max_thread_participation_roots"));
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn health_before_configure() {
         let c = MatrixConnector::new();
         let h = c.health().await;
@@ -2662,6 +4473,35 @@ mod tests {
         ));
     }
 
+    #[fcp_async_core::runtime::test]
+    async fn health_degrades_when_verified_e2ee_decryption_requested() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "e2ee": {
+                "verified_decryption_requested": true,
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123"
+            }
+        }))
+        .await
+        .unwrap();
+
+        let h = c.health().await;
+        assert!(matches!(
+            h.status,
+            HealthState::Degraded { ref reason }
+                if reason == "verified Matrix E2EE decryption requested but unavailable"
+        ));
+        assert_eq!(
+            h.details
+                .as_ref()
+                .and_then(|details| details["e2ee"]["decryption_status"].as_str()),
+            Some("denied_unavailable")
+        );
+    }
+
     #[test]
     fn doctor_before_configure() {
         let c = MatrixConnector::new();
@@ -2705,12 +4545,267 @@ mod tests {
         );
         assert_eq!(
             d["details"]["provisioning"]["sync_delivery_model"].as_str(),
-            Some("manual_sync_event_fanout")
+            Some("manual_or_supervised_sync_event_fanout")
         );
         assert!(d["checks"].as_array().unwrap().iter().any(|check| {
             check["name"].as_str() == Some("credential_injection")
                 && check["passed"].as_bool() == Some(false)
         }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_surfaces_e2ee_requested_unavailable_without_marking_critical_failure() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "inbound_policy": {
+                "encrypted_events": "metadata_only"
+            },
+            "e2ee": {
+                "verified_decryption_requested": true,
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123",
+                "recovery": { "status": "present_unverified" },
+                "room_key_backup": {
+                    "status": "missing",
+                    "backup_version": "1"
+                }
+            }
+        }))
+        .await
+        .unwrap();
+
+        let d = c.doctor();
+        assert!(d["passed"].as_bool().unwrap());
+        assert_eq!(
+            d["details"]["e2ee"]["decryption_status"].as_str(),
+            Some("denied_unavailable")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["encrypted_event_delivery_policy"].as_str(),
+            Some("metadata_only")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["recovery"]["status"].as_str(),
+            Some("present_unverified")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["room_key_backup"]["status"].as_str(),
+            Some("missing")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["crypto_backend"]["dependency"].as_str(),
+            Some("matrix-sdk-crypto")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["crypto_backend"]["dependency_version"].as_str(),
+            Some(crate::crypto::MATRIX_SDK_CRYPTO_VERSION)
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["crypto_backend"]["network_io_model"].as_str(),
+            Some(crate::crypto::MATRIX_CRYPTO_NETWORK_IO_MODEL)
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["crypto_backend"]["adapter_state"].as_str(),
+            Some("boundary_only")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["trust_state"]["device_list"]["status"].as_str(),
+            Some("unknown")
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["trust_state"]["readiness"]["trust_state_ready"].as_bool(),
+            Some(false)
+        );
+        let trust_reasons = d["details"]["e2ee"]["trust_state"]["readiness"]["denial_reason_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(trust_reasons.contains(&"device_keys_unverified"));
+        assert!(trust_reasons.contains(&"device_list_not_fresh"));
+        assert!(trust_reasons.contains(&"cross_signing_unverified"));
+        assert!(
+            !d["details"]["e2ee"]["crypto_backend"]
+                .to_string()
+                .contains("@bot:matrix.org")
+        );
+        assert!(
+            !d["details"]["e2ee"]["crypto_backend"]
+                .to_string()
+                .contains("DEVICE123")
+        );
+        assert!(d["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"].as_str() == Some("e2ee_verified_decryption")
+                && check["passed"].as_bool() == Some(false)
+                && check["critical"].as_bool() == Some(false)
+        }));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_surfaces_ready_secretless_trust_state_without_enabling_decrypted_delivery() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "e2ee": {
+                "verified_decryption_requested": true,
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123",
+                "trust_state": {
+                    "own_device": "verified",
+                    "device_keys": "verified",
+                    "device_list": {
+                        "status": "fresh",
+                        "last_refresh_age_ms": 10
+                    },
+                    "cross_signing": "verified",
+                    "tracked_users": ["@alice:matrix.org"],
+                    "tracked_rooms": ["!secure:matrix.org"]
+                },
+                "recovery": { "status": "verified" },
+                "room_key_backup": {
+                    "status": "verified",
+                    "backup_version": "1"
+                }
+            },
+            "state_persistence": {
+                "enabled": true,
+                "backend": "host_managed_snapshot",
+                "zone_id": "z:work",
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123"
+            }
+        }))
+        .await
+        .unwrap();
+
+        let d = c.doctor();
+        assert!(d["passed"].as_bool().unwrap());
+        assert_eq!(
+            d["details"]["e2ee"]["trust_state"]["readiness"]["trust_state_ready"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["trust_state"]["readiness"]["decrypted_delivery_enabled"]
+                .as_bool(),
+            Some(false)
+        );
+        assert_eq!(
+            d["details"]["e2ee"]["trust_state"]["tracked"]["user_count"].as_u64(),
+            Some(1)
+        );
+        let details = d["details"]["e2ee"]["trust_state"].to_string();
+        assert!(!details.contains("@bot:matrix.org"));
+        assert!(!details.contains("DEVICE123"));
+        assert!(!details.contains("@alice:matrix.org"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_surfaces_state_persistence_scope_without_leaking_identifiers() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "e2ee": {
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123"
+            },
+            "state_persistence": {
+                "enabled": true,
+                "backend": "host_managed_snapshot",
+                "zone_id": "z:work",
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123",
+                "restore": {
+                    "last_sync_token": "batch_restore",
+                    "dynamic_direct_message_rooms": ["!dm:matrix.org"],
+                    "thread_participation_roots": ["$thread-root"]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+
+        let d = c.doctor();
+        assert!(d["passed"].as_bool().unwrap());
+        assert_eq!(
+            d["details"]["state_persistence"]["enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            d["details"]["state_persistence"]["backend"].as_str(),
+            Some("host_managed_snapshot")
+        );
+        assert_eq!(
+            d["details"]["state_persistence"]["restore"]["last_sync_token_configured"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            d["sync_tracking"]["last_sync_token"].as_str(),
+            Some("batch_restore")
+        );
+        assert!(d["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"].as_str() == Some("state_persistence_scope")
+                && check["passed"].as_bool() == Some(true)
+        }));
+
+        let details = d["details"]["state_persistence"].to_string();
+        assert!(!details.contains("@bot:matrix.org"));
+        assert!(!details.contains("DEVICE123"));
+        assert!(!details.contains("batch_restore"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_resets_sync_state_when_state_persistence_disabled() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "state_persistence": {
+                "enabled": true,
+                "backend": "host_managed_snapshot",
+                "zone_id": "z:work",
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123",
+                "restore": {
+                    "last_sync_token": "batch_restore",
+                    "dynamic_direct_message_rooms": ["!dm:matrix.org"],
+                    "thread_participation_roots": ["$thread-root"]
+                }
+            }
+        }))
+        .await
+        .unwrap();
+        assert_eq!(
+            c.tracked_state_json()["last_sync_token"].as_str(),
+            Some("batch_restore")
+        );
+
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok2" }
+        }))
+        .await
+        .unwrap();
+        let tracked = c.tracked_state_json();
+        assert_eq!(tracked["last_sync_token"].as_str(), None);
+        assert_eq!(
+            tracked["dynamic_direct_message_rooms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
+            tracked["thread_participation_roots"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -2779,6 +4874,36 @@ mod tests {
                 details["provisioning"]["credential_injection_required"].as_bool()
             }),
             Some(true)
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn self_check_denies_requested_decryption_without_verified_crypto() {
+        let mut c = MatrixConnector::new();
+        c.configure(json!({
+            "homeserver_url": "https://matrix.org",
+            "auth": { "mode": "access_token", "access_token": "tok" },
+            "e2ee": {
+                "verified_decryption_requested": true,
+                "account_user_id": "@bot:matrix.org",
+                "device_id": "DEVICE123"
+            }
+        }))
+        .await
+        .unwrap();
+
+        let report = c.self_check().await.unwrap();
+        assert_eq!(report.status, SelfCheckStatus::Failed);
+        assert_eq!(
+            report.reason_code.as_deref(),
+            Some("e2ee_verified_decryption_unavailable")
+        );
+        assert_eq!(
+            report
+                .details
+                .as_ref()
+                .and_then(|details| details["e2ee"]["verified_decryption_available"].as_bool()),
+            Some(false)
         );
     }
 
@@ -3053,6 +5178,13 @@ mod tests {
             direct_message_rooms: vec!["!dm:matrix.org".into()],
             thread_participation_roots: vec!["$thread-root".into()],
             process_reactions: true,
+            workflow: MatrixWorkflowPolicy {
+                dynamic_direct_message_detection: false,
+                direct_message_member_limit: 2,
+                strip_bot_mentions: true,
+                approval_reaction_keys: vec!["approve".into()],
+                media_max_bytes: None,
+            },
             encrypted_events: MatrixEncryptedEventPolicy::FailClosed,
         };
 
@@ -3068,6 +5200,16 @@ mod tests {
         assert!(authorized_event_ids.contains(&"$authorized"));
         assert!(authorized_event_ids.contains(&"$thread_bypass"));
         assert!(authorized_event_ids.contains(&"$dm_unmentioned"));
+        let authorized_event = projection
+            .authorized_message_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$authorized"))
+            .unwrap();
+        assert_eq!(authorized_event["delivery_body"].as_str(), Some("hi"));
+        assert_eq!(
+            authorized_event["delivery_context"]["mention_present"].as_bool(),
+            Some(true)
+        );
         let thread_event = projection
             .authorized_message_events
             .iter()
@@ -3083,11 +5225,28 @@ mod tests {
             projection.reaction_events[0]["target_event_id"].as_str(),
             Some("$authorized")
         );
+        assert_eq!(
+            projection.reaction_events[0]["approval"]["approved"].as_bool(),
+            Some(true)
+        );
         assert_eq!(projection.encrypted_events.len(), 1);
         assert_eq!(
             projection.encrypted_events[0]["delivery_policy"].as_str(),
             Some("fail_closed")
         );
+        assert_eq!(
+            projection.encrypted_events[0]["ciphertext_redacted"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            projection.encrypted_events[0]["decryption_status"].as_str(),
+            Some("not_attempted")
+        );
+        assert_eq!(
+            projection.encrypted_events[0]["decryption_reason"].as_str(),
+            Some("verified_e2ee_decryption_not_requested")
+        );
+        assert!(projection.encrypted_events[0].get("ciphertext").is_none());
 
         let dropped_reasons = projection
             .dropped_events
@@ -3103,6 +5262,472 @@ mod tests {
                 .iter()
                 .all(|event| event.get("content").is_none())
         );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn project_sync_response_tracks_workflow_context_and_media_bounds() {
+        let sync = SyncResponse {
+            next_batch: "batch_workflow".into(),
+            rooms: crate::types::SyncRooms {
+                join: BTreeMap::from([
+                    (
+                        "!dm-auto:matrix.org".to_string(),
+                        crate::types::JoinedSyncRoom {
+                            state: crate::types::SyncEventList {
+                                events: vec![
+                                    Event {
+                                        event_id: Some("$bot-member".into()),
+                                        r#type: "m.room.member".into(),
+                                        state_key: Some("@bot:matrix.org".into()),
+                                        sender: Some("@bot:matrix.org".into()),
+                                        origin_server_ts: Some(1),
+                                        content: json!({ "membership": "join" }),
+                                        room_id: Some("!dm-auto:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$alice-member".into()),
+                                        r#type: "m.room.member".into(),
+                                        state_key: Some("@alice:matrix.org".into()),
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(2),
+                                        content: json!({ "membership": "join" }),
+                                        room_id: Some("!dm-auto:matrix.org".into()),
+                                    },
+                                ],
+                            },
+                            timeline: crate::types::SyncTimeline {
+                                events: vec![
+                                    Event {
+                                        event_id: Some("$dm-unmentioned".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(3),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "direct workflow without mention"
+                                        }),
+                                        room_id: Some("!dm-auto:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$media-ok".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(4),
+                                        content: json!({
+                                            "msgtype": "m.image",
+                                            "body": "diagram.png",
+                                            "url": "mxc://matrix.org/media-ok",
+                                            "info": {
+                                                "mimetype": "image/png",
+                                                "size": 512,
+                                                "w": 640,
+                                                "h": 480
+                                            }
+                                        }),
+                                        room_id: Some("!dm-auto:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$media-large".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(5),
+                                        content: json!({
+                                            "msgtype": "m.file",
+                                            "body": "archive.zip",
+                                            "url": "mxc://matrix.org/media-large",
+                                            "info": {
+                                                "mimetype": "application/zip",
+                                                "size": 2048
+                                            }
+                                        }),
+                                        room_id: Some("!dm-auto:matrix.org".into()),
+                                    },
+                                ],
+                                prev_batch: None,
+                                limited: false,
+                            },
+                        },
+                    ),
+                    (
+                        "!ops:matrix.org".to_string(),
+                        crate::types::JoinedSyncRoom {
+                            state: crate::types::SyncEventList::default(),
+                            timeline: crate::types::SyncTimeline {
+                                events: vec![
+                                    Event {
+                                        event_id: Some("$bot-thread".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@bot:matrix.org".into()),
+                                        origin_server_ts: Some(10),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "bot joined the thread",
+                                            "m.relates_to": {
+                                                "rel_type": "m.thread",
+                                                "event_id": "$support-thread"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$thread-followup".into()),
+                                        r#type: "m.room.message".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(11),
+                                        content: json!({
+                                            "msgtype": "m.text",
+                                            "body": "follow-up without another mention",
+                                            "m.relates_to": {
+                                                "rel_type": "m.thread",
+                                                "event_id": "$support-thread"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$reaction-eyes".into()),
+                                        r#type: "m.reaction".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(12),
+                                        content: json!({
+                                            "m.relates_to": {
+                                                "rel_type": "m.annotation",
+                                                "event_id": "$thread-followup",
+                                                "key": "eyes"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$reaction-denied".into()),
+                                        r#type: "m.reaction".into(),
+                                        state_key: None,
+                                        sender: Some("@mallory:matrix.org".into()),
+                                        origin_server_ts: Some(13),
+                                        content: json!({
+                                            "m.relates_to": {
+                                                "rel_type": "m.annotation",
+                                                "event_id": "$thread-followup",
+                                                "key": "approve"
+                                            }
+                                        }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$receipt".into()),
+                                        r#type: "m.receipt".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(14),
+                                        content: json!({ "$thread-followup": { "m.read": {} } }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                    Event {
+                                        event_id: Some("$redaction".into()),
+                                        r#type: "m.room.redaction".into(),
+                                        state_key: None,
+                                        sender: Some("@alice:matrix.org".into()),
+                                        origin_server_ts: Some(15),
+                                        content: json!({ "redacts": "$thread-followup" }),
+                                        room_id: Some("!ops:matrix.org".into()),
+                                    },
+                                ],
+                                prev_batch: None,
+                                limited: false,
+                            },
+                        },
+                    ),
+                ]),
+                ..crate::types::SyncRooms::default()
+            },
+        };
+        let policy = MatrixInboundPolicy {
+            allowed_users: vec!["@alice:matrix.org".into()],
+            bot_user_id: Some("@bot:matrix.org".into()),
+            require_mention: true,
+            workflow: MatrixWorkflowPolicy {
+                dynamic_direct_message_detection: true,
+                media_max_bytes: Some(1024),
+                approval_reaction_keys: vec!["approve".into()],
+                ..MatrixWorkflowPolicy::default()
+            },
+            ..MatrixInboundPolicy::default()
+        };
+
+        let projection = project_sync_response_with_policy(&sync, &policy);
+
+        assert!(
+            projection
+                .dynamic_direct_message_rooms
+                .contains("!dm-auto:matrix.org")
+        );
+        assert!(
+            projection
+                .thread_participation_roots
+                .contains("$support-thread")
+        );
+
+        let dm_message = projection
+            .authorized_message_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$dm-unmentioned"))
+            .unwrap();
+        assert_eq!(
+            dm_message["delivery_context"]["dynamic_direct_message"].as_bool(),
+            Some(true)
+        );
+
+        let media_message = projection
+            .authorized_message_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$media-ok"))
+            .unwrap();
+        assert_eq!(
+            media_message["media"]["mxc_uri"].as_str(),
+            Some("mxc://matrix.org/media-ok")
+        );
+        assert_eq!(
+            media_message["media"]["within_size_limit"].as_bool(),
+            Some(true)
+        );
+
+        let thread_message = projection
+            .authorized_message_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$thread-followup"))
+            .unwrap();
+        assert_eq!(
+            thread_message["delivery_context"]["thread_participated"].as_bool(),
+            Some(true)
+        );
+
+        let reaction = projection
+            .reaction_events
+            .iter()
+            .find(|event| event["event_id"].as_str() == Some("$reaction-eyes"))
+            .unwrap();
+        assert_eq!(reaction["approval"]["approved"].as_bool(), Some(false));
+        assert_eq!(
+            reaction["approval"]["denial_reason"].as_str(),
+            Some("reaction_key_not_configured_for_approval")
+        );
+
+        let dropped_reasons = projection
+            .dropped_events
+            .iter()
+            .map(|event| event["reason"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(dropped_reasons.contains(&"media_too_large"));
+        assert!(dropped_reasons.contains(&"self_event"));
+        assert!(dropped_reasons.contains(&"sender_not_allowed"));
+        assert!(dropped_reasons.contains(&"read_receipt_not_delivered"));
+        assert!(dropped_reasons.contains(&"redaction_event_not_delivered"));
+    }
+
+    #[test]
+    fn encrypted_event_projection_records_requested_decryption_denial_and_retry_metadata() {
+        let sync = SyncResponse {
+            next_batch: "batch_2".into(),
+            rooms: crate::types::SyncRooms {
+                join: BTreeMap::from([(
+                    "!secure:matrix.org".to_string(),
+                    crate::types::JoinedSyncRoom {
+                        state: crate::types::SyncEventList::default(),
+                        timeline: crate::types::SyncTimeline {
+                            events: vec![Event {
+                                event_id: Some("$encrypted".into()),
+                                r#type: "m.room.encrypted".into(),
+                                state_key: None,
+                                sender: Some("@alice:matrix.org".into()),
+                                origin_server_ts: Some(160),
+                                content: json!({
+                                    "algorithm": "m.megolm.v1.aes-sha2",
+                                    "session_id": "session-1",
+                                    "ciphertext": "must not leak"
+                                }),
+                                room_id: Some("!secure:matrix.org".into()),
+                            }],
+                            prev_batch: None,
+                            limited: false,
+                        },
+                    },
+                )]),
+                ..crate::types::SyncRooms::default()
+            },
+        };
+        let policy = MatrixInboundPolicy {
+            encrypted_events: MatrixEncryptedEventPolicy::MetadataOnly,
+            ..MatrixInboundPolicy::default()
+        };
+        let e2ee = MatrixE2eeConfig {
+            verified_decryption_requested: true,
+            account_user_id: Some("@bot:matrix.org".into()),
+            device_id: Some("DEVICE123".into()),
+            recovery: crate::types::MatrixE2eeRecoveryConfig {
+                status: MatrixE2eeMaterialStatus::PresentUnverified,
+            },
+            room_key_backup: crate::types::MatrixE2eeBackupConfig {
+                status: MatrixE2eeMaterialStatus::Missing,
+                backup_version: Some("1".into()),
+            },
+            undecrypted_retry: crate::types::MatrixUndecryptedRetryConfig {
+                max_attempts: 2,
+                retry_after_ms: 500,
+            },
+            ..MatrixE2eeConfig::default()
+        };
+
+        let projection = project_sync_response_with_context(&sync, &policy, &e2ee);
+        let encrypted = &projection.encrypted_events[0];
+        assert_eq!(encrypted["delivery_policy"].as_str(), Some("metadata_only"));
+        assert_eq!(
+            encrypted["decryption_status"].as_str(),
+            Some("denied_unavailable")
+        );
+        assert_eq!(
+            encrypted["decryption_reason"].as_str(),
+            Some("matrix_e2ee_verified_crypto_unimplemented")
+        );
+        assert_eq!(
+            encrypted["crypto_backend"]["dependency"].as_str(),
+            Some("matrix-sdk-crypto")
+        );
+        assert_eq!(
+            encrypted["crypto_backend"]["outgoing_requests"]["total_pending"].as_u64(),
+            Some(0)
+        );
+        assert_eq!(
+            encrypted["crypto_backend"]["network_io_model"].as_str(),
+            Some(crate::crypto::MATRIX_CRYPTO_NETWORK_IO_MODEL)
+        );
+        assert_eq!(
+            encrypted["account_user_id_configured"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(encrypted["device_id_configured"].as_bool(), Some(true));
+        assert_eq!(
+            encrypted["recovery_status"].as_str(),
+            Some("present_unverified")
+        );
+        assert_eq!(
+            encrypted["room_key_backup_status"].as_str(),
+            Some("missing")
+        );
+        assert_eq!(
+            encrypted["undecrypted_retry"]["classification"].as_str(),
+            Some("retryable_until_budget_exhausted")
+        );
+        assert_eq!(
+            encrypted["undecrypted_retry"]["max_attempts"].as_u64(),
+            Some(2)
+        );
+        assert_eq!(
+            encrypted["undecrypted_retry"]["retry_after_ms"].as_u64(),
+            Some(500)
+        );
+        assert!(encrypted.get("ciphertext").is_none());
+    }
+
+    #[test]
+    fn encrypted_event_projection_emits_verified_decrypted_message_only_after_trust_gate() {
+        let event = Event {
+            event_id: Some("$encrypted".into()),
+            r#type: "m.room.encrypted".into(),
+            state_key: None,
+            sender: Some("@alice:matrix.example".into()),
+            origin_server_ts: Some(160),
+            content: json!({
+                "algorithm": MATRIX_MEGOLM_ALGORITHM,
+                "session_id": "SESSION1",
+                "ciphertext": "must not leak"
+            }),
+            room_id: Some("!room:matrix.example".into()),
+        };
+        let policy = MatrixInboundPolicy {
+            encrypted_events: MatrixEncryptedEventPolicy::MetadataOnly,
+            ..MatrixInboundPolicy::default()
+        };
+        let e2ee = MatrixE2eeConfig {
+            verified_decryption_requested: true,
+            account_user_id: Some("@bot:matrix.example".into()),
+            device_id: Some("DEVICE123".into()),
+            trust_state: crate::types::MatrixE2eeTrustStateConfig {
+                own_device: MatrixE2eeMaterialStatus::Verified,
+                device_keys: MatrixE2eeMaterialStatus::Verified,
+                device_list: crate::types::MatrixE2eeDeviceListConfig {
+                    status: MatrixE2eeDeviceListStatus::Fresh,
+                    last_refresh_age_ms: Some(10),
+                },
+                cross_signing: MatrixE2eeMaterialStatus::Verified,
+                tracked_users: vec!["@alice:matrix.example".into()],
+                tracked_rooms: vec!["!room:matrix.example".into()],
+            },
+            recovery: crate::types::MatrixE2eeRecoveryConfig {
+                status: MatrixE2eeMaterialStatus::Verified,
+            },
+            room_key_backup: crate::types::MatrixE2eeBackupConfig {
+                status: MatrixE2eeMaterialStatus::Verified,
+                backup_version: Some("1".into()),
+            },
+            ..MatrixE2eeConfig::default()
+        };
+        let state = MatrixStatePersistenceConfig {
+            account_user_id: Some("@bot:matrix.example".into()),
+            device_id: Some("DEVICE123".into()),
+            ..MatrixStatePersistenceConfig::default()
+        };
+        let projection_policy = MatrixProjectionPolicyContext {
+            policy: &policy,
+            e2ee: &e2ee,
+            state_persistence: &state,
+        };
+        let candidate = MatrixVerifiedDecryptedMessageEvent {
+            room_id: "!room:matrix.example".into(),
+            sender: "@alice:matrix.example".into(),
+            sender_device_id: "ALICEDEVICE".into(),
+            sender_device_trust: crate::crypto::MatrixProjectionVerificationStatus::Verified,
+            cross_signing_trust: crate::crypto::MatrixProjectionVerificationStatus::Verified,
+            session_id: "SESSION1".into(),
+            session_room_id: "!room:matrix.example".into(),
+            session_trust: crate::crypto::MatrixProjectionVerificationStatus::Verified,
+            algorithm: MATRIX_MEGOLM_ALGORITHM.into(),
+            replay_key: "SESSION1:$encrypted:0".into(),
+            msgtype: "m.text".into(),
+            body: "trusted plaintext".into(),
+            format: None,
+            formatted_body: None,
+            redaction_state: MatrixEncryptedEventRedactionState::Clear,
+        };
+        let mut projection = SyncProjection::default();
+
+        project_encrypted_event_with_candidate(
+            &mut projection,
+            "!room:matrix.example",
+            &event,
+            projection_policy,
+            Some(&candidate),
+        );
+
+        assert_eq!(projection.decrypted_message_events.len(), 1);
+        assert_eq!(
+            projection.decrypted_message_events[0]["body"].as_str(),
+            Some("trusted plaintext")
+        );
+        assert_eq!(
+            projection.encrypted_events[0]["decrypted_projection"]["decryption_status"].as_str(),
+            Some("authorized_decrypted")
+        );
+        let encrypted_text = projection.encrypted_events[0].to_string();
+        assert!(!encrypted_text.contains("must not leak"));
+        assert!(!encrypted_text.contains("trusted plaintext"));
+        assert!(projection.dropped_events.is_empty());
     }
 
     #[test]
@@ -3140,13 +5765,16 @@ mod tests {
             );
         }
 
-        let preview = connector.preview_tracked_state_json(
-            "batch_2",
-            &BTreeMap::from([(
+        let projection = SyncProjection {
+            tracked_updates: BTreeMap::from([(
                 "!new:matrix.org".to_string(),
                 MatrixRoomSummary::with_membership("invite"),
             )]),
-        );
+            dynamic_direct_message_rooms: BTreeSet::from(["!dm:matrix.org".to_string()]),
+            thread_participation_roots: BTreeSet::from(["$thread-root".to_string()]),
+            ..SyncProjection::default()
+        };
+        let preview = connector.preview_tracked_state_json("batch_2", &projection);
 
         assert_eq!(preview["last_sync_token"], "batch_2");
         assert_eq!(preview["tracked_rooms"], 2);
@@ -3157,10 +5785,347 @@ mod tests {
                 .iter()
                 .any(|room| room["room_id"] == "!new:matrix.org" && room["membership"] == "invite")
         );
+        assert_eq!(
+            preview["dynamic_direct_message_rooms"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            preview["thread_participation_roots"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
 
         let persisted = connector.tracked_state_json();
         assert_eq!(persisted["last_sync_token"], "batch_1");
         assert_eq!(persisted["tracked_rooms"], 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn configure_rejects_invalid_enabled_supervised_sync() {
+        let mut connector = MatrixConnector::new();
+        let error = connector
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "supervised_sync": {
+                    "enabled": true,
+                    "poll_interval_ms": 0,
+                    "timeout_ms": 0,
+                    "supervisor": {
+                        "base_backoff_ms": 0,
+                        "max_backoff_ms": 1,
+                        "max_consecutive_failures": 0
+                    }
+                }
+            }))
+            .await
+            .unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("supervised_sync.poll_interval_ms must be > 0"));
+        assert!(message.contains("supervised_sync.timeout_ms must be > 0"));
+        assert!(message.contains("supervised_sync.supervisor.base_backoff_ms must be > 0"));
+        assert!(
+            message.contains("supervised_sync.supervisor.max_consecutive_failures must be > 0")
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn doctor_reports_supervised_sync_enabled_idle_without_failing() {
+        let mut connector = MatrixConnector::new();
+        connector
+            .configure(json!({
+                "homeserver_url": "https://matrix.org",
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "supervised_sync": {
+                    "enabled": true,
+                    "poll_interval_ms": 50,
+                    "timeout_ms": 25,
+                    "supervisor": {
+                        "base_backoff_ms": 10,
+                        "max_backoff_ms": 20,
+                        "jitter_enabled": false,
+                        "max_consecutive_failures": 2
+                    }
+                }
+            }))
+            .await
+            .unwrap();
+
+        let doctor = connector.doctor();
+        assert!(doctor["passed"].as_bool().unwrap());
+        assert_eq!(
+            doctor["details"]["supervised_sync"]["configured_enabled"].as_bool(),
+            Some(true)
+        );
+        assert_eq!(
+            doctor["details"]["supervised_sync"]["running"].as_bool(),
+            Some(false)
+        );
+        assert!(doctor["checks"].as_array().unwrap().iter().any(|check| {
+            check["name"].as_str() == Some("supervised_sync")
+                && check["passed"].as_bool() == Some(false)
+                && check["critical"].as_bool() == Some(false)
+                && check["message"]
+                    .as_str()
+                    .is_some_and(|message| message.contains("idle until subscribe"))
+        }));
+    }
+
+    #[test]
+    fn supervised_sync_backoff_uses_retry_after_floor_and_cap() {
+        let supervisor = SupervisorConfig {
+            base_backoff_ms: 10,
+            max_backoff_ms: 40,
+            jitter_enabled: false,
+            ..SupervisorConfig::default()
+        };
+
+        assert_eq!(
+            supervised_sync_backoff(&supervisor, &MatrixError::Runtime("again".into()), 1),
+            Duration::from_millis(10)
+        );
+        assert_eq!(
+            supervised_sync_backoff(&supervisor, &MatrixError::Runtime("again".into()), 4),
+            Duration::from_millis(40)
+        );
+        assert_eq!(
+            supervised_sync_backoff(
+                &supervisor,
+                &MatrixError::RateLimited {
+                    retry_after_ms: 250
+                },
+                2,
+            ),
+            Duration::from_millis(250)
+        );
+    }
+
+    async fn wait_for_supervised_status(
+        connector: &MatrixConnector,
+        label: &str,
+        predicate: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let started = Instant::now();
+        loop {
+            let status = connector.doctor()["details"]["supervised_sync"].clone();
+            if predicate(&status) {
+                return status;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(2),
+                "timed out waiting for supervised sync status {label}: {status}"
+            );
+            fcp_async_core::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_interrupts_supervised_sync_poll_sleep() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "next_batch": "batch_shutdown",
+                    "rooms": {}
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let key = test_signing_key();
+        let mut connector = MatrixConnector::new();
+        connector
+            .configure(json!({
+                "homeserver_url": mock.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "supervised_sync": {
+                    "enabled": true,
+                    "poll_interval_ms": 60_000,
+                    "timeout_ms": 10,
+                    "supervisor": {
+                        "base_backoff_ms": 10,
+                        "max_backoff_ms": 20,
+                        "jitter_enabled": false,
+                        "max_consecutive_failures": 3,
+                        "shutdown_timeout_ms": 1000
+                    }
+                }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+        connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_poll_shutdown"),
+                topics: vec![EVENT_MESSAGE_AUTHORIZED.into()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: Some(test_token_for_key(&key, &connector.base.instance_id)),
+            })
+            .await
+            .unwrap();
+
+        wait_for_supervised_status(&connector, "successful poll", |status| {
+            status["successful_polls"].as_u64() == Some(1)
+                && status["running"].as_bool() == Some(true)
+        })
+        .await;
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1_000,
+                drain: true,
+                reason: Some("poll sleep cancellation test".into()),
+            })
+            .await
+            .unwrap();
+        let status = connector.doctor()["details"]["supervised_sync"].clone();
+        assert_eq!(status["running"].as_bool(), Some(false));
+        assert_eq!(status["last_stop_reason"].as_str(), Some("shutdown"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn shutdown_interrupts_supervised_sync_retry_sleep() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/sync"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(429)
+                    .insert_header("retry-after", "60")
+                    .set_body_json(serde_json::json!({
+                        "errcode": "M_LIMIT_EXCEEDED",
+                        "error": "retry later"
+                    })),
+            )
+            .mount(&mock)
+            .await;
+
+        let key = test_signing_key();
+        let mut connector = MatrixConnector::new();
+        connector
+            .configure(json!({
+                "homeserver_url": mock.uri(),
+                "auth": { "mode": "access_token", "access_token": "tok" },
+                "supervised_sync": {
+                    "enabled": true,
+                    "poll_interval_ms": 10,
+                    "timeout_ms": 10,
+                    "supervisor": {
+                        "base_backoff_ms": 60_000,
+                        "max_backoff_ms": 60_000,
+                        "jitter_enabled": false,
+                        "max_consecutive_failures": 3,
+                        "shutdown_timeout_ms": 1000
+                    }
+                }
+            }))
+            .await
+            .unwrap();
+        connector
+            .handshake(HandshakeRequest {
+                protocol_version: "2.0.0".into(),
+                zone: ZoneId::work(),
+                zone_dir: None,
+                host_public_key: key.verifying_key().to_bytes(),
+                nonce: [0u8; 32],
+                capabilities_requested: vec![CapabilityId::from_static(CAP_READ)],
+                host: None,
+                transport_caps: None,
+                requested_instance_id: None,
+            })
+            .await
+            .unwrap();
+        connector
+            .subscribe(SubscribeRequest {
+                r#type: "subscribe".into(),
+                id: RequestId::new("sub_retry_shutdown"),
+                topics: vec![EVENT_MESSAGE_AUTHORIZED.into()],
+                since: None,
+                max_events_per_sec: None,
+                batch_ms: None,
+                window_size: None,
+                capability_token: Some(test_token_for_key(&key, &connector.base.instance_id)),
+            })
+            .await
+            .unwrap();
+
+        wait_for_supervised_status(&connector, "retry sleep", |status| {
+            status["failed_polls"].as_u64() == Some(1) && status["running"].as_bool() == Some(true)
+        })
+        .await;
+        connector
+            .shutdown(ShutdownRequest {
+                r#type: "shutdown".into(),
+                deadline_ms: 1_000,
+                drain: true,
+                reason: Some("retry sleep cancellation test".into()),
+            })
+            .await
+            .unwrap();
+        let status = connector.doctor()["details"]["supervised_sync"].clone();
+        assert_eq!(status["running"].as_bool(), Some(false));
+        assert_eq!(status["last_stop_reason"].as_str(), Some("shutdown"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn event_fanout_deduplicates_manual_and_supervised_sync_payloads() {
+        let connector = MatrixConnector::new();
+        connector
+            .subscribed_topics
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(EVENT_MESSAGE_AUTHORIZED.to_string());
+        let mut events = connector.subscribe_events();
+        let mut projection = SyncProjection::default();
+        projection.authorized_message_events.push(json!({
+            "room_id": "!room:matrix.org",
+            "event_id": "$duplicate",
+            "sender": "@alice:matrix.org",
+            "origin_server_ts": 120,
+            "msgtype": "m.text",
+            "body": "only once"
+        }));
+
+        assert_eq!(connector.emit_projected_events("batch_1", &projection), 1);
+        let event = fcp_async_core::time::timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("timeout waiting for first event")
+            .expect("broadcast receive")
+            .expect("event payload");
+        assert_eq!(event.cursor, "batch_1:$duplicate:1");
+
+        assert_eq!(connector.emit_projected_events("batch_2", &projection), 0);
+        assert!(
+            fcp_async_core::time::timeout(Duration::from_millis(50), events.recv())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            connector.sync_observability_snapshot()["emitted_event_dedupe_keys"].as_u64(),
+            Some(1)
+        );
     }
 
     #[fcp_async_core::runtime::test]

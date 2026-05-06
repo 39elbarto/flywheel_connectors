@@ -2,24 +2,27 @@
 
 use std::time::Duration;
 
-use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{CONTENT_DISPOSITION, CONTENT_TYPE, HeaderMap, HeaderValue};
 use reqwest::{Client, RequestBuilder};
 
 use crate::error::{MatrixError, MatrixResult};
 use crate::types::{
     CreateRoomRequest, CreateRoomResponse, DownloadedMedia, Event, JoinedRoomsResponse,
-    MediaUploadResponse, MembersResponse, MessagesResponse, SendEventResponse, SyncResponse,
-    WhoAmIResponse,
+    MatrixDeviceKeysClaimRequest, MatrixDeviceKeysClaimResponse, MatrixDeviceKeysQueryRequest,
+    MatrixDeviceKeysQueryResponse, MatrixDeviceKeysUploadResponse,
+    MatrixRoomKeyBackupUploadResponse, MatrixRoomKeyBackupVersionResponse, MediaUploadResponse,
+    MembersResponse, MessagesResponse, SendEventResponse, SyncResponse, WhoAmIResponse,
 };
 
-const CREDENTIAL_ID_HEADER: &str = "x-fcp-credential-id";
+const CREDENTIAL_ID_HEADER_NAME: &str = "x-fcp-credential-id";
 
 /// Matrix API client.
+#[derive(Clone)]
 pub struct MatrixClient {
     client: Client,
     homeserver_url: String,
     access_token: String,
-    credential_id: Option<String>,
+    credential_id_header: Option<HeaderValue>,
     is_secretless: bool,
 }
 
@@ -28,7 +31,10 @@ impl std::fmt::Debug for MatrixClient {
         f.debug_struct("MatrixClient")
             .field("homeserver_url", &self.homeserver_url)
             .field("access_token", &"[REDACTED]")
-            .field("credential_id", &self.credential_id)
+            .field(
+                "credential_id",
+                &self.credential_id_header.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("is_secretless", &self.is_secretless)
             .finish_non_exhaustive()
     }
@@ -52,7 +58,7 @@ impl MatrixClient {
             client,
             homeserver_url: base,
             access_token: access_token.to_string(),
-            credential_id: None,
+            credential_id_header: None,
             is_secretless: secretless,
         })
     }
@@ -67,7 +73,7 @@ impl MatrixClient {
         credential_id: &str,
         timeout: Duration,
     ) -> MatrixResult<Self> {
-        HeaderValue::from_str(credential_id)
+        let credential_id_header = HeaderValue::from_str(credential_id)
             .map_err(|e| MatrixError::Config(format!("Invalid credential_id header: {e}")))?;
 
         let client = Client::builder()
@@ -81,7 +87,7 @@ impl MatrixClient {
             client,
             homeserver_url: base,
             access_token: String::new(),
-            credential_id: Some(credential_id.to_string()),
+            credential_id_header: Some(credential_id_header),
             is_secretless: true,
         })
     }
@@ -317,6 +323,122 @@ impl MatrixClient {
         self.api_get(url.as_str()).await
     }
 
+    /// Query public Matrix device and cross-signing keys through the connector transport.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn query_device_keys(
+        &self,
+        request: &MatrixDeviceKeysQueryRequest,
+    ) -> MatrixResult<MatrixDeviceKeysQueryResponse> {
+        let url = format!("{}/_matrix/client/v3/keys/query", self.homeserver_url);
+        self.api_post(
+            &url,
+            &serde_json::to_value(request).map_err(MatrixError::Json)?,
+        )
+        .await
+    }
+
+    /// Upload public device keys and one-time-key counts.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn upload_device_keys(
+        &self,
+        request: &serde_json::Value,
+    ) -> MatrixResult<MatrixDeviceKeysUploadResponse> {
+        let url = format!("{}/_matrix/client/v3/keys/upload", self.homeserver_url);
+        self.api_post(&url, request).await
+    }
+
+    /// Claim one-time keys for Olm session establishment.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn claim_one_time_keys(
+        &self,
+        request: &MatrixDeviceKeysClaimRequest,
+    ) -> MatrixResult<MatrixDeviceKeysClaimResponse> {
+        let url = format!("{}/_matrix/client/v3/keys/claim", self.homeserver_url);
+        self.api_post(
+            &url,
+            &serde_json::to_value(request).map_err(MatrixError::Json)?,
+        )
+        .await
+    }
+
+    /// Send an E2EE to-device message such as room-key requests or key shares.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn send_to_device(
+        &self,
+        event_type: &str,
+        txn_id: &str,
+        messages: &serde_json::Value,
+    ) -> MatrixResult<serde_json::Value> {
+        let encoded_event_type = urlencoded(event_type);
+        let encoded_txn = urlencoded(txn_id);
+        let url = format!(
+            "{}/_matrix/client/v3/sendToDevice/{encoded_event_type}/{encoded_txn}",
+            self.homeserver_url
+        );
+        self.api_put(&url, messages).await
+    }
+
+    /// Fetch the active room-key backup version metadata.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn room_key_backup_version(
+        &self,
+    ) -> MatrixResult<MatrixRoomKeyBackupVersionResponse> {
+        let url = format!(
+            "{}/_matrix/client/v3/room_keys/version",
+            self.homeserver_url
+        );
+        self.api_get(&url).await
+    }
+
+    /// Upload room-key backup records for a known backup version.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn upload_room_keys(
+        &self,
+        version: &str,
+        request: &serde_json::Value,
+    ) -> MatrixResult<MatrixRoomKeyBackupUploadResponse> {
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/_matrix/client/v3/room_keys/keys",
+            self.homeserver_url
+        ))
+        .map_err(|e| MatrixError::Config(format!("Invalid room-key backup URL: {e}")))?;
+        url.query_pairs_mut().append_pair("version", version);
+        self.api_put(url.as_str(), request).await
+    }
+
+    /// Delete a stale backed-up room key before reuploading corrected material.
+    ///
+    /// # Errors
+    /// Returns `MatrixError` on transport, auth, or homeserver response errors.
+    pub async fn delete_room_key(
+        &self,
+        version: &str,
+        room_id: &str,
+        session_id: &str,
+    ) -> MatrixResult<serde_json::Value> {
+        let encoded_room = urlencoded(room_id);
+        let encoded_session = urlencoded(session_id);
+        let mut url = reqwest::Url::parse(&format!(
+            "{}/_matrix/client/v3/room_keys/keys/{encoded_room}/{encoded_session}",
+            self.homeserver_url
+        ))
+        .map_err(|e| MatrixError::Config(format!("Invalid room-key delete URL: {e}")))?;
+        url.query_pairs_mut().append_pair("version", version);
+        self.api_delete(url.as_str()).await
+    }
+
     // ─── Health ─────────────────────────────────────────────────────────────
 
     /// Lightweight health check.
@@ -378,9 +500,20 @@ impl MatrixClient {
         self.handle_response(resp).await
     }
 
+    async fn api_delete<T: serde::de::DeserializeOwned>(&self, url: &str) -> MatrixResult<T> {
+        let resp = self
+            .authorize(self.client.delete(url))
+            .send()
+            .await
+            .map_err(MatrixError::Http)?;
+        self.handle_response(resp).await
+    }
+
     fn authorize(&self, request: RequestBuilder) -> RequestBuilder {
-        if let Some(credential_id) = &self.credential_id {
-            request.header(CREDENTIAL_ID_HEADER, credential_id)
+        if let Some(credential_id_header) = &self.credential_id_header {
+            let mut headers = HeaderMap::with_capacity(1);
+            headers.insert(CREDENTIAL_ID_HEADER_NAME, credential_id_header.clone());
+            request.headers(headers)
         } else if self.access_token.is_empty() {
             request
         } else {
@@ -532,7 +665,10 @@ mod tests {
             .and(wiremock::matchers::path(
                 "/_matrix/client/v3/account/whoami",
             ))
-            .and(wiremock::matchers::header(CREDENTIAL_ID_HEADER, "cred_1"))
+            .and(wiremock::matchers::header(
+                CREDENTIAL_ID_HEADER_NAME,
+                "cred_1",
+            ))
             .respond_with(
                 wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "user_id": "@bot:matrix.org"
@@ -613,6 +749,207 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.end.as_deref(), Some("next"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn query_device_keys_posts_request_and_parses_trust_material_shape() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/keys/query"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "device_keys": {
+                        "@bot:matrix.org": {
+                            "DEVICE123": {
+                                "user_id": "@bot:matrix.org",
+                                "device_id": "DEVICE123",
+                                "algorithms": ["m.olm.v1.curve25519-aes-sha2"],
+                                "keys": {
+                                    "ed25519:DEVICE123": "public-ed25519"
+                                },
+                                "signatures": {
+                                    "@bot:matrix.org": {
+                                        "ed25519:DEVICE123": "public-signature"
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    "master_keys": {
+                        "@bot:matrix.org": {
+                            "user_id": "@bot:matrix.org",
+                            "usage": ["master"],
+                            "keys": {
+                                "ed25519:MASTER": "public-master"
+                            }
+                        }
+                    },
+                    "self_signing_keys": {},
+                    "user_signing_keys": {},
+                    "failures": {}
+                })),
+            )
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let response = c
+            .query_device_keys(&MatrixDeviceKeysQueryRequest {
+                device_keys: std::collections::BTreeMap::from([(
+                    "@bot:matrix.org".to_string(),
+                    vec!["DEVICE123".to_string()],
+                )]),
+                timeout: Some(5000),
+                token: Some("sync_token".into()),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response
+                .device_keys
+                .get("@bot:matrix.org")
+                .and_then(|devices| devices.get("DEVICE123"))
+                .map(|device| device.keys.contains_key("ed25519:DEVICE123")),
+            Some(true)
+        );
+        assert_eq!(
+            response
+                .master_keys
+                .get("@bot:matrix.org")
+                .map(|key| key.usage.clone()),
+            Some(vec!["master".to_string()])
+        );
+        let requests = mock.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        let request = requests.first().expect("one device-key query request");
+        let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+        assert_eq!(body["device_keys"]["@bot:matrix.org"][0], "DEVICE123");
+        assert_eq!(body["timeout"].as_u64(), Some(5000));
+        assert_eq!(body["token"].as_str(), Some("sync_token"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn e2ee_maintenance_methods_use_explicit_matrix_endpoints() {
+        let mock = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/keys/upload"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "one_time_key_counts": { "signed_curve25519": 2 }
+                })),
+            )
+            .mount(&mock)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path("/_matrix/client/v3/keys/claim"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "failures": {},
+                    "one_time_keys": {}
+                })),
+            )
+            .mount(&mock)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/sendToDevice/m.room.encrypted/txn-1",
+            ))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/room_keys/version",
+            ))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "algorithm": "m.megolm_backup.v1.curve25519-aes-sha2",
+                    "auth_data": {},
+                    "count": "0",
+                    "etag": "etag-1",
+                    "version": "1"
+                })),
+            )
+            .mount(&mock)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("PUT"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/room_keys/keys",
+            ))
+            .and(wiremock::matchers::query_param("version", "1"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "count": "1",
+                    "etag": "etag-2"
+                })),
+            )
+            .mount(&mock)
+            .await;
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path(
+                "/_matrix/client/v3/room_keys/keys/%21room%3Am.org/session-1",
+            ))
+            .and(wiremock::matchers::query_param("version", "1"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&mock)
+            .await;
+
+        let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
+        let upload = c
+            .upload_device_keys(&serde_json::json!({
+                "device_keys": { "user_id": "@bot:m.org", "device_id": "DEV1" }
+            }))
+            .await
+            .unwrap();
+        let claim = c
+            .claim_one_time_keys(&MatrixDeviceKeysClaimRequest {
+                one_time_keys: std::collections::BTreeMap::from([(
+                    "@alice:m.org".to_string(),
+                    std::collections::BTreeMap::from([(
+                        "ALICEDEVICE".to_string(),
+                        "signed_curve25519".to_string(),
+                    )]),
+                )]),
+                timeout: Some(1000),
+            })
+            .await
+            .unwrap();
+        let to_device = c
+            .send_to_device(
+                "m.room.encrypted",
+                "txn-1",
+                &serde_json::json!({ "messages": {} }),
+            )
+            .await
+            .unwrap();
+        let backup = c.room_key_backup_version().await.unwrap();
+        let room_keys = c
+            .upload_room_keys("1", &serde_json::json!({ "rooms": {} }))
+            .await
+            .unwrap();
+        let delete = c
+            .delete_room_key("1", "!room:m.org", "session-1")
+            .await
+            .unwrap();
+
+        assert_eq!(
+            upload.one_time_key_counts.get("signed_curve25519"),
+            Some(&2)
+        );
+        assert!(claim.failures.is_empty());
+        assert_eq!(to_device, serde_json::json!({}));
+        assert_eq!(backup.version.as_deref(), Some("1"));
+        assert_eq!(room_keys.etag.as_deref(), Some("etag-2"));
+        assert_eq!(delete, serde_json::json!({}));
+
+        let requests = mock.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 6);
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.headers.get("authorization").is_some())
+        );
     }
 
     #[fcp_async_core::runtime::test]
@@ -775,10 +1112,12 @@ mod tests {
 
         let c = MatrixClient::new(&mock.uri(), "tok", Duration::from_secs(10)).unwrap();
         let result = c.joined_rooms().await;
-        match result.unwrap_err() {
-            MatrixError::RateLimited { retry_after_ms } => assert_eq!(retry_after_ms, 60_000),
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
+        assert!(matches!(
+            result,
+            Err(MatrixError::RateLimited {
+                retry_after_ms: 60_000
+            })
+        ));
     }
 
     #[fcp_async_core::runtime::test]

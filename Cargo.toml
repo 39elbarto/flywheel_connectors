@@ -259,6 +259,9 @@ subtle = "2.6"
 rand = "0.8"
 rand_core = "0.6"
 rsa = { version = "0.9", features = ["sha2"] }
+# matrix-sdk-crypto 0.16 requires Rust 1.88; keep the Matrix E2EE adapter on
+# the latest Rust-1.85-compatible release until the workspace MSRV moves.
+matrix-sdk-crypto = { version = "0.13.0", default-features = false }
 
 # Identifiers
 uuid = { version = "1.21", features = ["v4", "v5", "serde"] }

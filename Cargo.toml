@@ -44,7 +44,6 @@ members = [
     "connectors/deepseek",
     "connectors/discord",
     "connectors/duckduckgo",
-    "connectors/comfyui",
     "connectors/fal",
     "connectors/fireworks",
     "connectors/glm",
@@ -337,7 +336,6 @@ fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-cerebras = { path = "connectors/cerebras" }
-fcp-comfyui = { path = "connectors/comfyui" }
 fcp-deepseek = { path = "connectors/deepseek" }
 fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-fireworks = { path = "connectors/fireworks" }

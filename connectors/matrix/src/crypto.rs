@@ -281,7 +281,7 @@ pub fn project_trust_gated_decrypted_event(
             outcome,
             reason,
             &[reason],
-            retry,
+            &retry,
         );
     };
 
@@ -303,6 +303,15 @@ pub fn project_trust_gated_decrypted_event(
         );
     }
 
+    authorized_decrypted_projection(input, candidate, e2ee, state_persistence)
+}
+
+fn authorized_decrypted_projection(
+    input: &MatrixEncryptedEventProjectionContext,
+    candidate: &MatrixVerifiedDecryptedMessageEvent,
+    e2ee: &MatrixE2eeConfig,
+    state_persistence: &MatrixStatePersistenceConfig,
+) -> MatrixTrustGatedDecryptedProjection {
     let provenance = json!({
         "source_event_type": "m.room.encrypted",
         "algorithm": candidate.algorithm,
@@ -337,15 +346,17 @@ pub fn project_trust_gated_decrypted_event(
         input,
         e2ee,
         state_persistence,
-        "authorized_decrypted",
-        "verified_decrypted",
-        &[],
-        json!({
-            "classification": "not_needed",
-            "outcome": "authorized_decrypted",
-            "contains_secret_material": false,
-        }),
-        true,
+        DecryptedProjectionMetadata {
+            outcome: "authorized_decrypted",
+            reason_code: "verified_decrypted",
+            denial_reasons: &[],
+            retry: &json!({
+                "classification": "not_needed",
+                "outcome": "authorized_decrypted",
+                "contains_secret_material": false,
+            }),
+            plaintext_emitted: true,
+        },
     );
 
     MatrixTrustGatedDecryptedProjection {
@@ -373,7 +384,9 @@ fn decrypted_projection_denial_reasons(
     {
         reasons.push("unsupported_algorithm");
     }
-    if input.room_id != candidate.room_id || input.room_id != candidate.session_room_id {
+    let event_room_matches = input.room_id == candidate.room_id;
+    let session_room_matches = input.room_id == candidate.session_room_id;
+    if !(event_room_matches && session_room_matches) {
         reasons.push("wrong_room");
     }
     if input.sender.as_deref() != Some(candidate.sender.as_str()) {
@@ -456,6 +469,12 @@ fn denied_decrypted_projection(
     reason_code: &'static str,
     denial_reasons: &[&'static str],
 ) -> MatrixTrustGatedDecryptedProjection {
+    let retry = undecrypted_retry_decision_snapshot(
+        input.event_id.as_deref(),
+        &input.room_id,
+        input.retry_attempts_used,
+        &e2ee.undecrypted_retry,
+    );
     denied_decrypted_projection_with_retry(
         input,
         e2ee,
@@ -463,12 +482,7 @@ fn denied_decrypted_projection(
         outcome,
         reason_code,
         denial_reasons,
-        undecrypted_retry_decision_snapshot(
-            input.event_id.as_deref(),
-            &input.room_id,
-            input.retry_attempts_used,
-            &e2ee.undecrypted_retry,
-        ),
+        &retry,
     )
 }
 
@@ -479,7 +493,7 @@ fn denied_decrypted_projection_with_retry(
     outcome: &'static str,
     reason_code: &'static str,
     denial_reasons: &[&'static str],
-    retry: Value,
+    retry: &Value,
 ) -> MatrixTrustGatedDecryptedProjection {
     MatrixTrustGatedDecryptedProjection {
         authorized_event: None,
@@ -487,25 +501,32 @@ fn denied_decrypted_projection_with_retry(
             input,
             e2ee,
             state_persistence,
-            outcome,
-            reason_code,
-            denial_reasons,
-            retry,
-            false,
+            DecryptedProjectionMetadata {
+                outcome,
+                reason_code,
+                denial_reasons,
+                retry,
+                plaintext_emitted: false,
+            },
         ),
         dropped_reason: Some(reason_code),
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DecryptedProjectionMetadata<'a> {
+    outcome: &'static str,
+    reason_code: &'static str,
+    denial_reasons: &'a [&'static str],
+    retry: &'a Value,
+    plaintext_emitted: bool,
 }
 
 fn decrypted_projection_metadata(
     input: &MatrixEncryptedEventProjectionContext,
     e2ee: &MatrixE2eeConfig,
     state_persistence: &MatrixStatePersistenceConfig,
-    outcome: &'static str,
-    reason_code: &'static str,
-    denial_reasons: &[&'static str],
-    retry: Value,
-    plaintext_emitted: bool,
+    metadata: DecryptedProjectionMetadata<'_>,
 ) -> Value {
     json!({
         "room_id": input.room_id,
@@ -516,14 +537,14 @@ fn decrypted_projection_metadata(
         "session": redacted_identifier_snapshot(input.session_id.as_deref()),
         "redaction_state": input.redaction_state.label(),
         "verified_decryption_requested": e2ee.verified_decryption_requested,
-        "decryption_status": outcome,
-        "decryption_reason": reason_code,
-        "denial_reason_codes": denial_reasons,
-        "plaintext_emitted": plaintext_emitted,
+        "decryption_status": metadata.outcome,
+        "decryption_reason": metadata.reason_code,
+        "denial_reason_codes": metadata.denial_reasons,
+        "plaintext_emitted": metadata.plaintext_emitted,
         "ciphertext_redacted": true,
         "trust_state": MatrixCryptoTrustState::from_config(e2ee, state_persistence).snapshot(),
-        "undecrypted_retry": retry,
-        "fcp_error_mapping": decrypted_projection_fcp_error_mapping(reason_code),
+        "undecrypted_retry": metadata.retry,
+        "fcp_error_mapping": decrypted_projection_fcp_error_mapping(metadata.reason_code),
         "contains_secret_material": false,
     })
 }

@@ -84,6 +84,7 @@ async fn youtube_introspect_has_required_operations() {
         "youtube.post_comment",
         "youtube.get_captions",
         "youtube.get_caption_transcript",
+        "youtube.get_transcript",
         "youtube.upload_caption",
         "youtube.get_analytics",
         "youtube.upload_video",
@@ -96,7 +97,7 @@ async fn youtube_introspect_has_required_operations() {
         );
     }
 
-    assert_eq!(ops.len(), 13, "YouTube should have exactly 13 operations");
+    assert_eq!(ops.len(), 14, "YouTube should have exactly 14 operations");
 }
 
 #[fcp_async_core::runtime::test]

@@ -439,6 +439,17 @@ impl FcpConnector for QqConnector {
     }
 
     async fn health(&self) -> HealthSnapshot {
+        let details = if let Some(client) = self.client.as_ref() {
+            let gateway_runtime = client.gateway_runtime_snapshot().await;
+            Some(json!({
+                "base_url": client.config().base_url,
+                "token_base_url": client.config().token_base_url,
+                "app_id": client.config().app_id,
+                "gateway_runtime": gateway_runtime,
+            }))
+        } else {
+            None
+        };
         HealthSnapshot {
             status: if self.client.is_some() {
                 HealthState::Ready
@@ -447,13 +458,7 @@ impl FcpConnector for QqConnector {
             },
             uptime_ms: u64::try_from(self.started_at.elapsed().as_millis()).unwrap_or(u64::MAX),
             load: None,
-            details: self.client.as_ref().map(|c| {
-                json!({
-                    "base_url": c.config().base_url,
-                    "token_base_url": c.config().token_base_url,
-                    "app_id": c.config().app_id,
-                })
-            }),
+            details,
             rate_limit: None,
         }
     }
@@ -492,7 +497,7 @@ impl FcpConnector for QqConnector {
     fn introspect(&self) -> Introspection {
         Introspection {
             operations: Self::operations(),
-            events: Vec::new(),
+            events: qq_events_info(),
             resource_types: Vec::new(),
             auth_caps: None,
             event_caps: Some(EventCaps {

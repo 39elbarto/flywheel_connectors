@@ -30,7 +30,7 @@ fn unique_log_path() -> PathBuf {
     dir.join("matrix_e2ee_decrypted_projection_e2e.jsonl")
 }
 
-fn log_step(logs: &mut File, step: &str, status: &str, details: Value) {
+fn log_step(logs: &mut File, step: &str, status: &str, details: &Value) {
     let line = json!({
         "ts": chrono::Utc::now().to_rfc3339(),
         "step": step,

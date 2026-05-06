@@ -130,6 +130,11 @@ fn provider_construction_auth_base_url_and_model_id_policy() {
     assert!(normalize_together_base_url(Some("https://api.together.xyz/v1")).is_err());
     assert!(normalize_together_base_url(Some("https://example.com/v1")).is_err());
     assert!(normalize_together_base_url(Some("https://api.together.ai/v2")).is_err());
+    assert!(normalize_together_base_url(Some("https://api.together.ai/v1?debug=1")).is_err());
+    assert!(normalize_together_base_url(Some("https://api.together.ai/v1#fragment")).is_err());
+    assert!(
+        normalize_together_base_url(Some("https://operator:secret@api.together.ai/v1")).is_err()
+    );
 
     let credential_provider = TogetherProvider::new(
         DEFAULT_BASE_URL,

@@ -253,6 +253,11 @@ pub fn normalize_together_base_url(raw: Option<&str>) -> Result<String, String> 
         return Err("base_url must not be empty".into());
     }
     let parsed = Url::parse(value).map_err(|err| format!("Invalid base_url: {err}"))?;
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(format!(
+            "base_url must not include username or password components: {value}"
+        ));
+    }
     let host = parsed
         .host_str()
         .ok_or_else(|| "base_url must include a host".to_string())?;

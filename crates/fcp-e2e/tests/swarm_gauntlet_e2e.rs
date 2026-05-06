@@ -850,11 +850,17 @@ fn maybe_write_batch_morselization_jsonl_artifact(jsonl: &str) -> std::io::Resul
     Ok(())
 }
 
-fn prewarm_command_line() -> Vec<String> {
+fn prewarm_cargo_target_dir() -> String {
+    std::env::var("CARGO_TARGET_DIR").unwrap_or_else(|_| "/tmp/fcp-prewarm-e2e".to_string())
+}
+
+fn prewarm_command_line(cargo_target_dir: &str) -> Vec<String> {
     vec![
         "rch".to_string(),
         "exec".to_string(),
         "--".to_string(),
+        "env".to_string(),
+        format!("CARGO_TARGET_DIR={cargo_target_dir}"),
         "cargo".to_string(),
         "test".to_string(),
         "-p".to_string(),
@@ -912,6 +918,14 @@ fn prewarm_latency(
     }
 }
 
+fn prewarm_decision_label(decision: &PrewarmCheckoutDecision) -> &'static str {
+    match decision {
+        PrewarmCheckoutDecision::AdmitWarm { .. } => "admit_warm",
+        PrewarmCheckoutDecision::FallbackOnDemand { .. } => "fallback_on_demand",
+        PrewarmCheckoutDecision::RejectUnsafe { .. } => "reject_unsafe",
+    }
+}
+
 fn prewarm_decision_reasons(
     decision: &PrewarmCheckoutDecision,
 ) -> Result<(Option<String>, Option<String>), Box<dyn Error>> {
@@ -943,26 +957,47 @@ fn prewarm_evidence(
 ) -> Result<SwarmPrewarmColdStartEvidence, Box<dyn Error>> {
     let decision = case.config.decide_checkout(&case.observation);
     let (fallback_reason, unsafe_rejection_reason) = prewarm_decision_reasons(&decision)?;
+    let cargo_target_dir = prewarm_cargo_target_dir();
+    let error_mapping = match (&fallback_reason, &unsafe_rejection_reason) {
+        (Some(reason), None) => format!("fallback_on_demand:{reason}"),
+        (None, Some(reason)) => format!("reject_unsafe:{reason}"),
+        (None, None) => "ok".to_string(),
+        (Some(fallback), Some(rejection)) => format!("ambiguous:{fallback}:{rejection}"),
+    };
 
     Ok(SwarmPrewarmColdStartEvidence {
         schema_version: SWARM_PREWARM_COLD_START_SCHEMA_VERSION.to_string(),
         scenario_id: case.scenario_id.to_string(),
         connector_id: "fcp.github:utility:1.0.0".to_string(),
-        command_line: prewarm_command_line(),
+        command_line: prewarm_command_line(&cargo_target_dir),
         git_revision: "e2e-smoke-revision".to_string(),
         worker_id: "offline-e2e-runner".to_string(),
+        cargo_target_dir,
+        connector_fixture_id: "fcp-test-connector:request-response".to_string(),
+        host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout".to_string(),
         manifest_hash: "blake3:prewarm-manifest".to_string(),
         zone: "z:project:swarm-prewarm".to_string(),
         strategy: serde_label(&case.config.strategy)?,
         pool_state: serde_label(&case.observation.pool_state)?,
+        pool_size: case.config.max_idle,
+        admission_decision: prewarm_decision_label(&decision).to_string(),
+        warm_checkout: decision.admits_warm_entry(),
         activation_latency_ms: case.activation_latency_ms,
         baseline_on_demand_latency_ms: case.baseline_on_demand_latency_ms,
         latency: case.latency,
         sandbox_layer: serde_label(&case.observation.sandbox)?,
+        sandbox_profile: "strict".to_string(),
+        sandbox_boundary: "fcp-sandbox::strict-profile-limits".to_string(),
         credential_mode: serde_label(&case.observation.credential)?,
         rss_bytes: 96 * 1024 * 1024 + u64::from(case.concurrent_startups).saturating_mul(4096),
         process_count: case.process_count,
         concurrent_startups: case.concurrent_startups,
+        error_mapping,
+        cleanup_result: if case.shutdown_cleanup_verified {
+            "verified".to_string()
+        } else {
+            "not_verified".to_string()
+        },
         restart_reason: case.restart_reason.map(str::to_string),
         fallback_reason,
         unsafe_rejection_reason,
@@ -1422,12 +1457,39 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
         SWARM_PREWARM_COLD_START_SCHEMA_VERSION
     );
     assert_eq!(warm_hit["connector_id"], "fcp.github:utility:1.0.0");
+    let cargo_target_dir = warm_hit["cargo_target_dir"]
+        .as_str()
+        .ok_or("cargo target dir should be recorded")?;
+    assert!(!cargo_target_dir.is_empty());
+    assert_eq!(
+        warm_hit["connector_fixture_id"],
+        "fcp-test-connector:request-response"
+    );
+    assert_eq!(
+        warm_hit["host_boundary"],
+        "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+    );
     assert_eq!(warm_hit["manifest_hash"], "blake3:prewarm-manifest");
     assert_eq!(warm_hit["zone"], "z:project:swarm-prewarm");
     assert_eq!(warm_hit["strategy"], "warm_pool");
     assert_eq!(warm_hit["pool_state"], "warm_hit");
+    assert_eq!(warm_hit["pool_size"], 256);
+    assert_eq!(warm_hit["admission_decision"], "admit_warm");
+    assert_eq!(warm_hit["warm_checkout"], true);
     assert_eq!(warm_hit["sandbox_layer"], "limits_active");
+    assert_eq!(warm_hit["sandbox_profile"], "strict");
+    assert_eq!(
+        warm_hit["sandbox_boundary"],
+        "fcp-sandbox::strict-profile-limits"
+    );
     assert_eq!(warm_hit["credential_mode"], "deferred");
+    assert_eq!(warm_hit["error_mapping"], "ok");
+    assert_eq!(warm_hit["cleanup_result"], "verified");
+    let cargo_target_arg = format!("CARGO_TARGET_DIR={cargo_target_dir}");
+    assert!(warm_hit["command_line"].as_array().is_some_and(|args| {
+        args.iter()
+            .any(|arg| arg.as_str() == Some(cargo_target_arg.as_str()))
+    }));
     assert!(
         warm_hit["p99_activation_latency_ms"]
             .as_u64()
@@ -1435,12 +1497,20 @@ fn prewarm_cold_start_e2e_emits_replayable_jsonl() -> Result<(), Box<dyn Error>>
             .is_some_and(|(p99, baseline)| p99 < baseline)
     );
     assert_eq!(empty_pool["fallback_reason"], "empty_pool");
+    assert_eq!(empty_pool["admission_decision"], "fallback_on_demand");
+    assert_eq!(empty_pool["warm_checkout"], false);
+    assert_eq!(empty_pool["error_mapping"], "fallback_on_demand:empty_pool");
     assert_eq!(stale_entry["fallback_reason"], "warm_entry_stale");
     assert_eq!(crash["fallback_reason"], "crash_before_checkout");
     assert_eq!(crash["restart_reason"], "exit_code_1");
     assert_eq!(
         zygote["unsafe_rejection_reason"],
         "zygote_without_security_proof"
+    );
+    assert_eq!(zygote["admission_decision"], "reject_unsafe");
+    assert_eq!(
+        zygote["error_mapping"],
+        "reject_unsafe:zygote_without_security_proof"
     );
     assert!(
         cleanup["shutdown_cleanup_verified"]

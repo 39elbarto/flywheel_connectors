@@ -673,6 +673,8 @@ pub enum PrewarmUnsafeReason {
 pub struct PrewarmCheckoutEvidence {
     /// Connector identifier.
     pub connector_id: String,
+    /// Host boundary that made the checkout decision.
+    pub host_boundary: String,
     /// Manifest hash used by the candidate warm entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_hash: Option<String>,
@@ -681,15 +683,32 @@ pub struct PrewarmCheckoutEvidence {
     pub zone: Option<String>,
     /// Pool state recorded for the checkout.
     pub pool_state: PrewarmPoolState,
+    /// Configured warm pool capacity represented by this checkout.
+    pub pool_size: u32,
+    /// Coarse checkout decision label for JSONL logs.
+    pub admission_decision: String,
+    /// Whether the decision admits a warm entry.
+    pub warm_checkout: bool,
     /// Activation latency in milliseconds, when measured.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub activation_latency_ms: Option<u64>,
     /// Sandbox layer reported for the warm entry.
     pub sandbox_layer: String,
+    /// Sandbox profile requested by the connector fixture.
+    pub sandbox_profile: String,
+    /// Sandbox boundary represented by this checkout.
+    pub sandbox_boundary: String,
     /// Credential handling mode, redacted to a coarse class.
     pub credential_state: PrewarmCredentialState,
+    /// Resident set size observed for the connector sandbox, when measured.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rss_bytes: Option<u64>,
     /// Process count observed for the connector sandbox.
     pub process_count: u32,
+    /// Operator-facing error mapping class for fallback or rejection paths.
+    pub error_mapping: String,
+    /// Cleanup result recorded for the warm entry or fallback path.
+    pub cleanup_result: String,
     /// Final checkout decision.
     pub decision: PrewarmCheckoutDecision,
 }
@@ -2060,20 +2079,45 @@ mod tests {
     {
         let evidence = PrewarmCheckoutEvidence {
             connector_id: "fcp.github:utility:1.0.0".to_string(),
+            host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+                .to_string(),
             manifest_hash: Some("blake3:abc123".to_string()),
             zone: Some("z:project:alpha".to_string()),
             pool_state: PrewarmPoolState::WarmHit,
+            pool_size: 4,
+            admission_decision: "admit_warm".to_string(),
+            warm_checkout: true,
             activation_latency_ms: Some(17),
             sandbox_layer: "wasi".to_string(),
+            sandbox_profile: "strict".to_string(),
+            sandbox_boundary: "fcp-sandbox::strict-profile-limits".to_string(),
             credential_state: PrewarmCredentialState::Deferred,
+            rss_bytes: Some(96 * 1024 * 1024),
             process_count: 1,
+            error_mapping: "ok".to_string(),
+            cleanup_result: "verified".to_string(),
             decision: PrewarmCheckoutDecision::AdmitWarm {
                 pool_state: PrewarmPoolState::WarmHit,
             },
         };
         let value = serde_json::to_value(&evidence)?;
+        assert_eq!(
+            value["host_boundary"],
+            "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+        );
         assert_eq!(value["credential_state"], "deferred");
+        assert_eq!(value["pool_size"], 4);
+        assert_eq!(value["admission_decision"], "admit_warm");
+        assert_eq!(value["warm_checkout"], true);
         assert_eq!(value["activation_latency_ms"], 17);
+        assert_eq!(value["sandbox_profile"], "strict");
+        assert_eq!(
+            value["sandbox_boundary"],
+            "fcp-sandbox::strict-profile-limits"
+        );
+        assert_eq!(value["rss_bytes"], 96 * 1024 * 1024);
+        assert_eq!(value["error_mapping"], "ok");
+        assert_eq!(value["cleanup_result"], "verified");
         assert!(!value.to_string().contains("secret"));
         Ok(())
     }
@@ -2331,11 +2375,10 @@ mod tests {
         let later = now + Duration::from_secs(5);
         coordinator.start_graceful(later);
         // Should still have the original start time.
-        if let ShutdownPhase::GracefulWait { sent_at } = coordinator.phase() {
-            assert_eq!(*sent_at, now);
-        } else {
-            panic!("expected GracefulWait");
-        }
+        assert_eq!(
+            coordinator.phase(),
+            &ShutdownPhase::GracefulWait { sent_at: now }
+        );
     }
 
     #[test]

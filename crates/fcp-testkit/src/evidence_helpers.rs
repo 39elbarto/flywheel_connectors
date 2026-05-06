@@ -284,7 +284,7 @@ pub const SWARM_PROMOTION_SCHEMA_VERSION: &str = "swarm-promotion/v1";
 pub const SWARM_BATCH_MORSELIZATION_SCHEMA_VERSION: &str = "swarm-batch-morselization/v1";
 
 /// Schema tag for connector prewarm cold-start evidence records.
-pub const SWARM_PREWARM_COLD_START_SCHEMA_VERSION: &str = "swarm-prewarm-cold-start/v1";
+pub const SWARM_PREWARM_COLD_START_SCHEMA_VERSION: &str = "swarm-prewarm-cold-start/v2";
 
 /// Synthetic-but-realistic workload families used for swarm latency baselines.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -2701,6 +2701,12 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub git_revision: String,
     /// Worker that produced the evidence.
     pub worker_id: String,
+    /// Cargo target directory used by the proof run.
+    pub cargo_target_dir: String,
+    /// Connector fixture activated by the host-backed proof.
+    pub connector_fixture_id: String,
+    /// Host boundary that made the checkout decision.
+    pub host_boundary: String,
     /// Manifest hash used by the candidate warm entry.
     pub manifest_hash: String,
     /// Zone requested by checkout.
@@ -2709,6 +2715,12 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub strategy: String,
     /// Pool state observed for checkout.
     pub pool_state: String,
+    /// Configured prewarm pool capacity for the connector fixture.
+    pub pool_size: u32,
+    /// Coarse checkout decision label.
+    pub admission_decision: String,
+    /// Whether the run checked out a warm entry.
+    pub warm_checkout: bool,
     /// Measured or modeled activation latency for this scenario.
     pub activation_latency_ms: u64,
     /// Conservative on-demand baseline used for comparison.
@@ -2717,6 +2729,10 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub latency: SwarmPrewarmLatencyPercentiles,
     /// Sandbox layer active for the connector.
     pub sandbox_layer: String,
+    /// Sandbox profile requested for the connector fixture.
+    pub sandbox_profile: String,
+    /// Sandbox enforcement boundary represented by this record.
+    pub sandbox_boundary: String,
     /// Redacted credential handling mode.
     pub credential_mode: String,
     /// Resident set size observed or bounded for the scenario.
@@ -2725,6 +2741,10 @@ pub struct SwarmPrewarmColdStartEvidence {
     pub process_count: u32,
     /// Number of simultaneous startup requests represented by the scenario.
     pub concurrent_startups: u32,
+    /// Operator-facing error mapping class for fallback or rejection paths.
+    pub error_mapping: String,
+    /// Cleanup result recorded for the warm entry or fallback path.
+    pub cleanup_result: String,
     /// Restart reason when a prior warm entry crashed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub restart_reason: Option<String>,
@@ -2761,12 +2781,20 @@ impl SwarmPrewarmColdStartEvidence {
             ("connector_id", self.connector_id.as_str()),
             ("git_revision", self.git_revision.as_str()),
             ("worker_id", self.worker_id.as_str()),
+            ("cargo_target_dir", self.cargo_target_dir.as_str()),
+            ("connector_fixture_id", self.connector_fixture_id.as_str()),
+            ("host_boundary", self.host_boundary.as_str()),
             ("manifest_hash", self.manifest_hash.as_str()),
             ("zone", self.zone.as_str()),
             ("strategy", self.strategy.as_str()),
             ("pool_state", self.pool_state.as_str()),
+            ("admission_decision", self.admission_decision.as_str()),
             ("sandbox_layer", self.sandbox_layer.as_str()),
+            ("sandbox_profile", self.sandbox_profile.as_str()),
+            ("sandbox_boundary", self.sandbox_boundary.as_str()),
             ("credential_mode", self.credential_mode.as_str()),
+            ("error_mapping", self.error_mapping.as_str()),
+            ("cleanup_result", self.cleanup_result.as_str()),
         ] {
             if value.trim().is_empty() {
                 return Err(SwarmPrewarmColdStartEvidenceError::EmptyField { field });
@@ -2803,6 +2831,13 @@ impl SwarmPrewarmColdStartEvidence {
                 },
             );
         }
+        if self.pool_size == 0 {
+            return Err(
+                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
+                    field: "pool_size",
+                },
+            );
+        }
         if self.process_count == 0 {
             return Err(
                 SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
@@ -2829,19 +2864,30 @@ impl SwarmPrewarmColdStartEvidence {
             "schema_version": self.schema_version,
             "scenario_id": self.scenario_id,
             "connector_id": self.connector_id,
+            "command_line": self.command_line,
+            "cargo_target_dir": self.cargo_target_dir,
+            "connector_fixture_id": self.connector_fixture_id,
+            "host_boundary": self.host_boundary,
             "manifest_hash": self.manifest_hash,
             "zone": self.zone,
             "strategy": self.strategy,
             "pool_state": self.pool_state,
+            "pool_size": self.pool_size,
+            "admission_decision": self.admission_decision,
+            "warm_checkout": self.warm_checkout,
             "activation_latency_ms": self.activation_latency_ms,
             "baseline_on_demand_latency_ms": self.baseline_on_demand_latency_ms,
             "p50_activation_latency_ms": self.latency.p50_ms,
             "p99_activation_latency_ms": self.latency.p99_ms,
             "sandbox_layer": self.sandbox_layer,
+            "sandbox_profile": self.sandbox_profile,
+            "sandbox_boundary": self.sandbox_boundary,
             "credential_mode": self.credential_mode,
             "rss_bytes": self.rss_bytes,
             "process_count": self.process_count,
             "concurrent_startups": self.concurrent_startups,
+            "error_mapping": self.error_mapping,
+            "cleanup_result": self.cleanup_result,
             "restart_reason": self.restart_reason,
             "fallback_reason": self.fallback_reason,
             "unsafe_rejection_reason": self.unsafe_rejection_reason,
@@ -8922,10 +8968,17 @@ mod tests {
             ],
             git_revision: "abc123".to_string(),
             worker_id: "rch-worker-64c".to_string(),
+            cargo_target_dir: "/tmp/fcp-prewarm-e2e".to_string(),
+            connector_fixture_id: "fcp-test-connector:request-response".to_string(),
+            host_boundary: "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+                .to_string(),
             manifest_hash: "blake3:manifest".to_string(),
             zone: "z:project:swarm".to_string(),
             strategy: "warm_pool".to_string(),
             pool_state: "warm_hit".to_string(),
+            pool_size: 256,
+            admission_decision: "admit_warm".to_string(),
+            warm_checkout: true,
             activation_latency_ms: 18,
             baseline_on_demand_latency_ms: 96,
             latency: SwarmPrewarmLatencyPercentiles {
@@ -8937,10 +8990,14 @@ mod tests {
                 mean_ms: 20,
             },
             sandbox_layer: "wasi".to_string(),
+            sandbox_profile: "strict".to_string(),
+            sandbox_boundary: "fcp-sandbox::strict-profile-limits".to_string(),
             credential_mode: "deferred".to_string(),
             rss_bytes: 96 * 1024 * 1024,
             process_count: 1,
             concurrent_startups: 1,
+            error_mapping: "ok".to_string(),
+            cleanup_result: "verified".to_string(),
             restart_reason: None,
             fallback_reason: None,
             unsafe_rejection_reason: None,
@@ -8964,18 +9021,52 @@ mod tests {
             SWARM_PREWARM_COLD_START_SCHEMA_VERSION
         );
         assert_eq!(record["connector_id"], "fcp.github:utility:1.0.0");
+        assert_eq!(
+            record["command_line"],
+            serde_json::json!([
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "fcp-e2e",
+                "--test",
+                "swarm_gauntlet_e2e",
+                "prewarm"
+            ])
+        );
+        assert_eq!(record["cargo_target_dir"], "/tmp/fcp-prewarm-e2e");
+        assert_eq!(
+            record["connector_fixture_id"],
+            "fcp-test-connector:request-response"
+        );
+        assert_eq!(
+            record["host_boundary"],
+            "fcp-host::supervisor::ConnectorPrewarmConfig::decide_checkout"
+        );
         assert_eq!(record["manifest_hash"], "blake3:manifest");
         assert_eq!(record["zone"], "z:project:swarm");
         assert_eq!(record["pool_state"], "warm_hit");
+        assert_eq!(record["pool_size"], 256);
+        assert_eq!(record["admission_decision"], "admit_warm");
+        assert_eq!(record["warm_checkout"], true);
         assert_eq!(record["activation_latency_ms"], 18);
         assert_eq!(record["baseline_on_demand_latency_ms"], 96);
         assert_eq!(record["p50_activation_latency_ms"], 18);
         assert_eq!(record["p99_activation_latency_ms"], 26);
         assert_eq!(record["sandbox_layer"], "wasi");
+        assert_eq!(record["sandbox_profile"], "strict");
+        assert_eq!(
+            record["sandbox_boundary"],
+            "fcp-sandbox::strict-profile-limits"
+        );
         assert_eq!(record["credential_mode"], "deferred");
         assert_eq!(record["rss_bytes"], 96 * 1024 * 1024);
         assert_eq!(record["process_count"], 1);
         assert_eq!(record["concurrent_startups"], 1);
+        assert_eq!(record["error_mapping"], "ok");
+        assert_eq!(record["cleanup_result"], "verified");
         assert!(
             record["shutdown_cleanup_verified"]
                 .as_bool()
@@ -9006,6 +9097,17 @@ mod tests {
             Err(
                 SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
                     field: "rss_bytes"
+                }
+            )
+        );
+
+        let mut missing_pool_size = prewarm_cold_start_evidence_fixture();
+        missing_pool_size.pool_size = 0;
+        assert_eq!(
+            missing_pool_size.validate(),
+            Err(
+                SwarmPrewarmColdStartEvidenceError::MissingResourceMeasurement {
+                    field: "pool_size"
                 }
             )
         );

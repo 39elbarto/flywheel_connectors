@@ -38,6 +38,17 @@ after phase-7 deletion work.
 | Secret reconstruction | `flywheel_connectors-tr2xx.6`, `flywheel_connectors-34q27.3` | HPKE seal ~80us, HPKE open ~52us, estimated k-of-n reconstruction `<1ms`, far under the `<150ms / <750ms` README target | `rch exec -- cargo bench -p fcp-crypto --bench crypto_benchmarks` | Meet README target; `REVIEW` on criterion delta beyond +20% p50 or +50% p99 | Baseline remains far below threshold; a current rerun should be cited in the final proof manifest |
 | Cross-cutover protocol / crypto / revocation / gossip / serialization / enforcement hot paths | `flywheel_connectors-ukr33.1`, `docs/FCP3_Pre_Cutover_Baseline.md` | Unified criterion harness added in `crates/fcp-conformance/benches/cutover_harness.rs` to freeze the measurement method across deletion waves | `export CARGO_TARGET_DIR=/tmp/fcp-mg-cod4 && rch exec -- cargo bench -p fcp-conformance --bench cutover_harness -- --output-format bencher` | `PASS` if criterion deltas stay within +20% p50 / +50% p99 and no user-visible flow loses its preserved scenario coverage | PASS on 2026-04-19: remote rerun completed successfully and produced a reproducible bencher transcript |
 
+## Prewarm Evidence Schema
+
+The connector prewarm lane uses `swarm-prewarm-cold-start/v2` JSONL records from
+`crates/fcp-testkit/src/evidence_helpers.rs` and
+`crates/fcp-e2e/tests/swarm_gauntlet_e2e.rs`. The v2 records carry the same
+latency and resource fields as v1 plus the host checkout boundary, sandbox
+profile/boundary, `CARGO_TARGET_DIR`, connector fixture id, pool size,
+admission decision, warm-checkout flag, error mapping, and cleanup result. That
+keeps cold-start comparisons tied to `fcp-host`/`fcp-sandbox` evidence instead
+of a latency-only artifact.
+
 ## Environment Capture For Final Review
 
 When the post-cutover rerun is attached, include:

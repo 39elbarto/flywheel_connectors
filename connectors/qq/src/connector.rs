@@ -238,6 +238,33 @@ impl QqConnector {
                 }),
                 "Use to normalize raw QQ Bot WebSocket gateway events into structured events with routing classification (channel/group/c2c), quote context, and attachment detection.",
             ),
+            operation(
+                OP_GATEWAY_PROJECT_EVENT,
+                "Project a raw QQ gateway event through runtime state and inbound policy",
+                CAP_EVENTS_READ,
+                RiskLevel::Low,
+                SafetyTier::Safe,
+                IdempotencyClass::Strict,
+                json!({
+                    "type": "object",
+                    "required": ["event"],
+                    "properties": {
+                        "event": {
+                            "type": "object",
+                            "description": "Raw QQ gateway event payload",
+                            "required": ["op"],
+                            "properties": {
+                                "op": { "type": "integer" },
+                                "s": { "type": "integer" },
+                                "t": { "type": "string" },
+                                "d": { "type": "object" },
+                                "id": { "type": "string" }
+                            }
+                        }
+                    }
+                }),
+                "Use when a host-owned QQ WebSocket loop needs connector-side sequence, duplicate, and inbound-policy projection before agent-visible event fanout.",
+            ),
         ]
     }
 
@@ -325,6 +352,27 @@ impl QqConnector {
                     normalize_message_event(&gateway_event).map_err(|e| e.to_fcp_error())?;
                 serde_json::to_value(&normalized).map_err(|e| FcpError::Internal {
                     message: format!("failed to serialize normalized event: {e}"),
+                })?
+            }
+            OP_GATEWAY_PROJECT_EVENT => {
+                let event_value =
+                    req.input
+                        .get("event")
+                        .ok_or_else(|| FcpError::InvalidRequest {
+                            code: 1005,
+                            message: "event is required".into(),
+                        })?;
+                let gateway_event: QqGatewayEvent = serde_json::from_value(event_value.clone())
+                    .map_err(|e| FcpError::InvalidRequest {
+                        code: 1005,
+                        message: format!("invalid gateway event: {e}"),
+                    })?;
+                let projection = client
+                    .project_gateway_event(gateway_event)
+                    .await
+                    .map_err(|e| e.to_fcp_error())?;
+                serde_json::to_value(&projection).map_err(|e| FcpError::Internal {
+                    message: format!("failed to serialize projected gateway event: {e}"),
                 })?
             }
             _ => {

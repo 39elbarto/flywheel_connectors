@@ -12,14 +12,11 @@ use std::io::Write as _;
 use std::time::{Duration, Instant};
 
 use fcp_deepgram::DeepgramConnector;
+use fcp_e2e::{HttpFixtureResponse, HttpFixtureRoute, HttpFixtureServer, RecordedHttpRequest};
 use fcp_elevenlabs::ElevenlabsConnector;
 use fcp_prelude::FcpError;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use wiremock::{
-    Mock, MockServer, ResponseTemplate,
-    matchers::{body_json, header, method, path, query_param},
-};
 
 const ARTIFACT_PATH: &str = "target/fcp-speech-media/speech-media-e2e.jsonl";
 const DEEPGRAM_TRANSCRIBE: &str = "deepgram.listen.transcribe";
@@ -33,6 +30,7 @@ async fn speech_media_provider_loopback_emits_redacted_evidence() {
     run_elevenlabs_fixture_script(&mut records).await;
 
     let jsonl = write_jsonl_artifact(&records);
+    assert!(jsonl.contains("\"fixture_mode\":\"loopback_http_tcp\""));
     assert!(jsonl.contains("\"provider\":\"deepgram\""));
     assert!(jsonl.contains("\"provider\":\"elevenlabs\""));
     assert!(!jsonl.contains("deepgram-fixture-key"));
@@ -46,8 +44,8 @@ async fn speech_media_provider_loopback_emits_redacted_evidence() {
 }
 
 async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
-    let server = MockServer::start().await;
-    mount_deepgram_transcribe_success(&server).await;
+    let server = HttpFixtureServer::start().expect("Deepgram loopback should bind");
+    mount_deepgram_transcribe_success(&server);
     let mut connector = configured_deepgram(&server, 5_000).await;
 
     let started = Instant::now();
@@ -61,6 +59,7 @@ async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
     )
     .await
     .expect("Deepgram fixture transcription should succeed");
+    assert_single_deepgram_transcribe_request(&server, "customer-audio.wav");
     records.push(evidence_record(EvidenceInput {
         provider: "deepgram",
         operation: DEEPGRAM_TRANSCRIBE,
@@ -98,8 +97,8 @@ async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
         details: json!({ "cleanup_result": cleanup_result }),
     }));
 
-    let rate_server = MockServer::start().await;
-    mount_deepgram_rate_limit(&rate_server).await;
+    let rate_server = HttpFixtureServer::start().expect("Deepgram rate limit loopback should bind");
+    mount_deepgram_rate_limit(&rate_server);
     let rate_connector = configured_deepgram(&rate_server, 5_000).await;
     let started = Instant::now();
     let rate_limited = deepgram_invoke(
@@ -108,6 +107,7 @@ async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
     )
     .await
     .expect_err("rate-limited fixture should fail");
+    assert_single_deepgram_transcribe_request(&rate_server, "rate-limit.wav");
     records.push(evidence_record(EvidenceInput {
         provider: "deepgram",
         operation: DEEPGRAM_TRANSCRIBE,
@@ -184,15 +184,16 @@ async fn run_deepgram_fixture_script(records: &mut Vec<Value>) {
 }
 
 async fn run_elevenlabs_fixture_script(records: &mut Vec<Value>) {
-    let server = MockServer::start().await;
-    mount_elevenlabs_voices(&server).await;
-    mount_elevenlabs_tts(&server).await;
+    let server = HttpFixtureServer::start().expect("ElevenLabs loopback should bind");
+    mount_elevenlabs_voices(&server);
+    mount_elevenlabs_tts(&server);
     let mut connector = configured_elevenlabs(&server, 5_000).await;
 
     let started = Instant::now();
     let voices = elevenlabs_invoke(&connector, ELEVEN_VOICES, json!({}))
         .await
         .expect("ElevenLabs voices fixture should succeed");
+    assert_elevenlabs_voices_request(&server);
     records.push(evidence_record(EvidenceInput {
         provider: "elevenlabs",
         operation: ELEVEN_VOICES,
@@ -225,6 +226,7 @@ async fn run_elevenlabs_fixture_script(records: &mut Vec<Value>) {
     )
     .await
     .expect("ElevenLabs TTS fixture should succeed");
+    assert_elevenlabs_tts_request(&server);
     records.push(evidence_record(EvidenceInput {
         provider: "elevenlabs",
         operation: ELEVEN_TTS,
@@ -291,8 +293,9 @@ async fn run_elevenlabs_fixture_script(records: &mut Vec<Value>) {
         details: json!({ "cleanup_result": cleanup_result }),
     }));
 
-    let timeout_server = MockServer::start().await;
-    mount_elevenlabs_slow_tts(&timeout_server).await;
+    let timeout_server =
+        HttpFixtureServer::start().expect("ElevenLabs timeout loopback should bind");
+    mount_elevenlabs_slow_tts(&timeout_server);
     let timeout_connector = configured_elevenlabs(&timeout_server, 20).await;
     let started = Instant::now();
     let timeout = elevenlabs_invoke(
@@ -319,12 +322,15 @@ async fn run_elevenlabs_fixture_script(records: &mut Vec<Value>) {
     }));
 }
 
-async fn configured_deepgram(server: &MockServer, request_timeout_ms: u64) -> DeepgramConnector {
+async fn configured_deepgram(
+    server: &HttpFixtureServer,
+    request_timeout_ms: u64,
+) -> DeepgramConnector {
     let mut connector = DeepgramConnector::new();
     connector
         .handle_configure(json!({
             "api_key": "deepgram-fixture-key",
-            "base_url": server.uri(),
+            "base_url": server.base_url(),
             "request_timeout_ms": request_timeout_ms
         }))
         .await
@@ -337,14 +343,14 @@ async fn configured_deepgram(server: &MockServer, request_timeout_ms: u64) -> De
 }
 
 async fn configured_elevenlabs(
-    server: &MockServer,
+    server: &HttpFixtureServer,
     request_timeout_ms: u64,
 ) -> ElevenlabsConnector {
     let mut connector = ElevenlabsConnector::new();
     connector
         .handle_configure(json!({
             "api_key": "eleven-fixture-key",
-            "base_url": server.uri(),
+            "base_url": server.base_url(),
             "request_timeout_ms": request_timeout_ms
         }))
         .await
@@ -375,90 +381,125 @@ async fn elevenlabs_invoke(
         .await
 }
 
-async fn mount_deepgram_transcribe_success(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .and(query_param("model", "nova-3"))
-        .and(header("authorization", "Token deepgram-fixture-key"))
-        .and(body_json(json!({
-            "url": "https://media.example.test/path/customer-audio.wav"
-        })))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "metadata": { "request_id": "deepgram-fixture" },
-            "results": {
-                "channels": [{
-                    "alternatives": [{
-                        "transcript": "fixture transcript should stay out of evidence",
-                        "confidence": 0.98
+fn mount_deepgram_transcribe_success(server: &HttpFixtureServer) {
+    server.mount(
+        HttpFixtureRoute::post("/v1/listen")
+            .for_scenario("deepgram_prerecorded_success")
+            .with_query("model", "nova-3")
+            .require_header("authorization", "Token deepgram-fixture-key")
+            .respond_with(HttpFixtureResponse::json(json!({
+                "metadata": { "request_id": "deepgram-fixture" },
+                "results": {
+                    "channels": [{
+                        "alternatives": [{
+                            "transcript": "fixture transcript should stay out of evidence",
+                            "confidence": 0.98
+                        }]
                     }]
+                }
+            }))),
+    );
+}
+
+fn mount_deepgram_rate_limit(server: &HttpFixtureServer) {
+    server.mount(
+        HttpFixtureRoute::post("/v1/listen")
+            .for_scenario("deepgram_rate_limit")
+            .with_query("model", "nova-3")
+            .require_header("authorization", "Token deepgram-fixture-key")
+            .respond_with(HttpFixtureResponse::rate_limited(
+                2,
+                json!({"error": "rate limited"}),
+            )),
+    );
+}
+
+fn mount_elevenlabs_voices(server: &HttpFixtureServer) {
+    server.mount(
+        HttpFixtureRoute::get("/voices")
+            .for_scenario("elevenlabs_voices_success")
+            .require_header("xi-api-key", "eleven-fixture-key")
+            .respond_with(HttpFixtureResponse::json(json!({
+                "voices": [{
+                    "voice_id": "voice-fixture",
+                    "name": "Fixture Voice",
+                    "category": "generated"
                 }]
-            }
-        })))
-        .expect(1)
-        .mount(server)
-        .await;
+            }))),
+    );
 }
 
-async fn mount_deepgram_rate_limit(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/v1/listen"))
-        .respond_with(
-            ResponseTemplate::new(429)
-                .insert_header("Retry-After", "2")
-                .set_body_json(json!({"error": "rate limited"})),
-        )
-        .expect(1)
-        .mount(server)
-        .await;
+fn mount_elevenlabs_tts(server: &HttpFixtureServer) {
+    server.mount(
+        HttpFixtureRoute::post("/text-to-speech/voice-fixture")
+            .for_scenario("elevenlabs_tts_success")
+            .with_query("output_format", "mp3_44100_128")
+            .require_header("xi-api-key", "eleven-fixture-key")
+            .respond_with(HttpFixtureResponse::binary(
+                vec![1_u8, 2, 3, 4, 5],
+                "audio/mpeg",
+            )),
+    );
 }
 
-async fn mount_elevenlabs_voices(server: &MockServer) {
-    Mock::given(method("GET"))
-        .and(path("/voices"))
-        .and(header("xi-api-key", "eleven-fixture-key"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "voices": [{
-                "voice_id": "voice-fixture",
-                "name": "Fixture Voice",
-                "category": "generated"
-            }]
-        })))
-        .expect(1)
-        .mount(server)
-        .await;
+fn mount_elevenlabs_slow_tts(server: &HttpFixtureServer) {
+    server.mount(
+        HttpFixtureRoute::post("/text-to-speech/voice-timeout")
+            .for_scenario("elevenlabs_timeout")
+            .require_header("xi-api-key", "eleven-fixture-key")
+            .respond_with(
+                HttpFixtureResponse::binary(vec![1_u8, 2, 3], "audio/mpeg")
+                    .with_delay(Duration::from_millis(200)),
+            ),
+    );
 }
 
-async fn mount_elevenlabs_tts(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/text-to-speech/voice-fixture"))
-        .and(header("xi-api-key", "eleven-fixture-key"))
-        .and(body_json(json!({
+fn assert_single_deepgram_transcribe_request(server: &HttpFixtureServer, media_name: &str) {
+    let requests = server.recorded_requests();
+    assert_eq!(requests.len(), 1, "expected one Deepgram HTTP request");
+    let request = &requests[0];
+    assert_eq!(request.method, "POST");
+    assert_eq!(request.path, "/v1/listen");
+    assert_eq!(request.query_value("model"), Some("nova-3"));
+    assert_eq!(
+        request.header("authorization"),
+        Some("Token deepgram-fixture-key")
+    );
+    assert_eq!(
+        request
+            .body_json()
+            .expect("Deepgram request body should be JSON"),
+        json!({ "url": format!("https://media.example.test/path/{media_name}") })
+    );
+}
+
+fn assert_elevenlabs_voices_request(server: &HttpFixtureServer) {
+    let request = recorded_request(server, "GET", "/voices");
+    assert_eq!(request.header("xi-api-key"), Some("eleven-fixture-key"));
+}
+
+fn assert_elevenlabs_tts_request(server: &HttpFixtureServer) {
+    let request = recorded_request(server, "POST", "/text-to-speech/voice-fixture");
+    assert_eq!(request.header("xi-api-key"), Some("eleven-fixture-key"));
+    assert_eq!(request.query_value("output_format"), Some("mp3_44100_128"));
+    assert_eq!(
+        request
+            .body_json()
+            .expect("ElevenLabs TTS request body should be JSON"),
+        json!({
             "text": "hello from fixture",
             "model_id": "eleven_multilingual_v2",
             "seed": 7_u64
-        })))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("Content-Type", "audio/mpeg")
-                .set_body_bytes([1_u8, 2, 3, 4, 5]),
-        )
-        .expect(1)
-        .mount(server)
-        .await;
+        })
+    );
 }
 
-async fn mount_elevenlabs_slow_tts(server: &MockServer) {
-    Mock::given(method("POST"))
-        .and(path("/text-to-speech/voice-timeout"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_delay(Duration::from_millis(200))
-                .insert_header("Content-Type", "audio/mpeg")
-                .set_body_bytes([1_u8, 2, 3]),
-        )
-        .expect(1)
-        .mount(server)
-        .await;
+fn recorded_request(server: &HttpFixtureServer, method: &str, path: &str) -> RecordedHttpRequest {
+    server
+        .recorded_requests()
+        .into_iter()
+        .find(|request| request.method == method && request.path == path)
+        .unwrap_or_else(|| panic!("expected {method} {path} request"))
 }
 
 struct EvidenceInput<'a> {
@@ -489,7 +530,7 @@ fn evidence_record(input: EvidenceInput<'_>) -> Value {
         "schema": "fcp.speech_media.e2e.v1",
         "command_line": "cargo test -p fcp-e2e --no-default-features --features deepgram,elevenlabs --test speech_media_provider_e2e -- --nocapture",
         "git_revision": git_revision(),
-        "fixture_mode": "wiremock",
+        "fixture_mode": "loopback_http_tcp",
         "provider": provider,
         "operation": operation,
         "scenario_id": scenario_id,

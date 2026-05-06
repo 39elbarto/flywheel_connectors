@@ -22,6 +22,10 @@ use fcp_async_core::net::TcpListener;
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::{CapabilityConstraints, InstanceId};
+use fcp_sdk::{
+    AgentId, ChatCoordinationBackend, ClaimKey, ClaimOutcome, InMemoryThreadOwnershipChecker,
+    ThreadOwnershipChecker,
+};
 use fcp_testkit::LogCapture;
 use serde_json::json;
 use std::collections::HashMap;
@@ -64,6 +68,14 @@ struct BoundTestSigningKey {
 }
 
 fn generate_valid_token(signing_key: &BoundTestSigningKey, op: &str) -> fcp_core::CapabilityToken {
+    generate_valid_token_for_principal(signing_key, op, "user:test")
+}
+
+fn generate_valid_token_for_principal(
+    signing_key: &BoundTestSigningKey,
+    op: &str,
+    principal: &str,
+) -> fcp_core::CapabilityToken {
     let cap = match op {
         "discord.send_message" | "discord.trigger_typing" => "discord.send",
         "discord.edit_message" => "discord.edit",
@@ -83,7 +95,7 @@ fn generate_valid_token(signing_key: &BoundTestSigningKey, op: &str) -> fcp_core
     let cose = CapabilityTokenBuilder::new()
         .capability_id(cap)
         .zone_id("z:work")
-        .principal("user:test")
+        .principal(principal)
         .operations(&[op])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
@@ -93,6 +105,22 @@ fn generate_valid_token(signing_key: &BoundTestSigningKey, op: &str) -> fcp_core
         .sign(&signing_key.signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
+}
+
+struct IndeterminateThreadOwnershipChecker {
+    reason: &'static str,
+}
+
+#[async_trait::async_trait]
+impl ThreadOwnershipChecker for IndeterminateThreadOwnershipChecker {
+    async fn claim(
+        &self,
+        _cx: &fcp_async_core::Cx,
+        _key: ClaimKey,
+        _agent_id: AgentId,
+    ) -> ClaimOutcome {
+        ClaimOutcome::Indeterminate(self.reason.to_string())
+    }
 }
 
 fn unique_zone_dir(label: &str) -> String {
@@ -588,6 +616,161 @@ async fn send_message_happy_path() {
     assert_eq!(result["delivery"]["reply_to"], serde_json::Value::Null);
     assert_eq!(result["delivery"]["content_present"], true);
     assert_eq!(result["delivery"]["requested_embed_count"], 0);
+    assert_eq!(fake_server.requests().len(), 2);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_reply_denies_duplicate_owner_before_http_send() {
+    let fake_server = StructuredFakeHttpServer::spawn(3, |idx, request| match idx {
+        0 | 1 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        2 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            let body: serde_json::Value =
+                serde_json::from_slice(&request.body).expect("discord reply body json");
+            assert_eq!(body["content"], "agent A reply");
+            assert_eq!(body["message_reference"]["message_id"], "222");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000031",
+                    "channel_id": "111",
+                    "content": "agent A reply",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let checker = Arc::new(InMemoryThreadOwnershipChecker::new());
+    let mut first = DiscordConnector::new()
+        .with_thread_ownership_checker(checker.clone(), ChatCoordinationBackend::InMemory);
+    let mut second = DiscordConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::InMemory);
+    setup_configure(&mut first, fake_server.url()).await;
+    setup_configure(&mut second, fake_server.url()).await;
+    let first_key = setup_handshake(&mut first, &["discord.send"]).await;
+    let second_key = setup_handshake(&mut second, &["discord.send"]).await;
+
+    let first_cap =
+        generate_valid_token_for_principal(&first_key, "discord.send_message", "agent:a");
+    let first_result = first
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "agent A reply",
+                "reply_to": "222"
+            },
+            "capability_token": first_cap
+        }))
+        .await
+        .expect("first owner should send");
+    assert_eq!(first_result["coordination"][0]["event"], "claim_attempt");
+    assert_eq!(first_result["coordination"][2]["event"], "send_executed");
+
+    let second_cap =
+        generate_valid_token_for_principal(&second_key, "discord.send_message", "agent:b");
+    let second_error = second
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "agent B reply",
+                "reply_to": "222"
+            },
+            "capability_token": second_cap
+        }))
+        .await
+        .expect_err("second owner should be denied before Discord REST");
+
+    assert!(matches!(
+        second_error,
+        fcp_core::FcpError::Unauthorized {
+            code: 4090,
+            ref message
+        } if message == "thread_owned_by_peer:agent:a"
+    ));
+    assert_eq!(fake_server.requests().len(), 3);
+}
+
+#[fcp_async_core::runtime::test]
+async fn send_message_fail_open_sends_with_degraded_coordination_audit() {
+    let fake_server = StructuredFakeHttpServer::spawn(2, |idx, request| match idx {
+        0 => {
+            assert_eq!(request.method, "GET");
+            assert_eq!(request.path, "/users/@me");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "123456789",
+                    "username": "TestBot",
+                    "discriminator": "0",
+                    "bot": true
+                }),
+            )
+        }
+        1 => {
+            assert_eq!(request.method, "POST");
+            assert_eq!(request.path, "/channels/111/messages");
+            StructuredHttpResponse::json(
+                200,
+                &json!({
+                    "id": "100000000000000032",
+                    "channel_id": "111",
+                    "content": "fail-open reply",
+                    "timestamp": "2026-03-02T12:00:00.000000+00:00",
+                    "author": {"id": "123456789", "username": "TestBot", "discriminator": "0"}
+                }),
+            )
+        }
+        _ => panic!("unexpected request index {idx}"),
+    });
+    let checker = Arc::new(IndeterminateThreadOwnershipChecker {
+        reason: "agent_mail_unavailable",
+    });
+    let mut connector = DiscordConnector::new()
+        .with_thread_ownership_checker(checker, ChatCoordinationBackend::AgentMail);
+    setup_configure(&mut connector, fake_server.url()).await;
+    let signing_key = setup_handshake(&mut connector, &["discord.send"]).await;
+
+    let token = generate_valid_token_for_principal(&signing_key, "discord.send_message", "agent:a");
+    let result = connector
+        .handle_invoke(json!({
+            "operation": "discord.send_message",
+            "input": {
+                "channel_id": "111",
+                "content": "fail-open reply",
+                "reply_to": "222"
+            },
+            "capability_token": token
+        }))
+        .await
+        .expect("fail-open indeterminate claim should send");
+
+    assert_eq!(result["coordination"][1]["outcome"], "indeterminate");
+    assert_eq!(
+        result["coordination"][1]["reason"],
+        "agent_mail_unavailable"
+    );
+    assert_eq!(result["coordination"][2]["event"], "send_executed");
+    assert_eq!(
+        result["coordination"][2]["reason"],
+        "agent_mail_unavailable"
+    );
     assert_eq!(fake_server.requests().len(), 2);
 }
 

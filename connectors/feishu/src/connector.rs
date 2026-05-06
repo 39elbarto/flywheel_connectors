@@ -159,10 +159,7 @@ impl std::fmt::Debug for FeishuWebhookIngressConfig {
                     .unwrap_or("[UNSET]"),
             )
             .field("max_body_bytes", &self.max_body_bytes)
-            .field(
-                "require_json_content_type",
-                &self.require_json_content_type,
-            )
+            .field("require_json_content_type", &self.require_json_content_type)
             .finish()
     }
 }
@@ -223,8 +220,8 @@ impl FeishuWebhookIngressConfig {
         if self.enabled && !self.security_material_configured() {
             return Err(FcpError::InvalidRequest {
                 code: 1001,
-                message:
-                    "webhook_ingress.enabled requires verification_token and encrypt_key".into(),
+                message: "webhook_ingress.enabled requires verification_token and encrypt_key"
+                    .into(),
             });
         }
 
@@ -1240,7 +1237,8 @@ fn optional_non_empty_string<'a>(input: &'a Value, field: &str) -> Option<&'a st
 }
 
 fn forwarded_request_path(input: &Value) -> Option<&str> {
-    optional_non_empty_string(input, "path").or_else(|| optional_non_empty_string(input, "route_path"))
+    optional_non_empty_string(input, "path")
+        .or_else(|| optional_non_empty_string(input, "route_path"))
 }
 
 fn content_type_is_json(value: &str) -> bool {
@@ -1306,7 +1304,7 @@ fn validate_configured_webhook_region(
         logs.push(json!({
             "layer": "request_region",
             "code": "route_path_required",
-            "expected_path": ingress.path,
+            "expected_path": ingress.path.as_str(),
         }));
         return Some((404, "route_path_required"));
     };
@@ -1314,7 +1312,7 @@ fn validate_configured_webhook_region(
         logs.push(json!({
             "layer": "request_region",
             "code": "route_path_mismatch",
-            "expected_path": ingress.path,
+            "expected_path": ingress.path.as_str(),
             "received_path": request_path,
         }));
         return Some((404, "route_path_mismatch"));
@@ -1426,10 +1424,7 @@ fn webhook_response(
     })
 }
 
-fn attach_webhook_request_region(
-    response: &mut Value,
-    region: WebhookRequestRegionEvidence<'_>,
-) {
+fn attach_webhook_request_region(response: &mut Value, region: WebhookRequestRegionEvidence<'_>) {
     let configured = configured_ingress(region.ingress);
     response["request_region"] = json!({
         "method_checked": true,
@@ -1468,15 +1463,6 @@ fn webhook_response_with_region(
     response
 }
 
-fn webhook_rejection(
-    status_code: u16,
-    reason_code: &str,
-    body_bytes: usize,
-    logs: Vec<Value>,
-) -> Value {
-    webhook_response(status_code, reason_code, body_bytes, logs, json!({}))
-}
-
 fn webhook_rejection_with_region(
     status_code: u16,
     reason_code: &str,
@@ -1484,7 +1470,14 @@ fn webhook_rejection_with_region(
     logs: Vec<Value>,
     region: WebhookRequestRegionEvidence<'_>,
 ) -> Value {
-    webhook_response_with_region(status_code, reason_code, body_bytes, logs, json!({}), region)
+    webhook_response_with_region(
+        status_code,
+        reason_code,
+        body_bytes,
+        logs,
+        json!({}),
+        region,
+    )
 }
 
 fn attach_webhook_event_identity(
@@ -2029,6 +2022,7 @@ fn invoke_webhook_ingest_request(input: &Value) -> FcpResult<Value> {
     invoke_webhook_ingest_request_with_state(input, None)
 }
 
+#[cfg(test)]
 fn invoke_webhook_ingest_request_with_state(
     input: &Value,
     webhook_state: Option<&FeishuWebhookStateStore>,
@@ -2199,8 +2193,14 @@ fn invoke_webhook_ingest_request_with_context(
             "code": "duplicate_event",
             "mode": "caller_supplied_seen_event_ids",
         }));
-        let mut duplicate =
-            webhook_response_with_region(200, "duplicate_event", body_bytes, logs, json!({}), region);
+        let mut duplicate = webhook_response_with_region(
+            200,
+            "duplicate_event",
+            body_bytes,
+            logs,
+            json!({}),
+            region,
+        );
         attach_webhook_event_identity(&mut duplicate, event_type, &event_id, &dedupe_key);
         return Ok(duplicate);
     }
@@ -3159,17 +3159,19 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_WEBHOOK_INGEST_REQUEST),
             summary: "Ingest a host-forwarded Feishu webhook request".into(),
             description: Some(
-                "Validates a Feishu/Lark webhook request already accepted by host ingress, verifies token and signature, rejects encrypted payloads, claims connector-owned dedupe state, normalizes supported message/read/reaction/document-comment events, and applies sender/chat/comment policy before returning an event record.".into(),
+                "Validates a Feishu/Lark webhook request already accepted by host ingress, verifies configured or per-request token/signature material, rejects encrypted payloads, claims connector-owned dedupe state, normalizes supported message/read/reaction/document-comment events, and applies sender/chat/comment policy before returning an event record for host fanout.".into(),
             ),
             input_schema: json!({
                 "type": "object",
-                "required": ["method", "headers", "raw_body", "verification_token", "encrypt_key", "policy"],
+                "required": ["method", "headers", "raw_body", "policy"],
                 "properties": {
                     "method": { "type": "string", "description": "Forwarded HTTP method; only POST is accepted" },
-                    "headers": { "type": "object", "description": "Forwarded request headers including x-lark-request-timestamp, x-lark-request-nonce, and x-lark-signature" },
+                    "headers": { "type": "object", "description": "Forwarded request headers including x-lark-request-timestamp, x-lark-request-nonce, x-lark-signature, and content-type when webhook_ingress.require_json_content_type is enabled" },
+                    "path": { "type": "string", "description": "Forwarded route path matched by host ingress when connector webhook_ingress is enabled" },
+                    "route_path": { "type": "string", "description": "Alias for path used by some host request-region adapters" },
                     "raw_body": { "type": "string", "description": "Exact raw JSON body bytes decoded as UTF-8; required for Feishu signature verification" },
-                    "verification_token": { "type": "string", "description": "Configured Feishu verification token" },
-                    "encrypt_key": { "type": "string", "description": "Configured Feishu encrypt key used by Feishu signature construction; encrypted payloads are still rejected by this slice" },
+                    "verification_token": { "type": "string", "description": "Optional per-request Feishu verification token; omit only when connector webhook_ingress is enabled with configured security material" },
+                    "encrypt_key": { "type": "string", "description": "Optional per-request Feishu encrypt key used by Feishu signature construction; encrypted payloads are still rejected by this slice" },
                     "policy": { "type": "object", "description": "Sender/chat/mention/comment policy evaluated before event emission" },
                     "seen_event_ids": { "type": "array", "items": { "type": "string" }, "description": "Legacy caller-supplied dedupe set; connector-owned state is used when configured on the connector instance" },
                     "max_body_bytes": { "type": "integer", "minimum": 1, "maximum": FEISHU_WEBHOOK_MAX_BODY_BYTES },
@@ -3200,10 +3202,11 @@ pub fn operations_info() -> Vec<OperationInfo> {
             safety_tier: SafetyTier::Risky,
             idempotency: IdempotencyClass::BestEffort,
             ai_hints: AgentHint {
-                when_to_use: "When host ingress forwards a Feishu/Lark webhook request for validation, normalization, and policy gating.".into(),
+                when_to_use: "When host ingress forwards a Feishu/Lark webhook request for configured request-region validation, normalization, policy gating, and host event fanout.".into(),
                 common_mistakes: vec![
                     "Pass the exact raw JSON body string used for signature verification.".into(),
-                    "Do not use this operation as an embedded HTTP listener; host ingress owns the socket.".into(),
+                    "Do not use this operation as an embedded HTTP listener; host ingress owns the socket and route binding.".into(),
+                    "When webhook_ingress is enabled, pass the forwarded path and JSON content-type; the connector validates them before signature work.".into(),
                     "Configure webhook_state.dedupe_state_path when restart replay suppression is required.".into(),
                     "Encrypted Feishu webhook payloads are deliberately rejected in this slice.".into(),
                 ],
@@ -3401,7 +3404,7 @@ impl FcpConnector for FeishuConnector {
             serde_json::from_value(config).map_err(|e| FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Invalid Feishu config: {e}"),
-        })?;
+            })?;
         validate_config(&config)?;
         config.webhook_state = config.webhook_state.clone().validate()?;
         config.webhook_ingress = config.webhook_ingress.clone().validate()?;
@@ -3891,13 +3894,11 @@ impl FeishuConnector {
                     message: format!("Failed to serialize response: {e}"),
                 })?
             }
-            OP_WEBHOOK_INGEST_REQUEST => {
-                invoke_webhook_ingest_request_with_context(
-                    &req.input,
-                    Some(&self.webhook_state),
-                    self.config.as_ref().map(|config| &config.webhook_ingress),
-                )?
-            }
+            OP_WEBHOOK_INGEST_REQUEST => invoke_webhook_ingest_request_with_context(
+                &req.input,
+                Some(&self.webhook_state),
+                self.config.as_ref().map(|config| &config.webhook_ingress),
+            )?,
             OP_COMMENTS_PAIRINGS_MANAGE => {
                 let action =
                     validate_comment_pairing_action(required_string_input(&req.input, "action")?)?;
@@ -4845,7 +4846,11 @@ mod tests {
             ..FeishuWebhookIngressConfig::default()
         };
         let error = missing_security.validate().unwrap_err();
-        assert!(error.to_string().contains("verification_token and encrypt_key"));
+        assert!(
+            error
+                .to_string()
+                .contains("verification_token and encrypt_key")
+        );
 
         let listener_transport = FeishuWebhookIngressConfig {
             enabled: true,
@@ -4902,8 +4907,9 @@ mod tests {
         input.as_object_mut().unwrap().remove("verification_token");
         input.as_object_mut().unwrap().remove("encrypt_key");
 
-        let missing_route = invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
-            .expect("missing route should produce webhook response");
+        let missing_route =
+            invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
+                .expect("missing route should produce webhook response");
         assert_eq!(missing_route["status_code"], 404);
         assert_eq!(missing_route["reason_code"], "route_path_required");
         assert_eq!(missing_route["request_region"]["route_checked"], true);
@@ -4921,7 +4927,10 @@ mod tests {
             invoke_webhook_ingest_request_with_context(&input, None, Some(&ingress))
                 .expect("wrong content type should produce webhook response");
         assert_eq!(wrong_content_type["status_code"], 415);
-        assert_eq!(wrong_content_type["reason_code"], "unsupported_content_type");
+        assert_eq!(
+            wrong_content_type["reason_code"],
+            "unsupported_content_type"
+        );
         assert_eq!(
             wrong_content_type["request_region"]["content_type_checked"],
             true

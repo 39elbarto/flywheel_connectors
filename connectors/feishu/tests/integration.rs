@@ -201,10 +201,7 @@ async fn setup_connector_with_extra_config(
             config.insert(key.clone(), value.clone());
         }
     }
-    connector
-        .configure(config)
-        .await
-        .unwrap();
+    connector.configure(config).await.unwrap();
     connector
         .handshake(handshake_req(signing_key.verifying_key().to_bytes()))
         .await
@@ -540,7 +537,10 @@ async fn invoke_webhook_ingest_configured_host_ingress_emits_fanout_contract() {
             "bot_open_id": "ou_bot",
         }),
     );
-    webhook_input.as_object_mut().unwrap().remove("verification_token");
+    webhook_input
+        .as_object_mut()
+        .unwrap()
+        .remove("verification_token");
     webhook_input.as_object_mut().unwrap().remove("encrypt_key");
     webhook_input["path"] = json!("/feishu/webhook");
     webhook_input["headers"]["content-type"] = json!("application/json; charset=utf-8");

@@ -488,6 +488,104 @@ async fn invoke_webhook_ingest_validates_and_normalizes_event_evidence() {
 }
 
 #[fcp_async_core::runtime::test]
+async fn invoke_webhook_ingest_configured_host_ingress_emits_fanout_contract() {
+    let server = MockServer::start().await;
+    let (connector, signing_key) = setup_connector_with_extra_config(
+        &server,
+        json!({
+            "webhook_ingress": {
+                "enabled": true,
+                "path": "/feishu/webhook",
+                "verification_token": "integration-token",
+                "encrypt_key": "integration-encrypt-key",
+                "max_body_bytes": 4096
+            }
+        }),
+    )
+    .await;
+
+    let doctor = serde_json::to_value(connector.doctor()).unwrap();
+    assert_eq!(doctor["provisioning"]["webhook_ingress"]["enabled"], true);
+    assert_eq!(
+        doctor["provisioning"]["webhook_ingress"]["listener_socket_opened"],
+        false
+    );
+
+    let raw_body = serde_json::to_string(&json!({
+        "schema": "2.0",
+        "header": {
+            "event_id": "evt-configured-ingress-1",
+            "event_type": "im.message.receive_v1",
+            "token": "integration-token",
+        },
+        "event": {
+            "sender": { "sender_id": { "open_id": "ou_allowed" } },
+            "message": {
+                "message_id": "om_configured_ingress",
+                "chat_id": "oc_allowed",
+                "chat_type": "group",
+                "message_type": "text",
+                "content": "{\"text\":\"hello\"}",
+                "mentions": [{ "id": { "open_id": "ou_bot" } }]
+            }
+        }
+    }))
+    .unwrap();
+    let mut webhook_input = signed_webhook_input(
+        raw_body,
+        json!({
+            "allowed_sender_open_ids": ["ou_allowed"],
+            "allowed_chat_ids": ["oc_allowed"],
+            "require_mention": true,
+            "bot_open_id": "ou_bot",
+        }),
+    );
+    webhook_input.as_object_mut().unwrap().remove("verification_token");
+    webhook_input.as_object_mut().unwrap().remove("encrypt_key");
+    webhook_input["path"] = json!("/feishu/webhook");
+    webhook_input["headers"]["content-type"] = json!("application/json; charset=utf-8");
+
+    let response = connector
+        .invoke(invoke_req(
+            OP_WEBHOOK_INGEST_REQUEST,
+            webhook_input,
+            generate_valid_token(
+                &signing_key,
+                OP_WEBHOOK_INGEST_REQUEST,
+                connector.instance_id(),
+            ),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status, InvokeStatus::Ok);
+    let result = response.result.expect("configured ingress webhook result");
+    assert_eq!(result["reason_code"], "event_accepted");
+    assert_eq!(result["event_emitted"], true);
+    assert_eq!(
+        result["normalized_event"]["topic"],
+        "feishu.webhook.message_received"
+    );
+    assert_eq!(result["request_region"]["configured_ingress"], true);
+    assert_eq!(
+        result["request_region"]["transport"],
+        "host_forwarded_request_region"
+    );
+    assert_eq!(result["request_region"]["listener_socket_opened"], false);
+    assert_eq!(
+        result["request_region"]["event_fanout"],
+        "host_consumes_returned_event_record"
+    );
+    assert_eq!(
+        result["request_region"]["security_material_source"],
+        "webhook_ingress_config"
+    );
+    println!(
+        "feishu_configured_webhook_ingress_evidence={}",
+        serde_json::to_string_pretty(&result).unwrap()
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn invoke_comment_automation_operations_emit_evidence() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -742,6 +840,10 @@ fn introspection_emits_v3_compliance_evidence() {
     assert_eq!(
         webhook["idempotency"],
         serde_json::to_value(IdempotencyClass::BestEffort).unwrap()
+    );
+    assert_eq!(
+        webhook["input_schema"]["required"],
+        json!(["method", "headers", "raw_body", "policy"])
     );
     let comment_context = operations
         .iter()

@@ -12,6 +12,7 @@ use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use crate::{ConnectorId, FcpError, ZoneId, async_trait};
+use serde::{Deserialize, Serialize};
 
 /// Default chat ownership and mention TTL: five minutes.
 pub const DEFAULT_THREAD_OWNERSHIP_TTL: Duration = Duration::from_secs(300);
@@ -33,7 +34,8 @@ pub enum DmMode {
 }
 
 /// Backend selected by connector-level chat coordination config.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChatCoordinationBackend {
     /// Agent Mail exclusive file reservations.
     #[default]
@@ -45,7 +47,8 @@ pub enum ChatCoordinationBackend {
 }
 
 /// Reason a connector call site skips chat coordination for a message.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ChatCoordinationSkipReason {
     /// Coordination is disabled by live config.
     Disabled,
@@ -53,6 +56,216 @@ pub enum ChatCoordinationSkipReason {
     ChannelNotAllowed,
     /// The message had no thread id and direct-message mode is skip.
     ThreadlessDmSkipped,
+}
+
+/// Redaction-safe event type for chat coordination audit records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatCoordinationAuditEvent {
+    /// Connector is about to ask a backend for thread ownership.
+    ClaimAttempt,
+    /// Backend returned an ownership decision.
+    ClaimOutcome,
+    /// Connector skipped ownership checks by policy.
+    CoordinationSkipped,
+    /// Connector executed the outbound send.
+    SendExecuted,
+    /// Connector denied the outbound send.
+    SendDenied,
+}
+
+/// Redaction-safe structured audit record for chat coordination.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatCoordinationAuditRecord {
+    event: ChatCoordinationAuditEvent,
+    backend: ChatCoordinationBackend,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claim_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    channel_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    claimant_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    owner_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    outcome: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_code: Option<u16>,
+}
+
+impl ChatCoordinationAuditRecord {
+    /// Build a redacted claim-attempt record.
+    #[must_use]
+    pub fn claim_attempt(
+        key: &ClaimKey,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+    ) -> Self {
+        Self {
+            event: ChatCoordinationAuditEvent::ClaimAttempt,
+            backend,
+            claim_key: Some(key.redacted()),
+            channel_id: Some(key.channel_id().redacted()),
+            claimant_agent_id: Some(claimant_agent_id.redacted()),
+            owner_agent_id: None,
+            outcome: None,
+            reason: None,
+            error_code: None,
+        }
+    }
+
+    /// Build a redacted claim-outcome record.
+    #[must_use]
+    pub fn claim_outcome(
+        key: &ClaimKey,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+        outcome: &ClaimOutcome,
+    ) -> Self {
+        let (outcome_label, owner_agent_id, reason, error_code) = match outcome {
+            ClaimOutcome::Granted(owner) => ("granted", Some(owner.redacted()), None, None),
+            ClaimOutcome::AlreadyOwned(owner) => (
+                "already_owned",
+                Some(owner.redacted()),
+                None,
+                Some(THREAD_OWNED_BY_PEER_ERROR_CODE),
+            ),
+            ClaimOutcome::Indeterminate(reason) => {
+                ("indeterminate", None, Some(reason.clone()), None)
+            }
+        };
+        Self {
+            event: ChatCoordinationAuditEvent::ClaimOutcome,
+            backend,
+            claim_key: Some(key.redacted()),
+            channel_id: Some(key.channel_id().redacted()),
+            claimant_agent_id: Some(claimant_agent_id.redacted()),
+            owner_agent_id,
+            outcome: Some(outcome_label.to_owned()),
+            reason,
+            error_code,
+        }
+    }
+
+    /// Build a redacted coordination-skipped record.
+    #[must_use]
+    pub fn coordination_skipped(
+        channel_id: &ChannelId,
+        backend: ChatCoordinationBackend,
+        reason: ChatCoordinationSkipReason,
+    ) -> Self {
+        Self {
+            event: ChatCoordinationAuditEvent::CoordinationSkipped,
+            backend,
+            claim_key: None,
+            channel_id: Some(channel_id.redacted()),
+            claimant_agent_id: None,
+            owner_agent_id: None,
+            outcome: Some("skipped".to_owned()),
+            reason: Some(skip_reason_label(reason).to_owned()),
+            error_code: None,
+        }
+    }
+
+    /// Build a redacted send-executed record.
+    #[must_use]
+    pub fn send_executed(
+        key: &ClaimKey,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+        degraded_reason: Option<&str>,
+    ) -> Self {
+        Self {
+            event: ChatCoordinationAuditEvent::SendExecuted,
+            backend,
+            claim_key: Some(key.redacted()),
+            channel_id: Some(key.channel_id().redacted()),
+            claimant_agent_id: Some(claimant_agent_id.redacted()),
+            owner_agent_id: None,
+            outcome: Some("executed".to_owned()),
+            reason: degraded_reason.map(ToOwned::to_owned),
+            error_code: None,
+        }
+    }
+
+    /// Build a redacted send-denied record.
+    #[must_use]
+    pub fn send_denied(
+        key: &ClaimKey,
+        backend: ChatCoordinationBackend,
+        claimant_agent_id: &AgentId,
+        error: &FcpError,
+        owner_agent_id: Option<&AgentId>,
+        reason: Option<&str>,
+    ) -> Self {
+        Self {
+            event: ChatCoordinationAuditEvent::SendDenied,
+            backend,
+            claim_key: Some(key.redacted()),
+            channel_id: Some(key.channel_id().redacted()),
+            claimant_agent_id: Some(claimant_agent_id.redacted()),
+            owner_agent_id: owner_agent_id.map(AgentId::redacted),
+            outcome: Some("denied".to_owned()),
+            reason: reason.map(ToOwned::to_owned),
+            error_code: Some(error.numeric_code()),
+        }
+    }
+
+    /// Event type for this record.
+    #[must_use]
+    pub const fn event(&self) -> ChatCoordinationAuditEvent {
+        self.event
+    }
+
+    /// Backend that produced or guided this record.
+    #[must_use]
+    pub const fn backend(&self) -> ChatCoordinationBackend {
+        self.backend
+    }
+
+    /// Redacted claim key, if a claim key was available.
+    #[must_use]
+    pub fn claim_key(&self) -> Option<&str> {
+        self.claim_key.as_deref()
+    }
+
+    /// Redacted channel id, if one was available.
+    #[must_use]
+    pub fn channel_id(&self) -> Option<&str> {
+        self.channel_id.as_deref()
+    }
+
+    /// Redacted claimant agent id, if one was available.
+    #[must_use]
+    pub fn claimant_agent_id(&self) -> Option<&str> {
+        self.claimant_agent_id.as_deref()
+    }
+
+    /// Redacted owner agent id, if one was available.
+    #[must_use]
+    pub fn owner_agent_id(&self) -> Option<&str> {
+        self.owner_agent_id.as_deref()
+    }
+
+    /// Stable outcome label, if one was set.
+    #[must_use]
+    pub fn outcome(&self) -> Option<&str> {
+        self.outcome.as_deref()
+    }
+
+    /// Redaction-safe reason label, if one was set.
+    #[must_use]
+    pub fn reason(&self) -> Option<&str> {
+        self.reason.as_deref()
+    }
+
+    /// Numeric FCP error code, if the record describes a denial.
+    #[must_use]
+    pub const fn error_code(&self) -> Option<u16> {
+        self.error_code
+    }
 }
 
 /// Connector action selected by chat coordination policy.
@@ -1133,6 +1346,14 @@ const fn is_literal_mention_word_char(ch: char) -> bool {
     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.')
 }
 
+const fn skip_reason_label(reason: ChatCoordinationSkipReason) -> &'static str {
+    match reason {
+        ChatCoordinationSkipReason::Disabled => "disabled",
+        ChatCoordinationSkipReason::ChannelNotAllowed => "channel_not_allowed",
+        ChatCoordinationSkipReason::ThreadlessDmSkipped => "threadless_dm_skipped",
+    }
+}
+
 fn fnv1a64(bytes: &[u8]) -> String {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in bytes {
@@ -1312,6 +1533,127 @@ mod tests {
                 .denial_error()
                 .is_some()
         );
+    }
+
+    #[test]
+    fn audit_claim_attempt_serializes_only_redacted_identifiers() {
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let record = ChatCoordinationAuditRecord::claim_attempt(
+            &key,
+            ChatCoordinationBackend::AgentMail,
+            &agent("alice"),
+        );
+        let json = serde_json::to_string(&record).expect("record serializes");
+
+        assert_eq!(record.event(), ChatCoordinationAuditEvent::ClaimAttempt);
+        assert_eq!(record.backend(), ChatCoordinationBackend::AgentMail);
+        assert_eq!(record.outcome(), None);
+        assert!(json.contains(r#""event":"claim_attempt""#));
+        assert!(json.contains(r#""backend":"agent_mail""#));
+        assert!(json.contains("agent:"));
+        assert!(json.contains("channel:"));
+        assert!(json.contains("thread:"));
+        assert!(!json.contains("alice"));
+        assert!(!json.contains("C123"));
+        assert!(!json.contains("1700000000.000100"));
+    }
+
+    #[test]
+    fn audit_claim_outcome_records_peer_owner_without_plaintext_owner() {
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let record = ChatCoordinationAuditRecord::claim_outcome(
+            &key,
+            ChatCoordinationBackend::AgentMail,
+            &agent("bob"),
+            &ClaimOutcome::AlreadyOwned(agent("alice")),
+        );
+        let json = serde_json::to_value(&record).expect("record serializes");
+
+        assert_eq!(record.event(), ChatCoordinationAuditEvent::ClaimOutcome);
+        assert_eq!(record.outcome(), Some("already_owned"));
+        assert_eq!(record.error_code(), Some(THREAD_OWNED_BY_PEER_ERROR_CODE));
+        assert!(
+            record
+                .owner_agent_id()
+                .is_some_and(|owner| owner.starts_with("agent:"))
+        );
+        assert_eq!(json["outcome"], "already_owned");
+        assert_eq!(json["error_code"], THREAD_OWNED_BY_PEER_ERROR_CODE);
+        assert!(!json.to_string().contains("alice"));
+        assert!(!json.to_string().contains("bob"));
+    }
+
+    #[test]
+    fn audit_skipped_record_hashes_channel_and_labels_reason() {
+        let record = ChatCoordinationAuditRecord::coordination_skipped(
+            &ChannelId::new("C123"),
+            ChatCoordinationBackend::MeshGossip,
+            ChatCoordinationSkipReason::ChannelNotAllowed,
+        );
+        let json = serde_json::to_value(&record).expect("record serializes");
+
+        assert_eq!(
+            record.event(),
+            ChatCoordinationAuditEvent::CoordinationSkipped
+        );
+        assert_eq!(record.backend(), ChatCoordinationBackend::MeshGossip);
+        assert_eq!(record.claim_key(), None);
+        assert_eq!(record.reason(), Some("channel_not_allowed"));
+        assert!(
+            record
+                .channel_id()
+                .is_some_and(|channel| channel.starts_with("channel:"))
+        );
+        assert_eq!(json["event"], "coordination_skipped");
+        assert_eq!(json["backend"], "mesh_gossip");
+        assert_eq!(json["outcome"], "skipped");
+        assert!(json.get("claim_key").is_none());
+        assert!(!json.to_string().contains("C123"));
+    }
+
+    #[test]
+    fn audit_send_records_capture_execution_and_denial_codes() {
+        let key = key_for(connector("slack:chat:1.0.0"));
+        let claimant = agent("bob");
+        let executed = ChatCoordinationAuditRecord::send_executed(
+            &key,
+            ChatCoordinationBackend::InMemory,
+            &claimant,
+            Some("agent_mail_unavailable"),
+        );
+        assert_eq!(executed.event(), ChatCoordinationAuditEvent::SendExecuted);
+        assert_eq!(executed.outcome(), Some("executed"));
+        assert_eq!(executed.reason(), Some("agent_mail_unavailable"));
+        assert_eq!(executed.error_code(), None);
+
+        let owner = agent("alice");
+        let error = thread_owned_by_peer_error(&owner);
+        let denied = ChatCoordinationAuditRecord::send_denied(
+            &key,
+            ChatCoordinationBackend::AgentMail,
+            &claimant,
+            &error,
+            Some(&owner),
+            Some("thread_owned_by_peer"),
+        );
+        let json = serde_json::to_string(&denied).expect("record serializes");
+
+        assert_eq!(denied.event(), ChatCoordinationAuditEvent::SendDenied);
+        assert_eq!(denied.outcome(), Some("denied"));
+        assert_eq!(denied.error_code(), Some(THREAD_OWNED_BY_PEER_ERROR_CODE));
+        assert!(
+            denied
+                .claimant_agent_id()
+                .is_some_and(|id| id.starts_with("agent:"))
+        );
+        assert!(
+            denied
+                .owner_agent_id()
+                .is_some_and(|id| id.starts_with("agent:"))
+        );
+        assert!(!json.contains("alice"));
+        assert!(!json.contains("bob"));
+        assert!(!json.contains("C123"));
     }
 
     #[test]

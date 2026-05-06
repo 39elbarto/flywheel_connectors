@@ -246,15 +246,15 @@ pub use contract::{
 
 /// Chat coordination helpers.
 pub use coordination::{
-    AgentId, ChannelId, ChatClaimDecision, ChatCoordinationAction, ChatCoordinationBackend,
-    ChatCoordinationConfig, ChatCoordinationSkipReason, ClaimKey, ClaimOutcome,
-    DEFAULT_THREAD_OWNERSHIP_TTL, DmMode, InMemoryThreadOwnershipChecker, MentionRecord,
-    MentionTracker, OwnershipRecord, THREAD_OWNED_BY_PEER_ERROR_CODE,
-    THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE, TelegramMentionEntity, ThreadId,
-    ThreadOwnershipChecker, discord_text_mentions_agent, literal_at_mention_matches,
-    matrix_mentions_agent, mattermost_props_mentions_agent, normalize_slack_channel_id,
-    slack_text_mentions_agent, structured_user_mentions_agent, teams_mentions_agent,
-    telegram_entities_mention_agent, thread_owned_by_peer_error,
+    AgentId, ChannelId, ChatClaimDecision, ChatCoordinationAction, ChatCoordinationAuditEvent,
+    ChatCoordinationAuditRecord, ChatCoordinationBackend, ChatCoordinationConfig,
+    ChatCoordinationSkipReason, ClaimKey, ClaimOutcome, DEFAULT_THREAD_OWNERSHIP_TTL, DmMode,
+    InMemoryThreadOwnershipChecker, MentionRecord, MentionTracker, OwnershipRecord,
+    THREAD_OWNED_BY_PEER_ERROR_CODE, THREAD_OWNERSHIP_INDETERMINATE_ERROR_CODE,
+    TelegramMentionEntity, ThreadId, ThreadOwnershipChecker, discord_text_mentions_agent,
+    literal_at_mention_matches, matrix_mentions_agent, mattermost_props_mentions_agent,
+    normalize_slack_channel_id, slack_text_mentions_agent, structured_user_mentions_agent,
+    teams_mentions_agent, telegram_entities_mention_agent, thread_owned_by_peer_error,
     thread_ownership_indeterminate_error,
 };
 

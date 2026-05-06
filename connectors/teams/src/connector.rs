@@ -806,7 +806,7 @@ impl TeamsConnector {
         })
     }
 
-    fn skipped_ingress_output(activity: &Activity, diagnostic: Value) -> Value {
+    fn skipped_ingress_output(activity: &Activity, diagnostic: &Value) -> Value {
         json!({
             "accepted": false,
             "duplicate": false,
@@ -1026,7 +1026,7 @@ impl TeamsConnector {
                     message: "Teams activity is missing conversation metadata".into(),
                 })?;
         if let Some(diagnostic) = self.ingress_skip_diagnostic(activity, conversation) {
-            let mut output = Self::skipped_ingress_output(activity, diagnostic);
+            let mut output = Self::skipped_ingress_output(activity, &diagnostic);
             if let Some(file_consent) = self.file_consent_diagnostic(activity) {
                 output["file_consent"] = file_consent;
             }

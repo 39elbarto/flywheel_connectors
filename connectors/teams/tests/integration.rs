@@ -97,7 +97,7 @@ async fn setup_connector(
     let mut connector = TeamsConnector::new();
     connector
         .configure(json!({
-            "graph_base_url": server.uri(),
+            "graph_base_url": "https://graph.microsoft.com/v1.0",
             "bot_service_url": server.uri(),
             "auth": { "mode": "access_token", "access_token": "tok" },
             "ingress_policy": ingress_policy,

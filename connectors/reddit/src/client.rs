@@ -2,11 +2,13 @@
 
 use fcp_prelude::log_redaction::redact_url;
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use reqwest::{Client, Response, StatusCode};
+use reqwest::{Client, RequestBuilder, Response, StatusCode, Url, header, redirect::Policy};
+use sha2::{Digest, Sha256};
 use tracing::{debug, instrument};
 
 use crate::{
@@ -16,6 +18,16 @@ use crate::{
 
 /// Default `Reddit` OAuth API base URL.
 pub const DEFAULT_BASE_URL: &str = "https://oauth.reddit.com";
+const DEFAULT_MEDIA_MAX_BYTES: u64 = 10_485_760;
+const MAX_MEDIA_MAX_BYTES: u64 = 26_214_400;
+const MIN_MEDIA_MAX_BYTES: u64 = 1_024;
+const MAX_MEDIA_REDIRECTS: usize = 2;
+const ALLOWED_MEDIA_HOSTS: &[&str] = &[
+    "i.redd.it",
+    "v.redd.it",
+    "preview.redd.it",
+    "external-preview.redd.it",
+];
 
 /// Authentication mode for the `Reddit` API.
 #[derive(Clone)]
@@ -53,6 +65,7 @@ impl fmt::Debug for RedditAuth {
 /// `Reddit` API client.
 pub struct RedditClient {
     client: Client,
+    media_client: Client,
     auth: RedditAuth,
     base_url: String,
     runtime: ConnectorRuntime,
@@ -76,9 +89,15 @@ impl RedditClient {
             .timeout(Duration::from_secs(30))
             .user_agent("fcp-reddit/0.1.0 (FCP connector)")
             .build()?;
+        let media_client = Client::builder()
+            .timeout(Duration::from_secs(90))
+            .user_agent("fcp-reddit/0.1.0 (FCP connector)")
+            .redirect(Policy::none())
+            .build()?;
 
         Ok(Self {
             client,
+            media_client,
             auth,
             base_url: base_url
                 .unwrap_or(DEFAULT_BASE_URL)
@@ -99,11 +118,33 @@ impl RedditClient {
         self.runtime.shutdown();
     }
 
-    fn add_auth(&self, req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    fn add_auth(&self, req: RequestBuilder) -> RedditResult<RequestBuilder> {
+        let mut headers = header::HeaderMap::new();
         match &self.auth {
-            RedditAuth::BearerToken(token) => req.bearer_auth(token),
-            RedditAuth::CredentialId(id) => req.header("X-FCP-Credential-Id", id.to_string()),
+            RedditAuth::BearerToken(token) => {
+                let mut value =
+                    header::HeaderValue::from_str(&format!("Bearer {token}")).map_err(|_| {
+                        RedditError::InvalidInput(
+                            "Bearer token contains invalid header characters".into(),
+                        )
+                    })?;
+                value.set_sensitive(true);
+                headers.insert(header::AUTHORIZATION, value);
+            }
+            RedditAuth::CredentialId(id) => {
+                let mut value = header::HeaderValue::from_str(&id.to_string()).map_err(|_| {
+                    RedditError::InvalidInput(
+                        "Credential ID contains invalid header characters".into(),
+                    )
+                })?;
+                value.set_sensitive(true);
+                headers.insert(
+                    header::HeaderName::from_static("x-fcp-credential-id"),
+                    value,
+                );
+            }
         }
+        Ok(req.headers(headers))
     }
 
     async fn handle_response(&self, resp: Response) -> RedditResult<serde_json::Value> {
@@ -158,7 +199,7 @@ impl RedditClient {
     ) -> RedditResult<serde_json::Value> {
         let url = format!("{}{path}", self.base_url);
         debug!(url = %redact_url(&url), "GET request");
-        let mut req = self.add_auth(self.client.get(&url));
+        let mut req = self.add_auth(self.client.get(&url))?;
         if let Some(q) = query {
             req = req.query(q);
         }
@@ -184,7 +225,7 @@ impl RedditClient {
                 .post(&url)
                 .header("Content-Type", "application/x-www-form-urlencoded")
                 .body(encoded),
-        );
+        )?;
         let resp = req.send().await?;
         self.handle_response(resp).await
     }
@@ -552,45 +593,189 @@ impl RedditClient {
         url: &str,
         max_bytes: Option<i64>,
     ) -> RedditResult<serde_json::Value> {
-        let resp = self
-            .client
-            .get(url)
-            .timeout(Duration::from_secs(90))
-            .send()
-            .await?;
+        let max_bytes = bounded_media_max_bytes(max_bytes)?;
+        let allow_local = self.allow_local_media_hosts_for_tests();
+        let mut current_url = validate_media_url(url, allow_local)?;
 
-        let status = resp.status();
-        if !status.is_success() {
-            return Err(RedditError::Api {
-                status_code: status.as_u16(),
-                message: format!("Media download failed: {status}"),
-            });
-        }
+        for redirect_count in 0..=MAX_MEDIA_REDIRECTS {
+            let resp = self
+                .media_client
+                .get(current_url.as_str())
+                .timeout(Duration::from_secs(90))
+                .send()
+                .await?;
 
-        let content_type = resp
-            .headers()
-            .get("content-type")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("application/octet-stream")
-            .to_string();
+            if resp.status().is_redirection() {
+                if redirect_count == MAX_MEDIA_REDIRECTS {
+                    return Err(RedditError::Api {
+                        status_code: 310,
+                        message: "Media download exceeded redirect limit".into(),
+                    });
+                }
 
-        let body = resp.bytes().await?;
-        let byte_count = i64::try_from(body.len()).unwrap_or(i64::MAX);
-
-        if let Some(max) = max_bytes {
-            if byte_count > max {
-                return Err(RedditError::Api {
-                    status_code: 413,
-                    message: format!("Media exceeds max_bytes ({byte_count} > {max})"),
-                });
+                let location = resp
+                    .headers()
+                    .get(header::LOCATION)
+                    .ok_or_else(|| RedditError::InvalidInput("Redirect missing Location".into()))?
+                    .to_str()
+                    .map_err(|_| {
+                        RedditError::InvalidInput("Redirect Location is not UTF-8".into())
+                    })?;
+                let next_url = current_url.join(location).map_err(|error| {
+                    RedditError::InvalidInput(format!("Invalid redirect URL: {error}"))
+                })?;
+                current_url = validate_media_url(next_url.as_str(), allow_local)?;
+                continue;
             }
+
+            return read_media_response(resp, max_bytes).await;
         }
 
-        Ok(serde_json::json!({
-            "content_type": content_type,
-            "bytes": byte_count,
-        }))
+        Err(RedditError::Api {
+            status_code: 310,
+            message: "Media download exceeded redirect limit".into(),
+        })
     }
+
+    fn allow_local_media_hosts_for_tests(&self) -> bool {
+        Url::parse(&self.base_url)
+            .ok()
+            .and_then(|url| url.host_str().map(canonical_host))
+            .is_some_and(|host| is_local_test_host(&host))
+    }
+}
+
+async fn read_media_response(
+    mut resp: Response,
+    max_bytes: u64,
+) -> RedditResult<serde_json::Value> {
+    let status = resp.status();
+    if !status.is_success() {
+        return Err(RedditError::Api {
+            status_code: status.as_u16(),
+            message: format!("Media download failed: {status}"),
+        });
+    }
+
+    if let Some(content_length) = resp.content_length() {
+        if content_length > max_bytes {
+            return Err(media_too_large(content_length, max_bytes));
+        }
+    }
+
+    let content_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream")
+        .to_string();
+
+    let mut byte_count = 0_u64;
+    let mut hasher = Sha256::new();
+
+    while let Some(chunk) = resp.chunk().await? {
+        let chunk_len = u64::try_from(chunk.len()).map_err(|_| RedditError::Api {
+            status_code: 413,
+            message: "Media chunk length cannot be represented".into(),
+        })?;
+        byte_count = byte_count
+            .checked_add(chunk_len)
+            .ok_or_else(|| media_too_large(max_bytes + 1, max_bytes))?;
+        if byte_count > max_bytes {
+            return Err(media_too_large(byte_count, max_bytes));
+        }
+        hasher.update(&chunk);
+    }
+
+    Ok(serde_json::json!({
+        "content_type": content_type,
+        "bytes": byte_count,
+        "sha256": hex::encode(hasher.finalize()),
+    }))
+}
+
+fn media_too_large(byte_count: u64, max_bytes: u64) -> RedditError {
+    RedditError::Api {
+        status_code: 413,
+        message: format!("Media exceeds max_bytes ({byte_count} > {max_bytes})"),
+    }
+}
+
+fn bounded_media_max_bytes(max_bytes: Option<i64>) -> RedditResult<u64> {
+    let Some(raw_max) = max_bytes else {
+        return Ok(DEFAULT_MEDIA_MAX_BYTES);
+    };
+    let max = u64::try_from(raw_max)
+        .map_err(|_| RedditError::InvalidInput("max_bytes must be positive".into()))?;
+
+    if !(MIN_MEDIA_MAX_BYTES..=MAX_MEDIA_MAX_BYTES).contains(&max) {
+        return Err(RedditError::InvalidInput(format!(
+            "max_bytes must be between {MIN_MEDIA_MAX_BYTES} and {MAX_MEDIA_MAX_BYTES}"
+        )));
+    }
+
+    Ok(max)
+}
+
+fn validate_media_url(raw_url: &str, allow_local_test_hosts: bool) -> RedditResult<Url> {
+    let url = Url::parse(raw_url)
+        .map_err(|error| RedditError::InvalidInput(format!("Invalid media URL: {error}")))?;
+    validate_parsed_media_url(url, allow_local_test_hosts)
+}
+
+fn validate_parsed_media_url(url: Url, allow_local_test_hosts: bool) -> RedditResult<Url> {
+    if !url.username().is_empty() || url.password().is_some() {
+        return Err(RedditError::InvalidInput(
+            "Media URL must not include userinfo".into(),
+        ));
+    }
+
+    let Some(host) = url.host_str().map(canonical_host) else {
+        return Err(RedditError::InvalidInput(
+            "Media URL must include a host".into(),
+        ));
+    };
+
+    let local_test_host = allow_local_test_hosts && is_local_test_host(&host);
+    let allowed_reddit_host = ALLOWED_MEDIA_HOSTS.contains(&host.as_str());
+
+    if host.parse::<IpAddr>().is_ok() && !local_test_host {
+        return Err(RedditError::InvalidInput(
+            "Media URL must not use an IP literal".into(),
+        ));
+    }
+
+    if !(allowed_reddit_host || local_test_host) {
+        return Err(RedditError::InvalidInput(format!(
+            "Media URL host is not allowlisted: {host}"
+        )));
+    }
+
+    match url.scheme() {
+        "https" => {}
+        "http" if local_test_host => {}
+        scheme => {
+            return Err(RedditError::InvalidInput(format!(
+                "Media URL must use https: {scheme}"
+            )));
+        }
+    }
+
+    if allowed_reddit_host && url.port().is_some_and(|port| port != 443) {
+        return Err(RedditError::InvalidInput(
+            "Reddit media URLs must use port 443".into(),
+        ));
+    }
+
+    Ok(url)
+}
+
+fn canonical_host(host: &str) -> String {
+    host.trim_end_matches('.').to_ascii_lowercase()
+}
+
+fn is_local_test_host(host: &str) -> bool {
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 /// Parameters for searching posts.
@@ -628,26 +813,32 @@ fn urlencoded(s: &str) -> String {
 mod tests {
     use super::*;
 
+    fn sample_auth(value: &str) -> RedditAuth {
+        let value = value.to_owned();
+        RedditAuth::BearerToken(value)
+    }
+
     #[test]
     fn auth_debug_redacts_token() {
-        let auth = RedditAuth::BearerToken("secret-token".into());
+        let marker = "redaction-input";
+        let auth = sample_auth(marker);
         let dbg = format!("{auth:?}");
-        assert!(!dbg.contains("secret-token"));
+        assert!(!dbg.contains(marker));
         assert!(dbg.contains("redacted"));
     }
 
     #[test]
     fn auth_secretless_detection() {
-        let token = RedditAuth::BearerToken("tok".into());
-        assert!(!token.is_secretless());
+        let auth = sample_auth("sample-value");
+        assert!(!auth.is_secretless());
         let cred = RedditAuth::CredentialId(CredentialId::new());
         assert!(cred.is_secretless());
     }
 
     #[test]
     fn auth_redacted_label() {
-        let token = RedditAuth::BearerToken("tok".into());
-        assert_eq!(token.redacted_label(), "bearer_token:redacted");
+        let auth = sample_auth("sample-value");
+        assert_eq!(auth.redacted_label(), "bearer_token:redacted");
     }
 
     #[test]
@@ -693,14 +884,14 @@ mod tests {
 
     #[test]
     fn client_new_default_url() {
-        let client = RedditClient::new(RedditAuth::BearerToken("tok".into()), None).unwrap();
+        let client = RedditClient::new(sample_auth("sample-value"), None).unwrap();
         assert_eq!(client.base_url, DEFAULT_BASE_URL);
     }
 
     #[test]
     fn client_new_custom_url() {
         let client = RedditClient::new(
-            RedditAuth::BearerToken("tok".into()),
+            sample_auth("sample-value"),
             Some("https://custom.example.com/api/"),
         )
         .unwrap();
@@ -709,27 +900,24 @@ mod tests {
 
     #[test]
     fn client_trims_trailing_slash() {
-        let client = RedditClient::new(
-            RedditAuth::BearerToken("tok".into()),
-            Some("https://example.com///"),
-        )
-        .unwrap();
+        let client =
+            RedditClient::new(sample_auth("sample-value"), Some("https://example.com///")).unwrap();
         assert_eq!(client.base_url, "https://example.com");
     }
 
     #[test]
     fn client_debug_redacts_bearer() {
-        let client =
-            RedditClient::new(RedditAuth::BearerToken("super-secret".into()), None).unwrap();
+        let marker = "redaction-input";
+        let client = RedditClient::new(sample_auth(marker), None).unwrap();
         let dbg = format!("{client:?}");
-        assert!(!dbg.contains("super-secret"));
+        assert!(!dbg.contains(marker));
         assert!(dbg.contains("redacted"));
         assert!(dbg.contains("RedditClient"));
     }
 
     #[test]
     fn client_debug_shows_base_url() {
-        let client = RedditClient::new(RedditAuth::BearerToken("tok".into()), None).unwrap();
+        let client = RedditClient::new(sample_auth("sample-value"), None).unwrap();
         let dbg = format!("{client:?}");
         assert!(dbg.contains(DEFAULT_BASE_URL));
     }
@@ -752,7 +940,7 @@ mod tests {
 
     #[test]
     fn auth_clone() {
-        let auth = RedditAuth::BearerToken("tok".into());
+        let auth = sample_auth("sample-value");
         #[allow(clippy::redundant_clone)]
         let cloned = auth.clone();
         assert_eq!(cloned.redacted_label(), "bearer_token:redacted");
@@ -828,6 +1016,60 @@ mod tests {
     #[test]
     fn default_base_url_value() {
         assert_eq!(DEFAULT_BASE_URL, "https://oauth.reddit.com");
+    }
+
+    #[test]
+    fn media_url_accepts_allowed_reddit_hosts() {
+        let url = validate_media_url("https://I.REDD.IT./image.png", false).unwrap();
+        assert_eq!(canonical_host(url.host_str().unwrap()), "i.redd.it");
+    }
+
+    #[test]
+    fn media_url_rejects_arbitrary_host() {
+        let err = validate_media_url("https://example.com/image.png", false).unwrap_err();
+        assert!(err.to_string().contains("not allowlisted"));
+    }
+
+    #[test]
+    fn media_url_rejects_http_for_reddit_host() {
+        let err = validate_media_url("http://i.redd.it/image.png", false).unwrap_err();
+        assert!(err.to_string().contains("must use https"));
+    }
+
+    #[test]
+    fn media_url_rejects_userinfo() {
+        let err = validate_media_url("https://user:pass@i.redd.it/image.png", false).unwrap_err();
+        assert!(err.to_string().contains("userinfo"));
+    }
+
+    #[test]
+    fn media_url_rejects_ip_literal_without_test_seam() {
+        let err = validate_media_url("https://127.0.0.1/image.png", false).unwrap_err();
+        assert!(err.to_string().contains("IP literal"));
+    }
+
+    #[test]
+    fn media_url_allows_localhost_with_test_seam() {
+        let url = validate_media_url("http://127.0.0.1:8080/image.png", true).unwrap();
+        assert_eq!(canonical_host(url.host_str().unwrap()), "127.0.0.1");
+    }
+
+    #[test]
+    fn media_url_rejects_non_443_reddit_port() {
+        let err = validate_media_url("https://i.redd.it:444/image.png", false).unwrap_err();
+        assert!(err.to_string().contains("port 443"));
+    }
+
+    #[test]
+    fn media_max_bytes_enforces_manifest_bounds() {
+        assert_eq!(
+            bounded_media_max_bytes(None).unwrap(),
+            DEFAULT_MEDIA_MAX_BYTES
+        );
+        assert_eq!(bounded_media_max_bytes(Some(1_024)).unwrap(), 1_024);
+        assert!(bounded_media_max_bytes(Some(1_023)).is_err());
+        assert!(bounded_media_max_bytes(Some(26_214_401)).is_err());
+        assert!(bounded_media_max_bytes(Some(-1)).is_err());
     }
 
     #[test]

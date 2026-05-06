@@ -12,6 +12,9 @@
 )]
 
 use serde_json::json;
+use std::io::{Read, Write};
+use std::net::TcpListener;
+use std::thread::{self, JoinHandle};
 use wiremock::matchers::{header, method, path, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -41,6 +44,22 @@ fn listing_response(posts: &serde_json::Value, after: Option<&str>) -> serde_jso
             "after": after
         }
     })
+}
+
+fn spawn_loopback_http_server(responses: Vec<String>) -> (String, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback test server");
+    let addr = listener.local_addr().expect("loopback addr");
+    let handle = thread::spawn(move || {
+        for response in responses {
+            let (mut stream, _) = listener.accept().expect("accept loopback request");
+            let mut request = [0_u8; 1024];
+            let _ = stream.read(&mut request);
+            stream
+                .write_all(response.as_bytes())
+                .expect("write loopback response");
+        }
+    });
+    (format!("http://{addr}"), handle)
 }
 
 // ── Lifecycle ────────────────────────────────────────────────────────
@@ -364,6 +383,71 @@ async fn stream_subreddit_new() {
         .unwrap();
     assert_eq!(result["events"].as_array().unwrap().len(), 1);
     assert_eq!(result["next_checkpoint"], "t3_s1");
+}
+
+// ── Download Media ───────────────────────────────────────────────────
+
+#[fcp_async_core::runtime::test]
+async fn download_media_loopback_success_returns_sha256() {
+    let body = "hello";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let (server_url, handle) = spawn_loopback_http_server(vec![response]);
+    let c = setup_connector(&server_url).await;
+
+    let result = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.download_media",
+            "input": {"url": format!("{server_url}/image.png"), "max_bytes": 1024}
+        }))
+        .await
+        .unwrap();
+
+    handle.join().expect("loopback server should finish");
+    assert_eq!(result["content_type"], "image/png");
+    assert_eq!(result["bytes"], 5);
+    assert_eq!(
+        result["sha256"],
+        "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+    );
+}
+
+#[fcp_async_core::runtime::test]
+async fn download_media_rejects_content_length_over_max() {
+    let response = "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: 1025\r\nConnection: close\r\n\r\n".to_string();
+    let (server_url, handle) = spawn_loopback_http_server(vec![response]);
+    let c = setup_connector(&server_url).await;
+
+    let error = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.download_media",
+            "input": {"url": format!("{server_url}/too-large.png"), "max_bytes": 1024}
+        }))
+        .await
+        .unwrap_err();
+
+    handle.join().expect("loopback server should finish");
+    assert!(error.to_string().contains("Media exceeds max_bytes"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn download_media_rejects_redirect_to_disallowed_host() {
+    let response = "HTTP/1.1 302 Found\r\nLocation: https://example.com/image.png\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_string();
+    let (server_url, handle) = spawn_loopback_http_server(vec![response]);
+    let c = setup_connector(&server_url).await;
+
+    let error = c
+        .handle_invoke(json!({
+            "operation_id": "reddit.download_media",
+            "input": {"url": format!("{server_url}/redirect.png"), "max_bytes": 1024}
+        }))
+        .await
+        .unwrap_err();
+
+    handle.join().expect("loopback server should finish");
+    assert!(error.to_string().contains("not allowlisted"));
 }
 
 // ── Subreddit Get ───────────────────────────────────────────────────

@@ -1,0 +1,41 @@
+[package]
+name = "fcp-aws-bedrock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "FCP AWS Bedrock connector using AWS-native SigV4 APIs"
+
+[[bin]]
+name = "fcp-aws-bedrock"
+path = "src/main.rs"
+
+[lib]
+name = "fcp_aws_bedrock"
+path = "src/lib.rs"
+
+[dependencies]
+async-trait.workspace = true
+anyhow.workspace = true
+bytes.workspace = true
+crc32fast = "1.5"
+fcp-async-core.workspace = true
+fcp-core.workspace = true
+fcp-prelude.workspace = true
+fcp-sdk.workspace = true
+hex.workspace = true
+reqwest = { workspace = true, features = ["json"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+url.workspace = true
+
+[dev-dependencies]
+chrono.workspace = true
+ciborium.workspace = true
+fcp-crypto.workspace = true
+fcp-testkit.workspace = true
+wiremock.workspace = true

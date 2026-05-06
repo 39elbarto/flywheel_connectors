@@ -1,0 +1,134 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:ollama-oai-compat"
+
+[connector]
+id = "fcp.ollama"
+name = "Ollama"
+version = "0.1.0"
+description = "Mesh-sovereign Ollama local and tailnet LLM connector using the OpenAI-compatible /v1 chat, streaming, embeddings, and model-list APIs"
+archetypes = ["request-response", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is optional auth, base_url, explicit allowed_hosts for non-loopback endpoints, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:owner", "z:private", "z:work", "z:project:*"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = ["ollama.chat", "ollama.embeddings", "ollama.models.read", "ollama.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+# Deliberate local-service exception: Ollama usually runs on localhost or a
+# tailnet/private host. The Rust connector still validates base_url at configure
+# time: loopback is allowed by default; every non-loopback host must be listed
+# in allowed_hosts. The connector never calls Ollama-native /api/pull or other
+# model-management endpoints, so it cannot auto-pull models.
+[sandbox]
+profile = "local-services"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 300000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."ollama.chat.completions"]
+description = "Create a bounded non-streaming Ollama chat completion through POST /v1/chat/completions."
+capability = "ollama.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama3.2" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, format = {}, keep_alive = {}, tools = { type = "array" }, tool_choice = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [11434, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."ollama.chat.completions".ai_hints]
+when_to_use = "Use for local or tailnet-hosted chat completions when the requested model is already installed in Ollama."
+common_mistakes = ["Do not log prompts, completions, tool-call arguments, or API keys.", "Do not expect this connector to pull missing models.", "Non-loopback endpoints require explicit allowed_hosts configuration."]
+examples = ['{"model":"llama3.2","messages":[{"role":"user","content":"Summarize FCP in one sentence."}]}']
+related = ["ollama.chat.completions_stream", "ollama.models.list"]
+
+[provides.operations."ollama.chat.completions_stream"]
+description = "Open an Ollama OpenAI-compatible SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "ollama.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "llama3.2" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, format = {}, keep_alive = {}, tools = { type = "array" }, tool_choice = {}, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [11434, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."ollama.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters for a local or tailnet-hosted Ollama model."
+common_mistakes = ["Handle finish_reason and chunk counts.", "Do not strip model-specific content such as thinking tags; this connector surfaces Ollama output as-is."]
+examples = ['{"model":"llama3.2","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["ollama.chat.completions"]
+
+[provides.operations."ollama.embeddings.create"]
+description = "Create Ollama text embeddings through POST /v1/embeddings."
+capability = "ollama.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string", default = "nomic-embed-text" }, input = {}, encoding_format = { type = "string" }, dimensions = { type = "integer", minimum = 1 }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [11434, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."ollama.embeddings.create".ai_hints]
+when_to_use = "Use for local embeddings with an already installed embedding model such as nomic-embed-text."
+common_mistakes = ["Do not log input text or embedding vectors.", "Do not auto-pull embedding models."]
+examples = ['{"model":"nomic-embed-text","input":"hello"}']
+related = ["ollama.models.list"]
+
+[provides.operations."ollama.models.list"]
+description = "List installed Ollama models from GET /v1/models."
+capability = "ollama.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [11434, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."ollama.models.list".ai_hints]
+when_to_use = "Use to discover installed Ollama model IDs before sending chat, streaming, or embeddings requests."
+common_mistakes = ["Do not infer missing models will be pulled automatically.", "Do not call Ollama-native /api/tags through this connector."]
+examples = ["{}"]
+related = ["ollama.chat.completions", "ollama.embeddings.create"]
+
+[provides.operations."ollama.health"]
+description = "Probe Ollama model listing with a short timeout and return connector health metadata."
+capability = "ollama.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [11434, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."ollama.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching local model work."
+common_mistakes = ["Do not treat absent optional auth as a failed connector; local Ollama is unauthenticated by default."]
+examples = ["{}"]
+related = ["ollama.models.list"]
+
+[metadata.privacy]
+zone_guidance = "Default home zone is z:owner because local/tailnet Ollama is usually used for private, no-cloud inference. Deployments may route z:private, z:work, or z:project:* callers when the operator configures that policy explicitly."
+logging = "Never log prompts, completions, embedding input, vectors, API keys, or full base URLs. Evidence logs use base_url_class, model hashes, byte counts, status, retry decision, and cleanup result."

@@ -1,0 +1,363 @@
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use fcp_async_core::http::{HttpClient, HttpClientBuilder, Method};
+use fcp_async_core::{Cx, time};
+use fcp_openai_compat::{
+    ChatCompletionStream, ChatCompletionsRequest, ChatCompletionsResponse, CompletionsRequest,
+    CompletionsResponse, EmbeddingsRequest, EmbeddingsResponse, HeaderList, HttpRequest, ModelInfo,
+    OpenAiCompatClient, OpenAiCompatClientConfig, OpenAiCompatProvider, OpenAiError,
+    RateLimitPolicy, parse_rate_limit_headers,
+};
+use serde::Deserialize;
+use url::Url;
+
+pub const DEFAULT_BASE_URL: &str = "https://api.together.ai/v1";
+pub const DEFAULT_MODEL: &str = "openai/gpt-oss-20b";
+pub const DEFAULT_EMBEDDING_MODEL: &str = "intfloat/multilingual-e5-large-instruct";
+pub const DEFAULT_SAFETY_MODEL: &str = "meta-llama/Llama-Guard-4-12B";
+pub const USER_AGENT: &str = "fcp-together/0.1.0";
+
+const ACCEPT_HEADER: &str = "Accept";
+const CONTENT_TYPE_HEADER: &str = "Content-Type";
+const JSON_CONTENT_TYPE: &str = "application/json";
+const USER_AGENT_HEADER: &str = "User-Agent";
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TogetherAuth {
+    ApiKey(String),
+    CredentialId(String),
+}
+
+impl TogetherAuth {
+    pub fn redacted_label(&self) -> String {
+        match self {
+            Self::ApiKey(_) => "api_key:redacted".into(),
+            Self::CredentialId(id) => format!("credential_id:{id}"),
+        }
+    }
+
+    pub const fn is_secretless(&self) -> bool {
+        matches!(self, Self::CredentialId(_))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TogetherProvider {
+    base_url: String,
+    auth: TogetherAuth,
+}
+
+impl TogetherProvider {
+    pub fn new(base_url: impl Into<String>, auth: TogetherAuth) -> Self {
+        Self {
+            base_url: base_url.into(),
+            auth,
+        }
+    }
+
+    pub const fn auth(&self) -> &TogetherAuth {
+        &self.auth
+    }
+}
+
+impl OpenAiCompatProvider for TogetherProvider {
+    fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    fn auth_header(&self, req: &mut HttpRequest) {
+        match &self.auth {
+            TogetherAuth::ApiKey(key) => req.bearer_auth(key),
+            TogetherAuth::CredentialId(id) => req.upsert_header("x-fcp-credential-id", id),
+        }
+    }
+
+    fn user_agent(&self) -> &'static str {
+        USER_AGENT
+    }
+
+    fn provider_name(&self) -> &'static str {
+        "together"
+    }
+
+    fn extra_request_headers(&self, _model: &str) -> HeaderList {
+        Vec::new()
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ModelCache {
+    fetched_at: Instant,
+    models: Vec<ModelInfo>,
+}
+
+pub struct TogetherClient {
+    inner: OpenAiCompatClient<TogetherProvider>,
+    provider: TogetherProvider,
+    http_client: Arc<HttpClient>,
+    request_timeout: Duration,
+    model_cache_ttl: Duration,
+    rate_limit_policy: RateLimitPolicy,
+    model_cache: fcp_async_core::sync::Mutex<Option<ModelCache>>,
+}
+
+impl TogetherClient {
+    pub fn new(
+        provider: TogetherProvider,
+        request_timeout: Duration,
+        model_cache_ttl: Duration,
+        rate_limit_policy: RateLimitPolicy,
+    ) -> Self {
+        let inner_http_client = HttpClientBuilder::new().build();
+        let direct_http_client = HttpClientBuilder::new().build();
+        Self {
+            inner: OpenAiCompatClient::new_with_config(
+                provider.clone(),
+                inner_http_client,
+                OpenAiCompatClientConfig {
+                    request_timeout,
+                    model_cache_ttl,
+                    rate_limit_policy,
+                },
+            ),
+            provider,
+            http_client: Arc::new(direct_http_client),
+            request_timeout,
+            model_cache_ttl,
+            rate_limit_policy,
+            model_cache: fcp_async_core::sync::Mutex::new(None),
+        }
+    }
+
+    pub const fn provider(&self) -> &TogetherProvider {
+        &self.provider
+    }
+
+    pub async fn chat_completions(
+        &self,
+        cx: &Cx,
+        request: ChatCompletionsRequest,
+    ) -> Result<ChatCompletionsResponse, OpenAiError> {
+        self.inner.chat_completions(cx, request).await
+    }
+
+    pub async fn chat_completions_stream(
+        &self,
+        cx: &Cx,
+        request: ChatCompletionsRequest,
+    ) -> Result<ChatCompletionStream, OpenAiError> {
+        self.inner.chat_completions_stream(cx, request).await
+    }
+
+    pub async fn embeddings(
+        &self,
+        cx: &Cx,
+        request: EmbeddingsRequest,
+    ) -> Result<EmbeddingsResponse, OpenAiError> {
+        self.inner.embeddings(cx, request).await
+    }
+
+    pub async fn list_models(&self, cx: &Cx) -> Result<Vec<ModelInfo>, OpenAiError> {
+        {
+            let guard = self.model_cache.lock().await;
+            if let Some(cache) = guard.as_ref() {
+                if cache.fetched_at.elapsed() <= self.model_cache_ttl {
+                    return Ok(cache.models.clone());
+                }
+            }
+        }
+
+        let models = self.fetch_models(cx).await?;
+        *self.model_cache.lock().await = Some(ModelCache {
+            fetched_at: Instant::now(),
+            models: models.clone(),
+        });
+        Ok(models)
+    }
+
+    pub async fn invalidate_model_cache(&self) {
+        *self.model_cache.lock().await = None;
+        self.inner.invalidate_model_cache().await;
+    }
+
+    pub async fn legacy_completions(
+        &self,
+        cx: &Cx,
+        request: CompletionsRequest,
+    ) -> Result<CompletionsResponse, OpenAiError> {
+        self.inner.legacy_completions(cx, request).await
+    }
+
+    async fn fetch_models(&self, cx: &Cx) -> Result<Vec<ModelInfo>, OpenAiError> {
+        let mut attempted_rate_limit_retry = false;
+        loop {
+            checkpoint(cx)?;
+            let mut request = HttpRequest {
+                headers: vec![
+                    (ACCEPT_HEADER.to_string(), JSON_CONTENT_TYPE.to_string()),
+                    (
+                        CONTENT_TYPE_HEADER.to_string(),
+                        JSON_CONTENT_TYPE.to_string(),
+                    ),
+                    (USER_AGENT_HEADER.to_string(), USER_AGENT.to_string()),
+                ],
+            };
+            self.provider.auth_header(&mut request);
+            let url = format!("{}/models", self.provider.base_url().trim_end_matches('/'));
+            let response = match time::timeout(
+                self.request_timeout,
+                self.http_client
+                    .request(cx, Method::Get, &url, request.headers, Vec::new()),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response,
+                Ok(Err(err)) => return Err(OpenAiError::Network(err.into())),
+                Err(err) => {
+                    return Err(OpenAiError::Network(
+                        fcp_openai_compat::NetworkError::Http {
+                            message: err.to_string(),
+                        },
+                    ));
+                }
+            };
+            let status = response.status_code();
+            let rate_limits = parse_rate_limit_headers(&response.headers, None);
+            if !status.is_success() {
+                let mapped = self.provider.error_mapper().map_response(
+                    self.provider.provider_name(),
+                    status.as_u16(),
+                    &response.headers,
+                    &response.body,
+                    rate_limits,
+                );
+                if !attempted_rate_limit_retry {
+                    if let Some(delay) = retry_delay_for_policy(&mapped, self.rate_limit_policy) {
+                        attempted_rate_limit_retry = true;
+                        time::sleep(delay).await;
+                        continue;
+                    }
+                }
+                return Err(mapped);
+            }
+            checkpoint(cx)?;
+            return parse_models_body(&response.body);
+        }
+    }
+}
+
+pub fn normalize_together_base_url(raw: Option<&str>) -> Result<String, String> {
+    let value = raw.unwrap_or(DEFAULT_BASE_URL).trim();
+    if value.is_empty() {
+        return Err("base_url must not be empty".into());
+    }
+    let parsed = Url::parse(value).map_err(|err| format!("Invalid base_url: {err}"))?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "base_url must include a host".to_string())?;
+    let normalized_host = host
+        .trim_matches(|c| c == '[' || c == ']')
+        .to_ascii_lowercase();
+    let local = matches!(normalized_host.as_str(), "localhost" | "127.0.0.1" | "::1");
+    let valid_scheme = if local {
+        matches!(parsed.scheme(), "http" | "https")
+    } else {
+        parsed.scheme() == "https"
+    };
+    let path = parsed.path().trim_end_matches('/');
+    let allowed_host = normalized_host == "api.together.ai" || local;
+
+    if !allowed_host || !valid_scheme || path != "/v1" {
+        return Err(format!(
+            "base_url must be https://api.together.ai/v1 (localhost/127.0.0.1/::1 allowed over http/https for tests): {value}"
+        ));
+    }
+    if parsed.query().is_some() || parsed.fragment().is_some() {
+        return Err(format!(
+            "base_url must not include query or fragment components: {value}"
+        ));
+    }
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+pub fn validate_auth_material(field: &str, value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} must not be empty"));
+    }
+    if trimmed
+        .bytes()
+        .any(|byte| matches!(byte, b'\r' | b'\n' | 0))
+    {
+        return Err(format!(
+            "{field} contains characters that are invalid in headers"
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn parse_models_body(body: &[u8]) -> Result<Vec<ModelInfo>, OpenAiError> {
+    let envelope = serde_json::from_slice::<TogetherModelsEnvelope>(body).map_err(|err| {
+        OpenAiError::InvalidRequest {
+            message: format!("failed to decode Together models response: {err}"),
+            param: None,
+            code: Some("decode_response".to_string()),
+        }
+    })?;
+    let models = match envelope {
+        TogetherModelsEnvelope::OpenAi { data, .. } | TogetherModelsEnvelope::Array(data) => data,
+    };
+    Ok(models
+        .into_iter()
+        .map(TogetherModelInfo::into_model_info)
+        .collect())
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum TogetherModelsEnvelope {
+    OpenAi {
+        #[allow(dead_code)]
+        object: Option<String>,
+        data: Vec<TogetherModelInfo>,
+    },
+    Array(Vec<TogetherModelInfo>),
+}
+
+#[derive(Debug, Deserialize)]
+struct TogetherModelInfo {
+    id: String,
+    object: Option<String>,
+    owned_by: Option<String>,
+    organization: Option<String>,
+    created: Option<i64>,
+}
+
+impl TogetherModelInfo {
+    fn into_model_info(self) -> ModelInfo {
+        ModelInfo {
+            id: self.id,
+            object: self.object.or_else(|| Some("model".into())),
+            owned_by: self.owned_by.or(self.organization),
+            created: self.created,
+        }
+    }
+}
+
+fn retry_delay_for_policy(error: &OpenAiError, policy: RateLimitPolicy) -> Option<Duration> {
+    let retry_after = error.retry_after()?;
+    match policy {
+        RateLimitPolicy::WaitUpTo(max_wait) if retry_after <= max_wait => Some(retry_after),
+        RateLimitPolicy::FailFast | RateLimitPolicy::WaitUpTo(_) => None,
+        RateLimitPolicy::WaitForever => Some(retry_after),
+    }
+}
+
+fn checkpoint(cx: &Cx) -> Result<(), OpenAiError> {
+    cx.checkpoint().map_err(|err| {
+        OpenAiError::Network(fcp_openai_compat::NetworkError::Cancelled {
+            message: err.to_string(),
+        })
+    })
+}

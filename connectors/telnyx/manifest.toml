@@ -1,0 +1,278 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:70113b5cb4e4b72efa957f56e1a293c0ef572c98955a0e5dff0e4236d72b2c48"
+
+[connector]
+id = "fcp.telnyx"
+name = "Telnyx Connector"
+version = "0.1.0"
+description = "FCP voice-call connector for Telnyx Call Control"
+archetypes = ["operational", "streaming", "bidirectional"]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
+optional = ["telnyx.voice", "telnyx.read", "telnyx.webhook"]
+forbidden = ["system.exec", "network.listen"]
+
+[provides.operations."telnyx.call.initiate"]
+description = "Initiate an outbound Telnyx voice call with FCP callback/session binding"
+capability = "telnyx.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["to", "from", "connection_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.initiate".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.continue"]
+description = "Answer or continue a Telnyx call"
+capability = "telnyx.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["call_control_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.continue".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.speak"]
+description = "Speak text into a Telnyx call"
+capability = "telnyx.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["call_control_id", "payload"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.speak".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.end"]
+description = "Hang up a Telnyx call"
+capability = "telnyx.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["call_control_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.end".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.status"]
+description = "Retrieve Telnyx call status"
+capability = "telnyx.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["call_control_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.status".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.transfer"]
+description = "Transfer a Telnyx call to another destination"
+capability = "telnyx.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["call_control_id", "to"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.transfer".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.call.gather"]
+description = "Gather DTMF input from a Telnyx call using spoken prompt text"
+capability = "telnyx.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+input_schema = { type = "object", required = ["call_control_id", "payload"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.call.gather".network_constraints]
+host_allow = ["api.telnyx.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."telnyx.webhook.validate_signature"]
+description = "Validate Telnyx Ed25519 webhook headers through fcp-voice-call and replay cache"
+capability = "telnyx.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["headers", "body"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.evaluate_inbound_policy"]
+description = "Evaluate Telnyx inbound caller policy"
+capability = "telnyx.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["body", "inbound_policy"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.parse_event"]
+description = "Parse a verified Telnyx webhook event"
+capability = "telnyx.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["body"] }
+output_schema = { type = "object" }
+
+[provides.operations."telnyx.webhook.ingest_request"]
+description = "Validate, replay-check, parse, policy-check, and ingest a Telnyx webhook"
+capability = "telnyx.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["headers", "body"] }
+output_schema = { type = "object" }
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

@@ -2659,6 +2659,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-aws-bedrock"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "ciborium",
+ "crc32fast",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-testkit",
+ "hex",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-azure"
 version = "0.1.0"
 dependencies = [
@@ -3223,6 +3251,7 @@ dependencies = [
  "hex",
  "serde",
  "serde_json",
+ "sha3",
  "subtle",
  "thiserror 2.0.18",
 ]
@@ -3275,6 +3304,31 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-deepseek"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-e2e",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "wiremock",
 ]
 
@@ -5297,6 +5351,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-ollama"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-onepassword"
 version = "0.1.0"
 dependencies = [
@@ -5560,6 +5639,31 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-plivo"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-voice-call",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
  "uuid",
  "wiremock",
 ]
@@ -6593,6 +6697,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-telnyx"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "ciborium",
+ "ed25519-dalek",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-manifest",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-testkit",
+ "fcp-voice-call",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-terraform"
 version = "0.1.0"
 dependencies = [
@@ -6684,6 +6816,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-together"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-e2e",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "fcp-testkit",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-trello"
 version = "0.1.0"
 dependencies = [
@@ -6718,6 +6877,7 @@ dependencies = [
  "fcp-prelude",
  "fcp-sdk",
  "fcp-testkit",
+ "fcp-voice-call",
  "futures-util",
  "hmac 0.12.1",
  "percent-encoding",
@@ -6725,7 +6885,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.10.6",
- "subtle",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
@@ -6834,6 +6993,28 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wiremock",
+]
+
+[[package]]
+name = "fcp-voice-call"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "ed25519-dalek",
+ "fcp-core",
+ "hex",
+ "hmac 0.12.1",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sha1 0.10.6",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "url",
 ]
 
 [[package]]
@@ -7014,6 +7195,31 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "fcp-xai"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-e2e",
+ "fcp-openai-compat",
+ "fcp-prelude",
+ "futures-util",
+ "pretty_assertions",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "url",

@@ -1,0 +1,428 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:fe9c3f6d70ea0fb8bcd9fac51590eab027c108ea6cdecfffc82df077b509e647"
+
+[connector]
+id = "fcp.plivo"
+name = "Plivo Connector"
+version = "0.1.0"
+description = "FCP voice-call connector for Plivo Voice"
+archetypes = [
+    "operational",
+    "streaming",
+    "bidirectional",
+]
+format = "wasi"
+
+[connector.state]
+model = "singleton_writer"
+state_schema_version = "1"
+migration_hint = "init"
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+    "storage.state",
+]
+optional = [
+    "plivo.voice",
+    "plivo.read",
+    "plivo.webhook",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."plivo.call.continue"]
+description = "Continue a Plivo call by transferring one or both legs to new XML"
+capability = "plivo.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."plivo.call.continue".input_schema]
+required = [
+    "call_uuid",
+    "xml_url",
+]
+type = "object"
+
+[provides.operations."plivo.call.continue".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.continue".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.continue".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.end"]
+description = "Hang up a Plivo call"
+capability = "plivo.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "best_effort"
+
+[provides.operations."plivo.call.end".input_schema]
+required = ["call_uuid"]
+type = "object"
+
+[provides.operations."plivo.call.end".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.end".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.end".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.gather"]
+description = "Generate Plivo GetDigits XML for DTMF collection"
+capability = "plivo.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "strict"
+
+[provides.operations."plivo.call.gather".input_schema]
+required = [
+    "prompt",
+    "action_url",
+]
+type = "object"
+
+[provides.operations."plivo.call.gather".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.gather".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.initiate"]
+description = "Initiate an outbound Plivo voice call with FCP callback/session binding"
+capability = "plivo.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."plivo.call.initiate".input_schema]
+required = [
+    "to",
+    "from",
+    "answer_url",
+]
+type = "object"
+
+[provides.operations."plivo.call.initiate".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.initiate".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.initiate".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.speak"]
+description = "Speak text into a Plivo call"
+capability = "plivo.voice"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."plivo.call.speak".input_schema]
+required = [
+    "call_uuid",
+    "text",
+]
+type = "object"
+
+[provides.operations."plivo.call.speak".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.speak".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.speak".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.status"]
+description = "Retrieve Plivo call status"
+capability = "plivo.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plivo.call.status".input_schema]
+required = ["call_uuid"]
+type = "object"
+
+[provides.operations."plivo.call.status".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.status".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.status".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.call.transfer"]
+description = "Transfer a Plivo call leg to another XML URL"
+capability = "plivo.voice"
+risk_level = "high"
+safety_tier = "dangerous"
+requires_approval = "policy"
+idempotency = "none"
+
+[provides.operations."plivo.call.transfer".input_schema]
+required = [
+    "call_uuid",
+    "legs",
+]
+type = "object"
+
+[provides.operations."plivo.call.transfer".output_schema]
+type = "object"
+
+[provides.operations."plivo.call.transfer".network_constraints]
+host_allow = ["api.plivo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 1048576
+
+[provides.operations."plivo.call.transfer".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.webhook.evaluate_inbound_policy"]
+description = "Evaluate Plivo inbound caller policy"
+capability = "plivo.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plivo.webhook.evaluate_inbound_policy".input_schema]
+required = [
+    "body",
+    "inbound_policy",
+]
+type = "object"
+
+[provides.operations."plivo.webhook.evaluate_inbound_policy".output_schema]
+type = "object"
+
+[provides.operations."plivo.webhook.evaluate_inbound_policy".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.webhook.ingest_request"]
+description = "Ingest a Plivo webhook request through the connector boundary"
+capability = "plivo.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."plivo.webhook.ingest_request".input_schema]
+required = [
+    "headers",
+    "url",
+    "body",
+]
+type = "object"
+
+[provides.operations."plivo.webhook.ingest_request".output_schema]
+type = "object"
+
+[provides.operations."plivo.webhook.ingest_request".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.webhook.parse_event"]
+description = "Parse a verified Plivo webhook event"
+capability = "plivo.webhook"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."plivo.webhook.parse_event".input_schema]
+required = ["body"]
+type = "object"
+
+[provides.operations."plivo.webhook.parse_event".output_schema]
+type = "object"
+
+[provides.operations."plivo.webhook.parse_event".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[provides.operations."plivo.webhook.validate_signature"]
+description = "Validate Plivo HMAC-SHA256 V3 webhook headers with V2 fallback"
+capability = "plivo.webhook"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+
+[provides.operations."plivo.webhook.validate_signature".input_schema]
+required = [
+    "headers",
+    "url",
+    "body",
+]
+type = "object"
+
+[provides.operations."plivo.webhook.validate_signature".output_schema]
+type = "object"
+
+[provides.operations."plivo.webhook.validate_signature".ai_hints]
+when_to_use = ""
+common_mistakes = []
+examples = []
+related = []
+
+[sandbox]
+profile = "strict"
+memory_mb = 64
+cpu_percent = 20
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

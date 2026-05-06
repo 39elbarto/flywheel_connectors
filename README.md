@@ -954,6 +954,7 @@ The workspace has a very large crate-local and end-to-end test surface across se
 | **Integration tests** | `connectors/*/tests/` | Connector lifecycle with wiremock HTTP mocking |
 | **Conformance** | `crates/fcp-conformance/tests/` | Protocol golden vectors, capability verification |
 | **E2E** | `crates/fcp-e2e/tests/` | Host-backed compliance scenarios |
+| **Connector proof scripts** | `scripts/e2e/*_verification.sh` | Operator replay bundles and redaction-safe JSONL evidence |
 | **Mesh scenarios** | `crates/fcp-conformance/tests/integration_scenarios.rs` | Network partition recovery, gossip convergence |
 | **Benchmarks** | `crates/fwc/benches/`, `crates/fcp-core/benches/` | Search, schema, pipeline, PCS performance |
 
@@ -962,6 +963,12 @@ Key testing patterns:
 - **Deterministic test logging**: structured JSON log output with correlation IDs
 - **RFC test vectors**: Ed25519 (RFC 8032), HKDF (RFC 5869), X25519 (RFC 7748)
 - **Golden vector snapshots**: canonical CBOR, manifest hashes, protocol frames
+
+Voice-call provider parity has a dedicated operator proof script:
+`scripts/e2e/voice_call_multi_provider_verification.sh` runs the Twilio, Telnyx,
+and Plivo no-live-credential loopback suites through their production connector
+boundaries, then normalizes their provider JSONL into one redaction-checked
+multi-provider evidence log.
 
 ### Deadlock detection (mesh + store runtime audits)
 

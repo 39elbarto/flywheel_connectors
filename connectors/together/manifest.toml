@@ -1,0 +1,142 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:dbae532304c558d6655d5c0ccdba6a87e8777bc466cc4c0833c4a1545b0bd6d7"
+
+[connector]
+id = "fcp.together"
+name = "Together AI"
+version = "0.1.0"
+description = "Together AI open-weights inference connector using OpenAI-compatible chat, streaming, embeddings, model listing, and legacy completions APIs"
+archetypes = ["operational", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default models, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["together.chat", "together.embeddings", "together.models.read", "together.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 180000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."together.chat.completions"]
+description = "Create a bounded non-streaming Together chat completion through POST /v1/chat/completions."
+capability = "together.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "openai/gpt-oss-20b", pattern = ".+/.+" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string", enum = ["low", "medium", "high"] }, safety_model = { type = "string", pattern = ".+/.+" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."together.chat.completions".ai_hints]
+when_to_use = "Use for direct Together open-weights chat completions when model-specific first-party serving matters."
+common_mistakes = ["Do not log prompts, completions, tool-call arguments, or API keys.", "Together model IDs include a namespace, for example openai/gpt-oss-20b.", "Do not add image generation to this text-focused connector."]
+examples = ['{"model":"openai/gpt-oss-20b","messages":[{"role":"user","content":"Summarize FCP in 3 bullets."}]}']
+related = ["together.chat.completions_stream", "together.models.list"]
+
+[provides.operations."together.chat.completions_stream"]
+description = "Open a Together SSE chat-completions stream and return redaction-safe chunk metadata plus assembled text."
+capability = "together.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["messages"], properties = { model = { type = "string", default = "openai/gpt-oss-20b", pattern = ".+/.+" }, messages = { type = "array", minItems = 1 }, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, top_p = { type = "number", minimum = 0, maximum = 1 }, stop = {}, response_format = { type = "object" }, tools = { type = "array" }, tool_choice = {}, reasoning_effort = { type = "string", enum = ["low", "medium", "high"] }, safety_model = { type = "string", pattern = ".+/.+" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 300000, max_response_bytes = 10485760 }
+
+[provides.operations."together.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters and the caller can consume incremental chunk metadata."
+common_mistakes = ["Do not expect image generation from this connector.", "Handle finish_reason and tool_call deltas from the returned chunks."]
+examples = ['{"model":"openai/gpt-oss-20b","messages":[{"role":"user","content":"Stream a one sentence answer."}],"max_tokens":64}']
+related = ["together.chat.completions"]
+
+[provides.operations."together.embeddings.create"]
+description = "Create Together text embeddings through POST /v1/embeddings."
+capability = "together.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["input"], properties = { model = { type = "string", default = "intfloat/multilingual-e5-large-instruct", pattern = ".+/.+" }, input = {}, encoding_format = { type = "string" }, dimensions = { type = "integer", minimum = 1 }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."together.embeddings.create".ai_hints]
+when_to_use = "Use for Together-hosted embedding models such as intfloat/multilingual-e5-large-instruct."
+common_mistakes = ["Do not log input text or embedding vectors.", "Do not assume chat models support embeddings."]
+examples = ['{"model":"intfloat/multilingual-e5-large-instruct","input":"hello"}']
+related = ["together.models.list"]
+
+[provides.operations."together.models.list"]
+description = "List Together models from GET /v1/models using the connector's Together-aware model-cache path."
+capability = "together.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = { refresh = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."together.models.list".ai_hints]
+when_to_use = "Use to discover currently active Together model IDs before sending chat, streaming, embeddings, or legacy completion requests."
+common_mistakes = ["Do not assume every listed model supports every operation."]
+examples = ["{}"]
+related = ["together.chat.completions", "together.embeddings.create"]
+
+[provides.operations."together.health"]
+description = "Probe Together model listing with a short timeout and return connector health metadata."
+capability = "together.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 5000, total_timeout_ms = 5000, max_response_bytes = 10485760 }
+
+[provides.operations."together.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible Together operations."
+common_mistakes = ["Do not treat degraded credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["together.models.list"]
+
+[provides.operations."together.completions.legacy"]
+description = "Minimal deprecated legacy /v1/completions support for older OpenAI-compatible clients."
+capability = "together.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["prompt"], properties = { model = { type = "string", default = "openai/gpt-oss-20b", pattern = ".+/.+" }, prompt = {}, max_tokens = { type = "integer", minimum = 1 }, temperature = { type = "number", minimum = 0, maximum = 2 }, safety_model = { type = "string", pattern = ".+/.+" }, provider_extensions = { type = "object" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api.together.ai"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 3, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+
+[provides.operations."together.completions.legacy".ai_hints]
+when_to_use = "Use only for older callers that cannot send chat messages."
+common_mistakes = ["Prefer together.chat.completions for all new work."]
+examples = ['{"model":"openai/gpt-oss-20b","prompt":"One sentence about FCP."}']
+related = ["together.chat.completions"]

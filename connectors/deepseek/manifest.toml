@@ -1,0 +1,443 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["streaming"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:a2d5c2ff83484ed0e81fce9363edaafe7b2e0ff22bca65ec3e35b3e4538b588f"
+
+[connector]
+id = "fcp.deepseek"
+name = "DeepSeek"
+version = "0.1.0"
+description = "DeepSeek inference connector using the OpenAI-compatible chat, streaming, and model APIs with reasoning_content preserved separately from final content"
+archetypes = [
+    "operational",
+    "streaming",
+]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is limited to api_key or credential_id, optional base_url, default_model, timeout, and rate-limit retry policy."
+
+[zones]
+home = "z:work"
+allowed_sources = [
+    "z:owner",
+    "z:private",
+    "z:work",
+]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = [
+    "network.dns",
+    "network.egress",
+    "network.tls.sni",
+]
+optional = [
+    "deepseek.chat",
+    "deepseek.models.read",
+    "deepseek.health.read",
+    "deepseek.embeddings",
+]
+forbidden = [
+    "system.exec",
+    "network.listen",
+]
+
+[provides.operations."deepseek.chat.completions"]
+description = "Create a bounded non-streaming DeepSeek chat completion through POST /chat/completions. Thinking-mode responses expose reasoning_content separately from final content."
+capability = "deepseek.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."deepseek.chat.completions".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.model]
+default = "deepseek-v4-pro"
+type = "string"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.reasoning_effort]
+enum = [
+    "high",
+    "max",
+    "low",
+    "medium",
+    "xhigh",
+]
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.stop]
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.thinking]
+type = "object"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.thinking.properties.type]
+enum = [
+    "enabled",
+    "disabled",
+]
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.tool_choice]
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."deepseek.chat.completions".input_schema.properties.user_id]
+type = "string"
+
+[provides.operations."deepseek.chat.completions".output_schema]
+type = "object"
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.content]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.content_bytes]
+type = "integer"
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.finish_reason]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.id]
+type = "string"
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.model]
+type = "string"
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.reasoning_content]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.reasoning_content_bytes]
+type = "integer"
+
+[provides.operations."deepseek.chat.completions".output_schema.properties.usage]
+type = [
+    "object",
+    "null",
+]
+
+[provides.operations."deepseek.chat.completions".network_constraints]
+host_allow = ["api.deepseek.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 10485760
+
+[provides.operations."deepseek.chat.completions".ai_hints]
+when_to_use = "Use for direct first-party DeepSeek chat completions when reasoning traces must remain separate from final answer content."
+common_mistakes = [
+    "Do not log prompts, completions, reasoning_content, or bearer tokens.",
+    "Do not collapse reasoning_content into content.",
+    "Prefer current v4 model ids over deprecated deepseek-chat and deepseek-reasoner aliases when possible.",
+]
+examples = ['{"model":"deepseek-v4-pro","messages":[{"role":"user","content":"Solve carefully."}],"thinking":{"type":"enabled"},"reasoning_effort":"high"}']
+related = [
+    "deepseek.chat.completions_stream",
+    "deepseek.models.list",
+]
+
+[provides.operations."deepseek.chat.completions_stream"]
+description = "Open a DeepSeek SSE chat-completions stream and return redaction-safe chunk metadata plus assembled reasoning_content and content."
+capability = "deepseek.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema]
+required = ["messages"]
+type = "object"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.max_tokens]
+minimum = 1
+type = "integer"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.messages]
+minItems = 1
+type = "array"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.model]
+default = "deepseek-v4-pro"
+type = "string"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.provider_extensions]
+type = "object"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.reasoning_effort]
+enum = [
+    "high",
+    "max",
+    "low",
+    "medium",
+    "xhigh",
+]
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.stop]
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.temperature]
+maximum = 2
+minimum = 0
+type = "number"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.thinking]
+type = "object"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.thinking.properties.type]
+enum = [
+    "enabled",
+    "disabled",
+]
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.tool_choice]
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.top_p]
+maximum = 1
+minimum = 0
+type = "number"
+
+[provides.operations."deepseek.chat.completions_stream".input_schema.properties.user_id]
+type = "string"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema]
+type = "object"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.chunk_count]
+type = "integer"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.chunks]
+type = "array"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.content]
+type = "string"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.content_bytes]
+type = "integer"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.finish_reason]
+type = [
+    "string",
+    "null",
+]
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.reasoning_content]
+type = "string"
+
+[provides.operations."deepseek.chat.completions_stream".output_schema.properties.reasoning_content_bytes]
+type = "integer"
+
+[provides.operations."deepseek.chat.completions_stream".network_constraints]
+host_allow = ["api.deepseek.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."deepseek.chat.completions_stream".ai_hints]
+when_to_use = "Use when lower first-token latency matters and the caller can handle reasoning and final answer deltas distinctly."
+common_mistakes = [
+    "Do not treat reasoning deltas as final content.",
+    "Do not log returned chunks; log only counts and byte lengths.",
+]
+examples = ['{"messages":[{"role":"user","content":"Stream a concise answer."}],"thinking":{"type":"enabled"},"max_tokens":64}']
+related = ["deepseek.chat.completions"]
+
+[provides.operations."deepseek.embeddings.create"]
+description = "Declared for introspection honesty. DeepSeek does not currently expose embeddings through the first-party API."
+capability = "deepseek.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."deepseek.embeddings.create".input_schema]
+type = "object"
+
+[provides.operations."deepseek.embeddings.create".input_schema.properties]
+
+[provides.operations."deepseek.embeddings.create".output_schema]
+type = "object"
+
+[provides.operations."deepseek.embeddings.create".network_constraints]
+host_allow = ["api.deepseek.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."deepseek.embeddings.create".ai_hints]
+when_to_use = "Do not invoke; use this metadata to explain that embeddings are intentionally unavailable for DeepSeek."
+common_mistakes = ["Do not proxy embeddings through OpenAI or an aggregator from this connector."]
+examples = ["{}"]
+related = ["deepseek.models.list"]
+
+[provides.operations."deepseek.health"]
+description = "Probe DeepSeek model listing with a short timeout and return connector health metadata."
+capability = "deepseek.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."deepseek.health".input_schema]
+type = "object"
+
+[provides.operations."deepseek.health".input_schema.properties]
+
+[provides.operations."deepseek.health".output_schema]
+type = "object"
+
+[provides.operations."deepseek.health".network_constraints]
+host_allow = ["api.deepseek.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 5000
+total_timeout_ms = 5000
+max_response_bytes = 10485760
+
+[provides.operations."deepseek.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching user-visible DeepSeek operations."
+common_mistakes = ["Do not treat credential_id mode as a failed connector; host egress injection may be required."]
+examples = ["{}"]
+related = ["deepseek.models.list"]
+
+[provides.operations."deepseek.models.list"]
+description = "List DeepSeek models from GET /models using the shared model-cache path."
+capability = "deepseek.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."deepseek.models.list".input_schema]
+type = "object"
+
+[provides.operations."deepseek.models.list".input_schema.properties.refresh]
+default = false
+type = "boolean"
+
+[provides.operations."deepseek.models.list".output_schema]
+type = "object"
+
+[provides.operations."deepseek.models.list".network_constraints]
+host_allow = ["api.deepseek.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 3
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."deepseek.models.list".ai_hints]
+when_to_use = "Use to discover currently active DeepSeek model IDs before sending chat or streaming requests."
+common_mistakes = ["Do not assume deprecated model aliases will remain available after their documented sunset date."]
+examples = ["{}"]
+related = ["deepseek.chat.completions"]
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 240000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true

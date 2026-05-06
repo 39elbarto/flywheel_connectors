@@ -35,19 +35,25 @@ members = [
     "crates/fcp-tailscale",
     "crates/fcp-telemetry",
     "crates/fcp-testkit",
+    "crates/fcp-voice-call",
     "crates/fcp-webhook",
     "connectors/anthropic",
     "connectors/aws",
+    "connectors/aws-bedrock",
     "connectors/cerebras",
-    "connectors/groq",
+    "connectors/deepseek",
     "connectors/discord",
     "connectors/duckduckgo",
     "connectors/glm",
+    "connectors/groq",
     "connectors/openai",
     "connectors/openrouter",
     "connectors/searxng",
+    "connectors/ollama",
+    "connectors/together",
     "connectors/telegram",
     "connectors/voyage",
+    "connectors/xai",
     "connectors/twitter",
     "connectors/vectordb",
     "connectors/wolfram",
@@ -78,6 +84,8 @@ members = [
     "connectors/irc",
     "connectors/jira",
     "connectors/twilio",
+    "connectors/telnyx",
+    "connectors/plivo",
     "connectors/airtable",
     "connectors/apple-notes",
     "connectors/apple-reminders",
@@ -322,12 +330,16 @@ fcp-crypto = { path = "crates/fcp-crypto" }
 fcp-google-discovery = { path = "crates/fcp-google-discovery" }
 fcp-graphql = { path = "crates/fcp-graphql" }
 fcp-cerebras = { path = "connectors/cerebras" }
+fcp-deepseek = { path = "connectors/deepseek" }
 fcp-duckduckgo = { path = "connectors/duckduckgo" }
 fcp-glm = { path = "connectors/glm" }
 fcp-groq = { path = "connectors/groq" }
 fcp-host = { path = "crates/fcp-host" }
 fcp-searxng = { path = "connectors/searxng" }
+fcp-ollama = { path = "connectors/ollama" }
+fcp-together = { path = "connectors/together" }
 fcp-voyage = { path = "connectors/voyage" }
+fcp-xai = { path = "connectors/xai" }
 fcp-kernel = { path = "crates/fcp-kernel" }
 fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
@@ -347,6 +359,7 @@ fcp-streaming = { path = "crates/fcp-streaming" }
 fcp-tailscale = { path = "crates/fcp-tailscale" }
 fcp-telemetry = { path = "crates/fcp-telemetry" }
 fcp-testkit = { path = "crates/fcp-testkit" }
+fcp-voice-call = { path = "crates/fcp-voice-call" }
 fcp-webhook = { path = "crates/fcp-webhook" }
 
 [workspace.lints.rust]

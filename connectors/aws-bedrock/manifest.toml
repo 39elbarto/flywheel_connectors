@@ -1,0 +1,210 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:348f916c7839be0a2ef8e87a61d1b50ebcdd5309b3ec89389fb4e52649c94a56"
+
+[connector]
+id = "fcp.aws-bedrock"
+name = "AWS Bedrock"
+version = "0.1.0"
+description = "AWS-native Bedrock Runtime connector for Converse, InvokeModel, streaming event-stream decoding, and foundation model discovery"
+archetypes = ["operational", "streaming"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "No durable connector state; credentials and HTTP clients live only inside the current connector instance."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work", "z:private"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public", "z:community"]
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = []
+forbidden = ["system.exec", "network.listen", "system.privileged"]
+
+[provides.operations."aws_bedrock.converse"]
+description = "Invoke the recommended Bedrock Converse API with unified message shape."
+capability = "aws_bedrock.chat"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["model_id", "messages"] }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.converse".network_constraints]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."aws_bedrock.converse_stream"]
+description = "Invoke the Bedrock ConverseStream API and decode AWS event-stream frames."
+capability = "aws_bedrock.chat"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["model_id", "messages"] }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.converse_stream".network_constraints]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."aws_bedrock.invoke_model"]
+description = "Invoke legacy Bedrock InvokeModel with either raw JSON body or connector-built model-family body."
+capability = "aws_bedrock.chat"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["model_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.invoke_model".network_constraints]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."aws_bedrock.invoke_model_stream"]
+description = "Invoke legacy Bedrock InvokeModelWithResponseStream and decode AWS event-stream frames."
+capability = "aws_bedrock.chat"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["model_id"] }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.invoke_model_stream".network_constraints]
+host_allow = ["bedrock-runtime.us-east-1.amazonaws.com", "bedrock-runtime.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 240000
+max_response_bytes = 25000000
+
+[provides.operations."aws_bedrock.models.list"]
+description = "List Bedrock foundation models on the control-plane Bedrock endpoint."
+capability = "aws_bedrock.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.models.list".network_constraints]
+host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."aws_bedrock.health"]
+description = "Check configured Bedrock control-plane connectivity using foundation model discovery."
+capability = "aws_bedrock.models.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+
+[provides.operations."aws_bedrock.health".network_constraints]
+host_allow = ["bedrock.us-east-1.amazonaws.com", "bedrock.us-west-2.amazonaws.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[sandbox]
+profile = "strict"
+memory_mb = 192
+cpu_percent = 25
+wall_clock_timeout_ms = 240000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true

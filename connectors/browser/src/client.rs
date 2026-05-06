@@ -358,6 +358,15 @@ fn cdp_parse_links_result(response: &CdpEvaluateResponse) -> BrowserResult<Links
     })
 }
 
+fn cdp_parse_wait_result(response: &CdpEvaluateResponse) -> BrowserResult<WaitResult> {
+    serde_json::from_str::<WaitResult>(&response.result).map_err(|err| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol Runtime.evaluate returned invalid wait_for_selector payload: {err}"
+        ),
+        status_code: None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CdpScreenshotResponse {
     image_data: String,
@@ -673,6 +682,114 @@ fn cdp_extract_links_expression(selector: Option<&str>) -> BrowserResult<String>
   }};
 }})()"#
     ))
+}
+
+fn cdp_wait_for_selector_expression(
+    selector: &str,
+    state: Option<&str>,
+    timeout_ms: Option<u64>,
+) -> BrowserResult<String> {
+    let selector = serde_json::to_string(selector)?;
+    let state = serde_json::to_string(cdp_wait_for_selector_state(state)?)?;
+    let timeout_ms = cdp_wait_timeout_ms(timeout_ms)?;
+    Ok(format!(
+        r#"(function() {{
+  const selector = {selector};
+  const state = {state};
+  const timeoutMs = {timeout_ms};
+  const isVisible = (element) => {{
+    if (!element) {{
+      return false;
+    }}
+    const style = window.getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.visibility !== "hidden"
+      && style.display !== "none"
+      && Number(style.opacity) !== 0
+      && rect.width > 0
+      && rect.height > 0;
+  }};
+  const matchesState = () => {{
+    const element = document.querySelector(selector);
+    switch (state) {{
+      case "attached":
+        return element !== null;
+      case "detached":
+        return element === null;
+      case "visible":
+        return isVisible(element);
+      case "hidden":
+        return element === null || !isVisible(element);
+      default:
+        throw new Error("unsupported wait state: " + state);
+    }}
+  }};
+  if (matchesState()) {{
+    return Promise.resolve({{ found: true }});
+  }}
+  if (timeoutMs === 0) {{
+    return Promise.resolve({{ found: false }});
+  }}
+  return new Promise((resolve) => {{
+    const root = document.documentElement ?? document;
+    let settled = false;
+    const observer = new MutationObserver(check);
+    const finish = (found) => {{
+      if (settled) {{
+        return;
+      }}
+      settled = true;
+      clearTimeout(timeoutId);
+      clearInterval(intervalId);
+      observer.disconnect();
+      resolve({{ found }});
+    }};
+    const timeoutId = setTimeout(() => finish(false), timeoutMs);
+    const intervalId = setInterval(check, 50);
+    function check() {{
+      if (matchesState()) {{
+        finish(true);
+      }}
+    }}
+    observer.observe(root, {{
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ["style", "class", "hidden", "aria-hidden"],
+    }});
+    check();
+  }});
+}})()"#
+    ))
+}
+
+fn cdp_wait_for_selector_state(state: Option<&str>) -> BrowserResult<&'static str> {
+    match state.unwrap_or("attached").to_ascii_lowercase().as_str() {
+        "attached" | "present" => Ok("attached"),
+        "detached" | "absent" => Ok("detached"),
+        "visible" => Ok("visible"),
+        "hidden" => Ok("hidden"),
+        other => Err(BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol wait_for_selector does not support state `{other}`"
+            ),
+            status_code: None,
+        }),
+    }
+}
+
+fn cdp_wait_timeout_ms(timeout_ms: Option<u64>) -> BrowserResult<u64> {
+    let timeout_ms = timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD);
+    if timeout_ms <= CONTROL_TIMEOUT_MS_STANDARD {
+        Ok(timeout_ms)
+    } else {
+        Err(BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol wait_for_selector timeout {timeout_ms}ms exceeds operation budget {CONTROL_TIMEOUT_MS_STANDARD}ms"
+            ),
+            status_code: None,
+        })
+    }
 }
 
 fn cdp_required_object_number(
@@ -1105,6 +1222,18 @@ where
         let expression = cdp_extract_links_expression(selector)?;
         let response = self.evaluate_expression(cx, &expression).await?;
         cdp_parse_links_result(&response)
+    }
+
+    async fn wait_for_selector(
+        &mut self,
+        cx: &Cx,
+        selector: &str,
+        state: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> BrowserResult<WaitResult> {
+        let expression = cdp_wait_for_selector_expression(selector, state, timeout_ms)?;
+        let response = self.evaluate_expression(cx, &expression).await?;
+        cdp_parse_wait_result(&response)
     }
 
     async fn capture_screenshot(
@@ -3125,6 +3254,71 @@ mod tests {
 
         assert!(format!("{text_error}").contains("invalid extract_text payload"));
         assert!(format!("{links_error}").contains("invalid extract_links payload"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_selector_issues_bounded_visible_wait() {
+        let cx = fcp_async_core::compatibility_cx();
+        let selector = r#"button[data-action="submit"]"#;
+        let expression =
+            cdp_wait_for_selector_expression(selector, Some("visible"), Some(1_250)).unwrap();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": { "found": true },
+                        },
+                    },
+                })
+                .to_string(),
+            )]));
+
+        let response = session
+            .wait_for_selector(&cx, selector, Some("visible"), Some(1_250))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert!(response.found);
+        assert!(expression.contains(r#"const selector = "button[data-action=\"submit\"]";"#));
+        assert!(expression.contains(r#"const state = "visible";"#));
+        assert!(expression.contains("const timeoutMs = 1250;"));
+        assert!(expression.contains("MutationObserver"));
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn test_cdp_wait_for_selector_rejects_invalid_state_timeout_and_payload() {
+        let invalid_state =
+            cdp_wait_for_selector_expression(".ready", Some("stable"), Some(10)).unwrap_err();
+        let too_long =
+            cdp_wait_for_selector_expression(".ready", Some("attached"), Some(30_001)).unwrap_err();
+        let bad_payload = cdp_parse_wait_result(&CdpEvaluateResponse {
+            result: r#"{"found":"yes"}"#.to_string(),
+        })
+        .unwrap_err();
+        let alias = cdp_wait_for_selector_expression(".gone", Some("absent"), Some(0)).unwrap();
+
+        assert!(format!("{invalid_state}").contains("state `stable`"));
+        assert!(format!("{too_long}").contains("exceeds operation budget"));
+        assert!(format!("{bad_payload}").contains("invalid wait_for_selector payload"));
+        assert!(alias.contains(r#"const state = "detached";"#));
+        assert!(alias.contains("const timeoutMs = 0;"));
     }
 
     #[fcp_async_core::runtime::test]

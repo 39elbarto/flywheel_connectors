@@ -7,6 +7,7 @@
 
 use std::time::Duration;
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_async_core::{
     Cx,
     net::TcpStream,
@@ -370,6 +371,40 @@ impl CdpScreenshotResponse {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CdpPdfResponse {
+    pdf_data: String,
+    page_count: u32,
+}
+
+impl CdpPdfResponse {
+    fn from_print_result(result: &serde_json::Value) -> BrowserResult<Self> {
+        if result.get("stream").is_some() {
+            return Err(BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.printToPDF returned an IO stream; expected base64 data"
+                    .into(),
+                status_code: None,
+            });
+        }
+
+        let pdf_data = result
+            .get("data")
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.printToPDF response is missing data".into(),
+                status_code: None,
+            })?
+            .to_string();
+        let page_count = count_pdf_pages_from_base64(&pdf_data)?;
+
+        Ok(Self {
+            pdf_data,
+            page_count,
+        })
+    }
+}
+
 #[derive(Debug, Clone)]
 struct CdpCookieResponse {
     cookies: Vec<Cookie>,
@@ -640,6 +675,119 @@ fn cdp_screenshot_format(format: Option<&str>) -> BrowserResult<String> {
             status_code: None,
         })
     }
+}
+
+fn cdp_pdf_paper_size(format: Option<&str>) -> BrowserResult<Option<(f64, f64)>> {
+    let Some(format) = format else {
+        return Ok(None);
+    };
+    let size = match format.to_ascii_lowercase().as_str() {
+        "letter" => (8.5, 11.0),
+        "legal" => (8.5, 14.0),
+        "tabloid" => (11.0, 17.0),
+        "a0" => (33.11, 46.81),
+        "a1" => (23.39, 33.11),
+        "a2" => (16.54, 23.39),
+        "a3" => (11.69, 16.54),
+        "a4" => (8.27, 11.69),
+        "a5" => (5.83, 8.27),
+        "a6" => (4.13, 5.83),
+        other => {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol Page.printToPDF does not support paper format `{other}`"
+                ),
+                status_code: None,
+            });
+        }
+    };
+    Ok(Some(size))
+}
+
+fn count_pdf_pages_from_base64(encoded: &str) -> BrowserResult<u32> {
+    let pdf_bytes = BASE64_STANDARD
+        .decode(encoded)
+        .map_err(|err| BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol Page.printToPDF returned invalid base64 PDF data: {err}"
+            ),
+            status_code: None,
+        })?;
+    let page_count = count_pdf_page_objects(&pdf_bytes)?;
+    u32::try_from(page_count).map_err(|err| BrowserError::Api {
+        message: format!("Chrome DevTools Protocol Page.printToPDF page count exceeds u32: {err}"),
+        status_code: None,
+    })
+}
+
+fn count_pdf_page_objects(pdf_bytes: &[u8]) -> BrowserResult<usize> {
+    let mut count = 0_usize;
+    let mut offset = 0_usize;
+
+    while let Some(relative_position) = pdf_bytes.get(offset..).and_then(|tail| {
+        tail.windows(b"/Type".len())
+            .position(|window| window == b"/Type")
+    }) {
+        let type_position = offset + relative_position;
+        let after_type = type_position + b"/Type".len();
+        if let Some(token_position) = skip_pdf_whitespace(pdf_bytes, after_type)
+            && pdf_bytes
+                .get(token_position..)
+                .is_some_and(pdf_token_is_page_object)
+        {
+            count = count.checked_add(1).ok_or_else(|| BrowserError::Api {
+                message: "Chrome DevTools Protocol Page.printToPDF page count overflowed usize"
+                    .into(),
+                status_code: None,
+            })?;
+        }
+        offset = after_type;
+    }
+
+    if count == 0 {
+        return Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol Page.printToPDF PDF data contains no page objects"
+                .into(),
+            status_code: None,
+        });
+    }
+
+    Ok(count)
+}
+
+fn skip_pdf_whitespace(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start;
+    loop {
+        let byte = bytes.get(index)?;
+        if matches!(byte, b'\0' | b'\t' | b'\n' | b'\x0c' | b'\r' | b' ') {
+            index = index.checked_add(1)?;
+        } else {
+            return Some(index);
+        }
+    }
+}
+
+fn pdf_token_is_page_object(tail: &[u8]) -> bool {
+    tail.starts_with(b"/Page") && tail.get(b"/Page".len()).is_some_and(pdf_delimits_token)
+}
+
+fn pdf_delimits_token(byte: &u8) -> bool {
+    matches!(
+        byte,
+        b'\0'
+            | b'\t'
+            | b'\n'
+            | b'\x0c'
+            | b'\r'
+            | b' '
+            | b'/'
+            | b'<'
+            | b'>'
+            | b'['
+            | b']'
+            | b'('
+            | b')'
+    )
 }
 
 fn cdp_cookie_from_value(value: &serde_json::Value) -> BrowserResult<Cookie> {
@@ -952,6 +1100,42 @@ where
             )
             .await?;
         CdpScreenshotResponse::from_capture_result(&result, clip)
+    }
+
+    async fn render_pdf(
+        &mut self,
+        cx: &Cx,
+        format: Option<&str>,
+        landscape: Option<bool>,
+        print_background: Option<bool>,
+    ) -> BrowserResult<CdpPdfResponse> {
+        let mut params = serde_json::Map::new();
+        if let Some((paper_width, paper_height)) = cdp_pdf_paper_size(format)? {
+            params.insert("paperWidth".to_string(), serde_json::json!(paper_width));
+            params.insert("paperHeight".to_string(), serde_json::json!(paper_height));
+        }
+        if let Some(landscape) = landscape {
+            params.insert("landscape".to_string(), serde_json::Value::Bool(landscape));
+        }
+        if let Some(print_background) = print_background {
+            params.insert(
+                "printBackground".to_string(),
+                serde_json::Value::Bool(print_background),
+            );
+        }
+        params.insert(
+            "transferMode".to_string(),
+            serde_json::Value::String("ReturnAsBase64".to_string()),
+        );
+
+        let result = self
+            .call_method(
+                cx,
+                "Page.printToPDF",
+                Some(serde_json::Value::Object(params)),
+            )
+            .await?;
+        CdpPdfResponse::from_print_result(&result)
     }
 
     async fn get_cookies(
@@ -2887,6 +3071,71 @@ mod tests {
 
         assert!(format!("{missing_data}").contains("missing data"));
         assert!(format!("{empty_clip}").contains("positive dimensions"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_render_pdf_issues_documented_command_and_counts_pages() {
+        let cx = fcp_async_core::compatibility_cx();
+        let pdf_data = BASE64_STANDARD.encode(
+            b"%PDF-1.4
+1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj
+2 0 obj << /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >> endobj
+3 0 obj << /Type /Page /Parent 2 0 R >> endobj
+4 0 obj << /Type /Page /Parent 2 0 R >> endobj
+%%EOF",
+        );
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                serde_json::json!({ "id": 1, "result": { "data": pdf_data } }).to_string(),
+            )]));
+
+        let response = session
+            .render_pdf(&cx, Some("a4"), Some(true), Some(false))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response.page_count, 2);
+        assert!(response.pdf_data.starts_with("JVBER"));
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Page.printToPDF",
+                "params": {
+                    "landscape": true,
+                    "paperHeight": 11.69,
+                    "paperWidth": 8.27,
+                    "printBackground": false,
+                    "transferMode": "ReturnAsBase64",
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn test_cdp_pdf_response_rejects_missing_stream_invalid_and_uninspectable_data() {
+        let missing_data = CdpPdfResponse::from_print_result(&serde_json::json!({})).unwrap_err();
+        let stream_response = CdpPdfResponse::from_print_result(&serde_json::json!({
+            "stream": "stream-handle-alpha"
+        }))
+        .unwrap_err();
+        let invalid_base64 = CdpPdfResponse::from_print_result(&serde_json::json!({
+            "data": "not pdf data"
+        }))
+        .unwrap_err();
+        let no_pages = CdpPdfResponse::from_print_result(&serde_json::json!({
+            "data": BASE64_STANDARD.encode(b"%PDF-1.4\n1 0 obj << /Type /Catalog >> endobj\n%%EOF")
+        }))
+        .unwrap_err();
+        let bad_format = cdp_pdf_paper_size(Some("envelope")).unwrap_err();
+
+        assert!(format!("{missing_data}").contains("missing data"));
+        assert!(format!("{stream_response}").contains("IO stream"));
+        assert!(format!("{invalid_base64}").contains("invalid base64"));
+        assert!(format!("{no_pages}").contains("contains no page objects"));
+        assert!(format!("{bad_format}").contains("paper format `envelope`"));
     }
 
     #[fcp_async_core::runtime::test]

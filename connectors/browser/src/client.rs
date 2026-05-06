@@ -340,6 +340,24 @@ impl CdpEvaluateResponse {
     }
 }
 
+fn cdp_parse_text_result(response: &CdpEvaluateResponse) -> BrowserResult<TextResult> {
+    serde_json::from_str::<TextResult>(&response.result).map_err(|err| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol Runtime.evaluate returned invalid extract_text payload: {err}"
+        ),
+        status_code: None,
+    })
+}
+
+fn cdp_parse_links_result(response: &CdpEvaluateResponse) -> BrowserResult<LinksResult> {
+    serde_json::from_str::<LinksResult>(&response.result).map_err(|err| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol Runtime.evaluate returned invalid extract_links payload: {err}"
+        ),
+        status_code: None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CdpScreenshotResponse {
     image_data: String,
@@ -608,6 +626,53 @@ fn cdp_remote_value_to_result_string(value: &serde_json::Value) -> BrowserResult
         serde_json::Value::Null => Ok("null".to_string()),
         other => Ok(serde_json::to_string(other)?),
     }
+}
+
+fn cdp_extract_text_expression(
+    selector: Option<&str>,
+    include_hidden: Option<bool>,
+) -> BrowserResult<String> {
+    let selector = serde_json::to_string(&selector)?;
+    let include_hidden = include_hidden.unwrap_or(false);
+    Ok(format!(
+        r#"(function() {{
+  const selector = {selector};
+  const includeHidden = {include_hidden};
+  const root = selector === null ? (document.body ?? document.documentElement) : document.querySelector(selector);
+  if (!root) {{
+    throw new Error("selector not found: " + selector);
+  }}
+  const rawText = (includeHidden ? root.textContent : (root.innerText ?? root.textContent)) ?? "";
+  const text = rawText.replace(/\s+/g, " ").trim();
+  return {{
+    text,
+    word_count: text.length === 0 ? 0 : text.split(/\s+/).length,
+  }};
+}})()"#
+    ))
+}
+
+fn cdp_extract_links_expression(selector: Option<&str>) -> BrowserResult<String> {
+    let selector = serde_json::to_string(&selector)?;
+    Ok(format!(
+        r#"(function() {{
+  const selector = {selector};
+  const root = selector === null ? document : document.querySelector(selector);
+  if (!root) {{
+    throw new Error("selector not found: " + selector);
+  }}
+  const descendants = Array.from(root.querySelectorAll("a[href]"));
+  const nodes = typeof root.matches === "function" && root.matches("a[href]") ? [root, ...descendants] : descendants;
+  return {{
+    links: nodes
+      .map((node) => {{
+        const text = ((node.innerText ?? node.textContent) ?? "").replace(/\s+/g, " ").trim();
+        return {{ href: node.href, text: text.length === 0 ? null : text }};
+      }})
+      .filter((link) => link.href.length > 0),
+  }};
+}})()"#
+    ))
 }
 
 fn cdp_required_object_number(
@@ -1019,6 +1084,27 @@ where
             )
             .await?;
         CdpEvaluateResponse::from_result(&result)
+    }
+
+    async fn extract_text(
+        &mut self,
+        cx: &Cx,
+        selector: Option<&str>,
+        include_hidden: Option<bool>,
+    ) -> BrowserResult<TextResult> {
+        let expression = cdp_extract_text_expression(selector, include_hidden)?;
+        let response = self.evaluate_expression(cx, &expression).await?;
+        cdp_parse_text_result(&response)
+    }
+
+    async fn extract_links(
+        &mut self,
+        cx: &Cx,
+        selector: Option<&str>,
+    ) -> BrowserResult<LinksResult> {
+        let expression = cdp_extract_links_expression(selector)?;
+        let response = self.evaluate_expression(cx, &expression).await?;
+        cdp_parse_links_result(&response)
     }
 
     async fn capture_screenshot(
@@ -2926,6 +3012,119 @@ mod tests {
         assert!(!message.contains("value-alpha"));
         assert!(!message.contains("session-alpha"));
         assert!(message.contains("[redacted]"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_extract_text_issues_selector_safe_evaluate_command() {
+        let cx = fcp_async_core::compatibility_cx();
+        let selector = r#"main[data-label="hero"]"#;
+        let expression = cdp_extract_text_expression(Some(selector), Some(true)).unwrap();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "text": "Visible hidden copy",
+                                "word_count": 3,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            )]));
+
+        let response = session
+            .extract_text(&cx, Some(selector), Some(true))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response.text, "Visible hidden copy");
+        assert_eq!(response.word_count, Some(3));
+        assert!(expression.contains(r#"const selector = "main[data-label=\"hero\"]";"#));
+        assert!(expression.contains("const includeHidden = true;"));
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_extract_links_includes_selected_anchor_and_descendants() {
+        let cx = fcp_async_core::compatibility_cx();
+        let expression = cdp_extract_links_expression(Some("nav.primary")).unwrap();
+        let mut session =
+            CdpSession::new(FakeCdpTransport::with_received([WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 1,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "links": [
+                                    { "href": "https://example.test/", "text": "Home" },
+                                    { "href": "https://example.test/docs", "text": null },
+                                ],
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            )]));
+
+        let response = session
+            .extract_links(&cx, Some("nav.primary"))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response.links.len(), 2);
+        assert_eq!(response.links[0].href, "https://example.test/");
+        assert_eq!(response.links[0].text.as_deref(), Some("Home"));
+        assert_eq!(response.links[1].href, "https://example.test/docs");
+        assert_eq!(response.links[1].text, None);
+        assert!(expression.contains(r#"const selector = "nav.primary";"#));
+        assert!(expression.contains(r#"root.matches("a[href]")"#));
+        assert_eq!(transport.sent.len(), 1);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+    }
+
+    #[test]
+    fn test_cdp_extract_result_parsers_reject_invalid_payloads() {
+        let text_error = cdp_parse_text_result(&CdpEvaluateResponse {
+            result: r#"{"links":[]}"#.to_string(),
+        })
+        .unwrap_err();
+        let links_error = cdp_parse_links_result(&CdpEvaluateResponse {
+            result: r#"{"text":"not links","word_count":2}"#.to_string(),
+        })
+        .unwrap_err();
+
+        assert!(format!("{text_error}").contains("invalid extract_text payload"));
+        assert!(format!("{links_error}").contains("invalid extract_links payload"));
     }
 
     #[fcp_async_core::runtime::test]

@@ -12,9 +12,7 @@ use chrono::Utc;
 use fcp_host::{
     BatchExecutor, BatchInvokeRequest, BatchOperation, BatchOperationError, BatchOperationPriority,
     BatchOptions, BatchScheduleHint, BatchScheduleReport, BatchScheduleWaitPercentiles,
-    BatchSchedulerMode, BatchSchedulerOptions, OperationResultStatus, ResourceLedgerInput,
-    ResourceLedgerOutcome, ResourceLedgerRecord, ResourceLedgerRecordKind, ResourceLedgerSamples,
-    ResourceTelemetryState,
+    BatchSchedulerMode, BatchSchedulerOptions, OperationResultStatus,
 };
 use fcp_testkit::evidence_helpers::{
     LatencyBreakdown, SWARM_BASELINE_PROMOTION_SCHEMA_VERSION,
@@ -402,128 +400,6 @@ fn resource_snapshots(bundle: &SwarmLatencyEvidenceBundle) -> Vec<SwarmRegressio
         .collect()
 }
 
-fn resource_ledger_records(
-    command_line: &[String],
-    git_revision: &str,
-    worker_identity: &str,
-) -> Result<Vec<Value>, serde_json::Error> {
-    [
-        (
-            "invoke",
-            ResourceLedgerRecordKind::Invoke,
-            ResourceLedgerOutcome::Admitted,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::Observed,
-                queue_pressure_per_mille: Some(120),
-                cpu_pressure_per_mille: Some(180),
-                memory_pressure_per_mille: Some(210),
-                in_flight: Some(8),
-                queue_depth: Some(2),
-                retry_after_ms: None,
-            },
-            vec![10_000, 12_000, 15_000, 20_000],
-        ),
-        (
-            "batch",
-            ResourceLedgerRecordKind::Batch,
-            ResourceLedgerOutcome::Admitted,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::Observed,
-                queue_pressure_per_mille: Some(240),
-                cpu_pressure_per_mille: Some(360),
-                memory_pressure_per_mille: Some(300),
-                in_flight: Some(64),
-                queue_depth: Some(8),
-                retry_after_ms: None,
-            },
-            vec![30_000, 32_000, 40_000],
-        ),
-        (
-            "backpressure",
-            ResourceLedgerRecordKind::Backpressure,
-            ResourceLedgerOutcome::Delayed,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::Observed,
-                queue_pressure_per_mille: Some(820),
-                cpu_pressure_per_mille: Some(760),
-                memory_pressure_per_mille: Some(650),
-                in_flight: Some(64),
-                queue_depth: Some(31),
-                retry_after_ms: Some(25),
-            },
-            vec![20_000, 22_000, 30_000],
-        ),
-        (
-            "placement",
-            ResourceLedgerRecordKind::Placement,
-            ResourceLedgerOutcome::Admitted,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::Observed,
-                queue_pressure_per_mille: Some(100),
-                cpu_pressure_per_mille: Some(440),
-                memory_pressure_per_mille: Some(390),
-                in_flight: Some(16),
-                queue_depth: Some(4),
-                retry_after_ms: None,
-            },
-            vec![8_000, 9_000, 11_000],
-        ),
-        (
-            "retry",
-            ResourceLedgerRecordKind::Retry,
-            ResourceLedgerOutcome::Retried,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::Observed,
-                queue_pressure_per_mille: Some(400),
-                cpu_pressure_per_mille: Some(500),
-                memory_pressure_per_mille: None,
-                in_flight: Some(14),
-                queue_depth: Some(7),
-                retry_after_ms: Some(100),
-            },
-            vec![30_000, 50_000, 80_000],
-        ),
-        (
-            "audit",
-            ResourceLedgerRecordKind::Audit,
-            ResourceLedgerOutcome::Admitted,
-            ResourceLedgerSamples {
-                state: ResourceTelemetryState::NotApplicable,
-                ..ResourceLedgerSamples::default()
-            },
-            Vec::new(),
-        ),
-    ]
-    .into_iter()
-    .map(|(suffix, kind, outcome, samples, latency_samples_ns)| {
-        let audit_receipt_id = if kind == ResourceLedgerRecordKind::Audit {
-            Some("audit-receipt-resource-ledger-e2e".to_string())
-        } else {
-            None
-        };
-        ResourceLedgerRecord::new(ResourceLedgerInput {
-            scenario_id: "swarm.resource-ledger.e2e-gauntlet".to_string(),
-            operation_id: format!("op-proof-{suffix}"),
-            kind,
-            outcome,
-            command_line: command_line.to_vec(),
-            git_revision: git_revision.to_string(),
-            worker_identity: worker_identity.to_string(),
-            zone_id: Some("z:work".to_string()),
-            principal_id: Some("principal:resource-ledger-e2e".to_string()),
-            connector_id: Some("fcp.synthetic-gauntlet".to_string()),
-            controller_decision: Some(suffix.to_string()),
-            samples,
-            latency_samples_ns,
-            audit_receipt_id,
-            fallback_reason: None,
-            skip_reason: None,
-        })
-        .to_jsonl_value()
-    })
-    .collect()
-}
-
 fn batch_morselization_command_line() -> Vec<String> {
     vec![
         "rch".to_string(),
@@ -848,15 +724,6 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
     let latency_bundle = latency_bundle()?;
     let resources = resource_snapshots(&latency_bundle);
     let first_scenario = latency_bundle.summaries[0].scenario_id.clone();
-    let resource_ledger_records = resource_ledger_records(
-        &latency_bundle.environment.command_line,
-        latency_bundle
-            .environment
-            .source_revision
-            .as_deref()
-            .unwrap_or("unknown"),
-        &latency_bundle.environment.worker_id,
-    )?;
     let gauntlet = SwarmGauntletEvidenceBundle::new(
         manifest,
         latency_bundle,
@@ -869,8 +736,7 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
             sparse_high_k_metadata_events: 3,
         },
         None,
-    )?
-    .with_resource_ledger_records(resource_ledger_records)?;
+    )?;
 
     let records = gauntlet.to_jsonl_values()?;
     let types = record_types(&records);
@@ -888,7 +754,6 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
     assert!(types.contains("swarm_latency_bundle"));
     assert!(types.contains("swarm_latency_sample"));
     assert!(types.contains("swarm_decision_card"));
-    assert!(types.contains("resource_ledger"));
     assert!(types.contains("swarm_gauntlet_phase_evidence"));
     assert!(types.contains("swarm_gauntlet_summary"));
     assert!(types.contains("swarm_gauntlet_log"));
@@ -896,33 +761,14 @@ fn integrated_swarm_gauntlet_smoke_emits_replayable_jsonl() -> Result<(), Box<dy
     assert_eq!(log_record["worker_id"], "offline-e2e-runner");
     assert_eq!(log_record["evidence_bundle_id"], "gauntlet-e2e-smoke");
     assert!(log_record["decision_card_ids"].is_array());
-    assert_eq!(log_record["resource_ledger_record_count"], 6);
-    assert_eq!(log_record["resource_ledger_record_type"], "resource_ledger");
-    assert!(log_record["resource_ledger_operation_ids"].is_array());
     assert!(log_record["p99_ns"].is_u64());
     assert!(log_record["throughput_ops_per_second"].is_u64());
-    let ledger_record = records
-        .iter()
-        .find(|record| record["record_type"] == "resource_ledger")
-        .ok_or("resource ledger record should be present")?;
-    assert_eq!(ledger_record["schema_version"], "resource-ledger/v1");
-    assert!(
-        ledger_record["ledger"]["worker_ref"]
-            .as_str()
-            .is_some_and(|worker| worker.starts_with("worker:blake3:"))
-    );
-    assert!(
-        ledger_record["ledger"]["principal_ref"]
-            .as_str()
-            .is_some_and(|principal| principal.starts_with("principal:blake3:"))
-    );
     for line in jsonl.lines() {
         serde_json::from_str::<Value>(line)?;
     }
     assert!(!jsonl.contains("sk-live-"));
     assert!(!jsonl.contains("Bearer test-token"));
     assert!(!jsonl.contains("super-secret-value"));
-    assert!(!jsonl.contains("principal:resource-ledger-e2e"));
     Ok(())
 }
 

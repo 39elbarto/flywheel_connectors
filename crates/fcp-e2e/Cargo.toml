@@ -16,7 +16,9 @@ e2e-full = [
     "google_ai",
     "gcp",
     "cerebras",
+    "deepgram",
     "duckduckgo",
+    "elevenlabs",
     "glm",
     "groq",
     "voyage",
@@ -109,7 +111,9 @@ discord = ["dep:fcp-discord"]
 google_ai = ["dep:fcp-google-ai"]
 gcp = ["dep:fcp-gcp"]
 cerebras = ["dep:fcp-cerebras"]
+deepgram = ["dep:fcp-deepgram"]
 duckduckgo = ["dep:fcp-duckduckgo"]
+elevenlabs = ["dep:fcp-elevenlabs"]
 glm = ["dep:fcp-glm"]
 groq = ["dep:fcp-groq"]
 voyage = ["dep:fcp-voyage"]
@@ -219,7 +223,9 @@ fcp-discord = { path = "../../connectors/discord", features = ["testing"], optio
 fcp-google-ai = { path = "../../connectors/google-ai", optional = true }
 fcp-gcp = { path = "../../connectors/gcp", optional = true }
 fcp-cerebras = { path = "../../connectors/cerebras", optional = true }
+fcp-deepgram = { path = "../../connectors/deepgram", optional = true }
 fcp-duckduckgo = { path = "../../connectors/duckduckgo", optional = true }
+fcp-elevenlabs = { path = "../../connectors/elevenlabs", optional = true }
 fcp-glm = { path = "../../connectors/glm", optional = true }
 fcp-groq = { path = "../../connectors/groq", optional = true }
 fcp-voyage = { path = "../../connectors/voyage", optional = true }

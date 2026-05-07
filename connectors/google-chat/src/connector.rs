@@ -11,7 +11,8 @@ use fcp_google_discovery::auth::{GoogleAuthSelection, GoogleMaterializedAuth};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     EventCaps, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier, ZoneId,
+    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    SimulateRequest, SimulateResponse, ZoneId,
 };
 use fcp_sdk::{
     AgentId, ChannelId, ChatCoordinationAuditRecord, ChatCoordinationBackend,
@@ -451,6 +452,12 @@ impl ChatConnector {
             chat_coordination_config: default_google_chat_chat_coordination_config(),
             thread_ownership_checker: Arc::new(InMemoryThreadOwnershipChecker::new()),
         }
+    }
+
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
     }
 
     /// Replace the thread ownership checker used by outbound chat coordination.
@@ -1654,15 +1661,62 @@ impl ChatConnector {
     }
 
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
-        let operation = params
-            .get("operation")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown");
-        Ok(json!({
-            "operation": operation,
-            "would_execute": true,
-            "dry_run": true
-        }))
+        let req: SimulateRequest =
+            serde_json::from_value(params).map_err(|error| FcpError::InvalidRequest {
+                code: 1003,
+                message: format!("Invalid simulate request: {error}"),
+            })?;
+        let capability = match required_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return serde_json::to_value(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ))
+                .map_err(|error| FcpError::Internal {
+                    message: format!("Failed to serialize simulate denial: {error}"),
+                });
+            }
+        };
+        if self.client.is_none() {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ))
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ))
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), error.error_code());
+            if error.error_code() == "FCP-3001" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        }
+        serde_json::to_value(SimulateResponse::allowed(req.id)).map_err(|error| {
+            FcpError::Internal {
+                message: format!("Failed to serialize simulate response: {error}"),
+            }
+        })
     }
 
     pub async fn handle_shutdown(
@@ -2712,6 +2766,22 @@ fn request_timeout_from_params(params: &serde_json::Value) -> FcpResult<Duration
     Ok(Duration::from_millis(timeout_ms))
 }
 
+fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        OP_INGEST_WEBHOOK => Ok(CapabilityId::from_static(CAP_WEBHOOK)),
+        "chat.list_spaces" | "chat.get_space" | "chat.list_messages" | "chat.get_message"
+        | "chat.list_members" => Ok(CapabilityId::from_static("chat.read")),
+        "chat.send_message"
+        | "chat.reply_message"
+        | OP_SEND_MEDIA_MESSAGE
+        | "chat.add_reaction" => Ok(CapabilityId::from_static("chat.write")),
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("Unknown operation: {operation}"),
+        }),
+    }
+}
+
 fn op_info(
     id: &'static str,
     summary: &str,
@@ -2917,13 +2987,22 @@ mod tests {
     }
 
     #[test]
-    fn simulate_returns_dry_run() {
+    fn simulate_denies_not_configured_canonical_request() {
         let connector = ChatConnector::new();
-        let result =
-            run_async_test(connector.handle_simulate(json!({ "operation": "chat.send_message" })))
-                .unwrap();
-        assert_eq!(result["dry_run"], true);
-        assert_eq!(result["operation"], "chat.send_message");
+        let request = SimulateRequest::new(
+            ConnectorId::from_static("google-chat"),
+            OperationId::from_static("chat.send_message"),
+            ZoneId::work(),
+            json!({ "space_name": "spaces/AAAA", "text": "dry run" }),
+            fcp_prelude::CapabilityToken::test_token(),
+        );
+        let result = run_async_test(
+            connector.handle_simulate(serde_json::to_value(request).expect("serialize simulate")),
+        )
+        .unwrap();
+        assert_eq!(result["type"], "simulate_response");
+        assert_eq!(result["would_succeed"], false);
+        assert_eq!(result["denial_code"], FcpError::NotConfigured.error_code());
     }
 
     #[test]

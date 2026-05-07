@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
@@ -14,6 +15,8 @@ const DEFAULT_BASE_URL: &str = "https://api.exa.ai";
 const BOUNDARY: &str = "This first slice is read-only and covers Exa search. Content expansion and crawling stay out of scope for now.";
 const EXA_INTEGRATION: &str = "fcp";
 const EXA_MAX_SEARCH_RESULTS: u64 = 100;
+const EXA_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 1] = ["exa.search"];
 const EXA_SEARCH_TYPES: &[&str] = &[
     "auto",
     "neural",
@@ -331,29 +334,7 @@ impl ExaConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [{
-                "id": "exa.search",
-                "summary": "Execute an Exa search",
-                "capability": "exa.search",
-                "risk_level": "low",
-                "safety_tier": "safe",
-                "idempotency": "strict",
-                "input_schema": {
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": {"type": "string"},
-                        "numResults": {"type": "integer"},
-                        "type": {"type": "string"},
-                        "useAutoprompt": {},
-                        "category": {"type": "string"},
-                        "includeDomains": {"type": "array"},
-                        "excludeDomains": {"type": "array"},
-                        "contents": {}
-                    }
-                },
-                "output_schema": {"type": "object"}
-            }],
+            "operations": operations_info()?,
             "events": [],
             "resource_types": []
         }))
@@ -463,6 +444,65 @@ impl Default for ExaConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn operations_info() -> FcpResult<Vec<Value>> {
+    let manifest =
+        ConnectorManifest::parse_str(EXA_MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Exa manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
 }
 
 const fn health_status(
@@ -732,10 +772,105 @@ mod tests {
     #[test]
     fn manifest_matches_search_only_first_slice() {
         assert!(MANIFEST_TOML.contains("description = \"Exa connector for search\""));
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"exa.search\"]"));
         assert!(MANIFEST_TOML.contains(
             "migration_hint = \"First slice: search only. Content retrieval and crawling are deferred.\""
         ));
         assert!(!MANIFEST_TOML.contains("search and content retrieval"));
+    }
+
+    #[test]
+    fn manifest_declares_valid_search_operation_metadata() {
+        let unchecked = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("embedded manifest should parse");
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "manifest interface_hash must match computed operation metadata hash"
+        );
+
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let operation = manifest
+            .provides
+            .operations
+            .get("exa.search")
+            .expect("search operation should be declared");
+        assert_eq!(manifest.provides.operations.len(), 1);
+        assert_eq!(operation.capability.as_str(), "exa.search");
+        assert_eq!(json!(operation.risk_level), json!("low"));
+        assert_eq!(json!(operation.safety_tier), json!("safe"));
+        assert_eq!(json!(operation.idempotency), json!("strict"));
+        assert_eq!(operation.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            operation.input_schema["properties"]["numResults"]["maximum"],
+            json!(100)
+        );
+        assert_eq!(
+            operation.input_schema["properties"]["type"]["enum"],
+            json!(EXA_SEARCH_TYPES)
+        );
+        let network_constraints = operation
+            .network_constraints
+            .as_ref()
+            .expect("search operation should declare network constraints");
+        assert_eq!(
+            network_constraints.host_allow,
+            vec!["exa.ai".to_string(), "*.exa.ai".to_string()]
+        );
+        assert_eq!(network_constraints.port_allow, vec![443]);
+        assert!(network_constraints.require_sni);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_uses_manifest_operation_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get("exa.search")
+            .expect("manifest search operation");
+
+        let connector = ExaConnector::new();
+        let introspection = connector
+            .handle_introspect()
+            .await
+            .expect("introspection should succeed");
+        let operations = introspection["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+        let operation = operations
+            .iter()
+            .find(|operation| operation["id"] == "exa.search")
+            .expect("introspection should expose exa.search");
+
+        assert_eq!(
+            operation["summary"],
+            json!(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            operation["description"],
+            json!(manifest_operation.description.as_str())
+        );
+        assert_eq!(operation["capability"], json!("exa.search"));
+        assert_eq!(&operation["input_schema"], &manifest_operation.input_schema);
+        assert_eq!(
+            &operation["output_schema"],
+            &manifest_operation.output_schema
+        );
+        assert_eq!(
+            operation["network_constraints"]["host_allow"],
+            json!(["exa.ai", "*.exa.ai"])
+        );
+        assert_eq!(
+            operation["ai_hints"]["when_to_use"],
+            json!(manifest_operation.ai_hints.when_to_use.as_str())
+        );
     }
 
     #[test]

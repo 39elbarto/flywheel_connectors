@@ -3783,6 +3783,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-e2e",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",

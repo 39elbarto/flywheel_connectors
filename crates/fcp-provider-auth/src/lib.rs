@@ -273,6 +273,9 @@ fn build_authorization_request(
             query.append_pair("code_challenge", &pkce.challenge);
             query.append_pair("code_challenge_method", &pkce.method.to_string());
         }
+        for (name, value) in &config.extra_authorize_params {
+            query.append_pair(name, value);
+        }
     }
     Ok(OAuthAuthCodeRequest {
         authorization_url: url.to_string(),
@@ -1393,6 +1396,8 @@ pub struct OAuthAuthCodeAuth {
     pub scope: String,
     /// Whether PKCE must be used.
     pub use_pkce: bool,
+    /// Extra provider-specific authorization URL parameters.
+    pub extra_authorize_params: BTreeMap<String, String>,
     /// Current access token, if the flow has completed.
     pub access_token: Option<RedactedSecret>,
     /// Current refresh token, if the provider issued one.
@@ -1463,6 +1468,7 @@ impl OAuthAuthCodeAuth {
             redirect_uri: config.redirect_uri,
             scope: config.scope,
             use_pkce: config.use_pkce,
+            extra_authorize_params: config.extra_authorize_params,
             access_token: None,
             refresh_token: None,
             expires_at: None,
@@ -1568,6 +1574,7 @@ impl OAuthAuthCodeAuth {
             redirect_uri: self.redirect_uri.clone(),
             scope: self.scope.clone(),
             use_pkce: self.use_pkce,
+            extra_authorize_params: self.extra_authorize_params.clone(),
         };
         config.validate()
     }
@@ -1619,6 +1626,8 @@ pub struct OAuthAuthCodeConfig {
     pub scope: String,
     /// Whether to include S256 PKCE in the authorization request and exchange.
     pub use_pkce: bool,
+    /// Extra provider-specific authorization URL parameters.
+    pub extra_authorize_params: BTreeMap<String, String>,
 }
 
 impl OAuthAuthCodeConfig {
@@ -1693,9 +1702,28 @@ impl OAuthAuthCodeConfig {
             redirect_uri: redirect_uri.into(),
             scope: scope.into(),
             use_pkce,
+            extra_authorize_params: BTreeMap::new(),
         };
         config.validate()?;
         Ok(config)
+    }
+
+    /// Add one provider-specific authorization URL parameter.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the parameter is empty, unsafe,
+    /// or attempts to override a standard OAuth field owned by this config.
+    pub fn with_authorize_param(
+        mut self,
+        name: impl Into<String>,
+        value: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let name = name.into();
+        let value = value.into();
+        validate_authorize_param(&name, &value)?;
+        self.extra_authorize_params.insert(name, value);
+        Ok(self)
     }
 
     fn validate(&self) -> AuthResult<()> {
@@ -1707,7 +1735,31 @@ impl OAuthAuthCodeConfig {
         parse_oauth_url(&self.authorize_url, "authorize_url")?;
         parse_oauth_url(&self.token_url, "token_url")?;
         parse_oauth_url(&self.redirect_uri, "redirect_uri")?;
-        validate_no_crlf(&self.scope, "scope")
+        validate_no_crlf(&self.scope, "scope")?;
+        for (name, value) in &self.extra_authorize_params {
+            validate_authorize_param(name, value)?;
+        }
+        Ok(())
+    }
+}
+
+fn validate_authorize_param(name: &str, value: &str) -> AuthResult<()> {
+    validate_non_empty(name, "authorize_param")?;
+    validate_no_crlf(name, "authorize_param")?;
+    validate_non_empty(value, "authorize_param")?;
+    validate_no_crlf(value, "authorize_param")?;
+    match name {
+        "response_type"
+        | "client_id"
+        | "redirect_uri"
+        | "scope"
+        | "state"
+        | "code_challenge"
+        | "code_challenge_method" => Err(invalid_config(
+            "authorize_param",
+            "must not override standard OAuth authorization parameters",
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -1724,6 +1776,7 @@ impl fmt::Debug for OAuthAuthCodeConfig {
             .field("redirect_uri", &self.redirect_uri)
             .field("scope", &self.scope)
             .field("use_pkce", &self.use_pkce)
+            .field("extra_authorize_params", &self.extra_authorize_params)
             .finish()
     }
 }
@@ -2490,6 +2543,472 @@ impl AuthMethod for SigV4Auth {
 #[must_use]
 pub fn sha256_payload_hex(payload: &[u8]) -> String {
     hex::encode(Sha256::digest(payload))
+}
+
+/// Provider-specific constructors for common auth profile shapes.
+///
+/// These helpers compose the core auth primitives without performing network
+/// I/O or reading provider-local credential files.
+pub mod providers {
+    use std::time::Duration as StdDuration;
+
+    use super::{
+        ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, JwtAuth, OAuthAuthCodeAuth,
+        OAuthAuthCodeConfig, OAuthDeviceCodeAuth, OAuthDeviceCodeConfig, RedactedSecret, SigV4Auth,
+    };
+
+    fn profile(
+        provider: &'static str,
+        profile_id: impl Into<String>,
+        method: AuthMethodKind,
+        label: impl Into<String>,
+        priority: i32,
+    ) -> AuthResult<AuthProfile> {
+        AuthProfile::new(profile_id, provider, method, label, priority)
+    }
+
+    /// Anthropic provider helpers.
+    pub mod anthropic {
+        use super::{
+            ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, OAuthDeviceCodeAuth,
+            OAuthDeviceCodeConfig, profile,
+        };
+
+        /// Canonical provider id for Anthropic profiles.
+        pub const PROVIDER_ID: &str = "anthropic";
+        /// Anthropic API-key header.
+        pub const API_KEY_HEADER: &str = "x-api-key";
+
+        /// Build an Anthropic API-key method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when API-key material or headers are invalid.
+        pub fn api_key_method(api_key: impl Into<String>) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::ApiKey(ApiKeyAuth::new(
+                api_key,
+                API_KEY_HEADER,
+                Option::<String>::None,
+            )?))
+        }
+
+        /// Build an Anthropic API-key auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or API-key fields are invalid.
+        pub fn api_key_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            api_key: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                api_key_method(api_key)?,
+                label,
+                priority,
+            )
+        }
+
+        /// Build Anthropic device-code flow config from caller-supplied endpoints.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_config(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthDeviceCodeConfig> {
+            OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)
+        }
+
+        /// Build an Anthropic OAuth device-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_method(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthDeviceCode(
+                OAuthDeviceCodeAuth::from_config(device_code_config(
+                    client_id,
+                    device_code_url,
+                    token_url,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build an Anthropic OAuth device-code auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn device_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                device_code_method(client_id, device_code_url, token_url, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// `OpenAI` Codex provider helpers.
+    pub mod openai_codex {
+        use super::{
+            ApiKeyAuth, AuthMethodKind, AuthProfile, AuthResult, OAuthDeviceCodeAuth,
+            OAuthDeviceCodeConfig, profile,
+        };
+
+        /// Canonical provider id for `OpenAI` profiles.
+        pub const PROVIDER_ID: &str = "openai";
+
+        /// Build an `OpenAI` API-key method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when API-key material is invalid.
+        pub fn api_key_method(api_key: impl Into<String>) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::ApiKey(ApiKeyAuth::bearer(api_key)?))
+        }
+
+        /// Build an `OpenAI` API-key auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or API-key fields are invalid.
+        pub fn api_key_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            api_key: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                api_key_method(api_key)?,
+                label,
+                priority,
+            )
+        }
+
+        /// Build `OpenAI` Codex device-code flow config from caller-supplied endpoints.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_config(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthDeviceCodeConfig> {
+            OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)
+        }
+
+        /// Build an `OpenAI` Codex OAuth device-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn device_code_method(
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthDeviceCode(
+                OAuthDeviceCodeAuth::from_config(device_code_config(
+                    client_id,
+                    device_code_url,
+                    token_url,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build an `OpenAI` Codex OAuth device-code auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn device_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            device_code_url: impl Into<String>,
+            token_url: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                device_code_method(client_id, device_code_url, token_url, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// Google OAuth provider helpers.
+    pub mod google {
+        use super::{
+            AuthMethodKind, AuthProfile, AuthResult, OAuthAuthCodeAuth, OAuthAuthCodeConfig,
+            profile,
+        };
+
+        /// Canonical provider id for Google profiles.
+        pub const PROVIDER_ID: &str = "google";
+        /// Google OAuth authorization endpoint.
+        pub const AUTHORIZE_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
+        /// Google OAuth token endpoint.
+        pub const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+
+        /// Build Google public-client auth-code config with offline access.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_public_auth_code_config(
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthAuthCodeConfig> {
+            OAuthAuthCodeConfig::public_client(
+                client_id,
+                AUTHORIZE_URL,
+                TOKEN_URL,
+                redirect_uri,
+                scope,
+                true,
+            )?
+            .with_authorize_param("access_type", "offline")?
+            .with_authorize_param("prompt", "consent")
+        }
+
+        /// Build Google confidential-client auth-code config with offline access.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_confidential_auth_code_config(
+            client_id: impl Into<String>,
+            client_secret: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<OAuthAuthCodeConfig> {
+            OAuthAuthCodeConfig::confidential_client(
+                client_id,
+                client_secret,
+                AUTHORIZE_URL,
+                TOKEN_URL,
+                redirect_uri,
+                scope,
+                true,
+            )?
+            .with_authorize_param("access_type", "offline")?
+            .with_authorize_param("prompt", "consent")
+        }
+
+        /// Build a Google public-client OAuth auth-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_public_auth_code_method(
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthAuthCode(
+                OAuthAuthCodeAuth::from_config(offline_public_auth_code_config(
+                    client_id,
+                    redirect_uri,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build a Google confidential-client OAuth auth-code method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when OAuth config fields are invalid.
+        pub fn offline_confidential_auth_code_method(
+            client_id: impl Into<String>,
+            client_secret: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::OAuthAuthCode(
+                OAuthAuthCodeAuth::from_config(offline_confidential_auth_code_config(
+                    client_id,
+                    client_secret,
+                    redirect_uri,
+                    scope,
+                )?),
+            ))
+        }
+
+        /// Build a Google public-client OAuth auth-code profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or OAuth fields are invalid.
+        pub fn offline_public_auth_code_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            client_id: impl Into<String>,
+            redirect_uri: impl Into<String>,
+            scope: impl Into<String>,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                offline_public_auth_code_method(client_id, redirect_uri, scope)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// AWS provider helpers.
+    pub mod aws {
+        use super::{AuthMethodKind, AuthProfile, AuthResult, SigV4Auth, profile};
+
+        /// Canonical provider id for AWS profiles.
+        pub const PROVIDER_ID: &str = "aws";
+
+        /// Build AWS `SigV4` auth config.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when signing fields are invalid.
+        pub fn sigv4_auth(
+            access_key: impl Into<String>,
+            signing_key: impl Into<String>,
+            session_token: Option<impl Into<String>>,
+            region: impl Into<String>,
+            service: impl Into<String>,
+        ) -> AuthResult<SigV4Auth> {
+            SigV4Auth::new(access_key, signing_key, session_token, region, service)
+        }
+
+        /// Build an AWS `SigV4` method.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when signing fields are invalid.
+        pub fn sigv4_method(
+            access_key: impl Into<String>,
+            signing_key: impl Into<String>,
+            session_token: Option<impl Into<String>>,
+            region: impl Into<String>,
+            service: impl Into<String>,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::SigV4(sigv4_auth(
+                access_key,
+                signing_key,
+                session_token,
+                region,
+                service,
+            )?))
+        }
+
+        /// Build an AWS `SigV4` auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile fields are invalid.
+        pub fn sigv4_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            auth: SigV4Auth,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                AuthMethodKind::SigV4(auth),
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// GLM/Zhipu provider helpers.
+    pub mod glm {
+        use super::{AuthMethodKind, AuthProfile, AuthResult, JwtAuth, StdDuration, profile};
+
+        /// Canonical provider id for GLM profiles.
+        pub const PROVIDER_ID: &str = "glm";
+
+        /// Build a GLM JWT method from a caller-supplied generator.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when JWT metadata is invalid.
+        pub fn jwt_method(
+            ttl: StdDuration,
+            generator: impl Fn() -> AuthResult<String> + Send + Sync + 'static,
+        ) -> AuthResult<AuthMethodKind> {
+            Ok(AuthMethodKind::Jwt(JwtAuth::new(
+                PROVIDER_ID,
+                ttl,
+                generator,
+            )?))
+        }
+
+        /// Build a GLM JWT auth profile.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`crate::AuthError`] when profile or JWT metadata is invalid.
+        pub fn jwt_profile(
+            profile_id: impl Into<String>,
+            label: impl Into<String>,
+            priority: i32,
+            ttl: StdDuration,
+            generator: impl Fn() -> AuthResult<String> + Send + Sync + 'static,
+        ) -> AuthResult<AuthProfile> {
+            profile(
+                PROVIDER_ID,
+                profile_id,
+                jwt_method(ttl, generator)?,
+                label,
+                priority,
+            )
+        }
+    }
+
+    /// Build a redacted token from provider helper callers that need direct material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::AuthError`] when token material is empty.
+    pub fn redacted_secret(material: impl Into<String>) -> AuthResult<RedactedSecret> {
+        RedactedSecret::new(material)
+    }
 }
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
@@ -3397,6 +3916,223 @@ mod tests {
             request.value_for("Authorization"),
             Some("Bearer fixture-kind")
         );
+    }
+
+    #[test]
+    fn provider_helpers_build_api_key_profiles_with_provider_headers() {
+        let anthropic = providers::anthropic::api_key_profile(
+            "personal",
+            "Personal Claude",
+            10,
+            "fixture-anthropic-key",
+        )
+        .unwrap();
+        let openai =
+            providers::openai_codex::api_key_profile("codex", "Codex", 20, "fixture-openai-key")
+                .unwrap();
+
+        assert_eq!(anthropic.provider, providers::anthropic::PROVIDER_ID);
+        assert_eq!(anthropic.label, "Personal Claude");
+        assert_eq!(anthropic.priority, 10);
+        assert_eq!(openai.provider, providers::openai_codex::PROVIDER_ID);
+
+        let mut anthropic_request = AuthRequest::new();
+        run(anthropic
+            .method
+            .build_request_auth(&cx(), &mut anthropic_request))
+        .unwrap();
+        assert_eq!(
+            anthropic_request.value_for(providers::anthropic::API_KEY_HEADER),
+            Some("fixture-anthropic-key")
+        );
+
+        let mut openai_request = AuthRequest::new();
+        run(openai.method.build_request_auth(&cx(), &mut openai_request)).unwrap();
+        assert_eq!(
+            openai_request.value_for("Authorization"),
+            Some("Bearer fixture-openai-key")
+        );
+        assert!(!format!("{:?}", anthropic.method).contains("fixture-anthropic-key"));
+        assert!(!format!("{:?}", openai.method).contains("fixture-openai-key"));
+    }
+
+    #[test]
+    fn provider_helpers_build_device_code_profiles_and_validate_inputs() {
+        let anthropic = providers::anthropic::device_code_profile(
+            "work",
+            "Work Claude",
+            0,
+            "anthropic-client",
+            "https://auth.anthropic.example/device",
+            "https://auth.anthropic.example/token",
+            "claude-code",
+        )
+        .unwrap();
+        let openai = providers::openai_codex::device_code_profile(
+            "codex",
+            "Codex",
+            5,
+            "openai-client",
+            "https://auth.openai.example/device",
+            "https://auth.openai.example/token",
+            "codex",
+        )
+        .unwrap();
+
+        assert!(matches!(
+            anthropic.method,
+            AuthMethodKind::OAuthDeviceCode(_)
+        ));
+        let AuthMethodKind::OAuthDeviceCode(anthropic_method) = anthropic.method else {
+            return;
+        };
+        assert_eq!(anthropic_method.client_id, "anthropic-client");
+        assert_eq!(anthropic_method.scope, "claude-code");
+
+        assert!(matches!(openai.method, AuthMethodKind::OAuthDeviceCode(_)));
+        let AuthMethodKind::OAuthDeviceCode(openai_method) = openai.method else {
+            return;
+        };
+        assert_eq!(openai_method.client_id, "openai-client");
+        assert_eq!(openai_method.scope, "codex");
+
+        let error = providers::openai_codex::device_code_config(
+            "bad\nclient",
+            "https://auth.openai.example/device",
+            "https://auth.openai.example/token",
+            "codex",
+        )
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "client_id",
+                reason: "CR/LF bytes are not allowed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn google_helper_adds_offline_authorization_params() {
+        let config = providers::google::offline_confidential_auth_code_config(
+            "google-client",
+            "google-client-secret",
+            "https://agent.example.test/google/callback",
+            "openid email profile",
+        )
+        .unwrap();
+        assert_eq!(config.authorize_url, providers::google::AUTHORIZE_URL);
+        assert_eq!(config.token_url, providers::google::TOKEN_URL);
+        assert_eq!(
+            config
+                .extra_authorize_params
+                .get("access_type")
+                .map(String::as_str),
+            Some("offline")
+        );
+        assert_eq!(
+            config
+                .extra_authorize_params
+                .get("prompt")
+                .map(String::as_str),
+            Some("consent")
+        );
+        assert!(!format!("{config:?}").contains("google-client-secret"));
+
+        let flow = OAuthAuthCodeFlow::start_with_state(config, "fixed-google-state").unwrap();
+        let url = Url::parse(flow.request().authorization_url()).unwrap();
+        let params = url
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some(providers::google::AUTHORIZE_URL)
+        );
+        assert_eq!(
+            params.get("access_type").map(String::as_str),
+            Some("offline")
+        );
+        assert_eq!(params.get("prompt").map(String::as_str), Some("consent"));
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("openid email profile")
+        );
+    }
+
+    #[test]
+    fn auth_code_config_rejects_reserved_or_unsafe_extra_params() {
+        let reserved = auth_code_config()
+            .with_authorize_param("state", "malicious-state")
+            .unwrap_err();
+        assert_eq!(
+            reserved,
+            AuthError::InvalidConfig {
+                field: "authorize_param",
+                reason: "must not override standard OAuth authorization parameters".to_string()
+            }
+        );
+
+        let unsafe_value = auth_code_config()
+            .with_authorize_param("prompt", "consent\nadmin")
+            .unwrap_err();
+        assert_eq!(
+            unsafe_value,
+            AuthError::InvalidConfig {
+                field: "authorize_param",
+                reason: "CR/LF bytes are not allowed".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn aws_and_glm_helpers_build_redaction_safe_methods() {
+        let aws_auth = providers::aws::sigv4_auth(
+            aws_example_access_key(),
+            "fixture-aws-secret",
+            Some("fixture-session-token"),
+            "US-EAST-1",
+            "Bedrock",
+        )
+        .unwrap();
+        let aws = providers::aws::sigv4_profile("bedrock", "Bedrock", 0, aws_auth).unwrap();
+        assert_eq!(aws.provider, providers::aws::PROVIDER_ID);
+        assert!(matches!(aws.method, AuthMethodKind::SigV4(_)));
+        let AuthMethodKind::SigV4(method) = aws.method else {
+            return;
+        };
+        assert_eq!(method.region, "us-east-1");
+        assert_eq!(method.service, "bedrock");
+        let debug = format!("{method:?}");
+        assert!(!debug.contains("fixture-aws-secret"));
+        assert!(!debug.contains("fixture-session-token"));
+
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let glm = providers::glm::jwt_profile(
+            "glm-work",
+            "GLM Work",
+            0,
+            StdDuration::from_secs(60),
+            move || {
+                Ok(format!(
+                    "fixture-glm-jwt-{}",
+                    generator_counter.fetch_add(1, Ordering::SeqCst)
+                ))
+            },
+        )
+        .unwrap();
+        assert_eq!(glm.provider, providers::glm::PROVIDER_ID);
+
+        let mut request = AuthRequest::new();
+        run(glm.method.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-glm-jwt-0")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 1);
+        assert!(!format!("{:?}", glm.method).contains("fixture-glm-jwt-0"));
     }
 
     #[test]

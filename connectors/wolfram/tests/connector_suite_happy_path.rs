@@ -74,7 +74,7 @@ impl FcpConnector for WolframSuiteAdapter {
     }
 
     fn introspect(&self) -> Introspection {
-        self.connector.handle_introspect()
+        self.connector.typed_introspection()
     }
 
     async fn invoke(&self, req: InvokeRequest) -> fcp_core::FcpResult<InvokeResponse> {

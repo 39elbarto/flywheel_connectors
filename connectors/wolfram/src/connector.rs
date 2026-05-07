@@ -2,11 +2,11 @@
 
 use std::sync::Arc;
 
+use fcp_manifest::{ConnectorManifest, OperationSection};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
-    ConnectorId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier, ConnectorId,
+    EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse, Introspection,
+    OperationId, OperationInfo, SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig};
 use serde_json::json;
@@ -14,6 +14,14 @@ use tracing::{info, instrument};
 
 use crate::client::WolframClient;
 use crate::types::{WolframConfig, validate_wolfram_base_url};
+
+const WOLFRAM_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const CONNECTOR_ID: &str = "wolfram";
+const CONNECTOR_VERSION: &str = "0.1.0";
+const OP_QUERY: &str = "wolfram.query";
+const OP_SHORT_ANSWER: &str = "wolfram.short_answer";
+const OP_SPOKEN_RESULT: &str = "wolfram.spoken_result";
+const OPERATION_ORDER: [&str; 3] = [OP_QUERY, OP_SHORT_ANSWER, OP_SPOKEN_RESULT];
 
 /// Result of a doctor check run.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -62,7 +70,7 @@ impl WolframConnector {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            base: Arc::new(BaseConnector::new(ConnectorId::from_static("wolfram"))),
+            base: Arc::new(BaseConnector::new(ConnectorId::from_static(CONNECTOR_ID))),
             config: None,
             client: None,
             verifier: None,
@@ -358,9 +366,7 @@ impl WolframConnector {
             });
         }
 
-        let ops = wolfram_operations();
-        let op_exists = ops.iter().any(|o| o.id.as_ref() == req.operation.as_ref());
-        if !op_exists {
+        if !operation_supported(req.operation.as_ref()) {
             let mut resp = SimulateResponse::allowed(req.id);
             resp.would_succeed = false;
             resp.failure_reason = Some(format!("Unknown operation: {}", req.operation));
@@ -418,9 +424,9 @@ impl WolframConnector {
                 }
             })?;
             let op_id = OperationId::from_static(match operation {
-                "wolfram.query" => "wolfram.query",
-                "wolfram.short_answer" => "wolfram.short_answer",
-                "wolfram.spoken_result" => "wolfram.spoken_result",
+                OP_QUERY => OP_QUERY,
+                OP_SHORT_ANSWER => OP_SHORT_ANSWER,
+                OP_SPOKEN_RESULT => OP_SPOKEN_RESULT,
                 _ => {
                     return Err(FcpError::InvalidRequest {
                         code: 1003,
@@ -460,7 +466,7 @@ impl WolframConnector {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
         match operation {
-            "wolfram.query" => {
+            OP_QUERY => {
                 let qr = client.query(query, app_id).await.map_err(|e| {
                     use fcp_sdk::migration::ConnectorErrorMapping;
                     e.to_fcp_error()
@@ -469,11 +475,11 @@ impl WolframConnector {
                     message: format!("Failed to serialize query result: {e}"),
                 })
             }
-            "wolfram.short_answer" => client.short_answer(query, app_id).await.map_err(|e| {
+            OP_SHORT_ANSWER => client.short_answer(query, app_id).await.map_err(|e| {
                 use fcp_sdk::migration::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
-            "wolfram.spoken_result" => client.spoken_result(query, app_id).await.map_err(|e| {
+            OP_SPOKEN_RESULT => client.spoken_result(query, app_id).await.map_err(|e| {
                 use fcp_sdk::migration::ConnectorErrorMapping;
                 e.to_fcp_error()
             }),
@@ -485,15 +491,20 @@ impl WolframConnector {
     }
 
     /// Handle introspect.
+    pub fn handle_introspect(&self) -> FcpResult<serde_json::Value> {
+        Ok(json!({
+            "connector_id": CONNECTOR_ID,
+            "version": CONNECTOR_VERSION,
+            "operations": wolfram_operation_values()?,
+            "events": [],
+            "resource_types": []
+        }))
+    }
+
+    /// Return typed core introspection for `FcpConnector` adapters.
     #[must_use]
-    pub fn handle_introspect(&self) -> Introspection {
-        Introspection {
-            operations: wolfram_operations(),
-            events: vec![],
-            resource_types: vec![],
-            auth_caps: None,
-            event_caps: None,
-        }
+    pub fn typed_introspection(&self) -> Introspection {
+        wolfram_typed_introspection()
     }
 
     /// Graceful shutdown.
@@ -504,126 +515,118 @@ impl WolframConnector {
     }
 }
 
-/// Define the Wolfram Alpha operations.
+/// Define the Wolfram Alpha operations from the embedded manifest.
+///
+/// # Panics
+///
+/// Panics if the embedded connector manifest is invalid. The manifest is
+/// compiled into the binary and validated by provider-contract tests and the
+/// `fwc manifest fix --check` lane.
 #[must_use]
 pub fn wolfram_operations() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static("wolfram.query"),
-            summary: "Full computational query with pods, subpods, and assumptions".into(),
-            description: Some("Sends a query to the Wolfram Alpha Full Results API and returns structured pods with plain text and image representations".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "input": {"type": "string", "description": "Query to compute"}
-                },
-                "required": ["input"]
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "success": {"type": "boolean"},
-                    "numpods": {"type": "integer"},
-                    "pods": {"type": "array"},
-                    "assumptions": {"type": "array"}
-                }
-            }),
-            capability: CapabilityId::from_static("wolfram.query"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use for complex computations, data lookups, mathematical queries, unit conversions, and factual questions that need structured results".into(),
-                common_mistakes: vec![
-                    "Sending empty queries".into(),
-                    "Not checking the 'success' field in the response".into(),
-                ],
-                examples: vec![
-                    r#"{"input": "integrate x^2 dx"}"#.into(),
-                    r#"{"input": "population of Tokyo"}"#.into(),
-                ],
-                related: vec![
-                    CapabilityId::from_static("wolfram.short_answer"),
-                    CapabilityId::from_static("wolfram.spoken_result"),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("wolfram.short_answer"),
-            summary: "Short text answer to a computational query".into(),
-            description: Some("Returns a single-line text answer via the Short Answers API".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "input": {"type": "string", "description": "Query to answer"}
-                },
-                "required": ["input"]
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "answer": {"type": "string"}
-                }
-            }),
-            capability: CapabilityId::from_static("wolfram.query"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use for quick factual answers, unit conversions, simple calculations".into(),
-                common_mistakes: vec!["Sending empty queries".into()],
-                examples: vec![
-                    r#"{"input": "distance from Earth to Mars"}"#.into(),
-                    r#"{"input": "100 USD to EUR"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("wolfram.query")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static("wolfram.spoken_result"),
-            summary: "Natural language spoken-word answer to a query".into(),
-            description: Some("Returns a spoken-word text answer suitable for voice output via the Spoken Results API".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "input": {"type": "string", "description": "Query to answer in spoken form"}
-                },
-                "required": ["input"]
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "spoken": {"type": "string"}
-                }
-            }),
-            capability: CapabilityId::from_static("wolfram.query"),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "Use when you need a human-readable spoken answer for voice output or natural conversation".into(),
-                common_mistakes: vec!["Sending empty queries".into()],
-                examples: vec![
-                    r#"{"input": "how far is the moon"}"#.into(),
-                ],
-                related: vec![CapabilityId::from_static("wolfram.short_answer")],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-    ]
+    manifest_operations()
+        .expect("embedded Wolfram manifest should validate")
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(&id, operation))
+        .collect()
 }
 
 fn required_capability_for_operation(operation: &str) -> Option<CapabilityId> {
     match operation {
-        "wolfram.query" | "wolfram.short_answer" | "wolfram.spoken_result" => {
-            Some(CapabilityId::from_static("wolfram.query"))
-        }
+        OP_QUERY | OP_SHORT_ANSWER | OP_SPOKEN_RESULT => Some(CapabilityId::from_static(OP_QUERY)),
         _ => None,
+    }
+}
+
+fn wolfram_typed_introspection() -> Introspection {
+    Introspection {
+        operations: wolfram_operations(),
+        events: vec![],
+        resource_types: vec![],
+        auth_caps: None,
+        event_caps: None,
+    }
+}
+
+fn operation_supported(operation: &str) -> bool {
+    OPERATION_ORDER.contains(&operation)
+}
+
+fn manifest_operations() -> FcpResult<Vec<(String, OperationSection)>> {
+    let manifest = ConnectorManifest::parse_str(WOLFRAM_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded Wolfram manifest is invalid: {error}"),
+        }
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations)
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn wolfram_operation_values() -> FcpResult<Vec<serde_json::Value>> {
+    Ok(manifest_operations()?
+        .into_iter()
+        .map(|(id, operation)| operation_value_from_manifest(&id, operation))
+        .collect())
+}
+
+fn operation_value_from_manifest(id: &str, operation: OperationSection) -> serde_json::Value {
+    let description = operation.description;
+    let mut metadata = json!({
+        "id": id,
+        "summary": description,
+        "description": description,
+        "capability": operation.capability.as_str(),
+        "risk_level": operation.risk_level,
+        "safety_tier": operation.safety_tier,
+        "requires_approval": operation.requires_approval,
+        "idempotency": operation.idempotency,
+        "revocation_freshness": operation.revocation_freshness,
+        "input_schema": operation.input_schema,
+        "output_schema": operation.output_schema,
+        "network_constraints": operation.network_constraints,
+        "ai_hints": operation.ai_hints
+    });
+    if let Some(rate_limit) = operation.rate_limit {
+        metadata["rate_limit"] = json!(rate_limit.0);
+    }
+    metadata
+}
+
+fn operation_info_from_manifest(id: &str, operation: OperationSection) -> OperationInfo {
+    OperationInfo {
+        id: operation_id_from_manifest(id),
+        summary: operation.description.clone(),
+        description: Some(operation.description),
+        input_schema: operation.input_schema,
+        output_schema: operation.output_schema,
+        capability: operation.capability,
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints,
+        rate_limit: operation.rate_limit.map(|rate_limit| rate_limit.0),
+        requires_approval: Some(operation.requires_approval.into()),
+    }
+}
+
+fn operation_id_from_manifest(id: &str) -> OperationId {
+    match id {
+        OP_QUERY => OperationId::from_static(OP_QUERY),
+        OP_SHORT_ANSWER => OperationId::from_static(OP_SHORT_ANSWER),
+        OP_SPOKEN_RESULT => OperationId::from_static(OP_SPOKEN_RESULT),
+        _ => OperationId::new(id.to_owned()).expect("manifest operation id should be canonical"),
     }
 }
 
@@ -634,7 +637,9 @@ mod tests {
     use ciborium::into_writer;
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
-    use fcp_prelude::{CapabilityConstraints, InstanceId, ZoneId};
+    use fcp_prelude::{
+        CapabilityConstraints, IdempotencyClass, InstanceId, RiskLevel, SafetyTier, ZoneId,
+    };
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1176,12 +1181,16 @@ mod tests {
     #[fcp_async_core::runtime::test]
     async fn introspect_returns_three_operations() {
         let connector = WolframConnector::new();
-        let introspection = connector.handle_introspect();
-        assert_eq!(introspection.operations.len(), 3);
-        let op_ids: Vec<&str> = introspection
-            .operations
+        let introspection = connector
+            .handle_introspect()
+            .expect("introspection should serialize");
+        let operations = introspection["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert_eq!(operations.len(), 3);
+        let op_ids: Vec<&str> = operations
             .iter()
-            .map(|o| o.id.as_ref())
+            .map(|operation| operation["id"].as_str().expect("operation id"))
             .collect();
         assert!(op_ids.contains(&"wolfram.query"));
         assert!(op_ids.contains(&"wolfram.short_answer"));

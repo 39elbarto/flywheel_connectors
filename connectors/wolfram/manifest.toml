@@ -1,83 +1,268 @@
+[manifest]
+format = "fcp-connector-manifest"
 schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:f64b536ede2848ce40411972b93c33ee09e311463db5a6474189b82f281295a5"
 
 [connector]
 id = "fcp.wolfram"
 name = "Wolfram Alpha Computational Knowledge"
 version = "0.1.0"
 description = "Computational knowledge queries via the Wolfram Alpha API"
-archetypes = ["request-response"]
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stateless Wolfram Alpha query connector. AppIDs must be supplied through runtime input until host-side credential injection is wired for this connector."
 
 [zones]
 home = "z:work"
 allowed_sources = ["z:owner", "z:private", "z:work"]
-forbidden = ["z:public"]
+allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = ["wolfram.query"]
 forbidden = ["system.exec", "network.listen"]
 
 [sandbox]
 profile = "strict"
-memory_limit_mb = 128
-cpu_limit_percent = 25
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
 deny_exec = true
+deny_ptrace = true
 
-# ── wolfram.query ─────────────────────────────────────────────
-
-[[provides]]
-id = "wolfram.query"
-summary = "Full computational query with pods, subpods, and assumptions"
+[provides.operations."wolfram.query"]
+description = "Full computational query with pods, subpods, and assumptions."
 capability = "wolfram.query"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["api.wolframalpha.com"]
-allowed_ports = [443]
-require_tls = true
-
-[provides.rate_limit]
+[provides.operations."wolfram.query".rate_limit]
+max = 2000
+per_ms = 2592000000
 pool_name = "wolfram.query"
-requests = 2000
-window = "86400s"
 
-# ── wolfram.short_answer ──────────────────────────────────────
+[provides.operations."wolfram.query".input_schema]
+type = "object"
+required = ["app_id"]
 
-[[provides]]
-id = "wolfram.short_answer"
-summary = "Short text answer to a computational query"
+[[provides.operations."wolfram.query".input_schema.anyOf]]
+required = ["input"]
+
+[[provides.operations."wolfram.query".input_schema.anyOf]]
+required = ["query"]
+
+[provides.operations."wolfram.query".input_schema.properties.input]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Free-form Wolfram Alpha input string."
+
+[provides.operations."wolfram.query".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Alias for input; preserved for existing callers."
+
+[provides.operations."wolfram.query".input_schema.properties.app_id]
+type = "string"
+minLength = 1
+description = "Wolfram Alpha AppID. Host credential injection is not wired for this connector yet, so callers must provide this value explicitly."
+
+[provides.operations."wolfram.query".output_schema]
+type = "object"
+required = ["success"]
+additionalProperties = true
+
+[provides.operations."wolfram.query".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."wolfram.query".output_schema.properties.numpods]
+type = "integer"
+minimum = 0
+
+[provides.operations."wolfram.query".output_schema.properties.pods]
+type = "array"
+
+[provides.operations."wolfram.query".output_schema.properties.assumptions]
+type = "array"
+
+[provides.operations."wolfram.query".network_constraints]
+host_allow = ["api.wolframalpha.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."wolfram.query".ai_hints]
+when_to_use = "Use for complex computations, data lookups, mathematical queries, unit conversions, and factual questions that need structured pods."
+common_mistakes = ["Do not send empty input/query values.", "Check the success field before trusting pods.", "Do not log AppIDs, prompts, raw provider payloads, or provider error bodies."]
+examples = ['{"input":"integrate x^2 dx","app_id":"<wolfram-app-id>"}', '{"query":"population of Tokyo","app_id":"<wolfram-app-id>"}']
+related = ["wolfram.short_answer", "wolfram.spoken_result"]
+
+[provides.operations."wolfram.short_answer"]
+description = "Short text answer to a computational query."
 capability = "wolfram.query"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["api.wolframalpha.com"]
-allowed_ports = [443]
-require_tls = true
-
-[provides.rate_limit]
+[provides.operations."wolfram.short_answer".rate_limit]
+max = 2000
+per_ms = 2592000000
 pool_name = "wolfram.query"
-requests = 2000
-window = "86400s"
 
-# ── wolfram.spoken_result ─────────────────────────────────────
+[provides.operations."wolfram.short_answer".input_schema]
+type = "object"
+required = ["app_id"]
 
-[[provides]]
-id = "wolfram.spoken_result"
-summary = "Natural language spoken-word answer to a query"
+[[provides.operations."wolfram.short_answer".input_schema.anyOf]]
+required = ["input"]
+
+[[provides.operations."wolfram.short_answer".input_schema.anyOf]]
+required = ["query"]
+
+[provides.operations."wolfram.short_answer".input_schema.properties.input]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Free-form Wolfram Alpha input string."
+
+[provides.operations."wolfram.short_answer".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Alias for input; preserved for existing callers."
+
+[provides.operations."wolfram.short_answer".input_schema.properties.app_id]
+type = "string"
+minLength = 1
+description = "Wolfram Alpha AppID. Host credential injection is not wired for this connector yet, so callers must provide this value explicitly."
+
+[provides.operations."wolfram.short_answer".output_schema]
+type = "object"
+required = ["answer"]
+additionalProperties = true
+
+[provides.operations."wolfram.short_answer".output_schema.properties.answer]
+type = "string"
+
+[provides.operations."wolfram.short_answer".network_constraints]
+host_allow = ["api.wolframalpha.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
+[provides.operations."wolfram.short_answer".ai_hints]
+when_to_use = "Use for quick factual answers, unit conversions, and simple calculations where a single plain-text result is enough."
+common_mistakes = ["Do not use when the caller needs pods, assumptions, images, or detailed structured output.", "Do not send empty input/query values.", "Do not log AppIDs, prompts, raw provider payloads, or provider error bodies."]
+examples = ['{"input":"distance from Earth to Mars","app_id":"<wolfram-app-id>"}', '{"query":"100 USD to EUR","app_id":"<wolfram-app-id>"}']
+related = ["wolfram.query", "wolfram.spoken_result"]
+
+[provides.operations."wolfram.spoken_result"]
+description = "Natural language spoken-word answer to a query."
 capability = "wolfram.query"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["api.wolframalpha.com"]
-allowed_ports = [443]
-require_tls = true
-
-[provides.rate_limit]
+[provides.operations."wolfram.spoken_result".rate_limit]
+max = 2000
+per_ms = 2592000000
 pool_name = "wolfram.query"
-requests = 2000
-window = "86400s"
+
+[provides.operations."wolfram.spoken_result".input_schema]
+type = "object"
+required = ["app_id"]
+
+[[provides.operations."wolfram.spoken_result".input_schema.anyOf]]
+required = ["input"]
+
+[[provides.operations."wolfram.spoken_result".input_schema.anyOf]]
+required = ["query"]
+
+[provides.operations."wolfram.spoken_result".input_schema.properties.input]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Free-form Wolfram Alpha input string."
+
+[provides.operations."wolfram.spoken_result".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 4096
+description = "Alias for input; preserved for existing callers."
+
+[provides.operations."wolfram.spoken_result".input_schema.properties.app_id]
+type = "string"
+minLength = 1
+description = "Wolfram Alpha AppID. Host credential injection is not wired for this connector yet, so callers must provide this value explicitly."
+
+[provides.operations."wolfram.spoken_result".output_schema]
+type = "object"
+required = ["spoken"]
+additionalProperties = true
+
+[provides.operations."wolfram.spoken_result".output_schema.properties.spoken]
+type = "string"
+
+[provides.operations."wolfram.spoken_result".network_constraints]
+host_allow = ["api.wolframalpha.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 65536
+
+[provides.operations."wolfram.spoken_result".ai_hints]
+when_to_use = "Use when the caller needs a conversational spoken-text answer for voice output or natural language responses."
+common_mistakes = ["Do not use when the caller needs structured pods or images.", "Do not send empty input/query values.", "Do not log AppIDs, prompts, raw provider payloads, or provider error bodies."]
+examples = ['{"input":"how far is the moon","app_id":"<wolfram-app-id>"}']
+related = ["wolfram.query", "wolfram.short_answer"]

@@ -69,11 +69,7 @@ async fn handle_message(connector: &mut WolframConnector, message: &str) -> serd
         "doctor" => connector.handle_doctor().await,
         "self_check" => connector.handle_self_check().await,
         "simulate" => connector.handle_simulate(params).await,
-        "introspect" => serde_json::to_value(connector.handle_introspect()).map_err(|e| {
-            fcp_core::FcpError::Internal {
-                message: format!("Failed to serialize introspection: {e}"),
-            }
-        }),
+        "introspect" => connector.handle_introspect(),
         "invoke" => connector.handle_invoke(params).await,
         "shutdown" => {
             connector.shutdown();

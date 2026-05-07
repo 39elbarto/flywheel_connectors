@@ -73,8 +73,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
 ];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "anthropic",
-    "apple-notes",
-    "apple-reminders",
     "aws-bedrock",
     "dingtalk",
     "email-generic",

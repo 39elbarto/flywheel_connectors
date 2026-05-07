@@ -47,6 +47,15 @@ type = "object"
 [provides.operations."apple_notes.health".output_schema]
 type = "object"
 
+[provides.operations."apple_notes.health".ai_hints]
+when_to_use = "Use this before Apple Notes operations on a new macOS host or when diagnosing a failed Notes automation request."
+common_mistakes = [
+    "Treating a healthy connector as proof that the Notes app has granted Automation permission; creation and reads can still fail until macOS grants the permission.",
+    "Running this on Linux or Windows and interpreting the platform failure as a note-data problem.",
+]
+examples = ['{"check":"platform-and-configuration"}']
+related = ["apple_notes.list_notes", "apple_notes.search_notes"]
+
 [provides.operations."apple_notes.list_notes"]
 description = "List Apple Notes note summaries"
 capability = "apple_notes.read"
@@ -66,6 +75,15 @@ type = "object"
 
 [provides.operations."apple_notes.list_notes".output_schema.properties.notes]
 type = "array"
+
+[provides.operations."apple_notes.list_notes".ai_hints]
+when_to_use = "Use this when an agent needs a browseable inventory of Apple Notes before choosing a specific note to read."
+common_mistakes = [
+    "Assuming summaries include full note bodies; use apple_notes.get_note after selecting the note identifier.",
+    "Using a display folder name that does not exist in the local Notes app and treating the empty result as global absence.",
+]
+examples = ['{"folder":"Project Plans"}']
+related = ["apple_notes.get_note", "apple_notes.search_notes"]
 
 [provides.operations."apple_notes.search_notes"]
 description = "Search Apple Notes by title/body substring"
@@ -88,6 +106,15 @@ type = "object"
 [provides.operations."apple_notes.search_notes".output_schema.properties.notes]
 type = "array"
 
+[provides.operations."apple_notes.search_notes".ai_hints]
+when_to_use = "Use this when the user gives a keyword, topic, or phrase and the agent needs candidate Apple Notes before reading one."
+common_mistakes = [
+    "Sending an empty or whitespace query; the connector rejects empty search text.",
+    "Assuming substring search has semantic ranking; inspect candidate titles and folders before acting on a result.",
+]
+examples = ['{"query":"release checklist"}']
+related = ["apple_notes.get_note", "apple_notes.list_notes"]
+
 [provides.operations."apple_notes.get_note"]
 description = "Get one Apple Note by note identifier"
 capability = "apple_notes.read"
@@ -108,6 +135,15 @@ type = "object"
 
 [provides.operations."apple_notes.get_note".output_schema.properties.note]
 type = "object"
+
+[provides.operations."apple_notes.get_note".ai_hints]
+when_to_use = "Use this after list_notes or search_notes returns a note identifier and the agent needs the full note body."
+common_mistakes = [
+    "Passing a note title instead of the stable note identifier returned by list_notes or search_notes.",
+    "Logging or forwarding the returned body without considering that Apple Notes content may be private user data.",
+]
+examples = ['{"note_id":"x-coredata://NOTE-ID"}']
+related = ["apple_notes.list_notes", "apple_notes.search_notes"]
 
 [provides.operations."apple_notes.create_note"]
 description = "Create a new Apple Note"
@@ -135,6 +171,16 @@ type = "object"
 
 [provides.operations."apple_notes.create_note".output_schema.properties.note]
 type = "object"
+
+[provides.operations."apple_notes.create_note".ai_hints]
+when_to_use = "Use this when the user explicitly wants a new Apple Notes note created from agent-generated or user-provided content."
+common_mistakes = [
+    "Creating notes without policy approval or clear user intent; this is a write operation in the owner/private zone.",
+    "Using an empty title; the connector rejects blank note titles.",
+    "Embedding secrets or access tokens in example or audit payloads.",
+]
+examples = ['{"title":"Release checklist","body":"- Review conformance logs\\n- Confirm rollback plan","folder":"Project Plans"}']
+related = ["apple_notes.list_notes", "apple_notes.get_note"]
 
 [sandbox]
 profile = "strict"

@@ -249,4 +249,38 @@ mod tests {
             "Apple Reminders uses a bounded connector-local osascript carveout"
         );
     }
+
+    #[test]
+    fn manifest_ai_hints_are_agent_actionable_and_redacted() {
+        let manifest = parsed_manifest();
+        let sensitive_markers = ["api_key", "password", "secret", "token", "@example.com"];
+        for (operation_id, operation) in &manifest.provides.operations {
+            assert!(
+                !operation.ai_hints.when_to_use.trim().is_empty(),
+                "{operation_id} must explain when to use the operation"
+            );
+            assert!(
+                !operation.ai_hints.examples.is_empty(),
+                "{operation_id} must include at least one synthetic example"
+            );
+            assert!(
+                !operation.ai_hints.common_mistakes.is_empty(),
+                "{operation_id} must document at least one concrete mistake"
+            );
+            for example in &operation.ai_hints.examples {
+                let parsed = serde_json::from_str::<serde_json::Value>(example);
+                assert!(
+                    matches!(parsed.as_ref(), Ok(value) if value.is_object()),
+                    "{operation_id} example should be a JSON object: {example}"
+                );
+                let lower = example.to_ascii_lowercase();
+                for marker in sensitive_markers {
+                    assert!(
+                        !lower.contains(marker),
+                        "{operation_id} example should not include sensitive marker {marker}"
+                    );
+                }
+            }
+        }
+    }
 }

@@ -59,7 +59,7 @@ ciborium = "0.2"
 sha2 = "0.10"
 
 [dev-dependencies]
-opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "trace"] }
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "trace", "metrics"] }
 tokio = { workspace = true }
 tokio-stream = { version = "0.1", features = ["net"] }
 tonic = { version = "0.14", default-features = false, features = ["transport", "codegen", "router"] }

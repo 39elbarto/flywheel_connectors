@@ -18,6 +18,7 @@ use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 #[cfg(feature = "otlp")]
 use opentelemetry_sdk::{
     Resource,
+    metrics::SdkMeterProvider,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
 
@@ -29,6 +30,8 @@ use crate::{
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 #[cfg(feature = "otlp")]
 static OTLP_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
+#[cfg(feature = "otlp")]
+static OTLP_METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
 
 /// Initialize the Prometheus metrics exporter.
 ///
@@ -159,11 +162,7 @@ pub fn init_otlp_tracer_with_sample_rate_options_and_timeout(
     validate_otlp_endpoint(endpoint)?;
     validate_otlp_headers(headers)?;
     validate_otlp_resource_attributes(resource_attributes)?;
-    if export_timeout.is_some_and(|timeout| timeout.is_zero()) {
-        return Err(TelemetryError::Config(
-            "OTLP export timeout must be greater than zero".to_string(),
-        ));
-    }
+    validate_otlp_export_timeout(export_timeout)?;
     init_otlp_tracer_with_sample_rate_impl(
         service_name,
         endpoint,
@@ -172,6 +171,67 @@ pub fn init_otlp_tracer_with_sample_rate_options_and_timeout(
         resource_attributes,
         export_timeout,
     )
+}
+
+/// Initialize the OTLP metrics exporter with collector headers and resource attributes.
+///
+/// Header values are only used to configure the exporter and are never emitted
+/// in diagnostics from this crate.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::MetricsInit`] if the exporter cannot be initialized.
+pub fn init_otlp_metrics_with_options(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+) -> Result<(), TelemetryError> {
+    init_otlp_metrics_with_options_and_timeout(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        None,
+    )
+}
+
+/// Initialize the OTLP metrics exporter with an optional collector RPC timeout.
+///
+/// This installs an OpenTelemetry SDK meter provider. Callers can then emit
+/// metrics through `opentelemetry::global::meter(...)` and use
+/// [`flush_otlp_metrics`] to force an export before shutdown.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::MetricsInit`] if the exporter cannot be initialized.
+pub fn init_otlp_metrics_with_options_and_timeout(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    validate_otlp_export_timeout(export_timeout)?;
+    init_otlp_metrics_with_options_impl(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        export_timeout,
+    )
+}
+
+fn validate_otlp_export_timeout(export_timeout: Option<Duration>) -> Result<(), TelemetryError> {
+    if export_timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err(TelemetryError::Config(
+            "OTLP export timeout must be greater than zero".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(feature = "otlp")]
@@ -199,18 +259,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
         .build()
         .map_err(|e| TelemetryError::TracingInit(e.to_string()))?;
 
-    let mut resource_values = Vec::with_capacity(resource_attributes.len() + 1);
-    resource_values.push(KeyValue::new("service.name", service_name.to_string()));
-    resource_values.extend(
-        resource_attributes
-            .iter()
-            .filter(|attribute| attribute.key != "service.name")
-            .map(|attribute| KeyValue::new(attribute.key.clone(), attribute.value.clone())),
-    );
-
-    let resource = Resource::builder_empty()
-        .with_attributes(resource_values)
-        .build();
+    let resource = otlp_resource(service_name, resource_attributes);
 
     // NaN maps to AlwaysOff (clamp + compare: NaN != NaN so both
     // `>= 1.0` and `<= 0.0` are false, but we want fail-safe behavior
@@ -247,6 +296,98 @@ fn init_otlp_tracer_with_sample_rate_impl(
         "OTLP trace exporter initialized"
     );
 
+    Ok(())
+}
+
+#[cfg(feature = "otlp")]
+fn init_otlp_metrics_with_options_impl(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    let mut exporter_builder = opentelemetry_otlp::MetricExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint);
+
+    if let Some(timeout) = export_timeout {
+        exporter_builder = exporter_builder.with_timeout(timeout);
+    }
+
+    if !headers.is_empty() {
+        exporter_builder = exporter_builder.with_metadata(otlp_metadata_from_headers(headers)?);
+    }
+
+    let exporter = exporter_builder
+        .build()
+        .map_err(|e| TelemetryError::MetricsInit(e.to_string()))?;
+    let provider = SdkMeterProvider::builder()
+        .with_periodic_exporter(exporter)
+        .with_resource(otlp_resource(service_name, resource_attributes))
+        .build();
+
+    opentelemetry::global::set_meter_provider(provider.clone());
+    let _ = OTLP_METER_PROVIDER.set(provider);
+
+    tracing::info!(
+        endpoint = %otlp_endpoint_log_label(endpoint),
+        collector_header_count = headers.len(),
+        resource_attribute_count = resource_attributes.len(),
+        export_timeout_ms = export_timeout.map(|timeout| timeout.as_millis()),
+        "OTLP metrics exporter initialized"
+    );
+
+    Ok(())
+}
+
+/// Force-flush the installed OTLP meter provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::MetricsInit`] if the SDK reports a flush failure.
+#[cfg(feature = "otlp")]
+pub fn flush_otlp_metrics() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_METER_PROVIDER.get() {
+        provider.force_flush().map_err(|e| {
+            TelemetryError::MetricsInit(format!("OTLP metrics force_flush failed: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Force-flush the installed OTLP meter provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so flushing is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn flush_otlp_metrics() -> Result<(), TelemetryError> {
+    Ok(())
+}
+
+/// Shut down the installed OTLP meter provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::MetricsInit`] if the SDK reports a shutdown failure.
+#[cfg(feature = "otlp")]
+pub fn shutdown_otlp_metrics() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_METER_PROVIDER.get() {
+        provider.shutdown().map_err(|e| {
+            TelemetryError::MetricsInit(format!("OTLP metrics shutdown failed: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Shut down the installed OTLP meter provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so shutdown is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn shutdown_otlp_metrics() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -312,6 +453,35 @@ fn init_otlp_tracer_with_sample_rate_impl(
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
     ))
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_otlp_metrics_with_options_impl(
+    _service_name: &str,
+    _endpoint: &str,
+    _headers: &[OtlpHeader],
+    _resource_attributes: &[OtlpResourceAttribute],
+    _export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    Err(TelemetryError::Config(
+        "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
+    ))
+}
+
+#[cfg(feature = "otlp")]
+fn otlp_resource(service_name: &str, resource_attributes: &[OtlpResourceAttribute]) -> Resource {
+    let mut resource_values = Vec::with_capacity(resource_attributes.len() + 1);
+    resource_values.push(KeyValue::new("service.name", service_name.to_string()));
+    resource_values.extend(
+        resource_attributes
+            .iter()
+            .filter(|attribute| attribute.key != "service.name")
+            .map(|attribute| KeyValue::new(attribute.key.clone(), attribute.value.clone())),
+    );
+
+    Resource::builder_empty()
+        .with_attributes(resource_values)
+        .build()
 }
 
 #[cfg(feature = "otlp")]

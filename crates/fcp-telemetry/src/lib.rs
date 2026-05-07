@@ -962,6 +962,9 @@ pub enum TelemetryError {
 /// if you need explicit flush behavior.
 pub fn shutdown_telemetry() {
     tracing::info!("Telemetry shutdown requested");
+    if let Err(error) = crate::export::shutdown_otlp_metrics() {
+        tracing::warn!(?error, "OTLP metrics shutdown failed");
+    }
     if let Err(error) = crate::export::shutdown_otlp_tracer() {
         tracing::warn!(?error, "OTLP tracer shutdown failed");
     }

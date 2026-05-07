@@ -848,7 +848,6 @@ pub fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
 fn init_telemetry_with<L, P, M, G, T>(
     state: &OnceLock<TelemetryState>,
     config: TelemetryConfig,
-    otlp_enabled: bool,
     init_logging_fn: L,
     init_prometheus_fn: P,
     init_otlp_metrics_fn: M,
@@ -874,7 +873,7 @@ where
         return Ok(());
     }
 
-    let otlp_endpoint = if otlp_enabled && config.otlp_enabled {
+    let otlp_endpoint = if config.otlp_enabled {
         config.otlp_endpoint.as_deref()
     } else {
         None
@@ -937,7 +936,6 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
     init_telemetry_with(
         &TELEMETRY,
         config,
-        true,
         init_logging,
         init_prometheus_exporter,
         init_otlp_metrics_with_options,
@@ -952,10 +950,11 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
 ///
 /// Returns an error if initialization fails.
 pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError> {
+    let mut config = config;
+    config.otlp_enabled = false;
     init_telemetry_with(
         &TELEMETRY,
         config,
-        false,
         init_logging,
         init_prometheus_exporter,
         init_otlp_metrics_with_options,
@@ -1007,6 +1006,39 @@ pub fn shutdown_telemetry() {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    type CapturedOtlpConfig = Option<(usize, usize, String, String)>;
+
+    fn capture_otlp_config(
+        captured: &std::sync::Mutex<CapturedOtlpConfig>,
+        signal: &str,
+        headers: &[OtlpHeader],
+        attributes: &[OtlpResourceAttribute],
+    ) -> Result<(), TelemetryError> {
+        let header_name = headers
+            .first()
+            .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
+            .name
+            .clone();
+        let attribute_key = attributes
+            .first()
+            .ok_or_else(|| TelemetryError::Config("expected OTLP resource attribute".to_string()))?
+            .key
+            .clone();
+        *captured.lock().map_err(|_| {
+            TelemetryError::Config(format!("captured OTLP {signal} config lock poisoned"))
+        })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
+        Ok(())
+    }
+
+    fn captured_otlp_config(
+        captured: std::sync::Mutex<CapturedOtlpConfig>,
+        signal: &str,
+    ) -> Result<CapturedOtlpConfig, TelemetryError> {
+        captured.into_inner().map_err(|_| {
+            TelemetryError::Config(format!("captured OTLP {signal} config lock poisoned"))
+        })
+    }
 
     #[test]
     #[allow(clippy::float_cmp)] // exact float comparison is safe for sample rate
@@ -1510,18 +1542,20 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _, _| {
-                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _| {
-                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _, _| {
-                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, _, _| {
+                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _| {
+                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _, _| {
+                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
         )
         .unwrap();
 
@@ -1537,18 +1571,20 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _, _| {
-                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _| {
-                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _, _| {
-                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, _, _| {
+                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _| {
+                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _, _| {
+                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
         )
         .unwrap();
 
@@ -1577,9 +1613,11 @@ mod tests {
                 Err(TelemetryError::LoggingInit("boom".to_string()))
             },
             |_| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _, _| Ok(()),
+            otlp_init_hooks(
+                |_, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
+                |_, _, _, _, _| Ok(()),
+            ),
         );
 
         assert!(matches!(first, Err(TelemetryError::LoggingInit(_))));
@@ -1594,9 +1632,11 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _, _| Ok(()),
+            otlp_init_hooks(
+                |_, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
+                |_, _, _, _, _| Ok(()),
+            ),
         )
         .unwrap();
 
@@ -1626,12 +1666,14 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, rate, _, _| {
-                *captured_rate.lock().expect("lock") = Some(rate);
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
+                |_, _, rate, _, _| {
+                    *captured_rate.lock().expect("lock") = Some(rate);
+                    Ok(())
+                },
+            ),
         )
         .unwrap();
 
@@ -1667,71 +1709,22 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _, headers, attributes| {
-                let header_name = headers
-                    .first()
-                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
-                    .name
-                    .clone();
-                let attribute_key = attributes
-                    .first()
-                    .ok_or_else(|| {
-                        TelemetryError::Config("expected OTLP resource attribute".to_string())
-                    })?
-                    .key
-                    .clone();
-                *captured_metrics.lock().map_err(|_| {
-                    TelemetryError::Config("captured OTLP metrics config lock poisoned".to_string())
-                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
-                Ok(())
-            },
-            |_, _, headers, attributes| {
-                let header_name = headers
-                    .first()
-                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
-                    .name
-                    .clone();
-                let attribute_key = attributes
-                    .first()
-                    .ok_or_else(|| {
-                        TelemetryError::Config("expected OTLP resource attribute".to_string())
-                    })?
-                    .key
-                    .clone();
-                *captured_logs.lock().map_err(|_| {
-                    TelemetryError::Config("captured OTLP logs config lock poisoned".to_string())
-                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
-                Ok(())
-            },
-            |_, _, _, headers, attributes| {
-                let header_name = headers
-                    .first()
-                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
-                    .name
-                    .clone();
-                let attribute_key = attributes
-                    .first()
-                    .ok_or_else(|| {
-                        TelemetryError::Config("expected OTLP resource attribute".to_string())
-                    })?
-                    .key
-                    .clone();
-                *captured_traces.lock().map_err(|_| {
-                    TelemetryError::Config("captured OTLP traces config lock poisoned".to_string())
-                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, headers, attributes| {
+                    capture_otlp_config(&captured_metrics, "metrics", headers, attributes)
+                },
+                |_, _, headers, attributes| {
+                    capture_otlp_config(&captured_logs, "logs", headers, attributes)
+                },
+                |_, _, _, headers, attributes| {
+                    capture_otlp_config(&captured_traces, "traces", headers, attributes)
+                },
+            ),
         )?;
 
-        let captured_logs = captured_logs.into_inner().map_err(|_| {
-            TelemetryError::Config("captured OTLP logs config lock poisoned".to_string())
-        })?;
-        let captured_metrics = captured_metrics.into_inner().map_err(|_| {
-            TelemetryError::Config("captured OTLP metrics config lock poisoned".to_string())
-        })?;
-        let captured_traces = captured_traces.into_inner().map_err(|_| {
-            TelemetryError::Config("captured OTLP traces config lock poisoned".to_string())
-        })?;
+        let captured_logs = captured_otlp_config(captured_logs, "logs")?;
+        let captured_metrics = captured_otlp_config(captured_metrics, "metrics")?;
+        let captured_traces = captured_otlp_config(captured_traces, "traces")?;
         assert_eq!(
             captured_logs,
             Some((
@@ -1775,18 +1768,20 @@ mod tests {
             false,
             |_| Ok(()),
             |_| Ok(()),
-            |_, _, _, _| {
-                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _| {
-                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _, _| {
-                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, _, _| {
+                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _| {
+                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _, _| {
+                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
         )
         .unwrap();
 
@@ -1906,18 +1901,20 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
-            |_, _, _, _| {
-                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _| {
-                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
-            |_, _, _, _, _| {
-                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            },
+            otlp_init_hooks(
+                |_, _, _, _| {
+                    otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _| {
+                    otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+                |_, _, _, _, _| {
+                    otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                },
+            ),
         );
 
         assert!(matches!(result, Err(TelemetryError::Config(_))));
@@ -1948,9 +1945,11 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _| Ok(()),
-            |_, _, _, _, _| Ok(()),
+            otlp_init_hooks(
+                |_, _, _, _| Ok(()),
+                |_, _, _, _| Ok(()),
+                |_, _, _, _, _| Ok(()),
+            ),
         );
 
         assert!(matches!(result, Err(TelemetryError::Config(_))));

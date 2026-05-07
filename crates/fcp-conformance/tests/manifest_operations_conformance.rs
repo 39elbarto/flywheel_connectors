@@ -867,7 +867,6 @@ fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
         "apple-reminders",
         "dingtalk",
-        "email-generic",
         "firebase",
         "google-people",
         "google-workspace-events",

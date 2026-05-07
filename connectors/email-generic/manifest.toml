@@ -32,12 +32,30 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.health.ai_hints]
+when_to_use = "Use this before mailbox search or SMTP send work to confirm the configured account, IMAP reachability, and inbound monitor policy are healthy."
+common_mistakes = [
+    "Treating a green health response as proof that SMTP send permissions work; this operation primarily validates read-side connectivity and policy state.",
+    "Ignoring monitor-policy warnings about allowed senders or automated mail filtering before relying on inbound events.",
+]
+examples = ['{"check":"imap_and_monitor_policy"}']
+related = ["list_mailboxes", "search_messages"]
+
 [provides.operations.list_mailboxes]
 summary = "List IMAP mailboxes"
 capability = "email_generic.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.list_mailboxes.ai_hints]
+when_to_use = "Use this when an agent needs the exact provider mailbox names before searching messages, especially on accounts with localized or nested folders."
+common_mistakes = [
+    "Assuming every provider exposes an INBOX plus Sent folder with the same casing or delimiter.",
+    "Searching an guessed mailbox name instead of listing folders first, which can produce empty results that look like no matching mail exists.",
+]
+examples = ['{"include_special_use":true}']
+related = ["search_messages", "health"]
 
 [provides.operations.search_messages]
 summary = "Search IMAP messages and return matching UIDs"
@@ -46,12 +64,32 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.search_messages.ai_hints]
+when_to_use = "Use this to find candidate email message UIDs in a known mailbox before a follow-up workflow fetches or acts on specific messages."
+common_mistakes = [
+    "Passing a natural-language request as the IMAP query instead of a provider-supported search expression.",
+    "Forgetting that returned UIDs are mailbox-scoped and cannot be safely reused in a different folder.",
+    "Logging full subjects or sender addresses from follow-up processing instead of keeping audit output redacted.",
+]
+examples = ['{"mailbox":"INBOX","query":"FROM \"alerts@example.com\" SINCE 01-May-2026"}']
+related = ["list_mailboxes", "health"]
+
 [provides.operations.send_message]
 summary = "Send an email through SMTP"
 capability = "email_generic.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+
+[provides.operations.send_message.ai_hints]
+when_to_use = "Use this only after the agent has explicit approval to send mail from the configured SMTP account to the requested recipients."
+common_mistakes = [
+    "Retrying a timed-out send without checking idempotency, which can deliver duplicate email.",
+    "Omitting recipients or mixing To/Cc semantics when the task requires a specific audience.",
+    "Including secrets, tokens, or unnecessary personal data in the body because SMTP delivery leaves the FCP trust boundary.",
+]
+examples = ['{"to":["ops@example.com"],"subject":"Deployment check complete","body":"The production check completed successfully."}']
+related = ["health"]
 
 [sandbox]
 profile = "strict"

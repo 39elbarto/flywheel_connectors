@@ -5270,6 +5270,7 @@ dependencies = [
  "async-trait",
  "fcp-async-core",
  "fcp-core",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "fcp-testkit",

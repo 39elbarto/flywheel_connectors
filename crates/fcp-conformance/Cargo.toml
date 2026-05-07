@@ -78,6 +78,7 @@ url.workspace = true
 criterion.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+toml.workspace = true
 
 [[bench]]
 name = "cutover_harness"

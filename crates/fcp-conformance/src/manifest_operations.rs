@@ -230,7 +230,7 @@ pub fn audit_connector_text(
     manifest_raw: &str,
     source_texts: &[&str],
 ) -> ConnectorManifestOperationAudit {
-    let manifest_value = toml::from_str::<toml::Value>(manifest_raw);
+    let manifest_value = toml::from_str::<toml::Table>(manifest_raw).map(toml::Value::Table);
     let (connector_id, connector_slug, manifest_operation_count, parse_error) = match manifest_value
     {
         Ok(value) => (
@@ -312,7 +312,10 @@ fn runtime_operation_ids_from_sources(
 
     let mut ids = BTreeSet::new();
     for source in source_texts {
-        for candidate in json_id_string_literals(source) {
+        for candidate in json_id_string_literals(source)
+            .into_iter()
+            .chain(operation_const_string_literals(source))
+        {
             if prefixes
                 .iter()
                 .any(|prefix| candidate.starts_with(prefix.as_str()))
@@ -323,6 +326,24 @@ fn runtime_operation_ids_from_sources(
         }
     }
     ids.into_iter().collect()
+}
+
+fn operation_const_string_literals(source: &str) -> Vec<String> {
+    let mut literals = Vec::new();
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("const OP_") {
+            continue;
+        }
+        let Some((_, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let Some((literal, _)) = parse_jsonish_string_literal(value.trim()) else {
+            continue;
+        };
+        literals.push(literal);
+    }
+    literals
 }
 
 fn json_id_string_literals(source: &str) -> Vec<String> {
@@ -648,6 +669,7 @@ id = "fcp.demo"
             &[
                 r#""id": "demo-connector.beta", "id": "demo-connector.alpha", "id": "demo-connector.alpha""#,
                 r#""id": "demo_connector.gamma", "capability": "demo-connector.not_an_operation""#,
+                r#"const OP_DELTA: &str = "demo-connector.delta";"#,
             ],
         );
 
@@ -656,6 +678,7 @@ id = "fcp.demo"
             vec![
                 "demo-connector.alpha",
                 "demo-connector.beta",
+                "demo-connector.delta",
                 "demo_connector.gamma"
             ]
         );

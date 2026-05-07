@@ -1600,14 +1600,29 @@ enum AuthCommand {
     /// Store or replace credentials for one connector.
     Add(AuthAddArgs),
 
+    /// Create or replace a host-managed provider auth profile.
+    Login(AuthLoginArgs),
+
     /// List all stored connector credentials with redacted fields.
     List,
+
+    /// List or show host-managed provider auth profiles.
+    Profiles(AuthProfilesArgs),
 
     /// Show one stored credential with redacted fields and status hints.
     Show(TargetArgs),
 
     /// Remove one stored credential from the local store (requires `--yes`).
     Remove(AuthRemoveArgs),
+
+    /// Remove one host-managed provider auth profile (requires `--yes`).
+    RemoveProfile(AuthRemoveProfileArgs),
+
+    /// Refresh host-managed provider auth profiles when their method supports refresh.
+    Refresh(AuthRefreshArgs),
+
+    /// Import provider profiles from a Claude Code JSON config file.
+    MigrateFromClaudeCode(AuthMigrateFromClaudeCodeArgs),
 
     /// Run local structural validation and expiry checks without contacting the live connector.
     Test(TargetArgs),
@@ -1712,6 +1727,97 @@ struct AuthRemoveArgs {
     /// Confirm deleting the stored credential from the local credential store.
     #[arg(long)]
     yes: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthLoginArgs {
+    /// Provider id, for example `github`, `openai`, or `anthropic`.
+    provider: String,
+
+    /// Profile id to create or replace.
+    #[arg(long, default_value = "default")]
+    profile: String,
+
+    /// Display label for the provider profile.
+    #[arg(long)]
+    label: Option<String>,
+
+    /// Lower values are preferred when the host selects an active profile.
+    #[arg(long, default_value_t = 0)]
+    priority: i32,
+
+    /// API key or bearer token value to store in the host auth profile.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    api_key: String,
+
+    /// Header receiving the credential. Defaults to Authorization bearer auth.
+    #[arg(long)]
+    header_name: Option<String>,
+
+    /// Optional credential value prefix such as `Bearer`.
+    #[arg(long)]
+    value_prefix: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthProfilesArgs {
+    /// Provider id to inspect.
+    provider: String,
+
+    /// Optional profile id. Omit to list all profiles for the provider.
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthRefreshArgs {
+    /// Provider id to refresh.
+    provider: String,
+
+    /// Optional profile id. Omit to refresh every profile for the provider.
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthRemoveProfileArgs {
+    /// Provider id to mutate.
+    provider: String,
+
+    /// Profile id to remove.
+    #[arg(long)]
+    profile: String,
+
+    /// Confirm deleting the host-managed provider auth profile.
+    #[arg(long)]
+    yes: bool,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthMigrateFromClaudeCodeArgs {
+    /// Provider id receiving the imported profile.
+    provider: String,
+
+    /// Profile id to create or replace.
+    #[arg(long, default_value = "claude-code")]
+    profile: String,
+
+    /// Display label for the imported profile.
+    #[arg(long)]
+    label: Option<String>,
+
+    /// Lower values are preferred when the host selects an active profile.
+    #[arg(long, default_value_t = 0)]
+    priority: i32,
+
+    /// Path to the Claude Code JSON config. Defaults to ~/.claude.json.
+    #[arg(long)]
+    input: Option<PathBuf>,
+
+    /// JSON key to import from the config.
+    #[arg(long, default_value = "apiKey")]
+    key: String,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -3252,7 +3358,7 @@ fn dispatch(cli: &Cli) -> Result<DispatchOutcome> {
         Commands::Unpin(args) => unpin_dispatch(args, cli.host.as_deref())?,
         Commands::Lifecycle(args) => lifecycle_dispatch(args, cli.host.as_deref())?,
         Commands::Rollout(args) => rollout_dispatch(args, cli.host.as_deref())?,
-        Commands::Auth(args) => auth_dispatch(args)?,
+        Commands::Auth(args) => auth_dispatch(args, cli.host.as_deref())?,
         Commands::Config(args) => config_dispatch(args, cli.host.as_deref())?,
         Commands::Invoke(args) => invoke_dispatch("invoke", args, cli.host.as_deref())?,
         Commands::Simulate(args) => invoke_dispatch("simulate", args, cli.host.as_deref())?,
@@ -4340,6 +4446,35 @@ impl HostAdminClient {
                 "to_version": to_version,
             }),
         )
+    }
+
+    fn auth_profile_upsert(&self, provider: &str, request: &Value) -> Result<Value> {
+        self.post_json(&format!("/rpc/admin/auth/profiles/{provider}"), request)
+    }
+
+    fn auth_profiles(&self, provider: &str) -> Result<Value> {
+        self.get_json(&format!("/rpc/admin/auth/profiles/{provider}"))
+    }
+
+    fn auth_profile(&self, provider: &str, profile_id: &str) -> Result<Value> {
+        self.get_json(&format!("/rpc/admin/auth/profiles/{provider}/{profile_id}"))
+    }
+
+    fn auth_profile_refresh(&self, provider: &str, profile_id: Option<&str>) -> Result<Value> {
+        match profile_id {
+            Some(profile_id) => self.post_json(
+                &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh"),
+                &json!({}),
+            ),
+            None => self.post_json(
+                &format!("/rpc/admin/auth/profiles/{provider}/refresh"),
+                &json!({}),
+            ),
+        }
+    }
+
+    fn auth_profile_delete(&self, provider: &str, profile_id: &str) -> Result<Value> {
+        self.delete_json(&format!("/rpc/admin/auth/profiles/{provider}/{profile_id}"))
     }
 
     fn get_json<T: DeserializeOwned>(&self, path: &str) -> Result<T> {
@@ -11815,21 +11950,468 @@ fn rollout_dispatch(args: &RolloutArgs, explicit_host: Option<&str>) -> Result<D
     }
 }
 
-fn auth_dispatch(args: &AuthArgs) -> Result<DispatchOutcome> {
+fn auth_dispatch(args: &AuthArgs, explicit_host: Option<&str>) -> Result<DispatchOutcome> {
     let store = CredentialStore::default_path();
-    auth_dispatch_with_store(args, &store)
+    auth_dispatch_with_store_and_host(args, &store, explicit_host)
 }
 
+#[cfg(test)]
 fn auth_dispatch_with_store(args: &AuthArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
+    auth_dispatch_with_store_and_host(args, store, None)
+}
+
+fn auth_dispatch_with_store_and_host(
+    args: &AuthArgs,
+    store: &CredentialStore,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
     match &args.command {
         AuthCommand::Add(add_args) => auth_add_dispatch(add_args, store),
+        AuthCommand::Login(login_args) => auth_login_dispatch(login_args, explicit_host),
         AuthCommand::List => auth_list_dispatch(store),
+        AuthCommand::Profiles(profiles_args) => {
+            auth_profiles_dispatch(profiles_args, explicit_host)
+        }
         AuthCommand::Show(target) => auth_show_dispatch(target, store),
         AuthCommand::Remove(target) => auth_remove_dispatch(target, store),
+        AuthCommand::RemoveProfile(remove_args) => {
+            auth_remove_profile_dispatch(remove_args, explicit_host)
+        }
+        AuthCommand::Refresh(refresh_args) => auth_refresh_dispatch(refresh_args, explicit_host),
+        AuthCommand::MigrateFromClaudeCode(migrate_args) => {
+            auth_migrate_from_claude_code_dispatch(migrate_args, explicit_host)
+        }
         AuthCommand::Test(target) => auth_test_dispatch(target, store),
         AuthCommand::Verify(target) => auth_verify_dispatch(target, store),
         AuthCommand::Status(status_args) => auth_status_dispatch(status_args, store),
     }
+}
+
+fn auth_host_config(
+    subcommand: &str,
+    details: Value,
+    next_actions: Vec<String>,
+    explicit_host: Option<&str>,
+) -> Result<ResolvedHostConfig, DispatchOutcome> {
+    match resolve_host_config(explicit_host) {
+        Ok(Some(host)) => Ok(host),
+        Ok(None) => Err(missing_host_dispatch(
+            "auth",
+            json!({
+                "subcommand": subcommand,
+                "request": details,
+            }),
+            next_actions,
+        )),
+        Err(error) => Err(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "auth",
+                "subcommand": subcommand,
+                "error": {
+                    "type": "host-context-error",
+                    "message": error.to_string(),
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    "Retry with `--host <endpoint>`.".to_owned(),
+                    "Run `fwc context list` to inspect configured host contexts.".to_owned(),
+                ],
+            }),
+            exit_code: CliExitCode::Transport,
+        }),
+    }
+}
+
+fn auth_profile_evidence_handles(
+    provider: &str,
+    profile_id: Option<&str>,
+    endpoint: &str,
+    action: &str,
+) -> Vec<Value> {
+    vec![json!({
+        "kind": "provider-auth-profile-admin",
+        "provider": provider,
+        "profile_id": profile_id,
+        "endpoint": endpoint,
+        "action": action,
+    })]
+}
+
+fn attach_auth_host_contract(
+    payload: &mut Value,
+    endpoint: &str,
+    provider: &str,
+    profile_id: Option<&str>,
+    action: &str,
+    mutated: bool,
+) {
+    attach_install_contract(
+        payload,
+        "auth",
+        "host-admin-api",
+        "node-local-root-app",
+        action,
+        Some(endpoint),
+        mutated,
+        false,
+        false,
+        "Live provider-auth profile answers are authoritative for the current fcp-host process and are redaction-safe, but they do not by themselves prove external provider login success.",
+        auth_profile_evidence_handles(provider, profile_id, endpoint, action),
+    );
+}
+
+fn auth_login_dispatch(
+    args: &AuthLoginArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "login",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth login {} --profile {} --api-key <secret> --host <endpoint>",
+                args.provider, args.profile
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let label = args.label.clone().unwrap_or_else(|| args.profile.clone());
+    let mut request = json!({
+        "profile_id": args.profile,
+        "method": "api_key",
+        "label": label,
+        "priority": args.priority,
+        "api_key": args.api_key,
+    });
+    if let Some(header_name) = args.header_name.as_deref() {
+        request["header_name"] = json!(header_name);
+    }
+    if let Some(value_prefix) = args.value_prefix.as_deref() {
+        request["value_prefix"] = json!(value_prefix);
+    }
+    let response = client.auth_profile_upsert(&args.provider, &request)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "login",
+        "source": "host-admin-api",
+        "message": format!("Stored host-managed provider auth profile `{}` for `{}`.", args.profile, args.provider),
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "profile": response["profile"].clone(),
+        "next_actions": [
+            format!("fwc auth profiles {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
+            format!("fwc auth refresh {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        Some(&args.profile),
+        "provider-auth-profile-upsert",
+        true,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_profiles_dispatch(
+    args: &AuthProfilesArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "profiles",
+        serde_json::to_value(args)?,
+        vec![
+            format!("fwc auth profiles {} --host <endpoint>", args.provider),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = match args.profile.as_deref() {
+        Some(profile_id) => client.auth_profile(&args.provider, profile_id)?,
+        None => client.auth_profiles(&args.provider)?,
+    };
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "profiles",
+        "source": "host-admin-api",
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "result": response,
+        "next_actions": [
+            format!("fwc auth login {} --profile <profile> --api-key <secret> --host {}", args.provider, host.endpoint),
+            format!("fwc auth refresh {} --host {}", args.provider, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        args.profile.as_deref(),
+        "provider-auth-profile-read",
+        false,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_refresh_dispatch(
+    args: &AuthRefreshArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "refresh",
+        serde_json::to_value(args)?,
+        vec![
+            format!("fwc auth refresh {} --host <endpoint>", args.provider),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.auth_profile_refresh(&args.provider, args.profile.as_deref())?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "refresh",
+        "source": "host-admin-api",
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "refresh": response,
+        "next_actions": [
+            format!("fwc auth profiles {} --host {}", args.provider, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        args.profile.as_deref(),
+        "provider-auth-profile-refresh",
+        true,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_remove_profile_dispatch(
+    args: &AuthRemoveProfileArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if !args.yes {
+        return Ok(DispatchOutcome {
+            payload: json!({
+                "status": "error",
+                "command": "auth",
+                "subcommand": "remove-profile",
+                "provider": args.provider,
+                "profile_id": args.profile,
+                "requires_confirmation": true,
+                "error": {
+                    "type": "confirmation-required",
+                    "message": format!(
+                        "Refusing to remove provider auth profile `{}` for `{}` without `--yes`.",
+                        args.profile, args.provider
+                    ),
+                    "recoverable": true,
+                },
+                "next_actions": [
+                    format!("fwc auth remove-profile {} --profile {} --yes", args.provider, args.profile),
+                    format!("fwc auth profiles {} --profile {}", args.provider, args.profile),
+                ],
+            }),
+            exit_code: CliExitCode::Validation,
+        });
+    }
+    let host = match auth_host_config(
+        "remove-profile",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth remove-profile {} --profile {} --yes --host <endpoint>",
+                args.provider, args.profile
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.auth_profile_delete(&args.provider, &args.profile)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "remove-profile",
+        "source": "host-admin-api",
+        "message": format!("Removed host-managed provider auth profile `{}` for `{}`.", args.profile, args.provider),
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "confirmed": true,
+        "delete": response,
+        "next_actions": [
+            format!("fwc auth profiles {} --host {}", args.provider, host.endpoint),
+            format!("fwc auth login {} --profile {} --api-key <secret> --host {}", args.provider, args.profile, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        Some(&args.profile),
+        "provider-auth-profile-delete",
+        true,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_migrate_from_claude_code_dispatch(
+    args: &AuthMigrateFromClaudeCodeArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "migrate-from-claude-code",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth migrate-from-claude-code {} --profile {} --host <endpoint>",
+                args.provider, args.profile
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let input_path = args
+        .input
+        .clone()
+        .or_else(default_claude_code_config_path)
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a default Claude Code config path"))?;
+    let api_key = match read_claude_code_auth_value(&input_path, &args.key) {
+        Ok(value) => value,
+        Err(error) => {
+            return Ok(DispatchOutcome {
+                payload: json!({
+                    "status": "error",
+                    "command": "auth",
+                    "subcommand": "migrate-from-claude-code",
+                    "source": "claude-code-config",
+                    "input": input_path.display().to_string(),
+                    "key": args.key,
+                    "error": {
+                        "type": "claude-code-config-import-failed",
+                        "message": error.to_string(),
+                        "recoverable": true,
+                    },
+                    "next_actions": [
+                        "Retry with `--input <path>` pointing at a Claude Code JSON config.".to_owned(),
+                        "Retry with `--key <json.path>` for the provider credential field to import.".to_owned(),
+                    ],
+                }),
+                exit_code: CliExitCode::Validation,
+            });
+        }
+    };
+
+    let login_args = AuthLoginArgs {
+        provider: args.provider.clone(),
+        profile: args.profile.clone(),
+        label: Some(
+            args.label
+                .clone()
+                .unwrap_or_else(|| "Claude Code import".to_owned()),
+        ),
+        priority: args.priority,
+        api_key,
+        header_name: None,
+        value_prefix: None,
+    };
+    let mut outcome = auth_login_dispatch(&login_args, Some(&host.endpoint))?;
+    if let Some(obj) = outcome.payload.as_object_mut() {
+        obj.insert(
+            "subcommand".to_owned(),
+            Value::String("migrate-from-claude-code".to_owned()),
+        );
+        obj.insert(
+            "source".to_owned(),
+            Value::String("claude-code-config+host-admin-api".to_owned()),
+        );
+        obj.insert(
+            "input".to_owned(),
+            Value::String(input_path.display().to_string()),
+        );
+        obj.insert("imported_key".to_owned(), Value::String(args.key.clone()));
+    }
+    Ok(outcome)
+}
+
+fn default_claude_code_config_path() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".claude.json"))
+}
+
+fn read_claude_code_auth_value(path: &Path, key_path: &str) -> Result<String> {
+    let raw = std::fs::read_to_string(path)
+        .with_context(|| format!("failed to read `{}`", path.display()))?;
+    let value: Value = serde_json::from_str(&raw)
+        .with_context(|| format!("failed to parse `{}` as JSON", path.display()))?;
+    let mut cursor = &value;
+    for segment in key_path.split('.') {
+        if segment.trim().is_empty() {
+            bail!("Claude Code config key path contains an empty segment");
+        }
+        cursor = cursor.get(segment).with_context(|| {
+            format!(
+                "Claude Code config `{}` does not contain key path `{key_path}`",
+                path.display()
+            )
+        })?;
+    }
+    let token = cursor
+        .as_str()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "Claude Code config key path `{key_path}` must resolve to a non-empty string"
+            )
+        })?;
+    Ok(token.to_owned())
 }
 
 fn auth_add_dispatch(args: &AuthAddArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
@@ -43500,20 +44082,144 @@ require_attestation_types = ["in-toto"]"#,
 
     #[test]
     fn auth_refresh_nonexistent_connector_returns_error() {
-        // "refresh" is not a valid AuthCommand subcommand; it routes to unknown-subcommand dispatch.
         let (exit_code, payload) = execute_json(&["fwc", "--json", "auth", "refresh", "github"]);
 
-        assert_eq!(exit_code, CliExitCode::UnknownCommand.into());
-        let error_type = payload["error"]["type"].as_str().unwrap_or("");
+        assert_eq!(exit_code, CliExitCode::Transport.into());
+        assert_eq!(payload["command"], "auth");
+        assert_eq!(payload["details"]["subcommand"], "refresh");
+        assert_eq!(payload["error"]["type"], "missing-host-endpoint");
         assert!(
-            error_type.contains("auth") || error_type.contains("unknown"),
-            "Error type should reference auth or unknown: {error_type}"
+            payload["next_actions"]
+                .as_array()
+                .is_some_and(|actions| !actions.is_empty())
         );
-        let message = payload["error"]["message"].as_str().unwrap_or("");
-        assert!(
-            message.contains("refresh"),
-            "Error message should mention 'refresh': {message}"
+    }
+
+    #[test]
+    fn auth_login_profiles_refresh_and_remove_profile_use_host_admin_api() {
+        let provider = "test-provider";
+        let profile = "primary";
+        let (host, server) = spawn_mock_host_sequence(vec![
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "api_key",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
+                format!("GET /rpc/admin/auth/profiles/{provider}/{profile}"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "api_key",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/refresh"),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "outcomes": [{
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "api_key",
+                        "action": "not_refreshable",
+                        "outcome": "skipped"
+                    }]
+                }),
+            ),
+            (
+                format!("DELETE /rpc/admin/auth/profiles/{provider}/{profile}"),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "deleted": true
+                }),
+            ),
+        ]);
+
+        let (login_exit, login_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "login",
+            provider,
+            "--profile",
+            profile,
+            "--api-key",
+            "sk-test-secret",
+        ]);
+        assert_eq!(login_exit, CliExitCode::Success.into());
+        assert_eq!(login_payload["command"], "auth");
+        assert_eq!(login_payload["subcommand"], "login");
+        assert_eq!(login_payload["source"], "host-admin-api");
+        assert_eq!(login_payload["profile"]["method"], "api_key");
+        assert!(!login_payload.to_string().contains("sk-test-secret"));
+
+        let (profiles_exit, profiles_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "profiles",
+            provider,
+            "--profile",
+            profile,
+        ]);
+        assert_eq!(profiles_exit, CliExitCode::Success.into());
+        assert_eq!(profiles_payload["subcommand"], "profiles");
+        assert_eq!(profiles_payload["result"]["profile"]["profile_id"], profile);
+
+        let (refresh_exit, refresh_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "refresh",
+            provider,
+            "--profile",
+            profile,
+        ]);
+        assert_eq!(refresh_exit, CliExitCode::Success.into());
+        assert_eq!(refresh_payload["subcommand"], "refresh");
+        assert_eq!(
+            refresh_payload["refresh"]["outcomes"][0]["outcome"],
+            "skipped"
         );
+
+        let (remove_exit, remove_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "remove-profile",
+            provider,
+            "--profile",
+            profile,
+            "--yes",
+        ]);
+        assert_eq!(remove_exit, CliExitCode::Success.into());
+        assert_eq!(remove_payload["subcommand"], "remove-profile");
+        assert_eq!(remove_payload["delete"]["deleted"], true);
+
+        server.join().expect("mock host thread should complete");
     }
 
     #[test]

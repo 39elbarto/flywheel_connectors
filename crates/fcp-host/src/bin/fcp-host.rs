@@ -8,7 +8,7 @@ use std::path::Path as FsPath;
 use std::path::{Path as StdPath, PathBuf};
 use std::pin::pin;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use axum::{
@@ -105,6 +105,11 @@ use fcp_prelude::{
 };
 #[cfg(test)]
 use fcp_prelude::{DecisionReceiptPolicy, ObjectHeader, Provenance, ZoneTransportPolicy};
+use fcp_provider_auth::{
+    ApiKeyAuth, AuthError, AuthMethod, AuthMethodKind, AuthProfile, AuthProfileStore,
+    InMemoryAuthProfileStore, OAuthAuthCodeAuth, OAuthDeviceCodeAuth, TokenRefreshActor,
+    TokenRefreshDecision, TokenRefreshOutcome, TokenRefreshPolicy,
+};
 use fcp_ratelimit::{BackpressureThresholds, TokenBucket};
 use futures_util::future::join_all;
 use hyper::body::Incoming;
@@ -164,6 +169,12 @@ const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_CONNECTOR_ID: &str = "fcp.telegram";
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_ZONE_ID: &str = "z:community";
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_MAX_BODY_BYTES: usize = 1024 * 1024;
 const DEFAULT_TELEGRAM_WEBHOOK_INGRESS_TIMEOUT_MS: u64 = 5_000;
+
+static AUTH_PROFILE_STORE: OnceLock<Arc<InMemoryAuthProfileStore>> = OnceLock::new();
+
+fn auth_profile_store() -> Arc<InMemoryAuthProfileStore> {
+    Arc::clone(AUTH_PROFILE_STORE.get_or_init(|| Arc::new(InMemoryAuthProfileStore::new())))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct HybridOwnerInvokeEvidence {
@@ -4478,6 +4489,22 @@ async fn async_main() -> HostResult<()> {
             "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
             post(credential_pool_cooldown_handler),
         )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}",
+            get(auth_profile_list_handler).post(auth_profile_upsert_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/refresh",
+            post(auth_profile_refresh_provider_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}",
+            get(auth_profile_get_handler).delete(auth_profile_delete_handler),
+        )
+        .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
+            post(auth_profile_refresh_one_handler),
+        )
         .route("/rpc/budget/report", post(budget_report_handler))
         // br-71lku: /rpc/cancel and /rpc/operations/cancel were
         // previously mounted on the public app router below, where
@@ -4977,6 +5004,327 @@ async fn credential_pool_cooldown_handler(
         .redacted_view(&key, Utc::now())
         .map_err(map_credential_pool_error)?;
     Ok(Json(CredentialPoolResponse { pool }))
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthProfileUpsertRequest {
+    profile_id: String,
+    label: String,
+    #[serde(default)]
+    priority: i32,
+    #[serde(flatten)]
+    method: AuthProfileMethodRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
+enum AuthProfileMethodRequest {
+    ApiKey {
+        api_key: String,
+        #[serde(default)]
+        header_name: Option<String>,
+        #[serde(default)]
+        value_prefix: Option<String>,
+    },
+    OAuthDevice {
+        client_id: String,
+        device_code_url: String,
+        token_url: String,
+        scope: String,
+    },
+    OAuthAuthCode {
+        client_id: String,
+        #[serde(default)]
+        client_secret: Option<String>,
+        authorize_url: String,
+        token_url: String,
+        redirect_uri: String,
+        scope: String,
+        #[serde(default = "default_auth_code_pkce")]
+        use_pkce: bool,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileView {
+    provider: String,
+    profile_id: String,
+    method: &'static str,
+    label: String,
+    priority: i32,
+    created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileListResponse {
+    provider: String,
+    profiles: Vec<AuthProfileView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileResponse {
+    profile: AuthProfileView,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileDeleteResponse {
+    provider: String,
+    profile_id: String,
+    deleted: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileRefreshResponse {
+    provider: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_id: Option<String>,
+    outcomes: Vec<AuthProfileRefreshOutcomeView>,
+}
+
+#[derive(Debug, Serialize)]
+struct AuthProfileRefreshOutcomeView {
+    provider: String,
+    profile_id: String,
+    method: &'static str,
+    action: &'static str,
+    outcome: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    refresh_in_secs: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
+const fn default_auth_code_pkce() -> bool {
+    true
+}
+
+fn map_auth_profile_error(error: AuthError) -> (StatusCode, String) {
+    let status = match error {
+        AuthError::ProfileNotFound { .. } | AuthError::ProviderNotFound { .. } => {
+            StatusCode::NOT_FOUND
+        }
+        AuthError::UnsupportedMethod { .. }
+        | AuthError::Expired { .. }
+        | AuthError::ProviderRejected { .. } => StatusCode::CONFLICT,
+        AuthError::InvalidConfig { .. }
+        | AuthError::InvalidHeader { .. }
+        | AuthError::InvalidProviderResponse { .. }
+        | AuthError::MissingToken { .. }
+        | AuthError::MissingSigningContext { .. } => StatusCode::BAD_REQUEST,
+    };
+    (status, error.to_string())
+}
+
+fn auth_profile_view(profile: AuthProfile) -> AuthProfileView {
+    AuthProfileView {
+        provider: profile.provider,
+        profile_id: profile.id,
+        method: profile.method.id(),
+        label: profile.label,
+        priority: profile.priority,
+        created_at: profile.created_at,
+        last_used_at: profile.last_used_at,
+    }
+}
+
+fn auth_profile_method_from_request(
+    request: AuthProfileMethodRequest,
+) -> Result<AuthMethodKind, AuthError> {
+    match request {
+        AuthProfileMethodRequest::ApiKey {
+            api_key,
+            header_name,
+            value_prefix,
+        } => {
+            let method = match header_name {
+                Some(header_name) => ApiKeyAuth::new(api_key, header_name, value_prefix)?,
+                None => ApiKeyAuth::bearer(api_key)?,
+            };
+            Ok(AuthMethodKind::ApiKey(method))
+        }
+        AuthProfileMethodRequest::OAuthDevice {
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+        } => Ok(AuthMethodKind::OAuthDeviceCode(OAuthDeviceCodeAuth::new(
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+        )?)),
+        AuthProfileMethodRequest::OAuthAuthCode {
+            client_id,
+            client_secret,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        } => {
+            let method = match client_secret {
+                Some(client_secret) => OAuthAuthCodeAuth::confidential_client(
+                    client_id,
+                    client_secret,
+                    authorize_url,
+                    token_url,
+                    redirect_uri,
+                    scope,
+                    use_pkce,
+                )?,
+                None => OAuthAuthCodeAuth::public_client(
+                    client_id,
+                    authorize_url,
+                    token_url,
+                    redirect_uri,
+                    scope,
+                    use_pkce,
+                )?,
+            };
+            Ok(AuthMethodKind::OAuthAuthCode(method))
+        }
+    }
+}
+
+fn auth_refresh_action_name(decision: &TokenRefreshDecision) -> &'static str {
+    match decision.action {
+        fcp_provider_auth::TokenRefreshAction::NotRefreshable => "not_refreshable",
+        fcp_provider_auth::TokenRefreshAction::Fresh => "fresh",
+        fcp_provider_auth::TokenRefreshAction::Due => "due",
+        fcp_provider_auth::TokenRefreshAction::Expired => "expired",
+    }
+}
+
+fn auth_refresh_outcome_view(outcome: TokenRefreshOutcome) -> AuthProfileRefreshOutcomeView {
+    let decision = outcome.decision().clone();
+    let action = auth_refresh_action_name(&decision);
+    let (outcome_name, error) = match outcome {
+        TokenRefreshOutcome::Refreshed(_) => ("refreshed", None),
+        TokenRefreshOutcome::Skipped(_) => ("skipped", None),
+        TokenRefreshOutcome::Failed { error, .. } => ("failed", Some(error.to_string())),
+    };
+    AuthProfileRefreshOutcomeView {
+        provider: decision.provider,
+        profile_id: decision.profile_id,
+        method: decision.method,
+        action,
+        outcome: outcome_name,
+        refresh_in_secs: decision.refresh_in.map(|duration| duration.as_secs()),
+        error,
+    }
+}
+
+async fn auth_profile_list_handler(
+    Path(provider): Path<String>,
+) -> Result<Json<AuthProfileListResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profiles = store
+        .list_profiles(&provider)
+        .await
+        .map_err(map_auth_profile_error)?;
+    let provider = profiles
+        .first()
+        .map(|profile| profile.provider.clone())
+        .unwrap_or(provider);
+    Ok(Json(AuthProfileListResponse {
+        provider,
+        profiles: profiles.into_iter().map(auth_profile_view).collect(),
+    }))
+}
+
+async fn auth_profile_get_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
+    }))
+}
+
+async fn auth_profile_upsert_handler(
+    Path(provider): Path<String>,
+    Json(request): Json<AuthProfileUpsertRequest>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let method =
+        auth_profile_method_from_request(request.method).map_err(map_auth_profile_error)?;
+    let profile = AuthProfile::new(
+        request.profile_id,
+        provider,
+        method,
+        request.label,
+        request.priority,
+    )
+    .map_err(map_auth_profile_error)?;
+    profile
+        .method
+        .validate(&fcp_async_core::Cx::for_testing())
+        .await
+        .map_err(map_auth_profile_error)?;
+    let store = auth_profile_store();
+    store
+        .save_profile(profile.clone())
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
+    }))
+}
+
+async fn auth_profile_delete_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileDeleteResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    store
+        .delete_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileDeleteResponse {
+        provider,
+        profile_id,
+        deleted: true,
+    }))
+}
+
+async fn auth_profile_refresh_provider_handler(
+    Path(provider): Path<String>,
+) -> Result<Json<AuthProfileRefreshResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let actor = TokenRefreshActor::new(store, TokenRefreshPolicy::default());
+    let report = actor
+        .refresh_provider(&fcp_async_core::Cx::for_testing(), &provider)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileRefreshResponse {
+        provider,
+        profile_id: None,
+        outcomes: report
+            .outcomes
+            .into_iter()
+            .map(auth_refresh_outcome_view)
+            .collect(),
+    }))
+}
+
+async fn auth_profile_refresh_one_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+) -> Result<Json<AuthProfileRefreshResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let actor = TokenRefreshActor::new(store, TokenRefreshPolicy::default());
+    let outcome = actor
+        .refresh_profile(&fcp_async_core::Cx::for_testing(), &provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileRefreshResponse {
+        provider,
+        profile_id: Some(profile_id),
+        outcomes: vec![auth_refresh_outcome_view(outcome)],
+    }))
 }
 
 async fn budget_report_handler(
@@ -15602,6 +15950,22 @@ done"#;
                 "/rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown",
                 post(credential_pool_cooldown_handler),
             )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}",
+                get(auth_profile_list_handler).post(auth_profile_upsert_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/refresh",
+                post(auth_profile_refresh_provider_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}",
+                get(auth_profile_get_handler).delete(auth_profile_delete_handler),
+            )
+            .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
+                post(auth_profile_refresh_one_handler),
+            )
             .route_layer(axum::middleware::from_fn_with_state(
                 Arc::clone(&state),
                 admin_auth_middleware,
@@ -15957,6 +16321,135 @@ done"#;
         assert!(!audit_text.contains("sk-live-primary"));
         assert!(!audit_text.contains("sk-duplicate"));
         assert!(!audit_text.contains("sk-rotated"));
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_admin_routes_reject_unauthenticated_requests()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(state);
+
+        let response = send_json_request(
+            app,
+            axum::http::Method::POST,
+            "/rpc/admin/auth/profiles/test-auth-profile-denied",
+            json!({
+                "profile_id": "primary",
+                "method": "api_key",
+                "label": "primary",
+                "api_key": "sk-denied"
+            }),
+            &[],
+        )
+        .await?;
+
+        assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn auth_profile_admin_routes_crud_refresh_and_redact_profiles()
+    -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        let state = cancel_route_test_state();
+        let app = credential_pool_admin_test_app(Arc::clone(&state));
+        let auth = [
+            ("Authorization", "Bearer topsecret"),
+            (ADMIN_ZONE_HEADER, "z:owner"),
+        ];
+        let provider = "test-auth-profile-crud";
+        let profile_id = "primary";
+        let profile_path = format!("/rpc/admin/auth/profiles/{provider}/{profile_id}");
+
+        let upserted = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": profile_id,
+                "method": "api_key",
+                "label": "primary",
+                "priority": -5,
+                "api_key": "sk-live-primary"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(upserted.status(), axum::http::StatusCode::OK);
+        let upserted_body = response_body_json(upserted).await?;
+        assert_eq!(upserted_body["profile"]["provider"], provider);
+        assert_eq!(upserted_body["profile"]["profile_id"], profile_id);
+        assert_eq!(upserted_body["profile"]["method"], "api_key");
+        assert_eq!(upserted_body["profile"]["priority"], -5);
+        let upserted_profile = upserted_body["profile"]
+            .as_object()
+            .expect("profile should be a JSON object");
+        assert!(!upserted_profile.contains_key("api_key"));
+        let upserted_text = upserted_body.to_string();
+        assert!(!upserted_text.contains("sk-live-primary"));
+
+        let listed = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(listed.status(), axum::http::StatusCode::OK);
+        let listed_body = response_body_json(listed).await?;
+        assert_eq!(listed_body["provider"], provider);
+        assert_eq!(listed_body["profiles"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed_body["profiles"][0]["profile_id"], profile_id);
+
+        let shown = send_json_request(
+            app.clone(),
+            axum::http::Method::GET,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(shown.status(), axum::http::StatusCode::OK);
+        let shown_body = response_body_json(shown).await?;
+        assert_eq!(shown_body["profile"]["profile_id"], profile_id);
+
+        let refreshed = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/refresh"),
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(refreshed.status(), axum::http::StatusCode::OK);
+        let refreshed_body = response_body_json(refreshed).await?;
+        assert_eq!(refreshed_body["provider"], provider);
+        assert_eq!(refreshed_body["profile_id"], profile_id);
+        assert_eq!(refreshed_body["outcomes"][0]["action"], "not_refreshable");
+        assert_eq!(refreshed_body["outcomes"][0]["outcome"], "skipped");
+
+        let deleted = send_json_request(
+            app.clone(),
+            axum::http::Method::DELETE,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(deleted.status(), axum::http::StatusCode::OK);
+        let deleted_body = response_body_json(deleted).await?;
+        assert_eq!(deleted_body["deleted"], true);
+
+        let missing = send_json_request(
+            app,
+            axum::http::Method::GET,
+            &profile_path,
+            json!({}),
+            &auth,
+        )
+        .await?;
+        assert_eq!(missing.status(), axum::http::StatusCode::NOT_FOUND);
         Ok(())
     }
 

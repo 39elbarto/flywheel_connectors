@@ -225,7 +225,7 @@ fn bench_verify(c: &mut Criterion) {
     // matrix-vector multiplication + norm check on top of this.
     let (params, _, _, zp, _) = lattice_setup();
     let h = operation_hash(&REQUEST_ZONE, ref_period(), REQUEST_OP, REQUEST_PRINCIPAL);
-    let preimage = LatticePreimage { bytes: [0u8; 64] };
+    let preimage = LatticePreimage::fixture_zero(params).expect("reference preimage fixture");
     let now_secs = ref_period().start_secs + 100;
     group.bench_function("lattice_verify_structural_floor", |b| {
         b.iter(|| {
@@ -312,7 +312,8 @@ fn bench_end_to_end(c: &mut Criterion) {
             ));
             // Verify with a placeholder preimage — exercises the same
             // bridge code real callers will use.
-            let preimage = LatticePreimage { bytes: [0u8; 64] };
+            let preimage =
+                LatticePreimage::fixture_zero(params).expect("reference preimage fixture");
             let now_secs = ref_period().start_secs + 100;
             let _ = black_box(verify(
                 black_box(&zp),

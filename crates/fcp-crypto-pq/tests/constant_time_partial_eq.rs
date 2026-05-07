@@ -12,29 +12,41 @@
 
 use fcp_crypto_pq::{DelegationPeriod, LatticeParams, LatticePreimage, delegate, trap_gen};
 
+fn preimage_with(byte: u8) -> LatticePreimage {
+    let params = LatticeParams::SMALL_TEST;
+    LatticePreimage::from_encoded_bytes(
+        params,
+        vec![byte; params.preimage_encoded_bytes().unwrap()],
+    )
+    .expect("small-test preimage length")
+}
+
 #[test]
 fn lattice_preimage_eq_reflects_byte_equality() {
-    let a = LatticePreimage { bytes: [0x11; 64] };
-    let b = LatticePreimage { bytes: [0x11; 64] };
+    let a = preimage_with(0x11);
+    let b = preimage_with(0x11);
     assert_eq!(a, b);
 }
 
 #[test]
 fn lattice_preimage_eq_distinguishes_first_byte_diff() {
-    let a = LatticePreimage { bytes: [0x11; 64] };
-    let mut other = [0x11; 64];
+    let params = LatticeParams::SMALL_TEST;
+    let a = preimage_with(0x11);
+    let mut other = vec![0x11; params.preimage_encoded_bytes().unwrap()];
     other[0] = 0xFF;
-    let b = LatticePreimage { bytes: other };
+    let b = LatticePreimage::from_encoded_bytes(params, other).unwrap();
     assert_ne!(a, b);
 }
 
 #[test]
 fn lattice_preimage_eq_distinguishes_last_byte_diff() {
     // br-1zlht: pin behavioural correctness of the constant-time eq.
-    let a = LatticePreimage { bytes: [0x11; 64] };
-    let mut other = [0x11; 64];
-    other[63] = 0xFF;
-    let b = LatticePreimage { bytes: other };
+    let params = LatticeParams::SMALL_TEST;
+    let a = preimage_with(0x11);
+    let mut other = vec![0x11; params.preimage_encoded_bytes().unwrap()];
+    let last = other.len() - 1;
+    other[last] = 0xFF;
+    let b = LatticePreimage::from_encoded_bytes(params, other).unwrap();
     assert_ne!(a, b);
 }
 

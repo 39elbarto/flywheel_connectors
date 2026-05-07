@@ -7,8 +7,8 @@
 //! ## Status
 //!
 //! **The MP12 / CHKP / GPV cryptographic operations are not implemented.**
-//! `trap_gen` and `delegate` return deterministic SHAKE256-derived seed
-//! placeholders so downstream wiring can pin fixtures. `sample_pre` and
+//! `trap_gen` and `delegate` return deterministic SHAKE256-derived seeded
+//! representations so downstream wiring can pin fixtures. `sample_pre` and
 //! `verify` still return `Err(LatticePqError::NotImplemented { ... })` after
 //! their cheap structural checks. This crate exists to pin the API contract
 //! that:
@@ -35,10 +35,11 @@
 //! | [`sample_pre`]| Mint-time: produce a short preimage `e` such that `A·e≡h`  |
 //! | [`verify`]   | Verify-time: check `A·e ≡ h (mod q)` and `‖e‖₂ ≤ B`        |
 //!
-//! Wire types ([`DelegationCertificate`], [`LatticeSubToken`]) are byte-bag
-//! placeholders here; the canonical types live in
-//! `fcp_policy::lattice_delegation` and are populated by br-kyopb.1.3.2 once
-//! these primitives have real implementations.
+//! The representation profile is deliberately seed-backed: public matrices are
+//! transmitted as 32-byte seeds and expanded under explicit memory bounds,
+//! while secret trapdoors remain secret-only storage blobs. Sub-token
+//! preimages use profile-derived packed coefficient lengths rather than the
+//! old fixed 64-byte scaffold.
 
 #![forbid(unsafe_code)]
 
@@ -49,7 +50,20 @@ use sha3::{
 };
 use thiserror::Error;
 
-// ── Parameters ────────────────────────────────────────────────────────────
+// ── Parameters and representation profile ─────────────────────────────────
+
+/// Current lattice representation profile version.
+///
+/// Version 1 is a seed-backed profile: public matrix material is represented by
+/// a 32-byte SHAKE seed and secret trapdoor material is a sealed seed bundle.
+/// Expanded matrices are never serialized; callers must opt into expansion
+/// through arithmetic code that checks [`LatticeRepresentationProfile`] first.
+pub const LATTICE_REPRESENTATION_VERSION: u16 = 1;
+
+const MATRIX_SEED_BYTES: usize = 32;
+const SECRET_SEED_BUNDLE_BYTES: usize = 96;
+const MAX_PUBLIC_MATRIX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
+const MAX_PREIMAGE_ENCODED_BYTES: usize = 1024 * 1024;
 
 /// Lattice security parameters (§3.2 of the design doc).
 ///
@@ -73,6 +87,17 @@ pub struct LatticeParams {
 }
 
 impl LatticeParams {
+    /// Small deterministic test profile. This is not a security profile; it is
+    /// intentionally tiny so representation and arithmetic tests can exercise
+    /// dimension logic without allocating the V4 reference matrix.
+    pub const SMALL_TEST: Self = Self {
+        n: 8,
+        q: 257,
+        m: 16,
+        sigma_x100: 320,
+        depth: 2,
+    };
+
     /// Reference V4 profile: `n=512`, `q=2^32-5`, `m=16384`, `σ≈113`,
     /// `L=4` (~128-bit classical / Cat. 3 PQ security per the design
     /// doc §3.2).
@@ -83,6 +108,222 @@ impl LatticeParams {
         sigma_x100: 11_300, // σ ≈ 113.0
         depth: 4,
     };
+
+    /// Validate basic arithmetic and allocation invariants for this profile.
+    ///
+    /// This intentionally does not prove cryptographic strength; it enforces
+    /// the representation boundary so malformed external profiles cannot drive
+    /// divide-by-zero, overflow, or unbounded allocation paths.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] for zero or otherwise
+    /// malformed scalar parameters, or [`LatticePqError::RepresentationTooLarge`]
+    /// when the profile would exceed the explicit allocation ceilings.
+    pub fn validate(self) -> LatticePqResult<()> {
+        if self.n == 0 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "n",
+                value: 0,
+                reason: "lattice dimension must be non-zero",
+            });
+        }
+        if self.m == 0 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "m",
+                value: 0,
+                reason: "lattice width must be non-zero",
+            });
+        }
+        if self.q < 2 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "q",
+                value: self.q,
+                reason: "modulus must be at least 2",
+            });
+        }
+        if self.sigma_x100 == 0 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "sigma_x100",
+                value: 0,
+                reason: "Gaussian width must be non-zero",
+            });
+        }
+        if self.depth == 0 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "depth",
+                value: 0,
+                reason: "delegation depth must be non-zero",
+            });
+        }
+        let _profile = self.representation_profile()?;
+        Ok(())
+    }
+
+    /// Bytes required to store one coefficient modulo `q`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] when `q < 2`.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on targets where `usize` cannot represent a `u32` bit count.
+    pub fn coefficient_bytes(self) -> LatticePqResult<usize> {
+        if self.q < 2 {
+            return Err(LatticePqError::InvalidParameter {
+                field: "q",
+                value: self.q,
+                reason: "modulus must be at least 2",
+            });
+        }
+        let bits = u64::BITS - (self.q - 1).leading_zeros();
+        Ok(usize::try_from(bits.div_ceil(8)).expect("u32 bit count fits in usize"))
+    }
+
+    /// Expanded public matrix byte count for `n × m` coefficients.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] when `q < 2`, or
+    /// [`LatticePqError::RepresentationTooLarge`] when the expanded matrix would
+    /// exceed this crate's allocation ceiling.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on targets where `usize` cannot represent a `u32` dimension.
+    pub fn public_matrix_expanded_bytes(self) -> LatticePqResult<usize> {
+        let coefficient_bytes = self.coefficient_bytes()?;
+        checked_profile_product(
+            "public_matrix",
+            &[
+                usize::try_from(self.n).expect("u32 n fits in usize"),
+                usize::try_from(self.m).expect("u32 m fits in usize"),
+                coefficient_bytes,
+            ],
+            MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+        )
+    }
+
+    /// Packed byte count for a short-vector preimage in `Z_q^m`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] when `q < 2`, or
+    /// [`LatticePqError::RepresentationTooLarge`] when the packed preimage would
+    /// exceed this crate's allocation ceiling.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on targets where `usize` cannot represent a `u32` dimension.
+    pub fn preimage_encoded_bytes(self) -> LatticePqResult<usize> {
+        let coefficient_bytes = self.coefficient_bytes()?;
+        checked_profile_product(
+            "preimage",
+            &[
+                usize::try_from(self.m).expect("u32 m fits in usize"),
+                coefficient_bytes,
+            ],
+            MAX_PREIMAGE_ENCODED_BYTES,
+        )
+    }
+
+    /// Secret storage bytes for the seed-backed trapdoor bundle.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::public_matrix_expanded_bytes`] because
+    /// trapdoor storage is valid only for a bounded public-matrix profile.
+    pub fn trapdoor_storage_bytes(self) -> LatticePqResult<usize> {
+        self.public_matrix_expanded_bytes()?;
+        Ok(SECRET_SEED_BUNDLE_BYTES)
+    }
+
+    /// Full representation profile implied by these parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] for malformed parameters, or
+    /// [`LatticePqError::RepresentationTooLarge`] for profiles that exceed the
+    /// explicit matrix/preimage allocation ceilings.
+    ///
+    /// # Panics
+    ///
+    /// Panics only on targets where `usize` cannot represent a `u32` dimension.
+    pub fn representation_profile(self) -> LatticePqResult<LatticeRepresentationProfile> {
+        let coefficient_bytes = self.coefficient_bytes()?;
+        let public_matrix_expanded_bytes = checked_profile_product(
+            "public_matrix",
+            &[
+                usize::try_from(self.n).expect("u32 n fits in usize"),
+                usize::try_from(self.m).expect("u32 m fits in usize"),
+                coefficient_bytes,
+            ],
+            MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+        )?;
+        let preimage_encoded_bytes = checked_profile_product(
+            "preimage",
+            &[
+                usize::try_from(self.m).expect("u32 m fits in usize"),
+                coefficient_bytes,
+            ],
+            MAX_PREIMAGE_ENCODED_BYTES,
+        )?;
+        Ok(LatticeRepresentationProfile {
+            version: LATTICE_REPRESENTATION_VERSION,
+            params: self,
+            coefficient_bytes,
+            public_matrix_seed_bytes: MATRIX_SEED_BYTES,
+            public_matrix_expanded_bytes,
+            trapdoor_storage_bytes: SECRET_SEED_BUNDLE_BYTES,
+            preimage_encoded_bytes,
+        })
+    }
+}
+
+/// Concrete encoding plan for a lattice parameter profile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LatticeRepresentationProfile {
+    /// Representation version.
+    pub version: u16,
+    /// Parameter profile the representation is bound to.
+    pub params: LatticeParams,
+    /// Bytes per packed coefficient modulo `q`.
+    pub coefficient_bytes: usize,
+    /// Serialized public-matrix seed length.
+    pub public_matrix_seed_bytes: usize,
+    /// Upper-bound checked size for the expanded public matrix.
+    pub public_matrix_expanded_bytes: usize,
+    /// Secret seed-bundle bytes stored for a trapdoor.
+    pub trapdoor_storage_bytes: usize,
+    /// Packed preimage byte length.
+    pub preimage_encoded_bytes: usize,
+}
+
+fn checked_profile_product(
+    material: &'static str,
+    factors: &[usize],
+    max: usize,
+) -> LatticePqResult<usize> {
+    let mut requested = 1usize;
+    for factor in factors {
+        requested =
+            requested
+                .checked_mul(*factor)
+                .ok_or(LatticePqError::RepresentationTooLarge {
+                    material,
+                    requested: usize::MAX,
+                    max,
+                })?;
+    }
+    if requested > max {
+        return Err(LatticePqError::RepresentationTooLarge {
+            material,
+            requested,
+            max,
+        });
+    }
+    Ok(requested)
 }
 
 // ── Wire-format placeholders ──────────────────────────────────────────────
@@ -121,24 +362,63 @@ pub struct MasterPublicKey {
 
 /// Master trapdoor `T_root` held offline by the owner.
 ///
-/// **Stub:** the bytes here are placeholder; the real type will be the
-/// Micciancio-Peikert gadget trapdoor. Wrapped in its own type so future
-/// callers don't accidentally serialize it (and `Drop` can zeroize).
+/// The current representation is a sealed seed bundle bound to
+/// [`LATTICE_REPRESENTATION_VERSION`] and [`LatticeParams`]. It is not sent to
+/// verifiers and intentionally does not implement `Serialize`: only public
+/// matrix seeds and preimages cross the token boundary.
 ///
 /// **Constant-time equality** (br-1zlht): the trapdoor IS the
 /// load-bearing secret of the lattice-trapdoor scheme. Equality via
 /// [`subtle::ConstantTimeEq`] not the derived `[u8; N]::eq`.
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct MasterTrapdoor {
-    /// Opaque trapdoor bytes. Length will be `O(n × log q × n)` in the
-    /// real impl; here it's a fixed 32-byte placeholder.
-    pub(crate) bytes: [u8; 32],
+    version: u16,
+    params: LatticeParams,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl MasterTrapdoor {
+    /// Representation version bound into this trapdoor.
+    #[must_use]
+    pub const fn representation_version(&self) -> u16 {
+        self.version
+    }
+
+    /// Parameter profile bound into this trapdoor.
+    #[must_use]
+    pub const fn params(&self) -> LatticeParams {
+        self.params
+    }
+
+    /// Encoded secret storage byte length.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 impl PartialEq for MasterTrapdoor {
     fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        self.bytes.ct_eq(&other.bytes).into()
+        self.version == other.version
+            && self.params == other.params
+            && constant_time_bytes_eq(&self.bytes, &other.bytes)
+    }
+}
+
+impl std::fmt::Debug for MasterTrapdoor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MasterTrapdoor")
+            .field("version", &self.version)
+            .field("params", &self.params)
+            .field("encoded_len", &self.bytes.len())
+            .field("secret_material", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for MasterTrapdoor {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
     }
 }
 
@@ -163,15 +443,55 @@ pub struct ZonePeriodPublicKey {
 /// Held by the issuance node; used to derive sub-tokens via [`sample_pre`].
 ///
 /// **Constant-time equality** (br-1zlht): see [`MasterTrapdoor`].
-#[derive(Debug, Clone, Eq)]
+#[derive(Clone, Eq)]
 pub struct ZonePeriodTrapdoor {
-    pub(crate) bytes: [u8; 32],
+    version: u16,
+    params: LatticeParams,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl ZonePeriodTrapdoor {
+    /// Representation version bound into this trapdoor.
+    #[must_use]
+    pub const fn representation_version(&self) -> u16 {
+        self.version
+    }
+
+    /// Parameter profile bound into this trapdoor.
+    #[must_use]
+    pub const fn params(&self) -> LatticeParams {
+        self.params
+    }
+
+    /// Encoded secret storage byte length.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.len()
+    }
 }
 
 impl PartialEq for ZonePeriodTrapdoor {
     fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        self.bytes.ct_eq(&other.bytes).into()
+        self.version == other.version
+            && self.params == other.params
+            && constant_time_bytes_eq(&self.bytes, &other.bytes)
+    }
+}
+
+impl std::fmt::Debug for ZonePeriodTrapdoor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ZonePeriodTrapdoor")
+            .field("version", &self.version)
+            .field("params", &self.params)
+            .field("encoded_len", &self.bytes.len())
+            .field("secret_material", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for ZonePeriodTrapdoor {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
     }
 }
 
@@ -182,40 +502,109 @@ pub struct OperationHash(pub [u8; 32]);
 
 /// Short lattice preimage `e` such that `A_zp · e ≡ h (mod q)`.
 ///
-/// Real impl: a vector in `Z_q^m` with `‖e‖₂ ≤ B`. Here a fixed-size
-/// 64-byte placeholder so the API surface is concrete.
+/// Real impl: a vector in `Z_q^m` with `‖e‖₂ ≤ B`. The wire/storage encoding
+/// is profile-derived (`m × coefficient_bytes`) and validated by
+/// [`LatticePreimage::from_encoded_bytes`].
 ///
 /// **Constant-time equality** (br-1zlht): the preimage is the
 /// signature material of the lattice-trapdoor scheme; equality via
 /// [`subtle::ConstantTimeEq`].
-#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
+#[derive(Clone, Eq, Serialize, Deserialize)]
 pub struct LatticePreimage {
     /// Opaque preimage bytes.
-    #[serde(with = "hex_array_64")]
-    pub bytes: [u8; 64],
+    #[serde(with = "hex_vec")]
+    pub bytes: Vec<u8>,
+}
+
+impl LatticePreimage {
+    /// Build a preimage from encoded bytes after checking the profile-derived
+    /// wire length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] or
+    /// [`LatticePqError::RepresentationTooLarge`] when `params` do not define a
+    /// bounded preimage profile, and [`LatticePqError::InvalidEncodingLength`]
+    /// when `bytes` has the wrong profile-derived length.
+    pub fn from_encoded_bytes(params: LatticeParams, bytes: Vec<u8>) -> LatticePqResult<Self> {
+        let expected = params.preimage_encoded_bytes()?;
+        if bytes.len() != expected {
+            return Err(LatticePqError::InvalidEncodingLength {
+                material: "preimage",
+                expected,
+                got: bytes.len(),
+            });
+        }
+        Ok(Self { bytes })
+    }
+
+    /// Deterministic all-zero fixture with the correct profile-derived length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LatticePqError::InvalidParameter`] or
+    /// [`LatticePqError::RepresentationTooLarge`] when `params` do not define a
+    /// bounded preimage profile.
+    pub fn fixture_zero(params: LatticeParams) -> LatticePqResult<Self> {
+        let len = params.preimage_encoded_bytes()?;
+        Ok(Self {
+            bytes: vec![0_u8; len],
+        })
+    }
+
+    /// Encoded preimage byte length.
+    #[must_use]
+    pub fn encoded_len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Borrow the encoded preimage bytes.
+    #[must_use]
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
 }
 
 impl PartialEq for LatticePreimage {
     fn eq(&self, other: &Self) -> bool {
-        use subtle::ConstantTimeEq;
-        self.bytes.ct_eq(&other.bytes).into()
+        constant_time_bytes_eq(&self.bytes, &other.bytes)
     }
 }
 
-mod hex_array_64 {
+impl std::fmt::Debug for LatticePreimage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LatticePreimage")
+            .field("encoded_len", &self.bytes.len())
+            .field("secret_material", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for LatticePreimage {
+    fn drop(&mut self) {
+        self.bytes.fill(0);
+    }
+}
+
+fn constant_time_bytes_eq(left: &[u8], right: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+
+    if left.len() != right.len() {
+        return false;
+    }
+    left.ct_eq(right).into()
+}
+
+mod hex_vec {
     use serde::{Deserialize, Deserializer, Serializer};
 
-    pub fn serialize<S: Serializer>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+    pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
         s.serialize_str(&hex::encode(bytes))
     }
 
-    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
         let s = String::deserialize(d)?;
-        let v = hex::decode(&s).map_err(serde::de::Error::custom)?;
-        let arr: [u8; 64] = v
-            .try_into()
-            .map_err(|_| serde::de::Error::custom("expected 64 bytes"))?;
-        Ok(arr)
+        hex::decode(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -270,10 +659,10 @@ fn zone_period_trapdoor_seed(
     zone_id: &[u8; 32],
     period: DelegationPeriod,
     params: LatticeParams,
-) -> [u8; 32] {
-    let mut out = [0_u8; 32];
+) -> LatticePqResult<Vec<u8>> {
+    let mut out = vec![0_u8; params.trapdoor_storage_bytes()?];
     shake256_fill(
-        b"zone-period-trapdoor-placeholder",
+        b"zone-period-trapdoor-seed-bundle",
         |shaker| {
             update_len_prefixed(shaker, &parent_trap.bytes);
             update_len_prefixed(shaker, matrix_seed);
@@ -283,7 +672,20 @@ fn zone_period_trapdoor_seed(
         },
         &mut out,
     );
-    out
+    Ok(out)
+}
+
+fn trap_gen_secret_bundle(params: LatticeParams) -> LatticePqResult<Vec<u8>> {
+    let mut out = vec![0_u8; params.trapdoor_storage_bytes()?];
+    shake256_fill(
+        b"master-trapdoor-seed-bundle",
+        |shaker| {
+            update_params(shaker, params);
+            update_len_prefixed(shaker, b"master-trapdoor");
+        },
+        &mut out,
+    );
+    Ok(out)
 }
 
 /// Deterministically derive the public matrix seed for a `(zone, period)` child.
@@ -368,6 +770,42 @@ pub enum LatticePqError {
         bead: &'static str,
     },
 
+    /// Parameter profile is malformed before any cryptographic work starts.
+    #[error("invalid lattice parameter `{field}`={value}: {reason}")]
+    InvalidParameter {
+        /// Parameter field name.
+        field: &'static str,
+        /// Rejected value.
+        value: u64,
+        /// Human-readable reason.
+        reason: &'static str,
+    },
+
+    /// Representation implied by the parameters would exceed the crate's
+    /// explicit allocation ceiling.
+    #[error(
+        "lattice representation `{material}` too large: requested {requested} bytes, max {max}"
+    )]
+    RepresentationTooLarge {
+        /// Material being represented.
+        material: &'static str,
+        /// Requested encoded or expanded byte count.
+        requested: usize,
+        /// Hard ceiling.
+        max: usize,
+    },
+
+    /// Encoded material does not match the profile-derived wire length.
+    #[error("invalid encoded `{material}` length: expected {expected} bytes, got {got}")]
+    InvalidEncodingLength {
+        /// Material being decoded.
+        material: &'static str,
+        /// Expected byte count.
+        expected: usize,
+        /// Supplied byte count.
+        got: usize,
+    },
+
     /// Parameters mismatch between caller and key (e.g. trapdoor was
     /// generated for `n=512` but verification passed `n=1024` params).
     #[error("parameter mismatch: caller passed {caller:?}, key expects {key:?}")]
@@ -436,13 +874,16 @@ pub type LatticePqResult<T> = Result<T, LatticePqError>;
 /// real implementation may fail on entropy starvation; signature
 /// remains `LatticePqResult` to preserve forward compatibility.
 pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
+    params.validate()?;
     Ok((
         MasterPublicKey {
             hash: trap_gen_seed(params, b"master-public-matrix-seed"),
             params,
         },
         MasterTrapdoor {
-            bytes: trap_gen_seed(params, b"master-trapdoor-placeholder"),
+            version: LATTICE_REPRESENTATION_VERSION,
+            params,
+            bytes: trap_gen_secret_bundle(params)?,
         },
     ))
 }
@@ -477,6 +918,13 @@ pub fn delegate(
             key: parent_pub.params,
         });
     }
+    if params != parent_trap.params {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: parent_trap.params,
+        });
+    }
+    params.validate()?;
     if period.start_secs >= period.end_secs {
         return Err(LatticePqError::InvalidPeriod {
             start_secs: period.start_secs,
@@ -494,7 +942,11 @@ pub fn delegate(
             period,
             params,
         },
-        ZonePeriodTrapdoor { bytes: trap_bytes },
+        ZonePeriodTrapdoor {
+            version: LATTICE_REPRESENTATION_VERSION,
+            params,
+            bytes: trap_bytes?,
+        },
     ))
 }
 
@@ -506,7 +958,7 @@ pub fn delegate(
 ///
 /// **Stub:** returns
 /// `Err(LatticePqError::NotImplemented { primitive: "sample_pre", bead:
-/// "kyopb.1.3.1" })`.
+/// "kyopb.1.3.1.1.4" })`.
 ///
 /// # Errors
 ///
@@ -517,7 +969,7 @@ pub fn delegate(
 ///   parameter-validation tests can already cover the path.
 pub fn sample_pre(
     key: &ZonePeriodPublicKey,
-    _trap: &ZonePeriodTrapdoor,
+    trap: &ZonePeriodTrapdoor,
     _h: OperationHash,
     params: LatticeParams,
 ) -> LatticePqResult<LatticePreimage> {
@@ -527,9 +979,16 @@ pub fn sample_pre(
             key: key.params,
         });
     }
+    if params != trap.params {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: trap.params,
+        });
+    }
+    params.validate()?;
     Err(LatticePqError::NotImplemented {
         primitive: "sample_pre",
-        bead: "kyopb.1.3.1",
+        bead: "kyopb.1.3.1.1.4",
     })
 }
 
@@ -542,7 +1001,7 @@ pub fn sample_pre(
 /// period containment) so call-sites can already exercise the negative
 /// branches; returns
 /// `Err(LatticePqError::NotImplemented { primitive: "verify", bead:
-/// "kyopb.1.3.1" })` for any positive case.
+/// "kyopb.1.3.1.1.4" })` for any positive case.
 ///
 /// # Errors
 ///
@@ -564,6 +1023,7 @@ pub fn verify(
             key: key.params,
         });
     }
+    params.validate()?;
     if !key.period.contains(now_secs) {
         return Err(LatticePqError::OutsidePeriod {
             now_secs,
@@ -573,7 +1033,7 @@ pub fn verify(
     }
     Err(LatticePqError::NotImplemented {
         primitive: "verify",
-        bead: "kyopb.1.3.1",
+        bead: "kyopb.1.3.1.1.4",
     })
 }
 
@@ -627,6 +1087,26 @@ mod tests {
         assert_eq!(p.m, 16_384);
         assert_eq!(p.sigma_x100, 11_300);
         assert_eq!(p.depth, 4);
+        p.validate().expect("reference profile is valid");
+        let profile = p
+            .representation_profile()
+            .expect("reference profile has bounded representation");
+        assert_eq!(profile.version, LATTICE_REPRESENTATION_VERSION);
+        assert_eq!(profile.coefficient_bytes, 4);
+        assert_eq!(profile.public_matrix_seed_bytes, 32);
+        assert_eq!(profile.public_matrix_expanded_bytes, 33_554_432);
+        assert_eq!(profile.trapdoor_storage_bytes, 96);
+        assert_eq!(profile.preimage_encoded_bytes, 65_536);
+    }
+
+    #[test]
+    fn small_test_profile_has_tiny_deterministic_representation() {
+        let p = LatticeParams::SMALL_TEST;
+        p.validate().expect("small profile is valid");
+        let profile = p.representation_profile().unwrap();
+        assert_eq!(profile.coefficient_bytes, 2);
+        assert_eq!(profile.public_matrix_expanded_bytes, 256);
+        assert_eq!(profile.preimage_encoded_bytes, 32);
     }
 
     #[test]
@@ -652,6 +1132,9 @@ mod tests {
             &tr1.bytes[..],
             "public-key hash and trapdoor bytes are tagged differently"
         );
+        assert_eq!(tr1.representation_version(), LATTICE_REPRESENTATION_VERSION);
+        assert_eq!(tr1.params(), p);
+        assert_eq!(tr1.encoded_len(), p.trapdoor_storage_bytes().unwrap());
     }
 
     #[test]
@@ -670,9 +1153,10 @@ mod tests {
             hex::encode(master_pub.hash),
             "7f00d711a9de7cec422265e9cfb180de6c37aa7da3ff0375abf0249199b491ad"
         );
-        assert_eq!(
-            hex::encode(master_trap.bytes),
-            "3e0fd286853ff52ba018cf47dc22749cd6c5e774ea94a9deccf6780e627076cf"
+        assert_eq!(master_trap.encoded_len(), 96);
+        assert!(
+            format!("{master_trap:?}").contains("<redacted>"),
+            "secret trapdoor debug output must redact material"
         );
     }
 
@@ -698,6 +1182,8 @@ mod tests {
             &zp_trap.bytes[..],
             "child public hash and child trapdoor are tagged differently"
         );
+        assert_eq!(zp_trap.params(), p);
+        assert_eq!(zp_trap.encoded_len(), p.trapdoor_storage_bytes().unwrap());
     }
 
     #[test]
@@ -715,9 +1201,10 @@ mod tests {
 
         let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
         assert_eq!(zp_pub.hash, seed, "delegate exposes the public seed");
-        assert_eq!(
-            hex::encode(zp_trap.bytes),
-            "bed911c5064fc6cda4c26d5fa0686a257543a289b2e1c6189b81a9be79e0ae2a"
+        assert_eq!(zp_trap.encoded_len(), 96);
+        assert!(
+            format!("{zp_trap:?}").contains("<redacted>"),
+            "zone-period trapdoor debug output must redact material"
         );
 
         let different_zone_seed = zone_period_matrix_seed(&master_pub, &[8u8; 32], period, p);
@@ -793,7 +1280,7 @@ mod tests {
 
         // Build a placeholder preimage so verify can run its cheap-check
         // path; verify itself must still terminate at NotImplemented.
-        let placeholder_pre = LatticePreimage { bytes: [0u8; 64] };
+        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
         let now = period.start_secs + 100;
         let v_err = verify(&zp_pub, h, &placeholder_pre, now, p).unwrap_err();
         assert!(
@@ -815,7 +1302,7 @@ mod tests {
         let period = ref_period();
         let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], period, p).unwrap();
         let h = operation_hash(&[0u8; 32], period, b"op", b"princ");
-        let placeholder_pre = LatticePreimage { bytes: [0u8; 64] };
+        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
 
         // 999 is one second before the period opens.
         let err = verify(&zp_pub, h, &placeholder_pre, 999, p).unwrap_err();
@@ -851,7 +1338,7 @@ mod tests {
         let (master_pub, master_trap) = trap_gen(p).unwrap();
         let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), p).unwrap();
         let h = operation_hash(&[0u8; 32], ref_period(), b"op", b"princ");
-        let placeholder_pre = LatticePreimage { bytes: [0u8; 64] };
+        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
 
         let mut wrong = p;
         wrong.q = 7919;
@@ -925,32 +1412,101 @@ mod tests {
     }
 
     #[test]
+    fn public_key_representations_round_trip_through_json() {
+        let params = LatticeParams::SMALL_TEST;
+        let (master_pub, master_trap) = trap_gen(params).unwrap();
+        let period = ref_period();
+        let zone = [9_u8; 32];
+        let (zone_pub, _zone_trap) =
+            delegate(&master_pub, &master_trap, zone, period, params).unwrap();
+
+        let master_json = serde_json::to_string(&master_pub).unwrap();
+        let master_back: MasterPublicKey = serde_json::from_str(&master_json).unwrap();
+        assert_eq!(master_back, master_pub);
+
+        let zone_json = serde_json::to_string(&zone_pub).unwrap();
+        let zone_back: ZonePeriodPublicKey = serde_json::from_str(&zone_json).unwrap();
+        assert_eq!(zone_back, zone_pub);
+        assert_eq!(zone_back.hash.len(), MATRIX_SEED_BYTES);
+    }
+
+    #[test]
     fn lattice_preimage_round_trips_through_json() {
-        let pre = LatticePreimage {
-            bytes: {
-                let mut b = [0u8; 64];
-                for (i, byte) in b.iter_mut().enumerate() {
-                    *byte = u8::try_from(i).expect("0..64 fits in u8");
-                }
-                b
-            },
-        };
+        let params = LatticeParams::SMALL_TEST;
+        let bytes = (0..params.preimage_encoded_bytes().unwrap())
+            .map(|i| u8::try_from(i).expect("small profile fixture byte fits in u8"))
+            .collect::<Vec<_>>();
+        let pre = LatticePreimage::from_encoded_bytes(params, bytes).unwrap();
         let s = serde_json::to_string(&pre).unwrap();
-        // {"bytes":"<128 hex chars>"} = 10 + 128 + 2 = 140 chars
-        assert_eq!(s.len(), 140, "JSON wrapper + hex-of-64-bytes");
         assert!(s.contains("\"bytes\":\""), "uses bytes field");
         let back: LatticePreimage = serde_json::from_str(&s).unwrap();
         assert_eq!(back, pre);
+        assert_eq!(back.encoded_len(), params.preimage_encoded_bytes().unwrap());
+        assert!(
+            format!("{back:?}").contains("<redacted>"),
+            "preimage debug output must redact bytes"
+        );
+    }
+
+    #[test]
+    fn lattice_preimage_rejects_malformed_profile_length() {
+        let params = LatticeParams::SMALL_TEST;
+        let err = LatticePreimage::from_encoded_bytes(params, vec![0_u8; 31]).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "preimage",
+                    expected: 32,
+                    got: 31
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn invalid_params_reject_before_allocation() {
+        let mut params = LatticeParams::SMALL_TEST;
+        params.q = 1;
+        let err = params.validate().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidParameter {
+                    field: "q",
+                    value: 1,
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        params = LatticeParams::SMALL_TEST;
+        params.n = 1;
+        params.q = 2;
+        params.m = 1_048_577;
+        let err = params.representation_profile().unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::RepresentationTooLarge {
+                    material: "preimage",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
     }
 
     #[test]
     fn not_implemented_error_names_responsible_bead() {
         let err = LatticePqError::NotImplemented {
             primitive: "sample_pre",
-            bead: "kyopb.1.3.1",
+            bead: "kyopb.1.3.1.1.4",
         };
         let msg = err.to_string();
         assert!(msg.contains("sample_pre"), "msg: {msg}");
-        assert!(msg.contains("kyopb.1.3.1"), "msg: {msg}");
+        assert!(msg.contains("kyopb.1.3.1.1.4"), "msg: {msg}");
     }
 }

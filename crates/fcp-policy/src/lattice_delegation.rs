@@ -39,7 +39,7 @@
 //!   verification equation. Because [`fcp_crypto_pq::verify`] itself
 //!   currently returns
 //!   [`fcp_crypto_pq::LatticePqError::NotImplemented`] (the lattice
-//!   primitives are stubbed in br-kyopb.1.3.1), a happy-path call to
+//!   primitives are still stubbed), a happy-path call to
 //!   this verifier still terminates at
 //!   [`LatticeDelegationError::NotImplemented`] — but every cheap
 //!   negative-path check is now load-bearing and end-to-end testable.
@@ -98,7 +98,7 @@ impl DelegationPeriod {
 /// Opaque content-addressed identifier for a [`DelegationCertificate`].
 ///
 /// Computed via BLAKE3 over the certificate's canonical encoding —
-/// schema TBD in kyopb.1.3.1. Audit consumers index `DelegationReceipts`
+/// schema is versioned by the `fcp_crypto_pq` representation profile. Audit consumers index `DelegationReceipts`
 /// by this id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -127,8 +127,8 @@ impl DelegationCertificateId {
 /// Public material of one node in the lattice-trapdoor delegation
 /// tree (br-kyopb.1.3 §3.3 layer 1 or layer 2).
 ///
-/// Concrete type is opaque pending kyopb.1.3.1 (the cryptographic
-/// crate scaffolding bead). Holds:
+/// Concrete type is the seed-backed public representation from
+/// `fcp_crypto_pq`. Holds:
 ///
 /// - `cert_id` — content-addressed identifier
 /// - `zone_id` — the zone this delegation authorizes for
@@ -151,15 +151,18 @@ pub struct DelegationCertificate {
     /// the root certificate (the master trapdoor's public companion).
     pub parent_cert_id: Option<DelegationCertificateId>,
     /// 32-byte seed for the per-certificate public matrix `A_zp`.
-    /// Verifiers expand to the full matrix via SHAKE256 — saves
-    /// ~32 KB per certificate on the wire.
+    /// Verifiers expand to the full matrix via SHAKE256 — keeps the
+    /// certificate wire form at 32 bytes instead of the 33,554,432-byte
+    /// expanded `V4_REFERENCE` matrix.
     #[serde(with = "fcp_core::util::hex_or_bytes")]
     pub pub_matrix_seed: [u8; 32],
 }
 
-/// Layer-3 sub-token (br-kyopb.1.3 §3.3) — what a client carries on
-/// each invocation. Wire format is a content-addressed compact
-/// envelope; the concrete bytes layout is TBD in kyopb.1.3.1.
+/// Layer-3 sub-token (br-kyopb.1.3 §3.3).
+///
+/// This is what a client carries on each invocation. Wire format is a
+/// content-addressed compact envelope; the preimage byte length is derived
+/// from the verifier's `fcp_crypto_pq::LatticeParams` profile.
 ///
 /// Holds:
 ///
@@ -185,8 +188,8 @@ pub struct LatticeSubToken {
     /// `RequestDescriptorHash` in `fcp-evidence`).
     #[serde(with = "fcp_core::util::hex_or_bytes")]
     pub request_descriptor_hash: [u8; 32],
-    /// Compact-encoded short-vector pre-image. Concrete encoding
-    /// TBD in kyopb.1.3.1.
+    /// Compact-encoded short-vector pre-image. Encoding length is
+    /// `fcp_crypto_pq::LatticeParams::preimage_encoded_bytes()`.
     pub preimage_bytes: Vec<u8>,
 }
 
@@ -256,12 +259,11 @@ pub enum LatticeDelegationError {
     /// This is a `DoS` defense — a malicious issuance node could
     /// otherwise produce arbitrarily long chains and exhaust the
     /// verifier's stack/CPU walking them. The bound is set from the
-    /// `depth` field of the lattice parameters profile (br-kyopb.1.3.1
-    /// `LatticeParams::depth`).
+    /// `depth` field of the lattice parameters profile.
     #[error("delegation chain too deep: observed {observed}, max {max}")]
     ChainTooDeep { observed: u8, max: u8 },
     /// Sub-token's `preimage_bytes` length does not match the wire
-    /// format expected by the cryptographic verifier (currently 64
+    /// format expected by the cryptographic verifier (currently 65,536
     /// bytes for the `LatticeParams::V4_REFERENCE` profile). Returned
     /// as a length-mismatch failure rather than a cryptographic
     /// failure, so audit consumers can distinguish wire corruption
@@ -329,7 +331,7 @@ pub trait LatticeDelegationVerifier: Send + Sync {
 /// Hosts that want V4 lattice support today MUST replace this with a
 /// concrete implementation (which doesn't exist yet — the design
 /// doc and stub trait land in kyopb.1.3; the crypto crate scaffolding
-/// is kyopb.1.3.1; the trait wiring is kyopb.1.3.2).
+/// is provided by fcp-crypto-pq; the trait wiring is kyopb.1.3.2).
 #[derive(Debug, Default, Clone, Copy)]
 pub struct UnimplementedLatticeDelegationVerifier;
 
@@ -349,19 +351,6 @@ impl LatticeDelegationVerifier for UnimplementedLatticeDelegationVerifier {
 }
 
 // ── Production Verifier (br-kyopb.1.3.2) ──────────────────────────────────
-
-/// Wire-format expectation: number of bytes in a `LatticeSubToken`
-/// preimage for the `V4_REFERENCE` parameter profile. This matches
-/// `fcp_crypto_pq::LatticePreimage::bytes`.
-///
-/// Fixed at 64 for the reference profile because the placeholder
-/// preimage type in the crypto crate is `[u8; 64]`. When the real
-/// short-vector encoding lands, this will become a function of
-/// `LatticeParams` (m × ⌈log₂ q⌉ bits, packed); the structural check
-/// becomes "the encoded length matches what the params imply" rather
-/// than a hard-coded constant. Until then, callers MUST pad/truncate
-/// at the wire layer.
-const REFERENCE_PREIMAGE_BYTES: usize = 64;
 
 /// Production verifier that delegates the cryptographic check to
 /// [`fcp_crypto_pq::verify`] (br-kyopb.1.3.2 wiring).
@@ -546,19 +535,29 @@ impl LatticeDelegationVerifierImpl {
     }
 
     fn preimage_for_sub_token(
+        &self,
         sub_token: &LatticeSubToken,
         leaf: &DelegationCertificate,
     ) -> Result<pq::LatticePreimage, LatticeDelegationError> {
-        if sub_token.preimage_bytes.len() != REFERENCE_PREIMAGE_BYTES {
+        let expected = self.params.preimage_encoded_bytes().map_err(|_| {
+            LatticeDelegationError::ParameterMismatch {
+                verifier_n: self.params.n,
+                cert_n: self.params.n,
+            }
+        })?;
+        if sub_token.preimage_bytes.len() != expected {
             return Err(LatticeDelegationError::PreimageEncodingMismatch {
                 cert_id: leaf.cert_id.to_hex(),
-                expected: REFERENCE_PREIMAGE_BYTES,
+                expected,
                 got: sub_token.preimage_bytes.len(),
             });
         }
-        let mut bytes = [0_u8; REFERENCE_PREIMAGE_BYTES];
-        bytes.copy_from_slice(&sub_token.preimage_bytes);
-        Ok(pq::LatticePreimage { bytes })
+        pq::LatticePreimage::from_encoded_bytes(self.params, sub_token.preimage_bytes.clone())
+            .map_err(|_| LatticeDelegationError::PreimageEncodingMismatch {
+                cert_id: leaf.cert_id.to_hex(),
+                expected,
+                got: sub_token.preimage_bytes.len(),
+            })
     }
 
     fn verify_crypto_preimage(
@@ -618,6 +617,20 @@ impl LatticeDelegationVerifierImpl {
                     cert_n: key.n,
                 })
             }
+            Err(pq::LatticePqError::InvalidEncodingLength { expected, got, .. }) => {
+                Err(LatticeDelegationError::PreimageEncodingMismatch {
+                    cert_id: leaf.cert_id.to_hex(),
+                    expected,
+                    got,
+                })
+            }
+            Err(
+                pq::LatticePqError::InvalidParameter { .. }
+                | pq::LatticePqError::RepresentationTooLarge { .. },
+            ) => Err(LatticeDelegationError::ParameterMismatch {
+                verifier_n: self.params.n,
+                cert_n: self.params.n,
+            }),
             Err(pq::LatticePqError::InvalidPeriod { .. }) => {
                 Err(LatticeDelegationError::IncompleteDelegationChain {
                     cert_id: leaf.cert_id.to_hex(),
@@ -644,7 +657,7 @@ impl LatticeDelegationVerifier for LatticeDelegationVerifierImpl {
         self.validate_parent_chain(leaf, now_unix_ms)?;
 
         // Step 5 — preimage encoding length.
-        let preimage = Self::preimage_for_sub_token(sub_token, leaf)?;
+        let preimage = self.preimage_for_sub_token(sub_token, leaf)?;
 
         // Step 6 — bridge into fcp-crypto-pq + invoke verify.
         self.verify_crypto_preimage(leaf, sub_token, &preimage, now_unix_ms)
@@ -712,10 +725,10 @@ mod tests {
     #[test]
     fn unimplemented_verifier_returns_not_implemented_for_verify() {
         let verifier = UnimplementedLatticeDelegationVerifier;
-        let token = sub_token(0x01);
+        let sub = sub_token(0x01);
         let zone = ZoneId::work();
         let err = verifier
-            .verify_sub_token(&token, &zone, 1_700_000_000_000)
+            .verify_sub_token(&sub, &zone, 1_700_000_000_000)
             .expect_err("stub verifier MUST return NotImplemented");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -793,19 +806,42 @@ mod tests {
     #[test]
     fn lattice_sub_token_round_trips_through_json() {
         // Wire-format pin: while the concrete bytes layout for
-        // `preimage_bytes` is TBD in kyopb.1.3.1, the JSON envelope
-        // shape MUST be stable across the design-doc → implementation
-        // transition so audit consumers can already key off it.
-        let token = sub_token(0x42);
-        let json = serde_json::to_string(&token).unwrap();
-        let back: LatticeSubToken = serde_json::from_str(&json).unwrap();
-        assert_eq!(token, back);
+        // `preimage_bytes` is profile-derived, but the JSON envelope
+        // shape MUST stay stable so audit consumers can already key off it.
+        let sub = sub_token(0x42);
+        let json = serde_json::to_string(&sub).unwrap();
+        let back = serde_json::from_str::<LatticeSubToken>(&json).unwrap();
+        assert_eq!(sub, back);
+    }
+
+    #[test]
+    fn delegation_certificate_round_trips_through_json() {
+        let certificate = DelegationCertificate {
+            cert_id: cert_id(0x51),
+            zone_id: ZoneId::work(),
+            period: period(1_700_000_000_000, 1_700_003_600_000),
+            parent_cert_id: Some(cert_id(0x50)),
+            pub_matrix_seed: [0xAB; 32],
+        };
+        let json = serde_json::to_string(&certificate).unwrap();
+        let back: DelegationCertificate = serde_json::from_str(&json).unwrap();
+        assert_eq!(certificate, back);
+        assert!(
+            json.contains("abababab"),
+            "public matrix seed remains explicit public certificate material"
+        );
     }
 
     // ── Production verifier tests (br-kyopb.1.3.2) ───────────────────
 
     fn ref_params() -> pq::LatticeParams {
         pq::LatticeParams::V4_REFERENCE
+    }
+
+    fn ref_preimage_bytes() -> usize {
+        ref_params()
+            .preimage_encoded_bytes()
+            .expect("reference profile has bounded preimage encoding")
     }
 
     fn cert(
@@ -823,13 +859,13 @@ mod tests {
         }
     }
 
-    fn token_for(byte: u8) -> LatticeSubToken {
+    fn sub_for(byte: u8) -> LatticeSubToken {
         LatticeSubToken {
             cert_id: cert_id(byte),
             op_id: OperationId::new("op.test").unwrap(),
             principal_id: PrincipalId::new("user:alice").unwrap(),
             request_descriptor_hash: [0_u8; 32],
-            preimage_bytes: vec![0_u8; REFERENCE_PREIMAGE_BYTES],
+            preimage_bytes: vec![0_u8; ref_preimage_bytes()],
         }
     }
 
@@ -861,13 +897,16 @@ mod tests {
     fn impl_rejects_unknown_certificate() {
         let v = LatticeDelegationVerifierImpl::empty(ref_params());
         let err = v
-            .verify_sub_token(&token_for(0xAA), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(&sub_for(0xAA), &ZoneId::work(), 1_500_000)
             .expect_err("unknown cert MUST be rejected");
         match err {
             LatticeDelegationError::UnknownCertificate { cert_id } => {
                 assert_eq!(cert_id, "aa".repeat(32));
             }
-            other => panic!("expected UnknownCertificate, got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::UnknownCertificate { .. }),
+                "expected UnknownCertificate, got {other:?}"
+            ),
         }
     }
 
@@ -878,9 +917,9 @@ mod tests {
             ref_params(),
             [cert(0x10, ZoneId::work(), p, None)],
         );
-        let token = token_for(0x10);
+        let sub = sub_for(0x10);
         let err = v
-            .verify_sub_token(&token, &ZoneId::public(), 1_500_000)
+            .verify_sub_token(&sub, &ZoneId::public(), 1_500_000)
             .expect_err("zone mismatch MUST be rejected");
         match err {
             LatticeDelegationError::ZoneMismatch {
@@ -890,7 +929,10 @@ mod tests {
                 assert_eq!(cert_zone, ZoneId::work().as_str());
                 assert_eq!(request_zone, ZoneId::public().as_str());
             }
-            other => panic!("expected ZoneMismatch, got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::ZoneMismatch { .. }),
+                "expected ZoneMismatch, got {other:?}"
+            ),
         }
     }
 
@@ -902,7 +944,7 @@ mod tests {
             [cert(0x10, ZoneId::work(), p, None)],
         );
         let err = v
-            .verify_sub_token(&token_for(0x10), &ZoneId::work(), 500_000)
+            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 500_000)
             .expect_err("now < period.start MUST be rejected");
         match err {
             LatticeDelegationError::OutsidePeriod {
@@ -914,7 +956,10 @@ mod tests {
                 assert_eq!(start_unix_ms, 1_000_000);
                 assert_eq!(end_unix_ms, 2_000_000);
             }
-            other => panic!("expected OutsidePeriod, got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::OutsidePeriod { .. }),
+                "expected OutsidePeriod, got {other:?}"
+            ),
         }
     }
 
@@ -926,7 +971,7 @@ mod tests {
             [cert(0x10, ZoneId::work(), p, None)],
         );
         let err = v
-            .verify_sub_token(&token_for(0x10), &ZoneId::work(), 3_000_000)
+            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 3_000_000)
             .expect_err("now > period.end MUST be rejected");
         assert!(matches!(err, LatticeDelegationError::OutsidePeriod { .. }));
     }
@@ -940,13 +985,19 @@ mod tests {
             [cert(0xBB, ZoneId::work(), p, Some(0xAA))],
         );
         let err = v
-            .verify_sub_token(&token_for(0xBB), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(&sub_for(0xBB), &ZoneId::work(), 1_500_000)
             .expect_err("missing parent MUST be rejected");
         match err {
             LatticeDelegationError::IncompleteDelegationChain { cert_id } => {
                 assert_eq!(cert_id, "bb".repeat(32));
             }
-            other => panic!("expected IncompleteDelegationChain, got {other:?}"),
+            other => assert!(
+                matches!(
+                    other,
+                    LatticeDelegationError::IncompleteDelegationChain { .. }
+                ),
+                "expected IncompleteDelegationChain, got {other:?}"
+            ),
         }
     }
 
@@ -963,7 +1014,7 @@ mod tests {
         );
         // now is inside the leaf's period but outside the parent's.
         let err = v
-            .verify_sub_token(&token_for(0xBB), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(&sub_for(0xBB), &ZoneId::work(), 1_500_000)
             .expect_err("expired ancestor MUST be rejected");
         match err {
             LatticeDelegationError::OutsidePeriod {
@@ -975,7 +1026,10 @@ mod tests {
                 assert_eq!(start_unix_ms, parent_p.start_unix_ms);
                 assert_eq!(end_unix_ms, parent_p.end_unix_ms);
             }
-            other => panic!("expected OutsidePeriod (parent), got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::OutsidePeriod { .. }),
+                "expected OutsidePeriod (parent), got {other:?}"
+            ),
         }
     }
 
@@ -991,7 +1045,7 @@ mod tests {
         }
         let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), certs);
         let err = v
-            .verify_sub_token(&token_for(0x06), &ZoneId::work(), 5_000_000)
+            .verify_sub_token(&sub_for(0x06), &ZoneId::work(), 5_000_000)
             .expect_err("chain longer than params.depth MUST be rejected");
         match err {
             LatticeDelegationError::ChainTooDeep { observed, max } => {
@@ -1001,7 +1055,10 @@ mod tests {
                 );
                 assert_eq!(max, ref_params().depth);
             }
-            other => panic!("expected ChainTooDeep, got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::ChainTooDeep { .. }),
+                "expected ChainTooDeep, got {other:?}"
+            ),
         }
     }
 
@@ -1017,7 +1074,7 @@ mod tests {
         }
         let v = LatticeDelegationVerifierImpl::with_certificates(ref_params(), certs);
         let err = v
-            .verify_sub_token(&token_for(0x05), &ZoneId::work(), 5_000_000)
+            .verify_sub_token(&sub_for(0x05), &ZoneId::work(), 5_000_000)
             .expect_err("crypto-pq stub MUST surface as NotImplemented");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -1029,10 +1086,10 @@ mod tests {
             ref_params(),
             [cert(0x10, ZoneId::work(), p, None)],
         );
-        let mut token = token_for(0x10);
-        token.preimage_bytes = vec![0_u8; 32]; // Wrong: 32 instead of 64.
+        let mut sub = sub_for(0x10);
+        sub.preimage_bytes = vec![0_u8; 32]; // Wrong for V4_REFERENCE.
         let err = v
-            .verify_sub_token(&token, &ZoneId::work(), 5_000_000)
+            .verify_sub_token(&sub, &ZoneId::work(), 5_000_000)
             .expect_err("wrong-length preimage MUST be rejected");
         match err {
             LatticeDelegationError::PreimageEncodingMismatch {
@@ -1041,10 +1098,16 @@ mod tests {
                 got,
             } => {
                 assert_eq!(cert_id, "10".repeat(32));
-                assert_eq!(expected, REFERENCE_PREIMAGE_BYTES);
+                assert_eq!(expected, ref_preimage_bytes());
                 assert_eq!(got, 32);
             }
-            other => panic!("expected PreimageEncodingMismatch, got {other:?}"),
+            other => assert!(
+                matches!(
+                    other,
+                    LatticeDelegationError::PreimageEncodingMismatch { .. }
+                ),
+                "expected PreimageEncodingMismatch, got {other:?}"
+            ),
         }
     }
 
@@ -1059,7 +1122,7 @@ mod tests {
             [cert(0x10, ZoneId::work(), p, None)],
         );
         let err = v
-            .verify_sub_token(&token_for(0x10), &ZoneId::work(), 1_500_000)
+            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 1_500_000)
             .expect_err("happy path MUST surface as NotImplemented until crypto lands");
         assert_eq!(err, LatticeDelegationError::NotImplemented);
     }
@@ -1079,7 +1142,7 @@ mod tests {
         );
         // Verify the new period is the one used.
         let err = v
-            .verify_sub_token(&token_for(0x10), &ZoneId::work(), 500_000)
+            .verify_sub_token(&sub_for(0x10), &ZoneId::work(), 500_000)
             .expect_err("now=500k is in p1 but NOT p2 (which won)");
         match err {
             LatticeDelegationError::OutsidePeriod {
@@ -1090,7 +1153,10 @@ mod tests {
                 assert_eq!(start_unix_ms, p2.start_unix_ms);
                 assert_eq!(end_unix_ms, p2.end_unix_ms);
             }
-            other => panic!("expected OutsidePeriod with p2 bounds, got {other:?}"),
+            other => assert!(
+                matches!(other, LatticeDelegationError::OutsidePeriod { .. }),
+                "expected OutsidePeriod with p2 bounds, got {other:?}"
+            ),
         }
     }
 

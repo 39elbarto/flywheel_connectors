@@ -1,7 +1,8 @@
 # Lattice-Trapdoor Capability Delegation — Design Doc
 
 **Bead:** `flywheel_connectors-kyopb.1.3` (J.5.3)
-**Status:** DRAFT — design + stub trait only; no production implementation in this commit.
+**Status:** DRAFT — representation profile scaffold exists; production lattice
+arithmetic is not implemented yet.
 **Authors:** AmberLark
 **Date:** 2026-05-02
 **Companion:** `docs/post-quantum/x_wing_kem_design.md` (kyopb.1.2 — KEM half) +
@@ -145,17 +146,36 @@ These values target **128-bit classical / Cat. 3 PQ** security per the
 Micciancio-Peikert sample-quality bound and are conservative against all known
 sieve / BKZ attacks as of 2026.
 
-### 3.2 Key sizes (per layer, approximate)
+### 3.2 Representation profile and key sizes
 
-| Object               | Size (bytes) | Notes                                                      |
-|----------------------|--------------|------------------------------------------------------------|
-| Public matrix `A`    | ~32 KB       | Per-layer; can be derived from a 32-byte seed via SHAKE     |
-| Trapdoor `T_A`       | ~512 KB      | Sealed at rest with X-Wing KEM (kyopb.1.2)                  |
-| Sub-token (layer 3)  | ~2.5 KB      | Short vector + period encoding + operation hash binding     |
-| Verification time    | ~0.5 ms      | One matrix-vector multiply mod q + norm check               |
+The implemented scaffold now pins
+`fcp_crypto_pq::LATTICE_REPRESENTATION_VERSION = 1`. Version 1 is a
+seed-backed representation profile:
+
+- Public matrices serialize as a 32-byte SHAKE seed. The expanded
+  `V4_REFERENCE` matrix is `512 * 16384 * 4 = 33,554,432` bytes and is
+  never stored in certificates or tokens.
+- Trapdoors are secret-only 96-byte seed bundles in the scaffold. They do
+  not implement `Serialize`, redact `Debug`, and zeroize their byte storage
+  on drop. The future MP12/CHKP implementation may replace the bundle with a
+  sealed basis, but it must keep the public/secret boundary explicit.
+- Layer-3 preimages serialize as profile-derived packed coefficients. For
+  `V4_REFERENCE`, the length is `16384 * 4 = 65,536` bytes; malformed lengths
+  are rejected before cryptographic verification.
+- The small deterministic test profile is `n=8, q=257, m=16`, yielding a
+  256-byte expanded public matrix and a 32-byte preimage. It exists only for
+  cheap dimension and serialization tests.
+
+| Object                          | V4_REFERENCE representation | Notes                                      |
+|---------------------------------|-----------------------------|--------------------------------------------|
+| Public matrix seed              | 32 B                        | Serialized public certificate material     |
+| Expanded public matrix `A`      | 33,554,432 B                | Derived on demand; guarded by a 64 MiB cap |
+| Trapdoor seed bundle            | 96 B                        | Secret-only, redacted, zeroized on drop    |
+| Sub-token preimage              | 65,536 B                    | Profile-derived packed `Z_q^m` vector      |
+| Verification time               | ~0.5 ms projected           | One matrix-vector multiply mod q + norm check |
 
 For comparison, an Ed25519 capability token is ~64 bytes signature + claims
-(~256 bytes total). Lattice sub-tokens are **~10× larger** but the operational
+(~256 bytes total). V4 lattice sub-tokens are much larger, but the operational
 model lets us batch issuance, which Ed25519 cannot.
 
 ### 3.3 Algorithms (high-level)
@@ -375,9 +395,9 @@ brief:
   signature OR a valid V4 sub-token over the same request; both verifications
   must complete before dispatch (defense in depth during the migration).
 
-The `fcp_policy::lattice_delegation::LatticeDelegationVerifier` trait (this
-commit's stub) is the abstraction layer; concrete implementations live in
-`fcp-crypto-pq` (a new crate, not in this commit).
+The `fcp_policy::lattice_delegation::LatticeDelegationVerifier` trait is the
+policy abstraction layer; representation and primitive scaffolding live in
+`fcp-crypto-pq`.
 
 ---
 
@@ -388,7 +408,7 @@ commit's stub) is the abstraction layer; concrete implementations live in
 | Ed25519 + per-token sign        | ✗       | ✗                      | ✗                      | ~256 B     | V3 baseline                            |
 | ML-DSA + per-token sign         | ✓       | ✗                      | ✗                      | ~3.3 KB    | V4 default (kyopb.1.1)                 |
 | ML-DSA + FROST threshold        | ✓       | ✗ (online ceremony)    | ✗                      | ~3.5 KB    | k-of-n online; doesn't help offline    |
-| **Lattice-trapdoor (this doc)** | ✓       | ✓                      | ✓                      | ~2.5 KB    | The alpha play                         |
+| **Lattice-trapdoor (this doc)** | ✓       | ✓                      | ✓                      | ~64 KiB    | The alpha play                         |
 | ZK-SNARK over delegation tree   | ✓       | ✓ (after setup)        | ✓                      | ~256 B     | Proven verifier; trusted setup hairy   |
 | Anonymous credentials (BBS+)    | classical| ✓                      | ✓                      | ~600 B     | Not PQ-safe; superseded by lattice     |
 
@@ -402,15 +422,14 @@ demons).
 
 ## 8. Implementation roadmap
 
-This commit lands the design + a stub trait
-(`crates/fcp-policy/src/lattice_delegation.rs`). The actual implementation
-splits into 4 sub-beads, filed alongside this close:
+The design, policy verifier wiring, and `fcp-crypto-pq` representation
+profile scaffold are in-tree. The remaining production implementation splits
+into the following sub-beads:
 
 1. **kyopb.1.3.1** — `crates/fcp-crypto-pq` crate scaffolding +
-   `TrapGen` / `Delegate` / `SamplePre` / `Verify` primitives. Wraps a
-   battle-tested Rust lattice library (likely `kyber-rs` extended +
-   `lattirust` or similar — concrete library choice is sub-bead work).
-   ~2-3 engineer-weeks.
+   `TrapGen` / `Delegate` / `SamplePre` / `Verify` primitives. The
+   version-1 representation profile is implemented; real MP12/CHKP/GPV
+   arithmetic remains follow-up work. ~2-3 engineer-weeks total.
 2. **kyopb.1.3.2** — `LatticeDelegationVerifier` trait implementation
    wiring stub from this commit to the kyopb.1.3.1 primitives.
    ~1 engineer-week.

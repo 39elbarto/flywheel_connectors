@@ -52,10 +52,12 @@ Three signature/delegation families across four shapes:
 - **ML-DSA-65** — production `fcp_crypto::ml_dsa` (RustCrypto `ml-dsa`
   crate, FIPS 204).
 - **Lattice-trapdoor** — `fcp_crypto_pq` (`br-kyopb.1.3.1` stubs).
-  `trap_gen` and `delegate` now deterministically derive 32-byte
-  placeholders via SHAKE256; `sample_pre` returns
-  `LatticePqError::NotImplemented` immediately; `verify` runs the
-  structural checks and then returns `NotImplemented`.
+  `trap_gen` and `delegate` now deterministically derive a 32-byte
+  public-matrix seed and a 96-byte secret trapdoor seed bundle via
+  SHAKE256. `sample_pre` returns `LatticePqError::NotImplemented`
+  immediately; `verify` validates the representation profile and the
+  65,536-byte `V4_REFERENCE` preimage length before returning
+  `NotImplemented`.
 
 The concrete numbers in §3 were captured on 2026-05-02 before the
 SHAKE256 fixture scaffold in `flywheel_connectors-kyopb.1.3.1.1.1`;
@@ -239,6 +241,16 @@ that bead should include:
    should be relegated to long-lived sub-token issuance only (V3
    stays the default for short-lived per-request tokens). Decision
    point recorded for the team.
+
+### 5.1 Representation-profile caveat
+
+The benchmark now uses the version-1 representation profile from
+`fcp_crypto_pq`: public matrices are seed-backed, trapdoors are
+secret-only 96-byte seed bundles, and the `V4_REFERENCE` preimage
+fixture is 65,536 bytes. Historical results from 2026-05-02 were
+captured before that profile existed and should be read only as
+bridge-cost floors, not as measurements of the final wire/storage
+shape.
 
 ## 6. Notes on bench fidelity
 

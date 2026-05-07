@@ -20,7 +20,7 @@ use fcp_policy::lattice_delegation::{
 };
 use proptest::prelude::*;
 
-fn cert_id(byte: u8) -> DelegationCertificateId {
+const fn cert_id(byte: u8) -> DelegationCertificateId {
     DelegationCertificateId::from_bytes([byte; 32])
 }
 
@@ -36,7 +36,7 @@ fn zone_from_kind(kind: u8) -> ZoneId {
     }
 }
 
-fn period_open() -> DelegationPeriod {
+const fn period_open() -> DelegationPeriod {
     DelegationPeriod {
         start_unix_ms: 0,
         end_unix_ms: u64::MAX,
@@ -63,16 +63,19 @@ fn verifier_with(certs: Vec<DelegationCertificate>) -> LatticeDelegationVerifier
 }
 
 fn sub_token_targeting(leaf: u8) -> LatticeSubToken {
+    let preimage_len = LatticeParams::V4_REFERENCE
+        .preimage_encoded_bytes()
+        .expect("reference profile has bounded preimage encoding");
     LatticeSubToken {
         cert_id: cert_id(leaf),
         op_id: OperationId::new("op:test").unwrap(),
         principal_id: PrincipalId::new("agent:test").unwrap(),
         request_descriptor_hash: [0u8; 32],
-        preimage_bytes: vec![0u8; 64],
+        preimage_bytes: vec![0u8; preimage_len],
     }
 }
 
-fn lean_period_contains(period: DelegationPeriod, now_unix_ms: u64) -> bool {
+const fn lean_period_contains(period: DelegationPeriod, now_unix_ms: u64) -> bool {
     period.start_unix_ms <= now_unix_ms && now_unix_ms <= period.end_unix_ms
 }
 
@@ -89,7 +92,7 @@ fn lean_accepts_token(
             .all(|ancestor| lean_period_contains(ancestor.period, now_unix_ms))
 }
 
-fn rust_reached_crypto_or_accepted(
+const fn rust_reached_crypto_or_accepted(
     outcome: &Result<
         fcp_policy::lattice_delegation::LatticeVerificationReceipt,
         LatticeDelegationError,
@@ -98,9 +101,9 @@ fn rust_reached_crypto_or_accepted(
     matches!(
         outcome,
         Ok(_)
-            | Err(LatticeDelegationError::NotImplemented)
-            | Err(LatticeDelegationError::VerificationEquationFailed { .. })
-            | Err(LatticeDelegationError::PreimageTooLong { .. })
+            | Err(LatticeDelegationError::NotImplemented
+                | LatticeDelegationError::VerificationEquationFailed { .. }
+                | LatticeDelegationError::PreimageTooLong { .. })
     )
 }
 
@@ -289,17 +292,20 @@ proptest! {
         // structural errors. Anything else is a regression.
         let outcome = result.unwrap();
         match outcome {
-            Ok(_) => {} // Receipt — fine, never reached today (stub)
-            Err(LatticeDelegationError::UnknownCertificate { .. })
-            | Err(LatticeDelegationError::ZoneMismatch { .. })
-            | Err(LatticeDelegationError::OutsidePeriod { .. })
-            | Err(LatticeDelegationError::IncompleteDelegationChain { .. })
-            | Err(LatticeDelegationError::ChainTooDeep { .. })
-            | Err(LatticeDelegationError::PreimageEncodingMismatch { .. })
-            | Err(LatticeDelegationError::ParameterMismatch { .. })
-            | Err(LatticeDelegationError::NotImplemented)
-            | Err(LatticeDelegationError::VerificationEquationFailed { .. })
-            | Err(LatticeDelegationError::PreimageTooLong { .. }) => {}
+            // Receipt — fine, never reached today (stub)
+            Ok(_)
+            | Err(
+                LatticeDelegationError::UnknownCertificate { .. }
+                    | LatticeDelegationError::ZoneMismatch { .. }
+                    | LatticeDelegationError::OutsidePeriod { .. }
+                    | LatticeDelegationError::IncompleteDelegationChain { .. }
+                    | LatticeDelegationError::ChainTooDeep { .. }
+                    | LatticeDelegationError::PreimageEncodingMismatch { .. }
+                    | LatticeDelegationError::ParameterMismatch { .. }
+                    | LatticeDelegationError::NotImplemented
+                    | LatticeDelegationError::VerificationEquationFailed { .. }
+                    | LatticeDelegationError::PreimageTooLong { .. }
+            ) => {}
         }
     }
 
@@ -394,8 +400,10 @@ proptest! {
             prop_assert!(
                 matches!(
                     outcome,
-                    Err(LatticeDelegationError::ZoneMismatch { .. })
-                        | Err(LatticeDelegationError::OutsidePeriod { .. })
+                    Err(
+                        LatticeDelegationError::ZoneMismatch { .. }
+                            | LatticeDelegationError::OutsidePeriod { .. }
+                    )
                 ),
                 "Lean rejected but Rust did not reject at a modeled structural gate: {outcome:?}"
             );

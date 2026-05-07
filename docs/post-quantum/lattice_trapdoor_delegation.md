@@ -449,11 +449,15 @@ operational differentiator the alpha play promised.
 
 ## 9. Open questions
 
-1. **Library choice for the lattice primitives.** `lattirust` is the most
-   actively maintained Rust crate for Micciancio-Peikert trapdoors as of
-   early 2026, but its API is research-grade (no semver). Alternative:
-   audit our own implementation against the open-source reference (Ducas,
-   Lyubashevsky, et al.). Decided in kyopb.1.3.1.
+1. **Library choice for the lattice primitives.** Decided by
+   `flywheel_connectors-kyopb.1.3.1.1.7`: no inspected off-the-shelf Rust
+   dependency or public reference implementation is accepted as a direct
+   production route for FCP V4 TrapGen, Delegate, SamplePre, and Verify.
+   The representation bead (`flywheel_connectors-kyopb.1.3.1.1.8`) should
+   proceed with a versioned basis-capable boundary, while arithmetic stays
+   on formal hold until a vendored or internal implementation has an explicit
+   cryptography review packet, deterministic fixtures, allocation evidence,
+   and redaction-safe JSONL proof.
 2. **Period granularity.** This design uses unix-millisecond
    `[period_start, period_end]`. Operational alternative: epoch-numbered
    periods (e.g., monthly buckets). Trade-off: ms gives flexibility,

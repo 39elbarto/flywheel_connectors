@@ -1,10 +1,66 @@
 use fcp_elevenlabs::ElevenlabsConnector;
+use fcp_manifest::ConnectorManifest;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
     ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
+use jsonschema::Validator;
 use serde_json::{Value, json};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const EXPECTED_OPERATION_IDS: [&str; 4] = [
+    "elevenlabs.voices.list",
+    "elevenlabs.tts.generate",
+    "elevenlabs.tts.stream",
+    "elevenlabs.scribe.realtime.transcribe",
+];
+
+fn elevenlabs_manifest_unchecked() -> ConnectorManifest {
+    ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+        .expect("ElevenLabs manifest should parse before hash validation")
+}
+
+fn manifest_input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {
+    &manifest
+        .provides
+        .operations
+        .get(operation_id)
+        .expect("manifest operation should be declared")
+        .input_schema
+}
+
+fn json_string<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("value should serialize")
+        .as_str()
+        .expect("serialized value should be a string")
+        .to_string()
+}
+
+fn validator_for(schema: &Value) -> Validator {
+    Validator::new(schema).expect("manifest operation schema should compile")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    let errors: Vec<_> = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "schema should accept {payload}; errors: {errors:?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    assert!(
+        validator.iter_errors(payload).next().is_some(),
+        "schema should reject {payload}"
+    );
+}
 
 #[fcp_async_core::runtime::test]
 async fn elevenlabs_provider_contract_is_advertised() {
@@ -57,6 +113,7 @@ async fn elevenlabs_provider_contract_is_advertised() {
                             .with_label("Eleven Monolingual v1"),
                     ),
             )
+            .with_operation(ProviderOperationContract::new("elevenlabs.voices.list"))
             .with_operation(
                 ProviderOperationContract::new("elevenlabs.tts.generate")
                     .with_catalog_id("tts_models")
@@ -219,6 +276,219 @@ async fn elevenlabs_provider_contract_is_advertised() {
     assert!(migration_hint.contains("retired from connector-local invoke"));
     assert!(migration_hint.contains("Long-running Scribe sessions"));
     assert!(migration_hint.contains("WebSocket input-stream TTS"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn elevenlabs_manifest_operations_match_runtime_introspection() {
+    let manifest = elevenlabs_manifest_unchecked();
+    manifest
+        .validate()
+        .expect("ElevenLabs manifest should validate with its checked interface hash");
+
+    let connector = ElevenlabsConnector::new();
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("introspection should serialize");
+    let runtime_operations = introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("introspection operations should be an array");
+    let runtime_ids: Vec<_> = runtime_operations
+        .iter()
+        .map(|operation| {
+            operation
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("operation id should be a string")
+        })
+        .collect();
+    assert_eq!(runtime_ids, EXPECTED_OPERATION_IDS);
+    assert_eq!(
+        manifest.provides.operations.len(),
+        EXPECTED_OPERATION_IDS.len()
+    );
+
+    for operation_id in EXPECTED_OPERATION_IDS {
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("manifest operation should be declared");
+        let runtime_operation = operation(&introspection, operation_id);
+
+        assert_eq!(
+            runtime_operation.get("summary").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            runtime_operation.get("description").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            runtime_operation.get("capability").and_then(Value::as_str),
+            Some(manifest_operation.capability.as_str())
+        );
+        assert_eq!(
+            runtime_operation
+                .get("risk_level")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.risk_level))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("safety_tier")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.safety_tier))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("idempotency")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.idempotency))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("requires_approval")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.requires_approval))
+        );
+        assert_eq!(
+            runtime_operation.get("input_schema"),
+            Some(&manifest_operation.input_schema)
+        );
+        assert_eq!(
+            runtime_operation.get("output_schema"),
+            Some(&manifest_operation.output_schema)
+        );
+        assert!(
+            manifest_operation.network_constraints.is_some(),
+            "{operation_id} should declare network constraints"
+        );
+        assert!(
+            runtime_operation.get("network_constraints").is_some(),
+            "{operation_id} should expose network constraints through introspection"
+        );
+        assert!(
+            !manifest_operation.ai_hints.when_to_use.trim().is_empty(),
+            "{operation_id} should declare AI guidance"
+        );
+        assert!(
+            runtime_operation.get("ai_hints").is_some(),
+            "{operation_id} should expose AI guidance through introspection"
+        );
+    }
+}
+
+#[test]
+fn elevenlabs_manifest_input_schemas_validate_representative_payloads() {
+    let manifest = elevenlabs_manifest_unchecked();
+
+    let voices_schema = manifest_input_schema(&manifest, "elevenlabs.voices.list");
+    assert_schema_accepts(voices_schema, &json!({}));
+    assert_schema_rejects(voices_schema, &json!(null));
+
+    let tts_generate_schema = manifest_input_schema(&manifest, "elevenlabs.tts.generate");
+    assert_schema_accepts(
+        tts_generate_schema,
+        &json!({
+            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+            "text": "short redaction-safe fixture text",
+            "model_id": "eleven_multilingual_v2",
+            "voice_settings": {
+                "stability": 0.5,
+                "similarity_boost": 0.75,
+                "style": 0.0,
+                "use_speaker_boost": true,
+                "speed": 1.0
+            },
+            "apply_text_normalization": "auto",
+            "output_format": "mp3_44100_128",
+            "optimize_streaming_latency": 4
+        }),
+    );
+    assert_schema_rejects(tts_generate_schema, &json!({}));
+    assert_schema_rejects(
+        tts_generate_schema,
+        &json!({"voice_id": "", "text": "hello"}),
+    );
+    assert_schema_rejects(
+        tts_generate_schema,
+        &json!({"voice_id": "voice", "text": "", "model_id": "eleven_multilingual_v2"}),
+    );
+    assert_schema_rejects(
+        tts_generate_schema,
+        &json!({"voice_id": "voice", "text": "hello", "optimize_streaming_latency": 5}),
+    );
+    assert_schema_rejects(
+        tts_generate_schema,
+        &json!({"voice_id": "voice", "text": "hello", "voice_settings": {"speed": 2.1}}),
+    );
+
+    let tts_stream_schema = manifest_input_schema(&manifest, "elevenlabs.tts.stream");
+    assert_schema_accepts(
+        tts_stream_schema,
+        &json!({
+            "voice_id": "21m00Tcm4TlvDq8ikWAM",
+            "text": "stream fixture",
+            "model_id": "eleven_multilingual_v2",
+            "max_audio_bytes": 16_777_216,
+            "max_chunks": 4096
+        }),
+    );
+    assert_schema_rejects(
+        tts_stream_schema,
+        &json!({"voice_id": "voice", "text": "hello", "max_audio_bytes": 0}),
+    );
+    assert_schema_rejects(
+        tts_stream_schema,
+        &json!({"voice_id": "voice", "text": "hello", "max_chunks": 4097}),
+    );
+
+    let realtime_schema = manifest_input_schema(&manifest, "elevenlabs.scribe.realtime.transcribe");
+    assert_schema_accepts(
+        realtime_schema,
+        &json!({
+            "audio_base64": "dWxhdy1hdWRpbw==",
+            "audio_format": "ulaw_8000",
+            "sample_rate": 8000,
+            "commit_strategy": "vad",
+            "language_code": "en",
+            "include_timestamps": false,
+            "include_language_detection": false,
+            "vad_silence_threshold_secs": 0.5,
+            "vad_threshold": 0.5,
+            "min_speech_duration_ms": 1,
+            "min_silence_duration_ms": 1,
+            "connect_timeout_ms": 100,
+            "timeout_ms": 300_000,
+            "max_events": 1024,
+            "max_reconnect_attempts": 5,
+            "reconnect_delay_ms": 30000
+        }),
+    );
+    assert_schema_accepts(
+        realtime_schema,
+        &json!({"audio_chunks_base64": ["dWxhdy1hdWRpbw=="], "model_id": "scribe_v2_realtime"}),
+    );
+    assert_schema_rejects(realtime_schema, &json!({}));
+    assert_schema_rejects(realtime_schema, &json!({"audio_chunks_base64": []}));
+    assert_schema_rejects(
+        realtime_schema,
+        &json!({"audio_base64": "dWxhdy1hdWRpbw==", "sample_rate": 7999}),
+    );
+    assert_schema_rejects(
+        realtime_schema,
+        &json!({"audio_base64": "dWxhdy1hdWRpbw==", "max_events": 1025}),
+    );
+    assert_schema_rejects(
+        realtime_schema,
+        &json!({"audio_base64": "dWxhdy1hdWRpbw==", "max_reconnect_attempts": 6}),
+    );
 }
 
 fn assert_connector_local_retired(

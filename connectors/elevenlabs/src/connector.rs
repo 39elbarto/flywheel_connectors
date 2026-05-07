@@ -5,6 +5,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_async_core::time;
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use reqwest::{
@@ -18,6 +19,13 @@ use url::Url;
 const CONNECTOR_ID: &str = "fcp.elevenlabs";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.elevenlabs.io/v1";
+const ELEVENLABS_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 4] = [
+    "elevenlabs.voices.list",
+    "elevenlabs.tts.generate",
+    "elevenlabs.tts.stream",
+    "elevenlabs.scribe.realtime.transcribe",
+];
 const BOUNDARY: &str = "This slice exposes voice discovery, request-response text-to-speech, finite HTTP chunked text-to-speech streaming, and finite Scribe realtime transcription sessions. Long-running stream subscriptions and WebSocket input-stream synthesis remain explicit follow-up surfaces.";
 const DEFAULT_TTS_MODEL_ID: &str = "eleven_multilingual_v2";
 const TTS_MODEL_IDS: &[&str] = &[
@@ -1227,165 +1235,67 @@ impl Default for ElevenlabsConnector {
 }
 
 fn operations_info() -> Vec<Value> {
-    vec![
-        voices_operation_info(),
-        tts_generate_operation_info(),
-        tts_stream_operation_info(),
-        realtime_transcription_operation_info(),
-    ]
-}
-
-fn voices_operation_info() -> Value {
-    json!({
-        "id": "elevenlabs.voices.list",
-        "summary": "List ElevenLabs voices",
-        "description": "Reads the current voice catalog from GET /voices.",
-        "capability": "elevenlabs.voices",
-        "risk_level": "low",
-        "safety_tier": "safe",
-        "idempotency": "strict",
-        "input_schema": {"type": "object", "properties": {}},
-        "output_schema": {"type": "object"},
-    })
-}
-
-fn tts_input_schema(extra_properties: Value) -> Value {
-    let mut properties = json!({
-        "voice_id": {"type": "string"},
-        "text": {"type": "string"},
-        "model_id": {
-            "type": "string",
-            "default": DEFAULT_TTS_MODEL_ID,
-            "enum": TTS_MODEL_IDS
-        },
-        "language_code": {"type": "string"},
-        "voice_settings": {
-            "type": "object",
-            "properties": {
-                "stability": {"type": "number", "minimum": 0, "maximum": 1},
-                "similarity_boost": {"type": "number", "minimum": 0, "maximum": 1},
-                "style": {"type": "number", "minimum": 0, "maximum": 1},
-                "use_speaker_boost": {"type": "boolean"},
-                "speed": {"type": "number", "minimum": 0.5, "maximum": 2}
-            }
-        },
-        "pronunciation_dictionary_locators": {"type": "array"},
-        "seed": {"type": "integer"},
-        "apply_text_normalization": {"type": "string", "enum": ["auto", "on", "off"]},
-        "output_format": {"type": "string"},
-        "optimize_streaming_latency": {"type": "integer"}
-    });
-    if let (Some(properties), Value::Object(extra)) = (properties.as_object_mut(), extra_properties)
-    {
-        for (key, value) in extra {
-            properties.insert(key, value);
+    let manifest = match ConnectorManifest::parse_str_unchecked(ELEVENLABS_MANIFEST_TOML) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::error!(%error, "embedded ElevenLabs manifest failed to parse");
+            return Vec::new();
         }
+    };
+
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
     }
-    json!({
-        "type": "object",
-        "required": ["voice_id", "text"],
-        "properties": properties
-    })
-}
-
-fn tts_generate_operation_info() -> Value {
-    json!({
-        "id": "elevenlabs.tts.generate",
-        "summary": "Generate speech audio with ElevenLabs",
-        "description": "Runs request-response synthesis against POST /text-to-speech/{voice_id} and returns the encoded audio bytes.",
-        "capability": "elevenlabs.tts",
-        "risk_level": "medium",
-        "safety_tier": "safe",
-        "idempotency": "none",
-        "input_schema": tts_input_schema(json!({})),
-        "output_schema": {"type": "object"},
-    })
-}
-
-fn tts_stream_operation_info() -> Value {
-    json!({
-        "id": "elevenlabs.tts.stream",
-        "summary": "Stream bounded ElevenLabs text-to-speech audio chunks",
-        "description": "Runs POST /text-to-speech/{voice_id}/stream and returns bounded base64 audio chunks plus byte accounting.",
-        "capability": "elevenlabs.tts.streaming",
-        "risk_level": "medium",
-        "safety_tier": "safe",
-        "idempotency": "none",
-        "input_schema": tts_input_schema(json!({
-            "max_audio_bytes": {
-                "type": "integer",
-                "default": DEFAULT_TTS_STREAM_MAX_AUDIO_BYTES,
-                "maximum": MAX_TTS_STREAM_AUDIO_BYTES
-            },
-            "max_chunks": {
-                "type": "integer",
-                "default": DEFAULT_TTS_STREAM_MAX_CHUNKS,
-                "maximum": MAX_TTS_STREAM_CHUNKS
-            }
-        })),
-        "output_schema": {
-            "type": "object",
-            "properties": {
-                "audio_chunks_base64": {"type": "array", "items": {"type": "string"}},
-                "audio_chunk_sizes": {"type": "array", "items": {"type": "integer"}},
-                "audio_chunk_count": {"type": "integer"},
-                "audio_size_bytes": {"type": "integer"}
-            }
-        },
-    })
-}
-
-fn realtime_transcription_operation_info() -> Value {
-    json!({
-        "id": "elevenlabs.scribe.realtime.transcribe",
-        "summary": "Run a finite ElevenLabs Scribe realtime transcription WebSocket session",
-        "description": "Streams bounded audio chunks to /speech-to-text/realtime and returns partial plus committed transcript frames.",
-        "capability": "elevenlabs.stt.streaming",
-        "risk_level": "low",
-        "safety_tier": "safe",
-        "idempotency": "none",
-        "input_schema": {
-            "type": "object",
-            "anyOf": [
-                {"required": ["audio_base64"]},
-                {"required": ["audio_b64"]},
-                {"required": ["audio_chunks_base64"]},
-                {"required": ["audio_chunks_b64"]}
-            ],
-            "properties": {
-                "audio_base64": {"type": "string"},
-                "audio_b64": {"type": "string"},
-                "audio_chunks_base64": {"type": "array", "items": {"type": "string"}},
-                "audio_chunks_b64": {"type": "array", "items": {"type": "string"}},
-                "session_id": {"type": "string"},
-                "model_id": {"type": "string", "default": DEFAULT_STT_MODEL_ID},
-                "model": {"type": "string", "default": DEFAULT_STT_MODEL_ID},
-                "audio_format": {"type": "string", "default": DEFAULT_STT_AUDIO_FORMAT},
-                "encoding": {"type": "string", "default": DEFAULT_STT_AUDIO_FORMAT},
-                "sample_rate": {"type": "integer", "default": DEFAULT_STT_SAMPLE_RATE},
-                "commit_strategy": {
-                    "type": "string",
-                    "default": DEFAULT_STT_COMMIT_STRATEGY,
-                    "enum": ["manual", "vad"]
-                },
-                "language_code": {"type": "string"},
-                "language": {"type": "string"},
-                "include_timestamps": {"type": "boolean", "default": false},
-                "include_language_detection": {"type": "boolean", "default": false},
-                "vad_silence_threshold_secs": {"type": "number"},
-                "vad_threshold": {"type": "number"},
-                "min_speech_duration_ms": {"type": "integer"},
-                "min_silence_duration_ms": {"type": "integer"},
-                "previous_text": {"type": "string"},
-                "connect_timeout_ms": {"type": "integer", "default": DEFAULT_STT_CONNECT_TIMEOUT_MS},
-                "timeout_ms": {"type": "integer", "default": DEFAULT_STT_TIMEOUT_MS},
-                "max_events": {"type": "integer", "default": DEFAULT_STT_MAX_EVENTS},
-                "max_reconnect_attempts": {"type": "integer", "default": DEFAULT_STT_MAX_RECONNECT_ATTEMPTS},
-                "reconnect_delay_ms": {"type": "integer", "default": DEFAULT_STT_RECONNECT_DELAY_MS}
-            }
-        },
-        "output_schema": {"type": "object"},
-    })
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
 }
 
 fn deferred_operations_info() -> Vec<Value> {

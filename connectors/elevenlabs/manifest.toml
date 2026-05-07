@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:elevenlabs-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:0294250276be028f928ae85582ec78447d5c385acc981b16d50f2bb796e0abe6"
 
 [connector]
 id = "fcp.elevenlabs"
 name = "ElevenLabs"
 version = "0.1.0"
 description = "ElevenLabs text-to-speech, streaming synthesis, realtime transcription, and voice discovery connector"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -27,8 +27,498 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["elevenlabs.voices", "elevenlabs.tts", "elevenlabs.tts.streaming", "elevenlabs.stt.streaming"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."elevenlabs.voices.list"]
+description = "List ElevenLabs voices"
+capability = "elevenlabs.voices"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."elevenlabs.voices.list".input_schema]
+type = "object"
+properties = {}
+
+[provides.operations."elevenlabs.voices.list".output_schema]
+type = "object"
+
+[provides.operations."elevenlabs.voices.list".network_constraints]
+host_allow = ["elevenlabs.io", "*.elevenlabs.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations."elevenlabs.voices.list".ai_hints]
+when_to_use = "Use to discover voice identifiers before text-to-speech synthesis."
+common_mistakes = ["Do not infer a voice_id from a display name without checking the returned catalog.", "Do not log the caller's API key or the full provider response when troubleshooting."]
+examples = ["{}"]
+related = ["elevenlabs.tts.generate", "elevenlabs.tts.stream"]
+
+[provides.operations."elevenlabs.tts.generate"]
+description = "Generate ElevenLabs speech audio"
+capability = "elevenlabs.tts"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."elevenlabs.tts.generate".input_schema]
+type = "object"
+required = ["voice_id", "text"]
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_id]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.text]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.model_id]
+type = "string"
+default = "eleven_multilingual_v2"
+enum = ["eleven_v3", "eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_monolingual_v1"]
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.language_code]
+type = "string"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings]
+type = "object"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings.properties.stability]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings.properties.similarity_boost]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings.properties.style]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings.properties.use_speaker_boost]
+type = "boolean"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.voice_settings.properties.speed]
+type = "number"
+minimum = 0.5
+maximum = 2
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.pronunciation_dictionary_locators]
+type = "array"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.seed]
+type = "integer"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.apply_text_normalization]
+type = "string"
+enum = ["auto", "on", "off"]
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.output_format]
+type = "string"
+pattern = "^(mp3|pcm|ulaw|alaw|opus)_[0-9]+(_[0-9]+)*$"
+
+[provides.operations."elevenlabs.tts.generate".input_schema.properties.optimize_streaming_latency]
+type = "integer"
+minimum = 0
+maximum = 4
+
+[provides.operations."elevenlabs.tts.generate".output_schema]
+type = "object"
+
+[provides.operations."elevenlabs.tts.generate".output_schema.properties.voice_id]
+type = "string"
+
+[provides.operations."elevenlabs.tts.generate".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."elevenlabs.tts.generate".output_schema.properties.audio_base64]
+type = "string"
+
+[provides.operations."elevenlabs.tts.generate".output_schema.properties.audio_size_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations."elevenlabs.tts.generate".network_constraints]
+host_allow = ["elevenlabs.io", "*.elevenlabs.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 33554432
+
+[provides.operations."elevenlabs.tts.generate".ai_hints]
+when_to_use = "Use for finite request-response speech synthesis when the caller has complete text and needs a single audio object."
+common_mistakes = ["Pass a stable voice_id; display names are not accepted by the API path.", "Do not log text prompts, generated audio bytes, or provider error bodies.", "Use elevenlabs.tts.stream when the caller needs bounded chunk accounting."]
+examples = ['{"voice_id":"21m00Tcm4TlvDq8ikWAM","text":"Short status update","model_id":"eleven_multilingual_v2"}']
+related = ["elevenlabs.voices.list", "elevenlabs.tts.stream"]
+
+[provides.operations."elevenlabs.tts.stream"]
+description = "Stream bounded ElevenLabs text-to-speech audio chunks"
+capability = "elevenlabs.tts.streaming"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."elevenlabs.tts.stream".input_schema]
+type = "object"
+required = ["voice_id", "text"]
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_id]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.text]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.model_id]
+type = "string"
+default = "eleven_multilingual_v2"
+enum = ["eleven_v3", "eleven_multilingual_v2", "eleven_turbo_v2_5", "eleven_monolingual_v1"]
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.language_code]
+type = "string"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings]
+type = "object"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings.properties.stability]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings.properties.similarity_boost]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings.properties.style]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings.properties.use_speaker_boost]
+type = "boolean"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.voice_settings.properties.speed]
+type = "number"
+minimum = 0.5
+maximum = 2
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.pronunciation_dictionary_locators]
+type = "array"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.seed]
+type = "integer"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.apply_text_normalization]
+type = "string"
+enum = ["auto", "on", "off"]
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.output_format]
+type = "string"
+pattern = "^(mp3|pcm|ulaw|alaw|opus)_[0-9]+(_[0-9]+)*$"
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.optimize_streaming_latency]
+type = "integer"
+minimum = 0
+maximum = 4
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.max_audio_bytes]
+type = "integer"
+default = 8388608
+minimum = 1
+maximum = 16777216
+
+[provides.operations."elevenlabs.tts.stream".input_schema.properties.max_chunks]
+type = "integer"
+default = 1024
+minimum = 1
+maximum = 4096
+
+[provides.operations."elevenlabs.tts.stream".output_schema]
+type = "object"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.voice_id]
+type = "string"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.content_type]
+type = "string"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_chunks_base64]
+type = "array"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_chunks_base64.items]
+type = "string"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_chunk_sizes]
+type = "array"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_chunk_sizes.items]
+type = "integer"
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_chunk_count]
+type = "integer"
+minimum = 0
+
+[provides.operations."elevenlabs.tts.stream".output_schema.properties.audio_size_bytes]
+type = "integer"
+minimum = 0
+
+[provides.operations."elevenlabs.tts.stream".network_constraints]
+host_allow = ["elevenlabs.io", "*.elevenlabs.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 16777216
+
+[provides.operations."elevenlabs.tts.stream".ai_hints]
+when_to_use = "Use for bounded chunked speech synthesis where the caller needs audio chunk sizes and byte limits."
+common_mistakes = ["This is finite HTTP chunked synthesis, not the host-owned WebSocket input-stream TTS surface.", "Do not set max_audio_bytes or max_chunks above connector limits.", "Do not log text prompts or returned audio chunks."]
+examples = ['{"voice_id":"21m00Tcm4TlvDq8ikWAM","text":"Short update","max_audio_bytes":8388608,"max_chunks":1024}']
+related = ["elevenlabs.voices.list", "elevenlabs.tts.generate"]
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe"]
+description = "Run a finite ElevenLabs Scribe realtime transcription WebSocket session"
+capability = "elevenlabs.stt.streaming"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema]
+type = "object"
+
+[[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_base64"]
+
+[[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_b64"]
+
+[[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_chunks_base64"]
+
+[[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_chunks_b64"]
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_base64]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_b64]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_chunks_base64]
+type = "array"
+minItems = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_chunks_base64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_chunks_b64]
+type = "array"
+minItems = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_chunks_b64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.session_id]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.model_id]
+type = "string"
+default = "scribe_v2_realtime"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.model]
+type = "string"
+default = "scribe_v2_realtime"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.audio_format]
+type = "string"
+default = "ulaw_8000"
+pattern = "^(pcm|ulaw|alaw)_[0-9]+$"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.encoding]
+type = "string"
+default = "ulaw_8000"
+pattern = "^(pcm|ulaw|alaw)_[0-9]+$"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.sample_rate]
+type = "integer"
+default = 8000
+minimum = 8000
+maximum = 192000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.commit_strategy]
+type = "string"
+default = "vad"
+enum = ["manual", "vad"]
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.language_code]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.language]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.include_timestamps]
+type = "boolean"
+default = false
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.include_language_detection]
+type = "boolean"
+default = false
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.vad_silence_threshold_secs]
+type = "number"
+minimum = 0.1
+maximum = 30
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.vad_threshold]
+type = "number"
+minimum = 0
+maximum = 1
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.min_speech_duration_ms]
+type = "integer"
+minimum = 1
+maximum = 60000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.min_silence_duration_ms]
+type = "integer"
+minimum = 1
+maximum = 60000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.previous_text]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.connect_timeout_ms]
+type = "integer"
+default = 10000
+minimum = 100
+maximum = 120000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.timeout_ms]
+type = "integer"
+default = 30000
+minimum = 100
+maximum = 300000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.max_events]
+type = "integer"
+default = 128
+minimum = 2
+maximum = 1024
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.max_reconnect_attempts]
+type = "integer"
+default = 5
+minimum = 0
+maximum = 5
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".input_schema.properties.reconnect_delay_ms]
+type = "integer"
+default = 1000
+minimum = 100
+maximum = 30000
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema]
+type = "object"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.session_id]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.provider_session_id]
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.model_id]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.audio_format]
+type = "object"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.text]
+type = "string"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.partials]
+type = "array"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.committed]
+type = "array"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".output_schema.properties.stats]
+type = "object"
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".network_constraints]
+host_allow = ["elevenlabs.io", "*.elevenlabs.io"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."elevenlabs.scribe.realtime.transcribe".ai_hints]
+when_to_use = "Use for a bounded realtime transcription session when the caller already has finite audio bytes in memory."
+common_mistakes = ["This is a finite WebSocket session, not an indefinite microphone subscription.", "Use either audio_base64/audio_b64 or audio_chunks_base64/audio_chunks_b64, not both.", "Do not log transcripts, previous_text, audio chunks, or provider error bodies."]
+examples = ['{"audio_base64":"<base64-ulaw>","audio_format":"ulaw_8000","sample_rate":8000,"timeout_ms":30000}']
+related = ["elevenlabs.tts.stream"]
 
 [sandbox]
 profile = "strict"

@@ -15,7 +15,9 @@ workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
+hex.workspace = true
+hmac.workspace = true
 parking_lot.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 zeroize.workspace = true
-

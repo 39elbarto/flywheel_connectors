@@ -11,14 +11,29 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
 use chrono::{DateTime, TimeDelta, Utc};
+use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use zeroize::Zeroizing;
+
+type HmacSha256 = Hmac<Sha256>;
+
+/// AWS `SigV4` algorithm label.
+pub const SIGV4_ALGORITHM: &str = "AWS4-HMAC-SHA256";
+
+/// `SigV4` payload sentinel for services that permit unsigned payloads.
+pub const UNSIGNED_PAYLOAD: &str = "UNSIGNED-PAYLOAD";
+
+/// SHA-256 hash of an empty payload.
+pub const EMPTY_PAYLOAD_SHA256: &str =
+    "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 /// Result type for provider-auth operations.
 pub type AuthResult<T> = Result<T, AuthError>;
@@ -47,6 +62,13 @@ pub enum AuthError {
     /// The auth method cannot build request auth without token material.
     #[error("auth method {method} has no usable token material")]
     MissingToken {
+        /// Auth method id.
+        method: &'static str,
+    },
+
+    /// The auth method needs request-signing fields that were not supplied.
+    #[error("auth method {method} needs request signing context")]
+    MissingSigningContext {
         /// Auth method id.
         method: &'static str,
     },
@@ -130,6 +152,30 @@ fn validate_header_value(value: &str) -> AuthResult<()> {
     validate_non_empty(value, "header_value")
 }
 
+fn validate_no_crlf(value: &str, field: &'static str) -> AuthResult<()> {
+    if value.contains('\r') || value.contains('\n') {
+        return Err(AuthError::InvalidConfig {
+            field,
+            reason: "CR/LF bytes are not allowed".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_payload_hash(value: &str) -> AuthResult<()> {
+    if value == UNSIGNED_PAYLOAD {
+        return Ok(());
+    }
+    if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        Ok(())
+    } else {
+        Err(invalid_config(
+            "payload_hash",
+            "must be a SHA-256 hex digest or UNSIGNED-PAYLOAD",
+        ))
+    }
+}
+
 fn std_duration_until(expires_at: DateTime<Utc>) -> StdDuration {
     let remaining = expires_at.signed_duration_since(Utc::now());
     remaining.to_std().unwrap_or(StdDuration::ZERO)
@@ -198,10 +244,88 @@ impl fmt::Display for RedactedSecret {
     }
 }
 
+/// Signable request context for AWS `SigV4` auth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SigV4SigningContext {
+    /// HTTP method such as `GET` or `POST`.
+    pub method: String,
+    /// Absolute path component. Empty paths are canonicalized to `/`.
+    pub uri_path: String,
+    /// Query parameters before `SigV4` URI encoding.
+    pub query_params: BTreeMap<String, String>,
+    /// SHA-256 payload hash or [`UNSIGNED_PAYLOAD`].
+    pub payload_hash: String,
+    /// Optional fixed timestamp for deterministic tests.
+    pub signing_time: Option<DateTime<Utc>>,
+}
+
+impl SigV4SigningContext {
+    /// Construct a `SigV4` signing context without query parameters.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] for invalid method, path, or payload hash.
+    pub fn new(
+        method: impl Into<String>,
+        uri_path: impl Into<String>,
+        payload_hash: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let method = method.into().trim().to_ascii_uppercase();
+        let mut uri_path = uri_path.into();
+        let payload_hash = payload_hash.into();
+        validate_non_empty(&method, "method")?;
+        validate_no_crlf(&method, "method")?;
+        validate_no_crlf(&uri_path, "uri_path")?;
+        validate_payload_hash(&payload_hash)?;
+        if uri_path.is_empty() {
+            uri_path.push('/');
+        }
+        let payload_hash = if payload_hash == UNSIGNED_PAYLOAD {
+            payload_hash
+        } else {
+            payload_hash.to_ascii_lowercase()
+        };
+        Ok(Self {
+            method,
+            uri_path,
+            query_params: BTreeMap::new(),
+            payload_hash,
+            signing_time: None,
+        })
+    }
+
+    /// Add a query parameter to this signing context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] if the key is empty or either field contains CR/LF.
+    pub fn with_query_param(
+        mut self,
+        key: impl Into<String>,
+        value: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let key = key.into();
+        let value = value.into();
+        validate_non_empty(&key, "query_param")?;
+        validate_no_crlf(&key, "query_param")?;
+        validate_no_crlf(&value, "query_value")?;
+        self.query_params.insert(key, value);
+        Ok(self)
+    }
+
+    /// Use a deterministic signing timestamp.
+    #[must_use]
+    pub const fn with_signing_time(mut self, signing_time: DateTime<Utc>) -> Self {
+        self.signing_time = Some(signing_time);
+        self
+    }
+}
+
 /// Minimal request-auth target used by connector clients and tests.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AuthRequest {
     headers: BTreeMap<String, String>,
+    sigv4_context: Option<SigV4SigningContext>,
 }
 
 impl AuthRequest {
@@ -210,6 +334,7 @@ impl AuthRequest {
     pub const fn new() -> Self {
         Self {
             headers: BTreeMap::new(),
+            sigv4_context: None,
         }
     }
 
@@ -242,6 +367,17 @@ impl AuthRequest {
     #[must_use]
     pub const fn headers(&self) -> &BTreeMap<String, String> {
         &self.headers
+    }
+
+    /// Attach `SigV4` signing context for methods that need full request details.
+    pub fn set_sigv4_context(&mut self, context: SigV4SigningContext) {
+        self.sigv4_context = Some(context);
+    }
+
+    /// Borrow `SigV4` signing context, if present.
+    #[must_use]
+    pub const fn sigv4_context(&self) -> Option<&SigV4SigningContext> {
+        self.sigv4_context.as_ref()
     }
 }
 
@@ -546,6 +682,17 @@ impl JwtAuth {
         self.cached_token.read().clone()
     }
 
+    fn regenerate_jwt(&self) -> AuthResult<JwtCachedToken> {
+        let jwt = RedactedSecret::new((self.generator)()?)?;
+        let expires_at = Utc::now() + chrono_duration(self.ttl)?;
+        let cached = JwtCachedToken {
+            token: jwt,
+            expires_at,
+        };
+        *self.cached_token.write() = Some(cached.clone());
+        Ok(cached)
+    }
+
     fn jwt_material(&self) -> AuthResult<RedactedSecret> {
         if let Some(cached) = self.cached_token.read().as_ref() {
             if Utc::now() < cached.expires_at {
@@ -553,13 +700,7 @@ impl JwtAuth {
             }
         }
 
-        let jwt = RedactedSecret::new((self.generator)()?)?;
-        let expires_at = Utc::now() + chrono_duration(self.ttl)?;
-        *self.cached_token.write() = Some(JwtCachedToken {
-            token: jwt.clone(),
-            expires_at,
-        });
-        Ok(jwt)
+        Ok(self.regenerate_jwt()?.token)
     }
 }
 
@@ -601,6 +742,42 @@ impl AuthMethod for JwtAuth {
         self.cached_token()
             .map(|cached| std_duration_until(cached.expires_at))
     }
+
+    async fn refresh(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        self.validate(cx).await?;
+        self.regenerate_jwt()?;
+        Ok(())
+    }
+}
+
+/// Result of applying AWS `SigV4` signing to request headers.
+#[derive(Clone, PartialEq, Eq)]
+pub struct SigV4SignedAuth {
+    /// Authorization header value.
+    pub authorization: String,
+    /// Timestamp used for `x-amz-date`.
+    pub x_amz_date: String,
+    /// Payload hash used for `x-amz-content-sha256`.
+    pub x_amz_content_sha256: String,
+    /// Optional temporary-security session token header.
+    pub x_amz_security_token: Option<String>,
+    /// Semicolon-separated canonical signed header names.
+    pub signed_headers: String,
+}
+
+impl fmt::Debug for SigV4SignedAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SigV4SignedAuth")
+            .field("authorization", &self.authorization)
+            .field("x_amz_date", &self.x_amz_date)
+            .field("x_amz_content_sha256", &self.x_amz_content_sha256)
+            .field(
+                "x_amz_security_token",
+                &self.x_amz_security_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("signed_headers", &self.signed_headers)
+            .finish()
+    }
 }
 
 /// AWS `SigV4` auth configuration.
@@ -639,9 +816,74 @@ impl SigV4Auth {
             access_key: RedactedSecret::new(access_key)?,
             secret_key: RedactedSecret::new(signing_key)?,
             session_token: session_token.map(RedactedSecret::new).transpose()?,
-            region,
-            service,
+            region: region.to_ascii_lowercase(),
+            service: service.to_ascii_lowercase(),
         })
+    }
+
+    /// Sign a request context and return the headers `SigV4` must apply.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when required request context or headers are invalid.
+    pub fn sign(
+        &self,
+        context: &SigV4SigningContext,
+        request_headers: &BTreeMap<String, String>,
+    ) -> AuthResult<SigV4SignedAuth> {
+        validate_non_empty(&self.region, "region")?;
+        validate_non_empty(&self.service, "service")?;
+        let signing_time = context.signing_time.unwrap_or_else(Utc::now);
+        let date_stamp = signing_time.format("%Y%m%d").to_string();
+        let amz_date = signing_time.format("%Y%m%dT%H%M%SZ").to_string();
+        let credential_scope =
+            format!("{date_stamp}/{}/{}/aws4_request", self.region, self.service);
+
+        let mut headers = request_headers.clone();
+        headers.insert("x-amz-date".to_string(), amz_date.clone());
+        headers.insert(
+            "x-amz-content-sha256".to_string(),
+            context.payload_hash.clone(),
+        );
+        if let Some(session_token) = &self.session_token {
+            headers.insert(
+                "x-amz-security-token".to_string(),
+                session_token.expose_secret().to_string(),
+            );
+        }
+
+        let (canonical_headers, signed_headers) = canonical_headers(&headers)?;
+        let canonical_request = canonical_request(context, &canonical_headers, &signed_headers);
+        let canonical_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
+        let string_to_sign =
+            format!("{SIGV4_ALGORITHM}\n{amz_date}\n{credential_scope}\n{canonical_hash}");
+        let signing_key = self.derive_signing_key(&date_stamp);
+        let signature = hex::encode(hmac_sha256(&signing_key, string_to_sign.as_bytes()));
+        let authorization = format!(
+            "{SIGV4_ALGORITHM} Credential={}/{credential_scope},SignedHeaders={signed_headers},Signature={signature}",
+            self.access_key.expose_secret(),
+        );
+
+        Ok(SigV4SignedAuth {
+            authorization,
+            x_amz_date: amz_date,
+            x_amz_content_sha256: context.payload_hash.clone(),
+            x_amz_security_token: self
+                .session_token
+                .as_ref()
+                .map(|token| token.expose_secret().to_string()),
+            signed_headers,
+        })
+    }
+
+    fn derive_signing_key(&self, date_stamp: &str) -> Vec<u8> {
+        let key_for_date = hmac_sha256(
+            format!("AWS4{}", self.secret_key.expose_secret()).as_bytes(),
+            date_stamp.as_bytes(),
+        );
+        let key_for_region = hmac_sha256(&key_for_date, self.region.as_bytes());
+        let key_for_service = hmac_sha256(&key_for_region, self.service.as_bytes());
+        hmac_sha256(&key_for_service, b"aws4_request")
     }
 }
 
@@ -659,17 +901,117 @@ impl AuthMethod for SigV4Auth {
     async fn build_request_auth(
         &self,
         _cx: &fcp_async_core::Cx,
-        _request: &mut AuthRequest,
+        request: &mut AuthRequest,
     ) -> AuthResult<()> {
-        Err(AuthError::UnsupportedMethod {
-            method: self.id(),
-            operation: "sigv4_request_signing",
-        })
+        let context = request
+            .sigv4_context()
+            .ok_or_else(|| AuthError::MissingSigningContext { method: self.id() })?;
+        let signed = self.sign(context, request.headers())?;
+        request.set_header("x-amz-date", signed.x_amz_date)?;
+        request.set_header("x-amz-content-sha256", signed.x_amz_content_sha256)?;
+        if let Some(session_token) = signed.x_amz_security_token {
+            request.set_header("x-amz-security-token", session_token)?;
+        }
+        request.set_header("Authorization", signed.authorization)
     }
 
     fn requires_refresh_in(&self) -> Option<StdDuration> {
         None
     }
+}
+
+/// Hash request payload bytes as lowercase SHA-256 hex.
+#[must_use]
+pub fn sha256_payload_hex(payload: &[u8]) -> String {
+    hex::encode(Sha256::digest(payload))
+}
+
+fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut mac = HmacSha256::new_from_slice(key).expect("HMAC-SHA256 accepts any key length");
+    mac.update(data);
+    mac.finalize().into_bytes().to_vec()
+}
+
+fn canonical_request(
+    context: &SigV4SigningContext,
+    canonical_headers: &str,
+    signed_headers: &str,
+) -> String {
+    format!(
+        "{}\n{}\n{}\n{}\n{signed_headers}\n{}",
+        context.method,
+        canonical_uri(&context.uri_path),
+        canonical_query(&context.query_params),
+        canonical_headers,
+        context.payload_hash,
+    )
+}
+
+fn canonical_headers(headers: &BTreeMap<String, String>) -> AuthResult<(String, String)> {
+    let mut normalized = BTreeMap::new();
+    for (name, value) in headers {
+        let name = name.to_ascii_lowercase();
+        if name == "authorization" {
+            continue;
+        }
+        validate_header_name(&name)?;
+        validate_header_value(value)?;
+        normalized.insert(name, normalize_header_value(value));
+    }
+    if !normalized.contains_key("host") {
+        return Err(invalid_config("host_header", "SigV4 signing requires host"));
+    }
+
+    let mut canonical = String::new();
+    for (name, value) in &normalized {
+        let _ = writeln!(&mut canonical, "{name}:{value}");
+    }
+    let signed = normalized.keys().cloned().collect::<Vec<_>>().join(";");
+    Ok((canonical, signed))
+}
+
+fn normalize_header_value(value: &str) -> String {
+    value.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn canonical_query(params: &BTreeMap<String, String>) -> String {
+    let mut encoded = params
+        .iter()
+        .map(|(key, value)| (uri_encode(key), uri_encode(value)))
+        .collect::<Vec<_>>();
+    encoded.sort();
+    encoded
+        .into_iter()
+        .map(|(key, value)| format!("{key}={value}"))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+fn canonical_uri(path: &str) -> String {
+    let path = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
+    path.split('/')
+        .map(uri_encode)
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn uri_encode(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(char::from(byte));
+            }
+            _ => {
+                let _ = write!(&mut encoded, "%{byte:02X}");
+            }
+        }
+    }
+    encoded
 }
 
 fn apply_bearer_token(
@@ -774,6 +1116,21 @@ impl AuthMethod for AuthMethodKind {
             Self::SetupToken(method) => method.requires_refresh_in(),
             Self::Jwt(method) => method.requires_refresh_in(),
             Self::SigV4(method) => method.requires_refresh_in(),
+        }
+    }
+
+    async fn refresh(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        match self {
+            Self::ApiKey(method) => method.refresh(cx).await,
+            Self::OAuthDeviceCode(_) | Self::OAuthAuthCode(_) => {
+                Err(AuthError::UnsupportedMethod {
+                    method: self.id(),
+                    operation: "refresh",
+                })
+            }
+            Self::SetupToken(method) => method.refresh(cx).await,
+            Self::Jwt(method) => method.refresh(cx).await,
+            Self::SigV4(method) => method.refresh(cx).await,
         }
     }
 }
@@ -954,9 +1311,29 @@ impl AuthProfileStore for InMemoryAuthProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     fn cx() -> fcp_async_core::Cx {
         fcp_async_core::Cx::for_testing()
+    }
+
+    fn sigv4_time() -> DateTime<Utc> {
+        "2013-05-24T00:00:00Z".parse().unwrap()
+    }
+
+    fn aws_example_access_key() -> String {
+        ["AKIAIOSFODNN7", "EXAMPLE"].concat()
+    }
+
+    fn sigv4_auth(session_token: Option<&str>) -> SigV4Auth {
+        SigV4Auth::new(
+            aws_example_access_key(),
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+            session_token.map(str::to_string),
+            "us-east-1",
+            "s3",
+        )
+        .unwrap()
     }
 
     fn run<T>(future: impl std::future::Future<Output = T>) -> T {
@@ -1055,6 +1432,112 @@ mod tests {
         );
         assert!(auth.cached_token().is_some());
         assert!(!format!("{auth:?}").contains("fixture-jwt-value"));
+    }
+
+    #[test]
+    fn jwt_refresh_regenerates_cached_token() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let mut auth = JwtAuth::new("glm", StdDuration::from_secs(60), move || {
+            Ok(format!(
+                "fixture-jwt-{}",
+                generator_counter.fetch_add(1, Ordering::SeqCst)
+            ))
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-0")
+        );
+
+        run(auth.refresh(&cx())).unwrap();
+        let cached = auth.cached_token().unwrap();
+        assert_eq!(cached.token.expose_secret(), "fixture-jwt-1");
+        assert!(auth.requires_refresh_in().is_some());
+
+        let mut refreshed_request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut refreshed_request)).unwrap();
+        assert_eq!(
+            refreshed_request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-1")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn sigv4_signs_aws_get_bucket_lifecycle_vector() {
+        let auth = sigv4_auth(None);
+        let context = SigV4SigningContext::new("GET", "/", EMPTY_PAYLOAD_SHA256)
+            .unwrap()
+            .with_query_param("lifecycle", "")
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let mut request = AuthRequest::new();
+        request
+            .set_header("Host", "examplebucket.s3.amazonaws.com")
+            .unwrap();
+        request.set_sigv4_context(context);
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(request.value_for("x-amz-date"), Some("20130524T000000Z"));
+        assert_eq!(
+            request.value_for("x-amz-content-sha256"),
+            Some(EMPTY_PAYLOAD_SHA256)
+        );
+        let expected_authorization = format!(
+            "AWS4-HMAC-SHA256 Credential={}/20130524/us-east-1/s3/aws4_request,SignedHeaders=host;x-amz-content-sha256;x-amz-date,Signature=fea454ca298b7da1c68078a5d1bdbfbbe0d65c699e0f91ac7a200a0136783543",
+            aws_example_access_key()
+        );
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some(expected_authorization.as_str())
+        );
+    }
+
+    #[test]
+    fn sigv4_includes_session_token_and_redacts_debug() {
+        let auth = sigv4_auth(Some("fixture-session-token"));
+        let context = SigV4SigningContext::new("POST", "/model/invoke", sha256_payload_hex(b"{}"))
+            .unwrap()
+            .with_signing_time(sigv4_time());
+        let mut request = AuthRequest::new();
+        request.set_header("Host", "bedrock.amazonaws.com").unwrap();
+        request.set_sigv4_context(context);
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("x-amz-security-token"),
+            Some("fixture-session-token")
+        );
+        assert!(
+            request
+                .value_for("Authorization")
+                .unwrap()
+                .contains("x-amz-security-token")
+        );
+        assert!(!format!("{auth:?}").contains("fixture-session-token"));
+        let signed = auth
+            .sign(request.sigv4_context().unwrap(), request.headers())
+            .unwrap();
+        assert!(!format!("{signed:?}").contains("fixture-session-token"));
+    }
+
+    #[test]
+    fn sigv4_requires_signing_context() {
+        let auth = sigv4_auth(None);
+        let mut request = AuthRequest::new();
+        request
+            .set_header("Host", "examplebucket.s3.amazonaws.com")
+            .unwrap();
+
+        let error = run(auth.build_request_auth(&cx(), &mut request)).unwrap_err();
+
+        assert_eq!(error, AuthError::MissingSigningContext { method: "sigv4" });
     }
 
     #[test]

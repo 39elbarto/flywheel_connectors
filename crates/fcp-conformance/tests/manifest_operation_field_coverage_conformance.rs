@@ -24,7 +24,6 @@ const EXPECTED_SCHEMA_GAPS: &[&str] = &[
     "bluebubbles",
     "confluence",
     "dingtalk",
-    "dockerhub",
     "email-generic",
     "google-places",
     "google-workspace-events",
@@ -55,10 +54,8 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "linear",
     "llm-router",
     "mastodon",
-    "matrix",
     "mattermost",
     "microsoft365",
-    "mysql",
     "nextcloud-talk",
     "nostr",
     "obsidian",
@@ -67,7 +64,7 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "qq",
     "sonos",
     "synology-chat",
-    "telegram",
+    "teams",
     "telnyx",
     "tlon",
     "twilio",
@@ -97,7 +94,7 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "telnyx",
     "wecom",
 ];
-const EXPECTED_SANDBOX_GAPS: &[&str] = &["google-people", "vercel"];
+const EXPECTED_SANDBOX_GAPS: &[&str] = &[];
 
 #[derive(Debug, Clone)]
 struct ManifestFieldCoverageRecord {

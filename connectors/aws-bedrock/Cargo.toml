@@ -38,4 +38,5 @@ chrono.workspace = true
 ciborium.workspace = true
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
+toml.workspace = true
 wiremock.workspace = true

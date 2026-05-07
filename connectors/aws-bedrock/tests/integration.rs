@@ -43,6 +43,53 @@ const OP_HEALTH: &str = "aws_bedrock.health";
 const TEST_ACCESS_KEY_ID: &str = "fcp-test-access-key";
 const TEST_SIGNING_MATERIAL: &str = "fcp-test-signing-material";
 
+#[test]
+fn manifest_ai_hints_cover_all_aws_bedrock_operations() {
+    let manifest = toml::from_str::<toml::Value>(include_str!("../manifest.toml"))
+        .expect("AWS Bedrock manifest TOML should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("AWS Bedrock manifest should declare operations");
+
+    for (operation_id, operation) in operations {
+        let hints = operation.get("ai_hints").and_then(toml::Value::as_table);
+        assert!(hints.is_some(), "{operation_id} missing ai_hints");
+        let Some(hints) = hints else {
+            continue;
+        };
+        assert!(
+            hints
+                .get("when_to_use")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "{operation_id} missing ai_hints.when_to_use"
+        );
+        assert!(
+            hints
+                .get("common_mistakes")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|mistakes| {
+                    !mistakes.is_empty()
+                        && mistakes.iter().all(|mistake| {
+                            mistake
+                                .as_str()
+                                .is_some_and(|value| !value.trim().is_empty())
+                        })
+                }),
+            "{operation_id} missing ai_hints.common_mistakes"
+        );
+        assert!(
+            hints
+                .get("examples")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|examples| !examples.is_empty()),
+            "{operation_id} missing ai_hints.examples"
+        );
+    }
+}
+
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     HandshakeRequest {
         protocol_version: "2.0.0".into(),

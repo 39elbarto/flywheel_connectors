@@ -10,6 +10,87 @@ const NOT_HANDSHAKEN_REASON_CODE: &str = "not_handshaken";
 const NOT_HANDSHAKEN_MESSAGE: &str = "Connector configured, but handshake has not completed yet.";
 const UNIMPLEMENTED_REASON_CODE: &str = "invoke_surface_unimplemented";
 const UNIMPLEMENTED_MESSAGE: &str = "This connector scaffold only declares planned operations. Live invoke support is not implemented yet.";
+const DM_SEND_OPERATION: &str = "tlon.dm.send";
+const CHANNEL_SEND_OPERATION: &str = "tlon.channel.send";
+const TARGET_RESOLVE_OPERATION: &str = "tlon.target.resolve";
+const DM_CAPABILITY: &str = "tlon.dm";
+const CHANNEL_CAPABILITY: &str = "tlon.channel";
+
+fn dm_send_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["ship", "message"],
+        "additionalProperties": false,
+        "properties": {
+            "ship": {
+                "type": "string",
+                "description": "Target ship name (e.g. ~zod)"
+            },
+            "message": {
+                "type": "string",
+                "description": "Message text to send"
+            }
+        }
+    })
+}
+
+fn channel_send_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["channel", "message"],
+        "additionalProperties": false,
+        "properties": {
+            "channel": {
+                "type": "string",
+                "description": "Target channel path or identifier"
+            },
+            "message": {
+                "type": "string",
+                "description": "Message text to send"
+            }
+        }
+    })
+}
+
+fn target_resolve_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["target"],
+        "additionalProperties": false,
+        "properties": {
+            "target": {
+                "type": "string",
+                "description": "Human-friendly DM or channel target to resolve"
+            }
+        }
+    })
+}
+
+fn ok_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["ok"],
+        "additionalProperties": false,
+        "properties": {
+            "ok": {
+                "type": "boolean"
+            }
+        }
+    })
+}
+
+fn target_resolve_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["resolved"],
+        "additionalProperties": false,
+        "properties": {
+            "resolved": {
+                "type": "boolean"
+            }
+        }
+    })
+}
 
 pub struct TlonConnector {
     base: Arc<BaseConnector>,
@@ -100,9 +181,57 @@ impl TlonConnector {
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
             "operations": [
-                { "id": "tlon.dm.send", "summary": "Send a Tlon DM", "capability": "tlon.dm", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
-                { "id": "tlon.channel.send", "summary": "Send a Tlon channel message", "capability": "tlon.channel", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": false },
-                { "id": "tlon.target.resolve", "summary": "Resolve a Tlon DM or channel target", "capability": "tlon.channel", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": false }
+                {
+                    "id": DM_SEND_OPERATION,
+                    "summary": "Send a Tlon DM",
+                    "capability": DM_CAPABILITY,
+                    "risk_level": "medium",
+                    "safety_tier": "safe",
+                    "idempotency": "best_effort",
+                    "implemented": false,
+                    "input_schema": dm_send_input_schema(),
+                    "output_schema": ok_output_schema(),
+                    "ai_hints": {
+                        "when_to_use": "When you need to send a direct message to a ship on the Tlon/Urbit network.",
+                        "common_mistakes": ["Omitting the ~ prefix on ship names."],
+                        "examples": [],
+                        "related": []
+                    }
+                },
+                {
+                    "id": CHANNEL_SEND_OPERATION,
+                    "summary": "Send a Tlon channel message",
+                    "capability": CHANNEL_CAPABILITY,
+                    "risk_level": "medium",
+                    "safety_tier": "safe",
+                    "idempotency": "best_effort",
+                    "implemented": false,
+                    "input_schema": channel_send_input_schema(),
+                    "output_schema": ok_output_schema(),
+                    "ai_hints": {
+                        "when_to_use": "When you need to send a message into a Tlon/Urbit channel.",
+                        "common_mistakes": ["Using a DM target where a channel path is required."],
+                        "examples": [],
+                        "related": []
+                    }
+                },
+                {
+                    "id": TARGET_RESOLVE_OPERATION,
+                    "summary": "Resolve a Tlon DM or channel target",
+                    "capability": CHANNEL_CAPABILITY,
+                    "risk_level": "low",
+                    "safety_tier": "safe",
+                    "idempotency": "strict",
+                    "implemented": false,
+                    "input_schema": target_resolve_input_schema(),
+                    "output_schema": target_resolve_output_schema(),
+                    "ai_hints": {
+                        "when_to_use": "When you need to normalize or validate a Tlon target before sending.",
+                        "common_mistakes": [],
+                        "examples": [],
+                        "related": []
+                    }
+                }
             ],
             "surface_status": "incubating",
             "surface_status_rationale": "Runtime path is incomplete or lacks production evidence",
@@ -126,7 +255,7 @@ impl TlonConnector {
             code: 1002,
             message: if matches!(
                 operation,
-                "tlon.dm.send" | "tlon.channel.send" | "tlon.target.resolve"
+                DM_SEND_OPERATION | CHANNEL_SEND_OPERATION | TARGET_RESOLVE_OPERATION
             ) {
                 format!(
                     "Operation {operation} is planned but not implemented in this connector slice"
@@ -147,7 +276,7 @@ impl TlonConnector {
         Ok(json!({
             "allowed": false,
             "simulate_capability": "unsupported",
-            "reason": if matches!(operation, "tlon.dm.send" | "tlon.channel.send" | "tlon.target.resolve") {
+            "reason": if matches!(operation, DM_SEND_OPERATION | CHANNEL_SEND_OPERATION | TARGET_RESOLVE_OPERATION) {
                 UNIMPLEMENTED_MESSAGE
             } else {
                 "Unknown operation."

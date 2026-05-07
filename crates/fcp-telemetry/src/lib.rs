@@ -242,7 +242,7 @@ pub struct TelemetryConfig {
     /// Prometheus metrics endpoint port.
     pub prometheus_port: u16,
 
-    /// Enable OTLP trace export.
+    /// Enable OTLP trace, metric, and log export.
     pub otlp_enabled: bool,
 
     /// OTLP endpoint URL.
@@ -372,7 +372,7 @@ impl TelemetryConfig {
         self
     }
 
-    /// Enable OTLP trace export to the given endpoint.
+    /// Enable OTLP trace, metric, and log export to the given endpoint.
     #[must_use]
     pub fn with_otlp(mut self, endpoint: impl Into<String>) -> Self {
         self.otlp_enabled = true;
@@ -845,18 +845,20 @@ pub fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
     Ok(())
 }
 
-fn init_telemetry_with<L, P, G, T>(
+fn init_telemetry_with<L, P, M, G, T>(
     state: &OnceLock<TelemetryState>,
     config: TelemetryConfig,
     otlp_enabled: bool,
     init_logging_fn: L,
     init_prometheus_fn: P,
+    init_otlp_metrics_fn: M,
     init_otlp_logs_fn: G,
     init_otlp_traces_fn: T,
 ) -> Result<(), TelemetryError>
 where
     L: Fn(&TelemetryConfig) -> Result<(), TelemetryError>,
     P: Fn(u16) -> Result<(), TelemetryError>,
+    M: Fn(&str, &str, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
     G: Fn(&str, &str, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
     T: Fn(&str, &str, f64, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
 {
@@ -884,6 +886,12 @@ where
     validate_otlp_resource_attributes(&config.otlp_resource_attributes)?;
 
     if let Some(endpoint) = otlp_endpoint {
+        init_otlp_metrics_fn(
+            &config.service_name,
+            endpoint,
+            &config.otlp_headers,
+            &config.otlp_resource_attributes,
+        )?;
         init_otlp_logs_fn(
             &config.service_name,
             endpoint,
@@ -932,6 +940,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
         true,
         init_logging,
         init_prometheus_exporter,
+        init_otlp_metrics_with_options,
         init_otlp_logs_with_options,
         init_otlp_tracer_with_sample_rate_and_options,
     )
@@ -949,6 +958,7 @@ pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError
         false,
         init_logging,
         init_prometheus_exporter,
+        init_otlp_metrics_with_options,
         init_otlp_logs_with_options,
         init_otlp_tracer_with_sample_rate_and_options,
     )
@@ -1480,6 +1490,7 @@ mod tests {
         let state = OnceLock::new();
         let logging_calls = AtomicUsize::new(0);
         let prometheus_calls = AtomicUsize::new(0);
+        let otlp_metric_calls = AtomicUsize::new(0);
         let otlp_log_calls = AtomicUsize::new(0);
         let otlp_trace_calls = AtomicUsize::new(0);
 
@@ -1497,6 +1508,10 @@ mod tests {
             },
             |_| {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
             |_, _, _, _| {
@@ -1523,6 +1538,10 @@ mod tests {
                 Ok(())
             },
             |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
                 otlp_log_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1535,6 +1554,7 @@ mod tests {
 
         assert_eq!(logging_calls.load(Ordering::SeqCst), 1);
         assert_eq!(prometheus_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(otlp_metric_calls.load(Ordering::SeqCst), 1);
         assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 1);
         assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
@@ -1558,6 +1578,7 @@ mod tests {
             },
             |_| Ok(()),
             |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         );
 
@@ -1573,6 +1594,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         )
@@ -1605,6 +1627,7 @@ mod tests {
             |_| Ok(()),
             |_| Ok(()),
             |_, _, _, _| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, rate, _, _| {
                 *captured_rate.lock().expect("lock") = Some(rate);
                 Ok(())
@@ -1625,6 +1648,8 @@ mod tests {
         let state = OnceLock::new();
         let captured_logs: std::sync::Mutex<Option<(usize, usize, String, String)>> =
             std::sync::Mutex::new(None);
+        let captured_metrics: std::sync::Mutex<Option<(usize, usize, String, String)>> =
+            std::sync::Mutex::new(None);
         let captured_traces: std::sync::Mutex<Option<(usize, usize, String, String)>> =
             std::sync::Mutex::new(None);
         let headers = vec![OtlpHeader::new("authorization", "Bearer secret")?];
@@ -1642,6 +1667,24 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
+            |_, _, headers, attributes| {
+                let header_name = headers
+                    .first()
+                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
+                    .name
+                    .clone();
+                let attribute_key = attributes
+                    .first()
+                    .ok_or_else(|| {
+                        TelemetryError::Config("expected OTLP resource attribute".to_string())
+                    })?
+                    .key
+                    .clone();
+                *captured_metrics.lock().map_err(|_| {
+                    TelemetryError::Config("captured OTLP metrics config lock poisoned".to_string())
+                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
+                Ok(())
+            },
             |_, _, headers, attributes| {
                 let header_name = headers
                     .first()
@@ -1683,11 +1726,23 @@ mod tests {
         let captured_logs = captured_logs.into_inner().map_err(|_| {
             TelemetryError::Config("captured OTLP logs config lock poisoned".to_string())
         })?;
+        let captured_metrics = captured_metrics.into_inner().map_err(|_| {
+            TelemetryError::Config("captured OTLP metrics config lock poisoned".to_string())
+        })?;
         let captured_traces = captured_traces.into_inner().map_err(|_| {
             TelemetryError::Config("captured OTLP traces config lock poisoned".to_string())
         })?;
         assert_eq!(
             captured_logs,
+            Some((
+                1,
+                1,
+                "authorization".to_string(),
+                "deployment.environment".to_string(),
+            )),
+        );
+        assert_eq!(
+            captured_metrics,
             Some((
                 1,
                 1,
@@ -1710,6 +1765,7 @@ mod tests {
     #[test]
     fn test_init_telemetry_sync_skips_otlp_side_effects() {
         let state = OnceLock::new();
+        let otlp_metric_calls = AtomicUsize::new(0);
         let otlp_log_calls = AtomicUsize::new(0);
         let otlp_trace_calls = AtomicUsize::new(0);
 
@@ -1719,6 +1775,10 @@ mod tests {
             false,
             |_| Ok(()),
             |_| Ok(()),
+            |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
             |_, _, _, _| {
                 otlp_log_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
@@ -1730,6 +1790,7 @@ mod tests {
         )
         .unwrap();
 
+        assert_eq!(otlp_metric_calls.load(Ordering::SeqCst), 0);
         assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 0);
         assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 0);
     }
@@ -1827,6 +1888,7 @@ mod tests {
         let state = OnceLock::new();
         let logging_calls = AtomicUsize::new(0);
         let prometheus_calls = AtomicUsize::new(0);
+        let otlp_metric_calls = AtomicUsize::new(0);
         let otlp_log_calls = AtomicUsize::new(0);
         let otlp_trace_calls = AtomicUsize::new(0);
 
@@ -1845,6 +1907,10 @@ mod tests {
                 Ok(())
             },
             |_, _, _, _| {
+                otlp_metric_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
+            |_, _, _, _| {
                 otlp_log_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
@@ -1858,6 +1924,7 @@ mod tests {
         assert!(state.get().is_none());
         assert_eq!(logging_calls.load(Ordering::SeqCst), 0);
         assert_eq!(prometheus_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_metric_calls.load(Ordering::SeqCst), 0);
         assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 0);
         assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 0);
     }
@@ -1881,6 +1948,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         );

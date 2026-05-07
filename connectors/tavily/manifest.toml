@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:tavily-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:159707d17f442f609bbe53ac066d98728cf1c97d3376aa67b8c7a3bd8ece3eb2"
 
 [connector]
 id = "fcp.tavily"
 name = "Tavily"
 version = "0.1.0"
-description = "Tavily connector for web search"
-archetypes = ["request-response"]
+description = "Tavily connector for read-only web search"
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -27,8 +27,105 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["tavily.search"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."tavily.search"]
+description = "Execute a read-only Tavily web search"
+capability = "tavily.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."tavily.search".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."tavily.search".input_schema.properties.query]
+type = "string"
+minLength = 1
+
+[provides.operations."tavily.search".input_schema.properties.topic]
+type = "string"
+enum = ["general", "news", "finance"]
+
+[provides.operations."tavily.search".input_schema.properties.search_depth]
+type = "string"
+enum = ["basic", "advanced"]
+
+[provides.operations."tavily.search".input_schema.properties.max_results]
+type = "number"
+description = "Optional numeric result count; runtime floors fractional values and clamps to Tavily's 1..20 connector bound."
+
+[provides.operations."tavily.search".input_schema.properties.include_answer]
+type = "boolean"
+
+[provides.operations."tavily.search".input_schema.properties.include_raw_content]
+type = "boolean"
+
+[provides.operations."tavily.search".input_schema.properties.include_images]
+type = "boolean"
+
+[provides.operations."tavily.search".input_schema.properties.include_domains]
+type = "array"
+
+[provides.operations."tavily.search".input_schema.properties.include_domains.items]
+type = "string"
+
+[provides.operations."tavily.search".input_schema.properties.exclude_domains]
+type = "array"
+
+[provides.operations."tavily.search".input_schema.properties.exclude_domains.items]
+type = "string"
+
+[provides.operations."tavily.search".input_schema.properties.days]
+type = "integer"
+minimum = 1
+
+[provides.operations."tavily.search".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year"]
+
+[provides.operations."tavily.search".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."tavily.search".output_schema.properties.answer]
+type = "string"
+
+[provides.operations."tavily.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."tavily.search".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."tavily.search".network_constraints]
+host_allow = ["tavily.com", "*.tavily.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."tavily.search".ai_hints]
+when_to_use = "Use for read-only Tavily web search when the caller needs current web results and has a concise natural-language query."
+common_mistakes = ["Do not include API keys, private credentials, or unrelated sensitive material in query text.", "Do not use this search-only operation for Tavily crawl, extract, or map workflows; those surfaces are deferred.", "Use include_domains and exclude_domains for explicit source steering rather than broad prompt instructions."]
+examples = ['{"query":"secure connector protocol","max_results":2,"search_depth":"basic"}']
+related = []
 
 [sandbox]
 profile = "strict"

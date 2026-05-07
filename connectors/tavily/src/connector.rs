@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
@@ -11,9 +12,11 @@ use url::Url;
 const CONNECTOR_ID: &str = "fcp.tavily";
 const CONNECTOR_VERSION: &str = "0.1.0";
 const DEFAULT_BASE_URL: &str = "https://api.tavily.com";
+const TAVILY_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 1] = ["tavily.search"];
 const BOUNDARY: &str = "This first slice is read-only and covers Tavily search. Extraction/crawl workflows are deferred until the connector surface is broader.";
 const TAVILY_CLIENT_SOURCE: &str = "fcp";
-const TAVILY_MAX_SEARCH_RESULTS: u64 = 20;
+const TAVILY_MAX_SEARCH_RESULTS: u8 = 20;
 const TAVILY_SEARCH_DEPTHS: &[&str] = &["basic", "advanced"];
 const TAVILY_TOPICS: &[&str] = &["general", "news", "finance"];
 const TAVILY_TIME_RANGES: &[&str] = &["day", "week", "month", "year"];
@@ -327,33 +330,7 @@ impl TavilyConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [{
-                "id": "tavily.search",
-                "summary": "Run a Tavily search",
-                "description": "Calls Tavily's POST /search endpoint with explicit read-only query shaping.",
-                "capability": "tavily.search",
-                "risk_level": "low",
-                "safety_tier": "safe",
-                "idempotency": "strict",
-                "input_schema": {
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": {"type": "string"},
-                        "topic": {"type": "string"},
-                        "search_depth": {"type": "string"},
-                        "max_results": {"type": "integer"},
-                        "include_answer": {},
-                        "include_raw_content": {},
-                        "include_images": {},
-                        "include_domains": {"type": "array"},
-                        "exclude_domains": {"type": "array"},
-                        "days": {"type": "integer"},
-                        "time_range": {"type": "string"}
-                    }
-                },
-                "output_schema": {"type": "object"}
-            }],
+            "operations": operations_info()?,
             "events": [],
             "resource_types": []
         }))
@@ -487,6 +464,65 @@ impl Default for TavilyConnector {
     }
 }
 
+fn operations_info() -> FcpResult<Vec<Value>> {
+    let manifest =
+        ConnectorManifest::parse_str(TAVILY_MANIFEST_TOML).map_err(|error| FcpError::Internal {
+            message: format!("Embedded Tavily manifest is invalid: {error}"),
+        })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
+}
+
 const fn health_status(
     configured: bool,
     handshaken: bool,
@@ -508,7 +544,13 @@ fn validated_max_results(value: &Value) -> FcpResult<u64> {
     if !raw.is_finite() {
         return Err(invalid_search_option("max_results must be finite"));
     }
-    Ok(raw.floor().clamp(1.0, TAVILY_MAX_SEARCH_RESULTS as f64) as u64)
+    let bounded = raw.floor().clamp(1.0, f64::from(TAVILY_MAX_SEARCH_RESULTS));
+    for candidate in 1..=TAVILY_MAX_SEARCH_RESULTS {
+        if (f64::from(candidate) - bounded).abs() < f64::EPSILON {
+            return Ok(u64::from(candidate));
+        }
+    }
+    Ok(u64::from(TAVILY_MAX_SEARCH_RESULTS))
 }
 
 fn validated_string_enum<'a>(
@@ -563,13 +605,14 @@ fn validated_domain_filter(field: &str, value: &Value) -> FcpResult<Vec<String>>
 }
 
 fn validated_positive_integer(field: &str, value: &Value) -> FcpResult<u64> {
-    if let Some(value) = value.as_u64().filter(|value| *value > 0) {
-        Ok(value)
-    } else {
-        Err(invalid_search_option(format!(
-            "{field} must be a positive integer"
-        )))
-    }
+    value.as_u64().filter(|value| *value > 0).map_or_else(
+        || {
+            Err(invalid_search_option(format!(
+                "{field} must be a positive integer"
+            )))
+        },
+        Ok,
+    )
 }
 
 fn invalid_search_option(message: impl Into<String>) -> FcpError {
@@ -689,16 +732,201 @@ fn map_reqwest_error(service: &'static str, error: &reqwest::Error) -> FcpError 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonschema::Validator;
 
     const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
+    fn tavily_manifest_unchecked() -> ConnectorManifest {
+        ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("Tavily manifest should parse before hash validation")
+    }
+
+    fn search_input_schema(manifest: &ConnectorManifest) -> &Value {
+        &manifest
+            .provides
+            .operations
+            .get("tavily.search")
+            .expect("tavily.search should be declared")
+            .input_schema
+    }
+
+    fn validator_for(schema: &Value) -> Validator {
+        Validator::new(schema).expect("manifest operation schema should compile")
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        let errors: Vec<_> = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {payload}; errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject {payload}"
+        );
+    }
+
     #[test]
     fn manifest_matches_search_only_first_slice() {
-        assert!(MANIFEST_TOML.contains("description = \"Tavily connector for web search\""));
+        assert!(
+            MANIFEST_TOML.contains("description = \"Tavily connector for read-only web search\"")
+        );
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"tavily.search\"]"));
         assert!(MANIFEST_TOML.contains(
             "migration_hint = \"First slice: search only. Extract, crawl, and map are deferred.\""
         ));
         assert!(!MANIFEST_TOML.contains("First slice: search, extract, crawl, and map."));
+    }
+
+    #[test]
+    fn manifest_declares_valid_search_operation_metadata() {
+        let unchecked = tavily_manifest_unchecked();
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "update connectors/tavily/manifest.toml interface_hash to {expected_hash}"
+        );
+
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let operation = manifest
+            .provides
+            .operations
+            .get("tavily.search")
+            .expect("search operation should be declared");
+        assert_eq!(manifest.provides.operations.len(), 1);
+        assert_eq!(operation.capability.as_str(), "tavily.search");
+        assert_eq!(json!(operation.risk_level), json!("low"));
+        assert_eq!(json!(operation.safety_tier), json!("safe"));
+        assert_eq!(json!(operation.idempotency), json!("strict"));
+        assert_eq!(operation.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            operation.input_schema["properties"]["topic"]["enum"],
+            json!(TAVILY_TOPICS)
+        );
+        assert_eq!(
+            operation.input_schema["properties"]["search_depth"]["enum"],
+            json!(TAVILY_SEARCH_DEPTHS)
+        );
+        assert_eq!(
+            operation.input_schema["properties"]["time_range"]["enum"],
+            json!(TAVILY_TIME_RANGES)
+        );
+        assert_eq!(
+            operation.input_schema["properties"]["max_results"]["type"],
+            json!("number")
+        );
+        assert!(
+            operation.input_schema["properties"]["max_results"]
+                .get("maximum")
+                .is_none(),
+            "schema must not reject runtime-supported clamp-above-bound values"
+        );
+        let network_constraints = operation
+            .network_constraints
+            .as_ref()
+            .expect("search operation should declare network constraints");
+        assert_eq!(
+            network_constraints.host_allow,
+            vec!["tavily.com".to_string(), "*.tavily.com".to_string()]
+        );
+        assert_eq!(network_constraints.port_allow, vec![443]);
+        assert!(network_constraints.require_sni);
+        assert!(network_constraints.deny_private_ranges);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_uses_manifest_operation_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get("tavily.search")
+            .expect("manifest search operation");
+
+        let connector = TavilyConnector::new();
+        let introspection = connector
+            .handle_introspect()
+            .await
+            .expect("introspection should succeed");
+        let operations = introspection["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+        let operation = operations
+            .iter()
+            .find(|operation| operation["id"] == "tavily.search")
+            .expect("introspection should expose tavily.search");
+
+        assert_eq!(
+            operation["summary"],
+            json!(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            operation["description"],
+            json!(manifest_operation.description.as_str())
+        );
+        assert_eq!(operation["capability"], json!("tavily.search"));
+        assert_eq!(&operation["input_schema"], &manifest_operation.input_schema);
+        assert_eq!(
+            &operation["output_schema"],
+            &manifest_operation.output_schema
+        );
+        assert_eq!(
+            operation["network_constraints"]["host_allow"],
+            json!(["tavily.com", "*.tavily.com"])
+        );
+        assert_eq!(
+            operation["ai_hints"]["when_to_use"],
+            json!(manifest_operation.ai_hints.when_to_use.as_str())
+        );
+    }
+
+    #[test]
+    fn manifest_search_input_schema_validates_representative_payloads() {
+        let manifest = tavily_manifest_unchecked();
+        let schema = search_input_schema(&manifest);
+
+        assert_schema_accepts(
+            schema,
+            &json!({
+                "query": "secure connector protocol",
+                "topic": "news",
+                "search_depth": "advanced",
+                "max_results": 45,
+                "include_answer": true,
+                "include_raw_content": false,
+                "include_images": false,
+                "include_domains": ["docs.openclaw.ai", "", "openclaw.ai"],
+                "exclude_domains": ["bad.example"],
+                "days": 3,
+                "time_range": "week",
+                "future_tavily_option": {"preserve": "unknown options ignored by runtime"}
+            }),
+        );
+        assert_schema_accepts(schema, &json!({"query": "q", "max_results": 9.9}));
+
+        assert_schema_rejects(schema, &json!({}));
+        assert_schema_rejects(schema, &json!({"query": ""}));
+        assert_schema_rejects(schema, &json!({"query": "q", "topic": "sports"}));
+        assert_schema_rejects(schema, &json!({"query": "q", "search_depth": "deep"}));
+        assert_schema_rejects(schema, &json!({"query": "q", "time_range": "hour"}));
+        assert_schema_rejects(schema, &json!({"query": "q", "include_images": "yes"}));
+        assert_schema_rejects(schema, &json!({"query": "q", "include_domains": ["ok", 7]}));
+        assert_schema_rejects(schema, &json!({"query": "q", "days": 0}));
+        assert_schema_rejects(schema, &json!({"query": "q", "max_results": "20"}));
     }
 
     #[test]

@@ -214,11 +214,12 @@ fn search_invoke(id: &'static str) -> InvokeRequest {
 }
 
 fn suite_with_base_url(
-    base_url: String,
+    base_url: impl Into<String>,
     test_name: &'static str,
     expect_error: bool,
     invoke: InvokeRequest,
 ) -> ConnectorSuite {
+    let base_url = base_url.into();
     ConnectorSuite {
         test_name: test_name.into(),
         config: json!({

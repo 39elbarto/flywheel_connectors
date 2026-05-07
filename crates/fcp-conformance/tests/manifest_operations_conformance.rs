@@ -804,7 +804,6 @@ fn expected_input_schema_gap_connectors() -> Vec<String> {
         "bluebubbles",
         "confluence",
         "dingtalk",
-        "dockerhub",
         "email-generic",
         "google-places",
         "google-workspace-events",

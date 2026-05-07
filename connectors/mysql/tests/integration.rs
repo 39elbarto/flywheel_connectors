@@ -89,10 +89,7 @@ fn manifest_declares_strict_per_operation_network_constraints() {
             continue;
         };
         let Some(constraints) = operation.network_constraints.as_ref() else {
-            assert!(
-                false,
-                "{operation_id} should declare network_constraints"
-            );
+            assert!(false, "{operation_id} should declare network_constraints");
             continue;
         };
 

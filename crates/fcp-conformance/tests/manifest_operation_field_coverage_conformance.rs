@@ -90,7 +90,6 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "plivo",
     "qq",
     "sonos",
-    "sqlite",
     "telnyx",
     "wecom",
 ];

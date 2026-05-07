@@ -13,6 +13,53 @@ use tempfile::tempdir;
 use fcp_sqlite::connector::SqliteConnector;
 use serde_json::json;
 
+#[test]
+fn manifest_ai_hints_cover_all_sqlite_operations() {
+    let manifest = toml::from_str::<toml::Value>(include_str!("../manifest.toml"))
+        .expect("sqlite manifest TOML should parse");
+    let operations = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("sqlite manifest should declare operations");
+
+    for (operation_id, operation) in operations {
+        let ai_hints = operation.get("ai_hints").and_then(toml::Value::as_table);
+        assert!(ai_hints.is_some(), "{operation_id} missing ai_hints");
+        let Some(ai_hints) = ai_hints else {
+            continue;
+        };
+        assert!(
+            ai_hints
+                .get("when_to_use")
+                .and_then(toml::Value::as_str)
+                .is_some_and(|value| !value.trim().is_empty()),
+            "{operation_id} missing ai_hints.when_to_use"
+        );
+        assert!(
+            ai_hints
+                .get("examples")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|examples| !examples.is_empty()),
+            "{operation_id} missing ai_hints.examples"
+        );
+        assert!(
+            ai_hints
+                .get("common_mistakes")
+                .and_then(toml::Value::as_array)
+                .is_some_and(|mistakes| {
+                    !mistakes.is_empty()
+                        && mistakes.iter().all(|mistake| {
+                            mistake
+                                .as_str()
+                                .is_some_and(|value| !value.trim().is_empty())
+                        })
+                }),
+            "{operation_id} contains an empty ai_hints.common_mistakes entry"
+        );
+    }
+}
+
 async fn setup_memory_connector() -> SqliteConnector {
     let mut connector = SqliteConnector::new();
     connector

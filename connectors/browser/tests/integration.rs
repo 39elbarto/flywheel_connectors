@@ -10,11 +10,13 @@
 
 #![allow(clippy::too_many_lines)]
 
+use std::time::Instant;
+
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
 use fcp_prelude::CapabilityConstraints;
-use fcp_testkit::AsyncTestContext;
+use fcp_testkit::{AsyncTestContext, LogCapture};
 use serde_json::json;
 use wiremock::{
     Mock, MockServer, ResponseTemplate,
@@ -146,9 +148,662 @@ async fn setup_configure(connector: &mut BrowserConnector, base_url: &str) {
         .expect("configure should succeed");
 }
 
+#[derive(Debug, Clone, Copy)]
+struct BrowserE2eRouteExpectation {
+    connector_operation: &'static str,
+    worker_operation: &'static str,
+    path: &'static str,
+    target_id: &'static str,
+    approval_required: bool,
+}
+
+async fn mount_full_flow_browser_control(mock_server: &MockServer) {
+    for (route, body) in [
+        (
+            "/navigate",
+            json!({
+                "url": "https://example.com/dashboard",
+                "status": 200,
+                "title": "Dashboard",
+                "target_id": "target-nav-1"
+            }),
+        ),
+        (
+            "/screenshot",
+            json!({
+                "image_data": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+                "width": 1280,
+                "height": 720,
+                "target_id": "target-capture-1"
+            }),
+        ),
+        (
+            "/pdf",
+            json!({
+                "pdf_data": "JVBERi0xLjQKJcTl8uXr",
+                "page_count": 2,
+                "target_id": "target-pdf-1"
+            }),
+        ),
+        (
+            "/extract_text",
+            json!({
+                "text": "Dashboard Ready",
+                "word_count": 2,
+                "target_id": "target-text-1"
+            }),
+        ),
+        (
+            "/extract_links",
+            json!({
+                "links": [
+                    { "href": "https://example.com/settings", "text": "Settings" }
+                ],
+                "target_id": "target-links-1"
+            }),
+        ),
+        (
+            "/wait_for_selector",
+            json!({ "found": true, "target_id": "target-wait-1" }),
+        ),
+        (
+            "/click",
+            json!({
+                "clicked": true,
+                "navigation_url": "https://example.com/dashboard/next",
+                "target_id": "target-click-1"
+            }),
+        ),
+        (
+            "/fill_form",
+            json!({ "filled_count": 2, "submitted": true, "target_id": "target-fill-1" }),
+        ),
+        (
+            "/evaluate",
+            json!({ "result": "ready", "target_id": "target-evaluate-1" }),
+        ),
+        (
+            "/cookies",
+            json!({
+                "cookies": [
+                    { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
+                    { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
+                ],
+                "target_id": "target-cookies-1"
+            }),
+        ),
+        (
+            "/set_cookies",
+            json!({ "set_count": 2, "target_id": "target-set-cookies-1" }),
+        ),
+        (
+            "/proxy/set",
+            json!({
+                "enabled": true,
+                "mode": "fixed_servers",
+                "server": "http://proxy.local:8080",
+                "target_id": "target-proxy-set-1"
+            }),
+        ),
+        (
+            "/proxy/clear",
+            json!({
+                "enabled": false,
+                "mode": "direct",
+                "server": null,
+                "target_id": "target-proxy-clear-1"
+            }),
+        ),
+    ] {
+        Mock::given(method("POST"))
+            .and(path(route))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .mount(mock_server)
+            .await;
+    }
+}
+
+async fn invoke_browser_operation(
+    connector: &BrowserConnector,
+    signing_key: &Ed25519SigningKey,
+    operation: &str,
+    input: serde_json::Value,
+    approval_required: bool,
+) -> serde_json::Value {
+    let approval = approval_required.then(|| generate_execution_approval(operation, &input));
+    let capability = generate_valid_token(signing_key, connector, operation);
+    let mut request = json!({
+        "operation": operation,
+        "input": input,
+        "capability_token": capability
+    });
+    if let Some(approval) = approval {
+        request
+            .as_object_mut()
+            .expect("browser invoke request should be a JSON object")
+            .insert(
+                "approval_token".to_string(),
+                serde_json::to_value(approval).expect("approval token should serialize"),
+            );
+    }
+
+    connector
+        .handle_invoke(request)
+        .await
+        .expect("browser operation should succeed")
+}
+
+fn push_browser_e2e_log(
+    capture: &LogCapture,
+    ctx: &AsyncTestContext,
+    phase: &str,
+    step_number: usize,
+    assertions_passed: u64,
+    details: &serde_json::Value,
+) {
+    capture
+        .push_value(&json!({
+            "timestamp": Utc::now().to_rfc3339(),
+            "log_version": "v2",
+            "test_name": "browser_control_connector_boundary_full_flow",
+            "module": "fcp-browser",
+            "phase": phase,
+            "correlation_id": ctx.correlation_id(),
+            "result": "pass",
+            "duration_ms": 0,
+            "assertions": { "passed": assertions_passed, "failed": 0 },
+            "step_number": step_number,
+            "run_id": ctx.run_id(),
+            "scenario_id": ctx.scenario_id(),
+            "details": details,
+        }))
+        .expect("structured e2e log entry should serialize");
+}
+
+fn request_header(request: &wiremock::Request, name: &str) -> String {
+    request
+        .headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
+fn json_len(value: &serde_json::Value) -> u64 {
+    serde_json::to_vec(value).map_or(0, |bytes| u64::try_from(bytes.len()).unwrap_or(u64::MAX))
+}
+
 // ============================================================================
 // Happy-path operation tests
 // ============================================================================
+
+#[fcp_async_core::runtime::test]
+async fn test_browser_control_connector_boundary_full_flow_e2e_logs() {
+    let ctx = AsyncTestContext::for_scenario("browser-control-boundary-full-flow");
+    let capture = LogCapture::new();
+    let started = Instant::now();
+    let mock_server = MockServer::start().await;
+    mount_full_flow_browser_control(&mock_server).await;
+
+    let mut connector = BrowserConnector::new();
+    let operations = [
+        "browser.navigate",
+        "browser.screenshot",
+        "browser.render_pdf",
+        "browser.extract_text",
+        "browser.extract_links",
+        "browser.wait_for_selector",
+        "browser.click",
+        "browser.fill_form",
+        "browser.evaluate_js",
+        "browser.get_cookies",
+        "browser.set_cookies",
+        "browser.session.save",
+        "browser.session.restore",
+        "browser.session.describe",
+        "browser.set_proxy",
+        "browser.clear_proxy",
+    ];
+    let signing_key = setup_handshake(&mut connector, &operations).await;
+    setup_configure(&mut connector, &mock_server.uri()).await;
+
+    let health = connector.handle_health().await.unwrap();
+    assert_eq!(health["status"], "healthy");
+    assert_eq!(
+        health["browser_control_contract"]["control_plane"],
+        "fcp-browser-control"
+    );
+    push_browser_e2e_log(
+        &capture,
+        &ctx,
+        "configure",
+        0,
+        3,
+        &json!({
+            "control_endpoint": mock_server.uri(),
+            "capability_decision": "handshake_accepted",
+            "contract_operation_count": health["browser_control_contract"]["operations"].as_array().map_or(0, Vec::len),
+            "target_id": "connector-boundary",
+            "cleanup_result": "pending",
+        }),
+    );
+
+    let denied_capability = generate_valid_token(&signing_key, &connector, "browser.navigate");
+    let denied = connector
+        .handle_invoke(json!({
+            "operation": "browser.evaluate_js",
+            "input": { "expression": "document.cookie" },
+            "capability_token": denied_capability
+        }))
+        .await;
+    assert!(denied.is_err());
+    assert_eq!(
+        mock_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .len(),
+        0
+    );
+    push_browser_e2e_log(
+        &capture,
+        &ctx,
+        "capability_denial",
+        1,
+        2,
+        &json!({
+            "connector_operation": "browser.evaluate_js",
+            "capability_decision": "denied_before_worker_route",
+            "command_route": null,
+            "target_id": null,
+            "worker_request_sent": false,
+            "timeout_checkpoint": "not_started",
+            "cancellation_checkpoint": "not_started",
+            "retry_decision": "not_started",
+            "cleanup_result": "not_needed",
+        }),
+    );
+
+    let mut results = Vec::new();
+    for (operation, input, approval_required) in [
+        (
+            "browser.navigate",
+            json!({ "url": "https://example.com/dashboard", "wait_until": "networkidle" }),
+            false,
+        ),
+        (
+            "browser.screenshot",
+            json!({ "selector": "#dashboard", "full_page": false, "format": "png" }),
+            false,
+        ),
+        (
+            "browser.render_pdf",
+            json!({ "format": "a4", "print_background": true, "max_pages": 4 }),
+            false,
+        ),
+        (
+            "browser.extract_text",
+            json!({ "selector": "main", "output_mode": "markdown", "max_chars": 512 }),
+            false,
+        ),
+        ("browser.extract_links", json!({ "selector": "nav" }), false),
+        (
+            "browser.wait_for_selector",
+            json!({ "selector": ".ready", "state": "visible", "timeout_ms": 2500 }),
+            false,
+        ),
+        (
+            "browser.click",
+            json!({ "selector": "button.next", "timeout_ms": 2000 }),
+            false,
+        ),
+        (
+            "browser.fill_form",
+            json!({
+                "fields": {
+                    "#email": "agent@example.test",
+                    "#remember": true
+                },
+                "submit_selector": "button[type=submit]"
+            }),
+            true,
+        ),
+        (
+            "browser.evaluate_js",
+            json!({ "expression": "({ ready: document.readyState === 'complete' })" }),
+            true,
+        ),
+        (
+            "browser.get_cookies",
+            json!({ "domain": "example.com" }),
+            true,
+        ),
+        (
+            "browser.set_cookies",
+            json!({
+                "cookies": [
+                    { "name": "session", "value": "abc123", "domain": "example.com", "path": "/" },
+                    { "name": "pref", "value": "dark", "domain": "example.com", "path": "/" }
+                ]
+            }),
+            true,
+        ),
+        (
+            "browser.session.save",
+            json!({
+                "domain": "example.com",
+                "lease_seq": 10,
+                "lease_object_id": "browser-lease-save-10"
+            }),
+            true,
+        ),
+    ] {
+        let result = invoke_browser_operation(
+            &connector,
+            &signing_key,
+            operation,
+            input,
+            approval_required,
+        )
+        .await;
+        results.push((operation, result));
+    }
+
+    let saved_state_object_id = results
+        .iter()
+        .find(|(operation, _)| *operation == "browser.session.save")
+        .and_then(|(_, result)| result.get("state_object_id"))
+        .and_then(serde_json::Value::as_str)
+        .expect("session save should return a state object id")
+        .to_string();
+
+    for (operation, input, approval_required) in [
+        (
+            "browser.session.restore",
+            json!({
+                "state_object_id": saved_state_object_id,
+                "lease_seq": 11,
+                "lease_object_id": "browser-lease-restore-11"
+            }),
+            true,
+        ),
+        (
+            "browser.session.describe",
+            json!({ "state_object_id": saved_state_object_id }),
+            false,
+        ),
+        (
+            "browser.set_proxy",
+            json!({
+                "server": "http://proxy.local:8080",
+                "bypass_list": ["localhost", "127.0.0.1"]
+            }),
+            true,
+        ),
+        ("browser.clear_proxy", json!({}), true),
+    ] {
+        let result = invoke_browser_operation(
+            &connector,
+            &signing_key,
+            operation,
+            input,
+            approval_required,
+        )
+        .await;
+        results.push((operation, result));
+    }
+
+    assert_eq!(results.len(), operations.len());
+    assert_eq!(results[0].1["url"], "https://example.com/dashboard");
+    assert_eq!(results[2].1["document_extraction"]["decision"], "deferred");
+    assert!(
+        results[7].1["audit"]["approval_token_id"]
+            .as_str()
+            .is_some()
+    );
+    assert_eq!(results[8].1["result"], "ready");
+    assert_eq!(results[13].1["is_head"], true);
+    assert_eq!(results[14].1["enabled"], true);
+    assert_eq!(results[15].1["enabled"], false);
+
+    let requests = mock_server.received_requests().await.unwrap_or_default();
+    let expected_routes = [
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.navigate",
+            worker_operation: "browser.navigate",
+            path: "/navigate",
+            target_id: "target-nav-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.screenshot",
+            worker_operation: "browser.screenshot",
+            path: "/screenshot",
+            target_id: "target-capture-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.render_pdf",
+            worker_operation: "browser.render_pdf",
+            path: "/pdf",
+            target_id: "target-pdf-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.extract_text",
+            worker_operation: "browser.extract_text",
+            path: "/extract_text",
+            target_id: "target-text-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.extract_links",
+            worker_operation: "browser.extract_links",
+            path: "/extract_links",
+            target_id: "target-links-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.wait_for_selector",
+            worker_operation: "browser.wait_for_selector",
+            path: "/wait_for_selector",
+            target_id: "target-wait-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.click",
+            worker_operation: "browser.click",
+            path: "/click",
+            target_id: "target-click-1",
+            approval_required: false,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.fill_form",
+            worker_operation: "browser.fill_form",
+            path: "/fill_form",
+            target_id: "target-fill-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.evaluate_js",
+            worker_operation: "browser.evaluate_js",
+            path: "/evaluate",
+            target_id: "target-evaluate-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.get_cookies",
+            worker_operation: "browser.get_cookies",
+            path: "/cookies",
+            target_id: "target-cookies-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.set_cookies",
+            worker_operation: "browser.set_cookies",
+            path: "/set_cookies",
+            target_id: "target-set-cookies-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.session.save",
+            worker_operation: "browser.get_cookies",
+            path: "/cookies",
+            target_id: "target-cookies-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.session.restore",
+            worker_operation: "browser.set_cookies",
+            path: "/set_cookies",
+            target_id: "target-set-cookies-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.set_proxy",
+            worker_operation: "browser.set_proxy",
+            path: "/proxy/set",
+            target_id: "target-proxy-set-1",
+            approval_required: true,
+        },
+        BrowserE2eRouteExpectation {
+            connector_operation: "browser.clear_proxy",
+            worker_operation: "browser.clear_proxy",
+            path: "/proxy/clear",
+            target_id: "target-proxy-clear-1",
+            approval_required: true,
+        },
+    ];
+    assert_eq!(requests.len(), expected_routes.len());
+
+    for (index, (request, expected)) in requests.iter().zip(expected_routes).enumerate() {
+        let request_body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("worker request body should be JSON");
+        let response_payload_bytes = results
+            .iter()
+            .find(|(operation, _)| *operation == expected.connector_operation)
+            .map_or(0, |(_, result)| json_len(result));
+        let timeout_ms = request_header(request, "X-FCP-Browser-Timeout-Ms");
+        let response_budget = request_header(request, "X-FCP-Browser-Max-Response-Bytes");
+        let target_scope = request_header(request, "X-FCP-Browser-Target-Scope");
+        let target_selection = request_header(request, "X-FCP-Browser-Target-Selection");
+        let stale_recovery = request_header(request, "X-FCP-Browser-Stale-Target-Recovery");
+        let current_tab_guard = request_header(request, "X-FCP-Browser-Current-Tab-Guard");
+        let export_guard = request_header(request, "X-FCP-Browser-Export-Guard");
+
+        assert_eq!(request.url.path(), expected.path);
+        assert_eq!(
+            request_header(request, "X-FCP-Browser-Operation"),
+            expected.worker_operation
+        );
+        assert!(!timeout_ms.is_empty());
+        assert!(!response_budget.is_empty());
+        assert!(!target_scope.is_empty());
+        assert!(!target_selection.is_empty());
+
+        push_browser_e2e_log(
+            &capture,
+            &ctx,
+            "invoke",
+            index + 2,
+            8,
+            &json!({
+                "connector_operation": expected.connector_operation,
+                "worker_operation": expected.worker_operation,
+                "command_route": request.url.path(),
+                "target_id": expected.target_id,
+                "capability_decision": "granted",
+                "approval_required": expected.approval_required,
+                "approval_present": expected.approval_required,
+                "timeout_checkpoint": {
+                    "timeout_ms": timeout_ms,
+                    "source": "worker_request_header"
+                },
+                "cancellation_checkpoint": {
+                    "requested": false,
+                    "source": "connector_boundary_e2e"
+                },
+                "payload_sizes": {
+                    "request_bytes": u64::try_from(request.body.len()).unwrap_or(u64::MAX),
+                    "response_bytes": response_payload_bytes
+                },
+                "retry_decision": "not_retried_status_200",
+                "target_policy": {
+                    "scope": target_scope,
+                    "selection": target_selection,
+                    "stale_target_recovery": stale_recovery,
+                    "current_tab_guard": current_tab_guard,
+                    "export_guard": export_guard
+                },
+                "request_body": request_body,
+                "cleanup_result": "pending",
+            }),
+        );
+    }
+
+    let described = results
+        .iter()
+        .find(|(operation, _)| *operation == "browser.session.describe")
+        .map(|(_, result)| result)
+        .expect("session describe should have a result");
+    push_browser_e2e_log(
+        &capture,
+        &ctx,
+        "connector_state",
+        expected_routes.len() + 2,
+        3,
+        &json!({
+            "connector_operation": "browser.session.describe",
+            "worker_operation": null,
+            "command_route": "connector_state",
+            "target_id": "session-store-head",
+            "capability_decision": "granted",
+            "timeout_checkpoint": "not_applicable_local_state",
+            "cancellation_checkpoint": "not_applicable_local_state",
+            "payload_sizes": {
+                "request_bytes": 0,
+                "response_bytes": json_len(described)
+            },
+            "retry_decision": "not_applicable_local_state",
+            "cleanup_result": "pending",
+        }),
+    );
+
+    let shutdown = connector.handle_shutdown(json!({})).await.unwrap();
+    assert_eq!(shutdown["status"], "shutdown");
+    push_browser_e2e_log(
+        &capture,
+        &ctx,
+        "cleanup",
+        expected_routes.len() + 3,
+        2,
+        &json!({
+            "command_route": "connector_shutdown",
+            "target_id": "connector-boundary",
+            "capability_decision": "not_applicable_cleanup",
+            "timeout_checkpoint": "not_applicable_cleanup",
+            "cancellation_checkpoint": "not_requested",
+            "payload_sizes": {
+                "request_bytes": 2,
+                "response_bytes": json_len(&shutdown)
+            },
+            "retry_decision": "not_applicable_cleanup",
+            "cleanup_result": "shutdown_complete",
+            "duration_ms": u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+        }),
+    );
+
+    let log_jsonl = capture.jsonl();
+    assert!(log_jsonl.contains("\"command_route\""));
+    assert!(log_jsonl.contains("\"target_id\""));
+    assert!(log_jsonl.contains("\"capability_decision\""));
+    assert!(log_jsonl.contains("\"timeout_checkpoint\""));
+    assert!(log_jsonl.contains("\"cancellation_checkpoint\""));
+    assert!(log_jsonl.contains("\"payload_sizes\""));
+    assert!(log_jsonl.contains("\"retry_decision\""));
+    assert!(log_jsonl.contains("\"cleanup_result\""));
+    capture.assert_valid();
+}
 
 #[fcp_async_core::runtime::test]
 async fn test_navigate() {

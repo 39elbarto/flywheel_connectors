@@ -4523,6 +4523,7 @@ dependencies = [
  "fcp-mesh",
  "fcp-policy",
  "fcp-prelude",
+ "fcp-provider-auth",
  "fcp-raptorq",
  "fcp-ratelimit",
  "fcp-sandbox",

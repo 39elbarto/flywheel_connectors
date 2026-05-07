@@ -11,6 +11,7 @@ use std::time::Duration as StdDuration;
 
 use chrono::{DateTime, Duration, Utc};
 use fcp_prelude::{CredentialId, ZoneId};
+use fcp_provider_auth::{AuthMethod, AuthProfile};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -175,6 +176,99 @@ pub enum CredentialErrorKind {
     RetryableProviderError,
 }
 
+/// Redaction-safe classifier for a leased credential payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CredentialPayloadKind {
+    /// Legacy raw JSON payload accepted by the host admin API.
+    RawJson,
+    /// Provider-auth profile that can build outbound request auth.
+    AuthProfile,
+}
+
+/// Secret-bearing payload carried by a pooled credential lease.
+///
+/// Intentionally not serializable: operator/admin surfaces expose only
+/// [`CredentialPayloadKind`] and redacted labels, never credential material.
+#[derive(Clone)]
+pub enum CredentialPayload {
+    /// Legacy JSON credential material accepted by existing admin routes.
+    RawJson(Value),
+    /// Provider-auth profile selected from the pool.
+    AuthProfile(Box<AuthProfile>),
+}
+
+impl CredentialPayload {
+    /// Construct a raw JSON payload.
+    #[must_use]
+    pub const fn raw_json(payload: Value) -> Self {
+        Self::RawJson(payload)
+    }
+
+    /// Construct an auth-profile payload.
+    #[must_use]
+    pub fn auth_profile(profile: AuthProfile) -> Self {
+        Self::AuthProfile(Box::new(profile))
+    }
+
+    /// Return the redaction-safe payload class.
+    #[must_use]
+    pub const fn kind(&self) -> CredentialPayloadKind {
+        match self {
+            Self::RawJson(_) => CredentialPayloadKind::RawJson,
+            Self::AuthProfile(_) => CredentialPayloadKind::AuthProfile,
+        }
+    }
+
+    /// Borrow raw JSON material, if this lease uses the legacy payload form.
+    #[must_use]
+    pub const fn as_raw_json(&self) -> Option<&Value> {
+        match self {
+            Self::RawJson(payload) => Some(payload),
+            Self::AuthProfile(_) => None,
+        }
+    }
+
+    /// Borrow the provider-auth profile, if this lease carries one.
+    #[must_use]
+    pub fn as_auth_profile(&self) -> Option<&AuthProfile> {
+        match self {
+            Self::RawJson(_) => None,
+            Self::AuthProfile(profile) => Some(profile.as_ref()),
+        }
+    }
+
+    /// Consume the payload and return the provider-auth profile, if present.
+    #[must_use]
+    pub fn into_auth_profile(self) -> Option<AuthProfile> {
+        match self {
+            Self::RawJson(_) => None,
+            Self::AuthProfile(profile) => Some(*profile),
+        }
+    }
+}
+
+impl From<Value> for CredentialPayload {
+    fn from(payload: Value) -> Self {
+        Self::RawJson(payload)
+    }
+}
+
+impl fmt::Debug for CredentialPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RawJson(_) => f.write_str("CredentialPayload::RawJson([redacted])"),
+            Self::AuthProfile(profile) => f
+                .debug_struct("CredentialPayload::AuthProfile")
+                .field("provider", &profile.provider)
+                .field("profile_id", &profile.id)
+                .field("method", &profile.method.id())
+                .field("label", &profile.label)
+                .finish(),
+        }
+    }
+}
+
 /// Secret material plus routing metadata for one pooled credential.
 ///
 /// Intentionally not serializable: public/operator surfaces must use
@@ -191,7 +285,7 @@ pub struct PooledCredential {
     /// Redaction-safe human label.
     pub label: String,
     /// Credential payload. This must never appear in public views or errors.
-    pub payload: Value,
+    pub payload: CredentialPayload,
     /// Current cooldown, if any.
     pub cooldown: Option<CredentialCooldown>,
     /// Last successful or attempted selection timestamp.
@@ -208,14 +302,14 @@ impl PooledCredential {
         source: CredentialSource,
         priority: u32,
         label: impl Into<String>,
-        payload: Value,
+        payload: impl Into<CredentialPayload>,
     ) -> Self {
         Self {
             credential_id,
             source,
             priority,
             label: label.into(),
-            payload,
+            payload: payload.into(),
             cooldown: None,
             last_used_at: None,
             error_count: 0,
@@ -498,14 +592,14 @@ impl CredentialPoolAuditEvent {
 }
 
 /// Active credential lease returned by a pool.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct CredentialLease {
     /// Opaque lease token used to release or report errors.
     pub token: CredentialLeaseToken,
     /// Credential selected for this lease.
     pub credential_id: CredentialId,
     /// Secret-bearing credential payload selected for this lease.
-    pub payload: Value,
+    pub payload: CredentialPayload,
     /// Provider+zone pool that issued the lease.
     pub pool_key: CredentialPoolKey,
 }
@@ -515,6 +609,7 @@ impl fmt::Debug for CredentialLease {
         f.debug_struct("CredentialLease")
             .field("token", &self.token)
             .field("credential_id", &self.credential_id)
+            .field("payload_kind", &self.payload.kind())
             .field("payload", &"[redacted]")
             .field("pool_key", &self.pool_key)
             .finish()
@@ -551,6 +646,8 @@ pub struct PooledCredentialView {
     pub priority: u32,
     /// Redaction-safe human label.
     pub label: String,
+    /// Redaction-safe payload class.
+    pub payload_kind: CredentialPayloadKind,
     /// Current active leases for this credential.
     pub active_leases: u32,
     /// Current cooldown, if any.
@@ -735,7 +832,7 @@ impl CredentialPool {
     }
 
     /// Change the pool selection strategy.
-    pub fn set_strategy(&mut self, strategy: CredentialPoolStrategy) {
+    pub const fn set_strategy(&mut self, strategy: CredentialPoolStrategy) {
         self.strategy = strategy;
         self.sticky_current = None;
     }
@@ -746,7 +843,7 @@ impl CredentialPool {
     ///
     /// Returns [`CredentialPoolError::InvalidMaxConcurrentPerCredential`] when
     /// `max` is zero.
-    pub fn set_max_concurrent_per_credential(
+    pub const fn set_max_concurrent_per_credential(
         &mut self,
         max: u32,
     ) -> Result<(), CredentialPoolError> {
@@ -758,7 +855,7 @@ impl CredentialPool {
     }
 
     /// Set the all-pool-exhausted behavior.
-    pub fn set_exhausted_behavior(&mut self, behavior: PoolExhaustedBehavior) {
+    pub const fn set_exhausted_behavior(&mut self, behavior: PoolExhaustedBehavior) {
         self.exhausted_behavior = behavior;
     }
 
@@ -911,6 +1008,7 @@ impl CredentialPool {
                     source: entry.source.as_label(),
                     priority: entry.priority,
                     label: entry.label.clone(),
+                    payload_kind: entry.payload.kind(),
                     active_leases,
                     cooldown: entry.cooldown.clone(),
                     last_used_at: entry.last_used_at,
@@ -1458,6 +1556,7 @@ pub fn parse_retry_after(value: &str, now: DateTime<Utc>) -> Option<StdDuration>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_provider_auth::{AuthRequest, providers};
 
     fn now() -> DateTime<Utc> {
         DateTime::parse_from_rfc3339("2026-05-06T20:00:00Z")
@@ -1477,6 +1576,14 @@ mod tests {
             ProviderKey::new(provider).expect("provider key"),
             ZoneId::work(),
         )
+    }
+
+    fn run<T>(future: impl std::future::Future<Output = T>) -> T {
+        fcp_async_core::runtime::block_on_sync(future).expect("test future should run")
+    }
+
+    fn cx() -> fcp_async_core::Cx {
+        fcp_async_core::Cx::for_testing()
     }
 
     fn entry(byte: u8, priority: u32, label: &str) -> PooledCredential {
@@ -1955,12 +2062,66 @@ mod tests {
         let lease = pool.acquire(now()).expect("credential lease");
 
         assert_eq!(lease.credential_id, cred(0x01));
-        assert_eq!(lease.payload["api_key"], "secret-1");
+        assert_eq!(
+            lease.payload.as_raw_json().expect("raw json payload")["api_key"],
+            "secret-1"
+        );
 
         let rendered = format!("{lease:?}");
         assert!(rendered.contains("[redacted]"));
         assert!(!rendered.contains("api_key"));
         assert!(!rendered.contains("secret-1"));
+    }
+
+    #[test]
+    fn auth_profile_payload_lease_builds_request_auth_and_redacts_views() {
+        let profile = providers::openai_codex::api_key_profile(
+            "codex-work",
+            "Codex Work",
+            0,
+            "fixture-openai-key",
+        )
+        .expect("provider profile");
+        let mut pool = CredentialPool::new(
+            key("openai"),
+            CredentialPoolStrategy::Priority,
+            vec![PooledCredential::new(
+                cred(0x04),
+                CredentialSource::Config,
+                0,
+                "codex profile",
+                CredentialPayload::auth_profile(profile),
+            )],
+        );
+
+        let view = pool.redacted_view(now());
+        assert_eq!(
+            view.entries[0].payload_kind,
+            CredentialPayloadKind::AuthProfile
+        );
+        let view_json = serde_json::to_string(&view).expect("serialize view");
+        assert!(view_json.contains("auth_profile"));
+        assert!(view_json.contains("codex profile"));
+        assert!(!view_json.contains("fixture-openai-key"));
+
+        let lease = pool.acquire(now()).expect("auth profile lease");
+        let profile = lease
+            .payload
+            .as_auth_profile()
+            .expect("auth profile payload");
+        assert_eq!(profile.provider, providers::openai_codex::PROVIDER_ID);
+        assert_eq!(profile.id, "codex-work");
+
+        let mut request = AuthRequest::new();
+        run(profile.method.build_request_auth(&cx(), &mut request)).expect("request auth");
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-openai-key")
+        );
+
+        let rendered = format!("{lease:?}");
+        assert!(rendered.contains("AuthProfile"));
+        assert!(!rendered.contains("fixture-openai-key"));
     }
 
     #[test]
@@ -1972,7 +2133,10 @@ mod tests {
         let first = registry.acquire(&pool_key, now()).expect("first lease");
         assert_eq!(first.pool_key, pool_key);
         assert_eq!(first.credential_id, cred(0x01));
-        assert_eq!(first.payload["api_key"], "secret-1");
+        assert_eq!(
+            first.payload.as_raw_json().expect("raw json payload")["api_key"],
+            "secret-1"
+        );
         assert_eq!(
             registry
                 .release(&pool_key, first.token)

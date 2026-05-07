@@ -63,11 +63,11 @@ fn constraints_for<'a>(
         .and_then(toml::Value::as_table)
         .and_then(|operations| operations.get(operation_id))
         .and_then(toml::Value::as_table)
-        .unwrap_or_else(|| panic!("{operation_id} operation should exist"));
+        .expect("Telegram operation should exist");
     operation
         .get("network_constraints")
         .and_then(toml::Value::as_table)
-        .unwrap_or_else(|| panic!("{operation_id} should declare network_constraints"))
+        .expect("Telegram operation should declare network_constraints")
 }
 
 fn manifest_operation_count(manifest: &toml::Value) -> usize {
@@ -86,12 +86,12 @@ fn string_array_field<'a>(
     constraints
         .get(field_name)
         .and_then(toml::Value::as_array)
-        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an array"))
+        .expect("network_constraints field should be an array")
         .iter()
         .map(|value| {
-            value.as_str().unwrap_or_else(|| {
-                panic!("network_constraints.{field_name} should contain strings")
-            })
+            value
+                .as_str()
+                .expect("network_constraints array field should contain strings")
         })
         .collect()
 }
@@ -103,12 +103,12 @@ fn integer_array_field(
     constraints
         .get(field_name)
         .and_then(toml::Value::as_array)
-        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an array"))
+        .expect("network_constraints field should be an array")
         .iter()
         .map(|value| {
-            value.as_integer().unwrap_or_else(|| {
-                panic!("network_constraints.{field_name} should contain integers")
-            })
+            value
+                .as_integer()
+                .expect("network_constraints array field should contain integers")
         })
         .collect()
 }
@@ -117,14 +117,14 @@ fn bool_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &st
     constraints
         .get(field_name)
         .and_then(toml::Value::as_bool)
-        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be a bool"))
+        .expect("network_constraints field should be a bool")
 }
 
 fn integer_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &str) -> i64 {
     constraints
         .get(field_name)
         .and_then(toml::Value::as_integer)
-        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an integer"))
+        .expect("network_constraints field should be an integer")
 }
 
 fn token_path(api_method: &str) -> String {

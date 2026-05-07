@@ -1603,6 +1603,12 @@ enum AuthCommand {
     /// Create or replace a host-managed provider auth profile.
     Login(AuthLoginArgs),
 
+    /// Poll an in-progress host-managed OAuth device-code login.
+    LoginPoll(AuthLoginPollArgs),
+
+    /// Complete an in-progress host-managed OAuth authorization-code login.
+    LoginComplete(AuthLoginCompleteArgs),
+
     /// List all stored connector credentials with redacted fields.
     List,
 
@@ -1749,7 +1755,48 @@ struct AuthLoginArgs {
     /// API key or bearer token value to store in the host auth profile.
     #[arg(long)]
     #[serde(skip_serializing)]
-    api_key: String,
+    api_key: Option<String>,
+
+    /// Configure and start an OAuth device-code login for this profile.
+    #[arg(long)]
+    oauth_device: bool,
+
+    /// Configure and start an OAuth authorization-code login for this profile.
+    #[arg(long)]
+    oauth_auth_code: bool,
+
+    /// OAuth client id.
+    #[arg(long)]
+    client_id: Option<String>,
+
+    /// OAuth client secret for confidential authorization-code clients.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    client_secret: Option<String>,
+
+    /// OAuth device-code endpoint URL.
+    #[arg(long)]
+    device_code_url: Option<String>,
+
+    /// OAuth authorization endpoint URL.
+    #[arg(long)]
+    authorize_url: Option<String>,
+
+    /// OAuth token endpoint URL.
+    #[arg(long)]
+    token_url: Option<String>,
+
+    /// OAuth redirect URI for authorization-code login.
+    #[arg(long)]
+    redirect_uri: Option<String>,
+
+    /// OAuth scope string.
+    #[arg(long, default_value = "")]
+    scope: String,
+
+    /// Disable PKCE for authorization-code login.
+    #[arg(long)]
+    no_pkce: bool,
 
     /// Header receiving the credential. Defaults to Authorization bearer auth.
     #[arg(long)]
@@ -1758,6 +1805,52 @@ struct AuthLoginArgs {
     /// Optional credential value prefix such as `Bearer`.
     #[arg(long)]
     value_prefix: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthLoginPollArgs {
+    /// Provider id to poll.
+    provider: String,
+
+    /// Profile id associated with the device-code login.
+    #[arg(long)]
+    profile: String,
+
+    /// Login id returned by `fwc auth login --oauth-device`.
+    #[arg(long)]
+    login_id: String,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthLoginCompleteArgs {
+    /// Provider id to complete.
+    provider: String,
+
+    /// Profile id associated with the authorization-code login.
+    #[arg(long)]
+    profile: String,
+
+    /// Login id returned by `fwc auth login --oauth-auth-code`.
+    #[arg(long)]
+    login_id: String,
+
+    /// Authorization code returned by the provider callback.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    code: Option<String>,
+
+    /// OAuth state returned by the provider callback.
+    #[arg(long)]
+    #[serde(skip_serializing)]
+    state: Option<String>,
+
+    /// Provider error code when the callback was rejected.
+    #[arg(long)]
+    error: Option<String>,
+
+    /// Provider error description when the callback was rejected.
+    #[arg(long)]
+    error_description: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -4471,6 +4564,44 @@ impl HostAdminClient {
                 &json!({}),
             ),
         }
+    }
+
+    fn auth_oauth_device_start(&self, provider: &str, profile_id: &str) -> Result<Value> {
+        self.post_json(
+            &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/start"),
+            &json!({}),
+        )
+    }
+
+    fn auth_oauth_device_poll(
+        &self,
+        provider: &str,
+        profile_id: &str,
+        login_id: &str,
+    ) -> Result<Value> {
+        self.post_json(
+            &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/poll"),
+            &json!({ "login_id": login_id }),
+        )
+    }
+
+    fn auth_oauth_auth_code_start(&self, provider: &str, profile_id: &str) -> Result<Value> {
+        self.post_json(
+            &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/start"),
+            &json!({}),
+        )
+    }
+
+    fn auth_oauth_auth_code_complete(
+        &self,
+        provider: &str,
+        profile_id: &str,
+        request: &Value,
+    ) -> Result<Value> {
+        self.post_json(
+            &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/complete"),
+            request,
+        )
     }
 
     fn auth_profile_delete(&self, provider: &str, profile_id: &str) -> Result<Value> {
@@ -11968,6 +12099,10 @@ fn auth_dispatch_with_store_and_host(
     match &args.command {
         AuthCommand::Add(add_args) => auth_add_dispatch(add_args, store),
         AuthCommand::Login(login_args) => auth_login_dispatch(login_args, explicit_host),
+        AuthCommand::LoginPoll(poll_args) => auth_login_poll_dispatch(poll_args, explicit_host),
+        AuthCommand::LoginComplete(complete_args) => {
+            auth_login_complete_dispatch(complete_args, explicit_host)
+        }
         AuthCommand::List => auth_list_dispatch(store),
         AuthCommand::Profiles(profiles_args) => {
             auth_profiles_dispatch(profiles_args, explicit_host)
@@ -12061,10 +12196,125 @@ fn attach_auth_host_contract(
     );
 }
 
+fn auth_login_validation_error(
+    args: &AuthLoginArgs,
+    message: impl Into<String>,
+) -> DispatchOutcome {
+    DispatchOutcome {
+        payload: json!({
+            "status": "error",
+            "command": "auth",
+            "subcommand": "login",
+            "provider": args.provider,
+            "profile_id": args.profile,
+            "error": {
+                "type": "invalid-auth-login-request",
+                "message": message.into(),
+                "recoverable": true,
+            },
+            "next_actions": [
+                format!("fwc auth login {} --profile {} --api-key <secret> --host <endpoint>", args.provider, args.profile),
+                format!("fwc auth login {} --profile {} --oauth-device --client-id <id> --device-code-url <url> --token-url <url> --scope <scope> --host <endpoint>", args.provider, args.profile),
+                format!("fwc auth login {} --profile {} --oauth-auth-code --client-id <id> --authorize-url <url> --token-url <url> --redirect-uri <url> --scope <scope> --host <endpoint>", args.provider, args.profile),
+            ],
+        }),
+        exit_code: CliExitCode::Validation,
+    }
+}
+
+fn require_auth_login_field(
+    args: &AuthLoginArgs,
+    field_name: &'static str,
+    value: &Option<String>,
+) -> Result<String, DispatchOutcome> {
+    value
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            auth_login_validation_error(
+                args,
+                format!(
+                    "`--{}` is required for this login method.",
+                    field_name.replace('_', "-")
+                ),
+            )
+        })
+}
+
+fn auth_login_request(args: &AuthLoginArgs) -> Result<(Value, &'static str), DispatchOutcome> {
+    let method_count = usize::from(args.api_key.is_some())
+        + usize::from(args.oauth_device)
+        + usize::from(args.oauth_auth_code);
+    if method_count != 1 {
+        return Err(auth_login_validation_error(
+            args,
+            "Choose exactly one login method: `--api-key`, `--oauth-device`, or `--oauth-auth-code`.",
+        ));
+    }
+
+    let label = args.label.clone().unwrap_or_else(|| args.profile.clone());
+    if let Some(api_key) = args.api_key.as_ref() {
+        let mut request = json!({
+            "profile_id": args.profile,
+            "method": "api_key",
+            "label": label,
+            "priority": args.priority,
+            "api_key": api_key,
+        });
+        if let Some(header_name) = args.header_name.as_deref() {
+            request["header_name"] = json!(header_name);
+        }
+        if let Some(value_prefix) = args.value_prefix.as_deref() {
+            request["value_prefix"] = json!(value_prefix);
+        }
+        return Ok((request, "api_key"));
+    }
+
+    if args.header_name.is_some() || args.value_prefix.is_some() {
+        return Err(auth_login_validation_error(
+            args,
+            "`--header-name` and `--value-prefix` only apply to `--api-key` login.",
+        ));
+    }
+
+    if args.oauth_device {
+        let request = json!({
+            "profile_id": args.profile,
+            "method": "oauth_device",
+            "label": label,
+            "priority": args.priority,
+            "client_id": require_auth_login_field(args, "client_id", &args.client_id)?,
+            "device_code_url": require_auth_login_field(args, "device_code_url", &args.device_code_url)?,
+            "token_url": require_auth_login_field(args, "token_url", &args.token_url)?,
+            "scope": args.scope,
+        });
+        return Ok((request, "oauth_device"));
+    }
+
+    let request = json!({
+        "profile_id": args.profile,
+        "method": "oauth_auth_code",
+        "label": label,
+        "priority": args.priority,
+        "client_id": require_auth_login_field(args, "client_id", &args.client_id)?,
+        "client_secret": args.client_secret,
+        "authorize_url": require_auth_login_field(args, "authorize_url", &args.authorize_url)?,
+        "token_url": require_auth_login_field(args, "token_url", &args.token_url)?,
+        "redirect_uri": require_auth_login_field(args, "redirect_uri", &args.redirect_uri)?,
+        "scope": args.scope,
+        "use_pkce": !args.no_pkce,
+    });
+    Ok((request, "oauth_auth_code"))
+}
+
 fn auth_login_dispatch(
     args: &AuthLoginArgs,
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
+    let (request, method) = match auth_login_request(args) {
+        Ok(request) => request,
+        Err(outcome) => return Ok(outcome),
+    };
     let host = match auth_host_config(
         "login",
         serde_json::to_value(args)?,
@@ -12081,22 +12331,38 @@ fn auth_login_dispatch(
         Err(outcome) => return Ok(outcome),
     };
     let client = HostAdminClient::new(&host.endpoint)?;
-    let label = args.label.clone().unwrap_or_else(|| args.profile.clone());
-    let mut request = json!({
-        "profile_id": args.profile,
-        "method": "api_key",
-        "label": label,
-        "priority": args.priority,
-        "api_key": args.api_key,
-    });
-    if let Some(header_name) = args.header_name.as_deref() {
-        request["header_name"] = json!(header_name);
-    }
-    if let Some(value_prefix) = args.value_prefix.as_deref() {
-        request["value_prefix"] = json!(value_prefix);
-    }
     let response = client.auth_profile_upsert(&args.provider, &request)?;
+    let oauth_start = match method {
+        "oauth_device" => Some(client.auth_oauth_device_start(&args.provider, &args.profile)?),
+        "oauth_auth_code" => {
+            Some(client.auth_oauth_auth_code_start(&args.provider, &args.profile)?)
+        }
+        _ => None,
+    };
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut next_actions = vec![format!(
+        "fwc auth profiles {} --profile {} --host {}",
+        args.provider, args.profile, host.endpoint
+    )];
+    if let Some(start) = oauth_start.as_ref() {
+        let login_id = start["login_id"].as_str().unwrap_or("<login-id>");
+        if method == "oauth_device" {
+            next_actions.push(format!(
+                "fwc auth login-poll {} --profile {} --login-id {} --host {}",
+                args.provider, args.profile, login_id, host.endpoint
+            ));
+        } else {
+            next_actions.push(format!(
+                "fwc auth login-complete {} --profile {} --login-id {} --code <code> --state <state> --host {}",
+                args.provider, args.profile, login_id, host.endpoint
+            ));
+        }
+    } else {
+        next_actions.push(format!(
+            "fwc auth refresh {} --profile {} --host {}",
+            args.provider, args.profile, host.endpoint
+        ));
+    }
     let mut payload = json!({
         "status": "ok",
         "command": "auth",
@@ -12105,7 +12371,57 @@ fn auth_login_dispatch(
         "message": format!("Stored host-managed provider auth profile `{}` for `{}`.", args.profile, args.provider),
         "provider": args.provider,
         "profile_id": args.profile,
+        "method": method,
         "profile": response["profile"].clone(),
+        "oauth_start": oauth_start,
+        "next_actions": next_actions,
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        Some(&args.profile),
+        "provider-auth-profile-upsert",
+        true,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_login_poll_dispatch(
+    args: &AuthLoginPollArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "login-poll",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth login-poll {} --profile {} --login-id {} --host <endpoint>",
+                args.provider, args.profile, args.login_id
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.auth_oauth_device_poll(&args.provider, &args.profile, &args.login_id)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "login-poll",
+        "source": "host-admin-api",
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "login_id": args.login_id,
+        "oauth_poll": response,
         "next_actions": [
             format!("fwc auth profiles {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
             format!("fwc auth refresh {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
@@ -12116,7 +12432,65 @@ fn auth_login_dispatch(
         &host.endpoint,
         &args.provider,
         Some(&args.profile),
-        "provider-auth-profile-upsert",
+        "provider-auth-oauth-device-poll",
+        true,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_login_complete_dispatch(
+    args: &AuthLoginCompleteArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "login-complete",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth login-complete {} --profile {} --login-id {} --code <code> --state <state> --host <endpoint>",
+                args.provider, args.profile, args.login_id
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let request = json!({
+        "login_id": args.login_id,
+        "code": args.code,
+        "state": args.state,
+        "error": args.error,
+        "error_description": args.error_description,
+    });
+    let response = client.auth_oauth_auth_code_complete(&args.provider, &args.profile, &request)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "login-complete",
+        "source": "host-admin-api",
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "login_id": args.login_id,
+        "oauth_complete": response,
+        "next_actions": [
+            format!("fwc auth profiles {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
+            format!("fwc auth refresh {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        Some(&args.profile),
+        "provider-auth-oauth-auth-code-complete",
         true,
     );
     envelope.inject_into(&mut payload);
@@ -12358,7 +12732,17 @@ fn auth_migrate_from_claude_code_dispatch(
                 .unwrap_or_else(|| "Claude Code import".to_owned()),
         ),
         priority: args.priority,
-        api_key,
+        api_key: Some(api_key),
+        oauth_device: false,
+        oauth_auth_code: false,
+        client_id: None,
+        client_secret: None,
+        device_code_url: None,
+        authorize_url: None,
+        token_url: None,
+        redirect_uri: None,
+        scope: String::new(),
+        no_pkce: false,
         header_name: None,
         value_prefix: None,
     };
@@ -26247,6 +26631,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::path::PathBuf;
+    use std::sync::{Arc, Mutex as StdMutex};
     use std::thread;
     use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -26949,6 +27334,127 @@ mod tests {
         });
 
         (endpoint, handle)
+    }
+
+    type MockHostRequestLog = Arc<StdMutex<Vec<(String, String)>>>;
+
+    fn spawn_mock_host_sequence_with_body_log(
+        routes: Vec<(String, Value)>,
+    ) -> (String, thread::JoinHandle<()>, MockHostRequestLog) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock host should bind");
+        listener
+            .set_nonblocking(true)
+            .expect("mock host should configure nonblocking accept");
+        let endpoint = format!(
+            "http://{}",
+            listener.local_addr().expect("mock host address")
+        );
+        let expected_requests = routes.len();
+        let responses = routes
+            .into_iter()
+            .map(|(key, value)| {
+                (
+                    key,
+                    serde_json::to_string(&value).expect("mock response should serialize"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let request_log = Arc::new(StdMutex::new(Vec::new()));
+        let thread_log = Arc::clone(&request_log);
+
+        let handle = thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut served = 0usize;
+
+            while served < expected_requests && Instant::now() < deadline {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(10));
+                        continue;
+                    }
+                    Err(error) => panic!("mock host accept failed: {error}"),
+                };
+
+                stream
+                    .set_nonblocking(false)
+                    .expect("mock host stream should switch back to blocking mode");
+
+                let mut reader =
+                    BufReader::new(stream.try_clone().expect("mock host should clone socket"));
+                let mut request_line = String::new();
+                reader
+                    .read_line(&mut request_line)
+                    .expect("mock host should read request line");
+                assert!(
+                    !request_line.trim().is_empty(),
+                    "mock host received an empty request line"
+                );
+
+                let mut content_length = 0usize;
+                loop {
+                    let mut header = String::new();
+                    reader
+                        .read_line(&mut header)
+                        .expect("mock host should read headers");
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        content_length = value
+                            .trim()
+                            .parse()
+                            .expect("content-length should be numeric");
+                    }
+                }
+
+                let mut body_text = String::new();
+                if content_length > 0 {
+                    let mut body = vec![0u8; content_length];
+                    reader
+                        .read_exact(&mut body)
+                        .expect("mock host should read request body");
+                    body_text = String::from_utf8_lossy(&body).to_string();
+                }
+
+                let mut parts = request_line.split_whitespace();
+                let method = parts.next().expect("request method should exist");
+                let path = parts.next().expect("request path should exist");
+                let key = format!("{method} {path}");
+                let Some((expected_key, body)) = responses.get(served) else {
+                    panic!("missing expected mock response for request {}", served + 1);
+                };
+                assert_eq!(
+                    &key,
+                    expected_key,
+                    "unexpected mock host request order at position {}",
+                    served + 1
+                );
+                thread_log
+                    .lock()
+                    .expect("mock host request log lock")
+                    .push((key, body_text));
+
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("mock host should write response");
+                stream.flush().expect("mock host should flush response");
+                served += 1;
+            }
+
+            assert_eq!(
+                served, expected_requests,
+                "mock host served {served} request(s), expected {expected_requests}"
+            );
+        });
+
+        (endpoint, handle, request_log)
     }
 
     fn mock_connector_summary_json() -> Value {
@@ -44220,6 +44726,247 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(remove_payload["delete"]["deleted"], true);
 
         server.join().expect("mock host thread should complete");
+    }
+
+    #[test]
+    fn auth_login_oauth_device_starts_and_polls_host_flow() {
+        let provider = "test-oauth-device";
+        let profile = "primary";
+        let (host, server, requests) = spawn_mock_host_sequence_with_body_log(vec![
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "oauth_device",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/oauth/device/start"),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "login_id": "login-device-123",
+                    "method": "oauth_device",
+                    "user_code": "USER-123",
+                    "verification_uri": "https://provider.example/device",
+                    "verification_uri_complete": "https://provider.example/device?user_code=USER-123",
+                    "expires_at": "2026-05-07T00:10:00Z",
+                    "interval_secs": 1
+                }),
+            ),
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/oauth/device/poll"),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "login_id": "login-device-123",
+                    "method": "oauth_device",
+                    "status": "pending",
+                    "retry_after_secs": 1,
+                    "profile": null
+                }),
+            ),
+        ]);
+
+        let (login_exit, login_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "login",
+            provider,
+            "--profile",
+            profile,
+            "--oauth-device",
+            "--client-id",
+            "client-device",
+            "--device-code-url",
+            "https://provider.example/device-code",
+            "--token-url",
+            "https://provider.example/token",
+            "--scope",
+            "repo",
+        ]);
+        assert_eq!(login_exit, CliExitCode::Success.into());
+        assert_eq!(login_payload["subcommand"], "login");
+        assert_eq!(login_payload["method"], "oauth_device");
+        assert_eq!(login_payload["oauth_start"]["login_id"], "login-device-123");
+        assert!(
+            login_payload["next_actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| action
+                    .as_str()
+                    .is_some_and(|text| text.contains("auth login-poll"))))
+        );
+
+        let (poll_exit, poll_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "login-poll",
+            provider,
+            "--profile",
+            profile,
+            "--login-id",
+            "login-device-123",
+        ]);
+        assert_eq!(poll_exit, CliExitCode::Success.into());
+        assert_eq!(poll_payload["subcommand"], "login-poll");
+        assert_eq!(poll_payload["oauth_poll"]["status"], "pending");
+
+        server.join().expect("mock host thread should complete");
+        let logged = requests.lock().expect("request log lock").clone();
+        assert_eq!(logged.len(), 3);
+        assert!(logged[0].1.contains("\"method\":\"oauth_device\""));
+        assert!(logged[0].1.contains("\"client_id\":\"client-device\""));
+        assert_eq!(logged[1].1, "{}");
+        assert!(logged[2].1.contains("\"login_id\":\"login-device-123\""));
+        let login_text = login_payload.to_string();
+        assert!(!login_text.contains("sk-"));
+        assert!(!login_text.contains("auth-code"));
+        assert!(!login_text.contains("client-secret"));
+    }
+
+    #[test]
+    fn auth_login_oauth_auth_code_starts_and_completes_host_flow_redacted() {
+        let provider = "test-oauth-auth-code";
+        let profile = "primary";
+        let (host, server, requests) = spawn_mock_host_sequence_with_body_log(vec![
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "oauth_auth_code",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
+                format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/oauth/auth-code/start"),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "login_id": "login-auth-code-123",
+                    "method": "oauth_auth_code",
+                    "authorization_url": "https://provider.example/authorize?state=state-123",
+                    "redirect_uri": "http://127.0.0.1/callback"
+                }),
+            ),
+            (
+                format!(
+                    "POST /rpc/admin/auth/profiles/{provider}/{profile}/oauth/auth-code/complete"
+                ),
+                json!({
+                    "provider": provider,
+                    "profile_id": profile,
+                    "login_id": "login-auth-code-123",
+                    "method": "oauth_auth_code",
+                    "status": "authorized",
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "oauth_auth_code",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+        ]);
+
+        let (login_exit, login_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "login",
+            provider,
+            "--profile",
+            profile,
+            "--oauth-auth-code",
+            "--client-id",
+            "client-auth-code",
+            "--client-secret",
+            "client-secret-123",
+            "--authorize-url",
+            "https://provider.example/authorize",
+            "--token-url",
+            "https://provider.example/token",
+            "--redirect-uri",
+            "http://127.0.0.1/callback",
+            "--scope",
+            "repo",
+            "--no-pkce",
+        ]);
+        assert_eq!(login_exit, CliExitCode::Success.into());
+        assert_eq!(login_payload["method"], "oauth_auth_code");
+        assert_eq!(
+            login_payload["oauth_start"]["login_id"],
+            "login-auth-code-123"
+        );
+        assert!(
+            login_payload["next_actions"]
+                .as_array()
+                .is_some_and(|actions| actions.iter().any(|action| action
+                    .as_str()
+                    .is_some_and(|text| text.contains("auth login-complete"))))
+        );
+        assert!(!login_payload.to_string().contains("client-secret-123"));
+
+        let (complete_exit, complete_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "login-complete",
+            provider,
+            "--profile",
+            profile,
+            "--login-id",
+            "login-auth-code-123",
+            "--code",
+            "authorization-code-secret",
+            "--state",
+            "state-123",
+        ]);
+        assert_eq!(complete_exit, CliExitCode::Success.into());
+        assert_eq!(complete_payload["subcommand"], "login-complete");
+        assert_eq!(complete_payload["oauth_complete"]["status"], "authorized");
+        let complete_text = complete_payload.to_string();
+        assert!(!complete_text.contains("authorization-code-secret"));
+        assert!(!complete_text.contains("client-secret-123"));
+
+        server.join().expect("mock host thread should complete");
+        let logged = requests.lock().expect("request log lock").clone();
+        assert_eq!(logged.len(), 3);
+        assert!(logged[0].1.contains("\"method\":\"oauth_auth_code\""));
+        assert!(
+            logged[0]
+                .1
+                .contains("\"client_secret\":\"client-secret-123\"")
+        );
+        assert_eq!(logged[1].1, "{}");
+        assert!(
+            logged[2]
+                .1
+                .contains("\"code\":\"authorization-code-secret\"")
+        );
+        assert!(logged[2].1.contains("\"state\":\"state-123\""));
     }
 
     #[test]

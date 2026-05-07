@@ -61,6 +61,7 @@ semver = { version = "1", features = ["serde"] }
 axum = { version = "0.8", features = ["json"] }
 hyper = "1.8.1"
 hyper-util = { version = "0.1.20", features = ["server", "service", "http1", "http2"] }
+reqwest = { workspace = true, features = ["blocking", "form"] }
 tower = { version = "0.5.3", features = ["util"] }
 fcp-sandbox = { version = "0.1.0", path = "../fcp-sandbox" }
 

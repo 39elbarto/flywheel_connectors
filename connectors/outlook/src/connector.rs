@@ -3,16 +3,15 @@
 use std::time::Instant;
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    ConnectorMetrics, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,
+    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use fcp_sdk::prelude::*;
-use serde_json::json;
 use sha2::{Digest, Sha256};
 
 use crate::client::OutlookClient;
@@ -29,6 +28,15 @@ const OP_SEND_MESSAGE: &str = "outlook.send_message";
 const OP_LIST_EVENTS: &str = "outlook.list_events";
 const OP_CREATE_EVENT: &str = "outlook.create_event";
 const OP_LIST_FOLDERS: &str = "outlook.list_folders";
+const OPERATION_ORDER: [&str; 7] = [
+    OP_LIST_MESSAGES,
+    OP_GET_MESSAGE,
+    OP_SEARCH_MESSAGES,
+    OP_SEND_MESSAGE,
+    OP_LIST_EVENTS,
+    OP_CREATE_EVENT,
+    OP_LIST_FOLDERS,
+];
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DoctorCheck {
@@ -106,182 +114,27 @@ impl OutlookConnector {
         DoctorResult::new(checks)
     }
 
+    /// Returns the operation catalog derived from the embedded manifest.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the embedded manifest cannot be parsed before interface-hash
+    /// validation. That indicates a checked-in connector manifest is
+    /// structurally invalid and should fail tests before release.
     #[must_use]
     pub fn operations_info() -> Vec<OperationInfo> {
-        vec![
-            OperationInfo {
-                id: OperationId::from_static(OP_LIST_MESSAGES),
-                summary: "List recent email messages from a folder".into(),
-                description: Some("List emails from the user's inbox or a specified folder via Microsoft Graph API.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": {
-                        "folder_id": { "type": "string" },
-                        "top": { "type": "integer", "minimum": 1, "maximum": 100 }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_READ),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to list recent emails in the user's inbox or a specific folder.".into(),
-                    common_mistakes: vec!["Forgetting to specify folder_id defaults to Inbox".into()],
-                    examples: vec!["{}".into(), "{\"folder_id\":\"Drafts\",\"top\":10}".into()],
-                    related: vec![CapabilityId::from_static(OP_GET_MESSAGE)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_GET_MESSAGE),
-                summary: "Get a single email message by ID".into(),
-                description: Some("Retrieve the full content of a specific email.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["message_id"],
-                    "properties": { "message_id": { "type": "string" } }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_READ),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to retrieve the full content of a specific email.".into(),
-                    common_mistakes: vec!["Use message ID, not display name".into()],
-                    examples: vec!["{\"message_id\":\"AAMk...\"}".into()],
-                    related: vec![CapabilityId::from_static(OP_LIST_MESSAGES)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_SEARCH_MESSAGES),
-                summary: "Search email messages by query".into(),
-                description: Some("Search emails with a keyword query across subjects, bodies, and senders.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["query"],
-                    "properties": {
-                        "query": { "type": "string" },
-                        "top": { "type": "integer", "minimum": 1, "maximum": 100 }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_READ),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to search emails with a keyword query.".into(),
-                    common_mistakes: vec!["Query must be a non-empty string".into()],
-                    examples: vec!["{\"query\":\"invoice\",\"top\":10}".into()],
-                    related: vec![CapabilityId::from_static(OP_LIST_MESSAGES)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_SEND_MESSAGE),
-                summary: "Send a new email message".into(),
-                description: Some("Send an email from the configured Outlook account.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["to", "subject", "body"],
-                    "properties": {
-                        "to": { "type": "array", "items": { "type": "string" } },
-                        "cc": { "type": "array", "items": { "type": "string" } },
-                        "subject": { "type": "string" },
-                        "body": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_SEND),
-                risk_level: RiskLevel::Medium,
-                safety_tier: SafetyTier::Risky,
-                idempotency: IdempotencyClass::None,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to send an email from the configured Outlook account.".into(),
-                    common_mistakes: vec!["At least one recipient required".into()],
-                    examples: vec!["{\"to\":[\"user@example.com\"],\"subject\":\"Hi\",\"body\":\"Hello\"}".into()],
-                    related: vec![CapabilityId::from_static(OP_LIST_MESSAGES)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_LIST_EVENTS),
-                summary: "List calendar events".into(),
-                description: Some("List upcoming calendar events from the user's default calendar.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "properties": { "top": { "type": "integer", "minimum": 1, "maximum": 100 } }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_CALENDAR),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to list upcoming calendar events.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into(), "{\"top\":5}".into()],
-                    related: vec![CapabilityId::from_static(OP_CREATE_EVENT)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_CREATE_EVENT),
-                summary: "Create a new calendar event".into(),
-                description: Some("Create a new event in the user's Outlook calendar.".into()),
-                input_schema: json!({
-                    "type": "object",
-                    "required": ["subject", "start", "end"],
-                    "properties": {
-                        "subject": { "type": "string" },
-                        "start": { "type": "string" },
-                        "end": { "type": "string" },
-                        "body": { "type": "string" },
-                        "location": { "type": "string" }
-                    }
-                }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_CALENDAR),
-                risk_level: RiskLevel::Medium,
-                safety_tier: SafetyTier::Risky,
-                idempotency: IdempotencyClass::None,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to create a new calendar event.".into(),
-                    common_mistakes: vec!["subject, start, and end are required".into()],
-                    examples: vec!["{\"subject\":\"Meeting\",\"start\":\"2026-04-01T10:00:00\",\"end\":\"2026-04-01T11:00:00\"}".into()],
-                    related: vec![CapabilityId::from_static(OP_LIST_EVENTS)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-            OperationInfo {
-                id: OperationId::from_static(OP_LIST_FOLDERS),
-                summary: "List mail folders".into(),
-                description: Some("Discover available mail folders.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
-                capability: CapabilityId::from_static(CAP_READ),
-                risk_level: RiskLevel::Low,
-                safety_tier: SafetyTier::Safe,
-                idempotency: IdempotencyClass::Strict,
-                ai_hints: AgentHint {
-                    when_to_use: "Use to discover available mail folders.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
-                    related: vec![CapabilityId::from_static(OP_LIST_MESSAGES)],
-                },
-                rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
-            },
-        ]
+        let manifest = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("embedded Outlook manifest should parse before hash validation");
+        let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+        operations.sort_by(|(left, _), (right, _)| {
+            let left_index = operation_order(left);
+            let right_index = operation_order(right);
+            left_index.cmp(&right_index).then_with(|| left.cmp(right))
+        });
+        operations
+            .into_iter()
+            .map(|(id, operation)| operation_info_from_manifest(id, operation))
+            .collect()
     }
 
     fn parse_top(input: &serde_json::Value) -> FcpResult<Option<u32>> {
@@ -476,6 +329,41 @@ impl Default for OutlookConnector {
     }
 }
 
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(usize::MAX)
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
+    }
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description;
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema,
+        output_schema: operation.output_schema,
+        capability: operation.capability,
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints,
+        rate_limit: operation.rate_limit.map(|rate_limit| rate_limit.0),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
+}
+
 fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
     match operation {
         OP_LIST_MESSAGES | OP_GET_MESSAGE | OP_SEARCH_MESSAGES | OP_LIST_FOLDERS => {
@@ -650,7 +538,62 @@ impl FcpConnector for OutlookConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use fcp_prelude::FcpConnector;
+    use fcp_prelude::{FcpConnector, IdempotencyClass, SafetyTier};
+    use jsonschema::Validator;
+    use serde_json::{Value, json};
+
+    fn outlook_manifest_unchecked() -> ConnectorManifest {
+        ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("Outlook manifest should parse before hash validation")
+    }
+
+    fn operation_input_schema<'a>(
+        manifest: &'a ConnectorManifest,
+        operation_id: &str,
+    ) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("operation should be declared")
+            .input_schema
+    }
+
+    fn operation_output_schema<'a>(
+        manifest: &'a ConnectorManifest,
+        operation_id: &str,
+    ) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("operation should be declared")
+            .output_schema
+    }
+
+    fn validator_for(schema: &Value) -> Validator {
+        Validator::new(schema).expect("manifest operation schema should compile")
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        let errors: Vec<_> = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {payload}; errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject {payload}"
+        );
+    }
 
     #[test]
     fn connector_id_is_correct() {
@@ -775,6 +718,278 @@ mod tests {
         let h2 = OutlookConnector::manifest_hash();
         assert_eq!(h1, h2);
         assert!(h1.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn manifest_declares_valid_outlook_operations_metadata() {
+        let unchecked = outlook_manifest_unchecked();
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "update connectors/outlook/manifest.toml interface_hash to {expected_hash}"
+        );
+
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        assert_eq!(manifest.connector.id.as_str(), "fcp.outlook");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        assert_eq!(
+            manifest
+                .capabilities
+                .optional
+                .iter()
+                .map(CapabilityId::as_str)
+                .collect::<Vec<_>>(),
+            vec![CAP_READ, CAP_SEND, CAP_CALENDAR]
+        );
+
+        let list_messages = manifest
+            .provides
+            .operations
+            .get(OP_LIST_MESSAGES)
+            .expect("list messages operation should be declared");
+        assert_eq!(list_messages.capability.as_str(), CAP_READ);
+        assert_eq!(json!(list_messages.risk_level), json!("low"));
+        assert_eq!(json!(list_messages.safety_tier), json!("safe"));
+        assert_eq!(json!(list_messages.idempotency), json!("strict"));
+        assert_eq!(
+            list_messages.input_schema["properties"]["top"]["maximum"],
+            json!(100)
+        );
+
+        let send_message = manifest
+            .provides
+            .operations
+            .get(OP_SEND_MESSAGE)
+            .expect("send operation should be declared");
+        assert_eq!(send_message.capability.as_str(), CAP_SEND);
+        assert_eq!(json!(send_message.risk_level), json!("medium"));
+        assert_eq!(json!(send_message.safety_tier), json!("risky"));
+        assert_eq!(json!(send_message.idempotency), json!("none"));
+        assert_eq!(
+            send_message.input_schema["required"],
+            json!(["to", "subject", "body"])
+        );
+
+        let create_event = manifest
+            .provides
+            .operations
+            .get(OP_CREATE_EVENT)
+            .expect("create event operation should be declared");
+        assert_eq!(create_event.capability.as_str(), CAP_CALENDAR);
+        assert_eq!(json!(create_event.safety_tier), json!("risky"));
+        assert_eq!(
+            create_event.input_schema["required"],
+            json!(["subject", "start", "end"])
+        );
+
+        for operation_id in OPERATION_ORDER {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("operation should be declared");
+            assert!(!operation.ai_hints.when_to_use.trim().is_empty());
+            assert!(!operation.ai_hints.common_mistakes.is_empty());
+            let network = operation
+                .network_constraints
+                .as_ref()
+                .expect("operation should declare network constraints");
+            assert_eq!(
+                network.host_allow,
+                vec![
+                    "graph.microsoft.com".to_string(),
+                    "graph.microsoft.us".to_string()
+                ]
+            );
+            assert_eq!(network.port_allow, vec![443]);
+            assert!(network.deny_localhost);
+            assert!(network.deny_private_ranges);
+            assert!(network.deny_tailnet_ranges);
+            assert!(network.require_sni);
+            assert!(network.deny_ip_literals);
+            assert_eq!(network.max_redirects, 0);
+            assert_eq!(network.total_timeout_ms, 15_000);
+        }
+    }
+
+    #[test]
+    fn introspection_uses_manifest_operation_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let connector = OutlookConnector::new();
+        let introspection = connector.introspect();
+        assert_eq!(
+            introspection.operations.len(),
+            manifest.provides.operations.len()
+        );
+
+        for (operation, expected_id) in introspection.operations.iter().zip(OPERATION_ORDER) {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(expected_id)
+                .expect("operation should be declared");
+            assert_eq!(operation.id.as_str(), expected_id);
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(operation.safety_tier, manifest_operation.safety_tier);
+            assert_eq!(operation.idempotency, manifest_operation.idempotency);
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(
+                operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+            assert_eq!(
+                operation
+                    .rate_limit
+                    .as_ref()
+                    .map(|rate| (rate.max, rate.per_ms)),
+                manifest_operation
+                    .rate_limit
+                    .as_ref()
+                    .map(|rate| (rate.0.max, rate.0.per_ms))
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_input_schemas_validate_happy_boundary_and_permissive_runtime_payloads() {
+        let manifest = outlook_manifest_unchecked();
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_LIST_MESSAGES),
+            &json!({ "folder_id": "Drafts", "top": 100 }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_GET_MESSAGE),
+            &json!({ "message_id": "AAMkExampleMessageId", "trace_context": "ignored-by-runtime" }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_SEARCH_MESSAGES),
+            &json!({ "query": "invoice", "top": 1 }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_SEND_MESSAGE),
+            &json!({
+                "to": ["recipient@example.com"],
+                "cc": ["copy@example.com"],
+                "subject": "",
+                "body": "",
+                "client_note": "ignored-by-runtime"
+            }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_LIST_EVENTS),
+            &json!({ "top": 100 }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_CREATE_EVENT),
+            &json!({
+                "subject": "Meeting",
+                "start": "2026-04-01T10:00:00-04:00",
+                "end": "2026-04-01T11:00:00-04:00",
+                "body": "Agenda",
+                "location": "Conference Room"
+            }),
+        );
+        assert_schema_accepts(
+            operation_input_schema(&manifest, OP_LIST_FOLDERS),
+            &json!({ "trace_context": "ignored-by-runtime" }),
+        );
+    }
+
+    #[test]
+    fn manifest_input_schemas_reject_missing_and_malformed_core_fields() {
+        let manifest = outlook_manifest_unchecked();
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_LIST_MESSAGES),
+            &json!({ "top": 0 }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_LIST_MESSAGES),
+            &json!({ "top": 101 }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_GET_MESSAGE),
+            &json!({}),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_GET_MESSAGE),
+            &json!({ "message_id": 5 }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_SEARCH_MESSAGES),
+            &json!({ "query": "" }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_SEARCH_MESSAGES),
+            &json!({ "query": "invoice", "top": "ten" }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_SEND_MESSAGE),
+            &json!({ "to": [], "subject": "Hello", "body": "World" }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_SEND_MESSAGE),
+            &json!({ "to": ["recipient@example.com"], "body": "World" }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_CREATE_EVENT),
+            &json!({ "subject": "", "start": "2026-04-01T10:00:00Z", "end": "2026-04-01T11:00:00Z" }),
+        );
+        assert_schema_rejects(
+            operation_input_schema(&manifest, OP_CREATE_EVENT),
+            &json!({ "subject": "Meeting", "start": "2026-04-01T10:00:00Z" }),
+        );
+    }
+
+    #[test]
+    fn manifest_output_schemas_validate_success_shapes_and_error_boundaries() {
+        let manifest = outlook_manifest_unchecked();
+        for operation_id in [
+            OP_LIST_MESSAGES,
+            OP_SEARCH_MESSAGES,
+            OP_LIST_EVENTS,
+            OP_LIST_FOLDERS,
+        ] {
+            assert_schema_accepts(
+                operation_output_schema(&manifest, operation_id),
+                &json!({ "value": [], "@odata.context": "redacted-in-tests" }),
+            );
+            assert_schema_rejects(
+                operation_output_schema(&manifest, operation_id),
+                &json!({ "value": "not-an-array" }),
+            );
+        }
+        assert_schema_accepts(
+            operation_output_schema(&manifest, OP_GET_MESSAGE),
+            &json!({
+                "id": "AAMkExampleMessageId",
+                "subject": "Subject",
+                "body": { "contentType": "Text", "content": "Redacted fixture body" }
+            }),
+        );
+        assert_schema_accepts(
+            operation_output_schema(&manifest, OP_SEND_MESSAGE),
+            &json!({ "status": "ok" }),
+        );
+        assert_schema_rejects(
+            operation_output_schema(&manifest, OP_SEND_MESSAGE),
+            &json!({ "status": "queued" }),
+        );
+        assert_schema_accepts(
+            operation_output_schema(&manifest, OP_CREATE_EVENT),
+            &json!({ "id": "event-id", "subject": "Meeting" }),
+        );
     }
 
     #[test]

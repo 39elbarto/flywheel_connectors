@@ -5,13 +5,15 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:e9f6e3180477d76f81a6335b5cf9fb4fff31eb2f6f6aa611fc9f6fa9e5e482ef"
 
 [connector]
 id = "fcp.outlook"
 name = "Microsoft Outlook Connector"
 version = "0.1.0"
-description = "FCP connector for Microsoft Outlook and Exchange via Microsoft Graph API — mail reading, sending, calendar events, and folder management."
-archetypes = ["request-response", "polling"]
+status = "ready"
+description = "Microsoft Outlook and Exchange connector over Microsoft Graph for mail reading, mail sending, calendar events, and folder discovery."
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -24,198 +26,448 @@ home = "z:work"
 allowed_sources = ["z:owner", "z:private", "z:work"]
 allowed_targets = ["z:owner", "z:private", "z:work"]
 forbidden = ["z:public"]
-tailscale_tag = "tag:fcp-work"
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["outlook.read", "outlook.send", "outlook.calendar"]
 forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 [sandbox]
 profile = "strict"
-memory_limit_mb = 128
-cpu_limit_percent = 25
-wall_clock_timeout_seconds = 30
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
 
-# --- Mail operations ---
-
-[[provides]]
-id = "outlook.list_messages"
-summary = "List recent email messages from a folder"
+# Production manifest egress is intentionally limited to Microsoft Graph's
+# public and sovereign API hosts. The Rust connector still allows loopback graph
+# hosts in tests; those are deterministic test fixtures, not production network
+# allowances.
+[provides.operations."outlook.list_messages"]
+description = "List recent email messages from the inbox or a specified mail folder through Microsoft Graph."
 capability = "outlook.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "100/min"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.list_messages".input_schema]
+type = "object"
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.read"
-requests = 100
-window = "60s"
+[provides.operations."outlook.list_messages".input_schema.properties.folder_id]
+type = "string"
+minLength = 1
+description = "Microsoft Graph mail folder id or well-known folder name. Defaults to inbox when omitted."
 
-[provides.ai_hints]
+[provides.operations."outlook.list_messages".input_schema.properties.top]
+type = "integer"
+minimum = 1
+maximum = 100
+description = "Maximum number of messages to request. Runtime defaults to 25 and caps Graph requests at 100."
+
+[provides.operations."outlook.list_messages".output_schema]
+type = "object"
+required = ["value"]
+additionalProperties = true
+
+[provides.operations."outlook.list_messages".output_schema.properties.value]
+type = "array"
+
+[provides.operations."outlook.list_messages".output_schema.properties.value.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.list_messages".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.list_messages".ai_hints]
 when_to_use = "Use to list recent emails in the user's inbox or a specific folder."
-common_mistakes = ["Forgetting to specify folder_id defaults to Inbox"]
-examples = ["{}", "{\"folder_id\": \"Drafts\", \"top\": 10}"]
+common_mistakes = ["Omitting folder_id intentionally defaults to inbox.", "Use outlook.get_message when the caller needs full message body content.", "Do not log message subjects, sender names, body previews, or provider error bodies."]
+examples = ['{}', '{"folder_id":"Drafts","top":10}']
 related = ["outlook.get_message", "outlook.search_messages"]
 
-[[provides]]
-id = "outlook.get_message"
-summary = "Get a single email message by ID"
+[provides.operations."outlook.get_message"]
+description = "Retrieve a single Outlook message by Microsoft Graph message id."
 capability = "outlook.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "100/min"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.get_message".input_schema]
+type = "object"
+required = ["message_id"]
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.read"
-requests = 100
-window = "60s"
+[provides.operations."outlook.get_message".input_schema.properties.message_id]
+type = "string"
+minLength = 1
+description = "Opaque Microsoft Graph message id."
 
-[provides.ai_hints]
+[provides.operations."outlook.get_message".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.get_message".output_schema.properties.id]
+type = "string"
+
+[provides.operations."outlook.get_message".output_schema.properties.subject]
+type = ["string", "null"]
+
+[provides.operations."outlook.get_message".output_schema.properties.body]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.get_message".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.get_message".ai_hints]
 when_to_use = "Use to retrieve the full content of a specific email by its message ID."
-common_mistakes = ["Using display name instead of message ID"]
-examples = ["{\"message_id\": \"AAMk...\"}"]
+common_mistakes = ["Use the opaque Microsoft Graph message id, not a display subject or sender name.", "Treat message bodies as private data and avoid logging them.", "Use outlook.list_messages first when the caller only has a folder context."]
+examples = ['{"message_id":"AAMkExampleMessageId"}']
 related = ["outlook.list_messages"]
 
-[[provides]]
-id = "outlook.search_messages"
-summary = "Search email messages by query"
+[provides.operations."outlook.search_messages"]
+description = "Search Outlook messages with a Microsoft Graph search phrase."
 capability = "outlook.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "100/min"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.search_messages".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.read"
-requests = 100
-window = "60s"
+[provides.operations."outlook.search_messages".input_schema.properties.query]
+type = "string"
+minLength = 1
+description = "Search phrase. Runtime trims whitespace, rejects empty/control-character queries, and escapes quotes for Graph search."
 
-[provides.ai_hints]
+[provides.operations."outlook.search_messages".input_schema.properties.top]
+type = "integer"
+minimum = 1
+maximum = 100
+
+[provides.operations."outlook.search_messages".output_schema]
+type = "object"
+required = ["value"]
+additionalProperties = true
+
+[provides.operations."outlook.search_messages".output_schema.properties.value]
+type = "array"
+
+[provides.operations."outlook.search_messages".output_schema.properties.value.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.search_messages".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.search_messages".ai_hints]
 when_to_use = "Use to search emails with a keyword query across subjects, bodies, and senders."
-common_mistakes = ["Query must be a non-empty string"]
-examples = ["{\"query\": \"invoice\", \"top\": 10}"]
+common_mistakes = ["Query must be non-empty and must not include control characters.", "Search results may expose private message metadata; do not log query text or returned subjects.", "Use outlook.get_message only after selecting a specific message id."]
+examples = ['{"query":"invoice","top":10}']
 related = ["outlook.list_messages"]
 
-[[provides]]
-id = "outlook.send_message"
-summary = "Send a new email message"
+[provides.operations."outlook.send_message"]
+description = "Send a new email from the configured Outlook account through Microsoft Graph sendMail."
 capability = "outlook.send"
 risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
+rate_limit = "30/min"
 idempotency = "none"
+revocation_freshness = "risky"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.send_message".input_schema]
+type = "object"
+required = ["to", "subject", "body"]
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.write"
-requests = 30
-window = "60s"
+[provides.operations."outlook.send_message".input_schema.properties.to]
+type = "array"
+minItems = 1
+description = "Recipient email addresses. Runtime trims entries and rejects empty or non-string recipients."
 
-[provides.ai_hints]
+[provides.operations."outlook.send_message".input_schema.properties.to.items]
+type = "string"
+minLength = 1
+
+[provides.operations."outlook.send_message".input_schema.properties.cc]
+type = "array"
+description = "Optional cc recipient email addresses."
+
+[provides.operations."outlook.send_message".input_schema.properties.cc.items]
+type = "string"
+minLength = 1
+
+[provides.operations."outlook.send_message".input_schema.properties.subject]
+type = "string"
+description = "Message subject. Do not include secrets unless explicitly requested by the user."
+
+[provides.operations."outlook.send_message".input_schema.properties.body]
+type = "string"
+description = "Plain text message body."
+
+[provides.operations."outlook.send_message".output_schema]
+type = "object"
+required = ["status"]
+additionalProperties = true
+
+[provides.operations."outlook.send_message".output_schema.properties.status]
+const = "ok"
+
+[provides.operations."outlook.send_message".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.send_message".ai_hints]
 when_to_use = "Use to send an email from the configured Outlook account."
-common_mistakes = ["At least one recipient is required", "Subject and body must not be empty"]
-examples = ["{\"to\": [\"recipient@example.com\"], \"subject\": \"Hello\", \"body\": \"World\"}"]
+common_mistakes = ["At least one to recipient is required.", "This operation is not idempotent; retries can send duplicate email.", "Never log API tokens, recipient lists, subjects, bodies, or provider error bodies."]
+examples = ['{"to":["recipient@example.com"],"subject":"Hello","body":"World"}']
 related = ["outlook.list_messages"]
 
-# --- Calendar operations ---
-
-[[provides]]
-id = "outlook.list_events"
-summary = "List calendar events"
+[provides.operations."outlook.list_events"]
+description = "List upcoming Outlook calendar events from the default calendar."
 capability = "outlook.calendar"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "100/min"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.list_events".input_schema]
+type = "object"
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.read"
-requests = 100
-window = "60s"
+[provides.operations."outlook.list_events".input_schema.properties.top]
+type = "integer"
+minimum = 1
+maximum = 100
 
-[provides.ai_hints]
+[provides.operations."outlook.list_events".output_schema]
+type = "object"
+required = ["value"]
+additionalProperties = true
+
+[provides.operations."outlook.list_events".output_schema.properties.value]
+type = "array"
+
+[provides.operations."outlook.list_events".output_schema.properties.value.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.list_events".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.list_events".ai_hints]
 when_to_use = "Use to list upcoming calendar events from the user's default calendar."
-common_mistakes = ["Dates should be in ISO 8601 format"]
-examples = ["{}", "{\"top\": 5}"]
+common_mistakes = ["Use outlook.create_event only when creating a new event, not when reading existing event details.", "Calendar subjects and locations can be private; do not log result contents."]
+examples = ['{}', '{"top":5}']
 related = ["outlook.create_event"]
 
-[[provides]]
-id = "outlook.create_event"
-summary = "Create a new calendar event"
+[provides.operations."outlook.create_event"]
+description = "Create a calendar event in the configured Outlook account through Microsoft Graph."
 capability = "outlook.calendar"
 risk_level = "medium"
 safety_tier = "risky"
+requires_approval = "none"
+rate_limit = "30/min"
 idempotency = "none"
+revocation_freshness = "risky"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.create_event".input_schema]
+type = "object"
+required = ["subject", "start", "end"]
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.write"
-requests = 30
-window = "60s"
+[provides.operations."outlook.create_event".input_schema.properties.subject]
+type = "string"
+minLength = 1
 
-[provides.ai_hints]
+[provides.operations."outlook.create_event".input_schema.properties.start]
+type = "string"
+minLength = 1
+description = "Event start date-time string. Runtime sends it to Graph with UTC time zone metadata."
+
+[provides.operations."outlook.create_event".input_schema.properties.end]
+type = "string"
+minLength = 1
+description = "Event end date-time string. Runtime sends it to Graph with UTC time zone metadata."
+
+[provides.operations."outlook.create_event".input_schema.properties.body]
+type = "string"
+description = "Optional plain text event body."
+
+[provides.operations."outlook.create_event".input_schema.properties.location]
+type = "string"
+description = "Optional event location display name."
+
+[provides.operations."outlook.create_event".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.create_event".output_schema.properties.id]
+type = "string"
+
+[provides.operations."outlook.create_event".output_schema.properties.subject]
+type = ["string", "null"]
+
+[provides.operations."outlook.create_event".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.create_event".ai_hints]
 when_to_use = "Use to create a new calendar event in the user's Outlook calendar."
-common_mistakes = ["subject, start, and end are required", "Times must include timezone"]
-examples = ["{\"subject\": \"Meeting\", \"start\": \"2026-04-01T10:00:00-04:00\", \"end\": \"2026-04-01T11:00:00-04:00\"}"]
+common_mistakes = ["subject, start, and end are required.", "This operation is not idempotent; retries can create duplicate events.", "Never log calendar subjects, locations, body text, access tokens, or provider error bodies."]
+examples = ['{"subject":"Meeting","start":"2026-04-01T10:00:00-04:00","end":"2026-04-01T11:00:00-04:00"}']
 related = ["outlook.list_events"]
 
-# --- Folder operations ---
-
-[[provides]]
-id = "outlook.list_folders"
-summary = "List mail folders"
+[provides.operations."outlook.list_folders"]
+description = "List Outlook mail folders such as Inbox, Sent Items, and Drafts through Microsoft Graph."
 capability = "outlook.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
+rate_limit = "100/min"
 idempotency = "strict"
+revocation_freshness = "safe"
 
-[provides.network_constraints]
-allowed_hosts = ["graph.microsoft.com"]
-allowed_ports = [443]
-require_tls = true
-follow_redirects = false
+[provides.operations."outlook.list_folders".input_schema]
+type = "object"
+additionalProperties = true
 
-[provides.rate_limit]
-pool_name = "graph.read"
-requests = 100
-window = "60s"
+[provides.operations."outlook.list_folders".output_schema]
+type = "object"
+required = ["value"]
+additionalProperties = true
 
-[provides.ai_hints]
+[provides.operations."outlook.list_folders".output_schema.properties.value]
+type = "array"
+
+[provides.operations."outlook.list_folders".output_schema.properties.value.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."outlook.list_folders".network_constraints]
+host_allow = ["graph.microsoft.com", "graph.microsoft.us"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 10485760
+
+[provides.operations."outlook.list_folders".ai_hints]
 when_to_use = "Use to discover available mail folders (Inbox, Sent Items, Drafts, etc.)."
-common_mistakes = []
-examples = ["{}"]
+common_mistakes = ["Use the returned folder id as folder_id for outlook.list_messages.", "Folder display names can reveal private mailbox organization; do not log raw results."]
+examples = ['{}']
 related = ["outlook.list_messages"]

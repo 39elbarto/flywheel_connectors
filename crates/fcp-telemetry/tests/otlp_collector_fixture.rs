@@ -11,13 +11,18 @@ use std::{
 };
 
 use fcp_telemetry::{
-    FcpSpan, OtlpHeader, OtlpResourceAttribute, flush_otlp_metrics, flush_otlp_tracer,
+    FcpSpan, OtlpHeader, OtlpResourceAttribute, TelemetryConfig, flush_otlp_logs,
+    flush_otlp_metrics, flush_otlp_tracer, init_logging, init_otlp_logs_with_options_and_timeout,
     init_otlp_metrics_with_options_and_timeout, init_otlp_tracer_with_sample_rate_and_options,
-    shutdown_otlp_metrics, shutdown_otlp_tracer,
+    shutdown_otlp_logs, shutdown_otlp_metrics, shutdown_otlp_tracer,
 };
 use opentelemetry::{KeyValue, global};
 use opentelemetry_proto::tonic::{
     collector::{
+        logs::v1::{
+            ExportLogsServiceRequest, ExportLogsServiceResponse,
+            logs_service_server::{LogsService, LogsServiceServer},
+        },
         metrics::v1::{
             ExportMetricsServiceRequest, ExportMetricsServiceResponse,
             metrics_service_server::{MetricsService, MetricsServiceServer},
@@ -28,6 +33,7 @@ use opentelemetry_proto::tonic::{
         },
     },
     common::v1::any_value,
+    logs::v1::LogRecord,
     metrics::v1::metric,
 };
 use serde_json::json;
@@ -85,6 +91,50 @@ struct RecordingMetricsCollector {
 impl RecordingMetricsCollector {
     const fn new(tx: mpsc::Sender<ExportMetricsServiceRequest>) -> Self {
         Self { tx: Mutex::new(tx) }
+    }
+}
+
+struct RecordingLogsCollector {
+    tx: Mutex<mpsc::Sender<ExportLogsServiceRequest>>,
+}
+
+impl RecordingLogsCollector {
+    const fn new(tx: mpsc::Sender<ExportLogsServiceRequest>) -> Self {
+        Self { tx: Mutex::new(tx) }
+    }
+}
+
+#[tonic::async_trait]
+impl LogsService for RecordingLogsCollector {
+    async fn export(
+        &self,
+        request: tonic::Request<ExportLogsServiceRequest>,
+    ) -> Result<tonic::Response<ExportLogsServiceResponse>, tonic::Status> {
+        let metadata = request.metadata();
+        let marker = metadata
+            .get("x-fcp-e2e")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if marker != "otlp-logs-fixture" {
+            return Err(tonic::Status::invalid_argument(
+                "missing x-fcp-e2e logs collector marker",
+            ));
+        }
+        if metadata.get("authorization").is_none() {
+            return Err(tonic::Status::invalid_argument(
+                "missing authorization metadata",
+            ));
+        }
+
+        self.tx
+            .lock()
+            .map_err(|_| tonic::Status::internal("collector channel lock poisoned"))?
+            .try_send(request.into_inner())
+            .map_err(|_| tonic::Status::resource_exhausted("collector channel full"))?;
+
+        Ok(tonic::Response::new(ExportLogsServiceResponse {
+            partial_success: None,
+        }))
     }
 }
 
@@ -170,6 +220,30 @@ async fn start_metrics_collector() -> Result<
     Ok((addr, rx, handle))
 }
 
+async fn start_logs_collector() -> Result<
+    (
+        SocketAddr,
+        mpsc::Receiver<ExportLogsServiceRequest>,
+        tokio::task::JoinHandle<()>,
+    ),
+    Box<dyn Error>,
+> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let incoming = TcpListenerStream::new(listener);
+    let (tx, rx) = mpsc::channel(8);
+    let service = LogsServiceServer::new(RecordingLogsCollector::new(tx));
+
+    let handle = tokio::spawn(async move {
+        let _ = tonic::transport::Server::builder()
+            .add_service(service)
+            .serve_with_incoming(incoming)
+            .await;
+    });
+
+    Ok((addr, rx, handle))
+}
+
 async fn abort_server(server: tokio::task::JoinHandle<()>) -> Result<(), Box<dyn Error>> {
     server.abort();
     match server.await {
@@ -238,6 +312,21 @@ fn metrics_resource_attribute<'a>(
         .and_then(|attribute| string_value(attribute.value.as_ref()))
 }
 
+fn logs_resource_attribute<'a>(
+    request: &'a ExportLogsServiceRequest,
+    key: &str,
+) -> Option<&'a str> {
+    request
+        .resource_logs
+        .first()?
+        .resource
+        .as_ref()?
+        .attributes
+        .iter()
+        .find(|attribute| attribute.key == key)
+        .and_then(|attribute| string_value(attribute.value.as_ref()))
+}
+
 fn metric_data_point_count(metric: &opentelemetry_proto::tonic::metrics::v1::Metric) -> usize {
     match metric.data.as_ref() {
         Some(metric::Data::Gauge(gauge)) => gauge.data_points.len(),
@@ -247,6 +336,25 @@ fn metric_data_point_count(metric: &opentelemetry_proto::tonic::metrics::v1::Met
         Some(metric::Data::Summary(summary)) => summary.data_points.len(),
         None => 0,
     }
+}
+
+fn log_record_count(request: &ExportLogsServiceRequest) -> usize {
+    request
+        .resource_logs
+        .iter()
+        .flat_map(|resource| &resource.scope_logs)
+        .map(|scope| scope.log_records.len())
+        .sum()
+}
+
+fn first_log_record(request: &ExportLogsServiceRequest) -> Option<&LogRecord> {
+    request
+        .resource_logs
+        .first()?
+        .scope_logs
+        .first()?
+        .log_records
+        .first()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -430,6 +538,94 @@ async fn otlp_metric_exporter_reaches_local_collector_and_flushes() -> Result<()
         "metric_count": metric_count,
         "data_point_count": data_point_count,
         "first_metric_name": exported_metric.name,
+        "collector_endpoint_class": "local_loopback_grpc",
+        "retry_decision": "not_needed",
+        "dropped_count": 0,
+        "grpc_status": "ok",
+        "runtime_error_mapping": "none",
+        "cleanup_result": "shutdown_and_abort_server",
+        "skip_reason": null
+    });
+    append_evidence(&evidence)?;
+
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn otlp_log_exporter_reaches_local_collector_and_flushes() -> Result<(), Box<dyn Error>> {
+    let command_line = std::env::var("FCP_TEST_COMMAND_LINE").unwrap_or_else(|_| {
+        "cargo test -p fcp-telemetry --test otlp_collector_fixture --features otlp".to_string()
+    });
+    let git_revision = std::env::var("FCP_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
+    append_evidence(&json!({
+        "event": "otlp_e2e_start",
+        "ts_ms": now_millis(),
+        "command_line": command_line,
+        "git_revision": git_revision,
+        "collector_endpoint_class": "local_loopback_grpc",
+        "signal_type": "log"
+    }))?;
+
+    let (addr, mut rx, server) = start_logs_collector().await?;
+    let endpoint = format!("http://{addr}");
+    init_otlp_logs_with_options_and_timeout(
+        "fcp-telemetry-logs-e2e",
+        &endpoint,
+        &[
+            OtlpHeader::new("x-fcp-e2e", "otlp-logs-fixture")?,
+            OtlpHeader::new("authorization", "Bearer redacted-test-token")?,
+        ],
+        &[
+            OtlpResourceAttribute::new("deployment.environment", "test")?,
+            OtlpResourceAttribute::new("fcp.zone", "z:otlp-e2e")?,
+        ],
+        Some(Duration::from_secs(3)),
+    )?;
+    init_logging(
+        &TelemetryConfig::new("fcp-telemetry-logs-e2e")
+            .with_log_level("info")
+            .with_json_logs(false),
+    )?;
+
+    tracing::info!(
+        target: "fcp.telemetry.otlp.fixture",
+        fcp_signal_type = "log",
+        fcp_test = "otlp-logs-fixture",
+        "telemetry.otlp.log_exported"
+    );
+
+    flush_otlp_logs()?;
+    let request = time::timeout(time::Duration::from_secs(10), rx.recv())
+        .await?
+        .ok_or("collector did not receive an OTLP logs export request")?;
+    shutdown_otlp_logs()?;
+    abort_server(server).await?;
+
+    let record_count = log_record_count(&request);
+    let first_record =
+        first_log_record(&request).ok_or("collector request did not contain any log records")?;
+
+    assert!(record_count > 0);
+    assert_eq!(
+        logs_resource_attribute(&request, "service.name"),
+        Some("fcp-telemetry-logs-e2e")
+    );
+    assert_eq!(
+        logs_resource_attribute(&request, "deployment.environment"),
+        Some("test")
+    );
+    assert_eq!(
+        logs_resource_attribute(&request, "fcp.zone"),
+        Some("z:otlp-e2e")
+    );
+
+    let evidence = json!({
+        "event": "otlp_e2e_export_received",
+        "ts_ms": now_millis(),
+        "signal_type": "log",
+        "batch_count": request.resource_logs.len(),
+        "log_record_count": record_count,
+        "first_log_severity": first_record.severity_text,
         "collector_endpoint_class": "local_loopback_grpc",
         "retry_decision": "not_needed",
         "dropped_count": 0,

@@ -18,6 +18,7 @@ use opentelemetry_otlp::{WithExportConfig, WithTonicConfig};
 #[cfg(feature = "otlp")]
 use opentelemetry_sdk::{
     Resource,
+    logs::SdkLoggerProvider,
     metrics::SdkMeterProvider,
     trace::{RandomIdGenerator, Sampler, SdkTracerProvider},
 };
@@ -32,6 +33,8 @@ static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 static OTLP_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 #[cfg(feature = "otlp")]
 static OTLP_METER_PROVIDER: OnceLock<SdkMeterProvider> = OnceLock::new();
+#[cfg(feature = "otlp")]
+static OTLP_LOGGER_PROVIDER: OnceLock<SdkLoggerProvider> = OnceLock::new();
 
 /// Initialize the Prometheus metrics exporter.
 ///
@@ -225,6 +228,59 @@ pub fn init_otlp_metrics_with_options_and_timeout(
     )
 }
 
+/// Initialize the OTLP logs exporter with collector headers and resource attributes.
+///
+/// Header values are only used to configure the exporter and are never emitted
+/// in diagnostics from this crate. Once initialized, [`init_logging`](crate::init_logging)
+/// installs a tracing bridge layer that exports `tracing` events as OTLP logs.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::LoggingInit`] if the exporter cannot be initialized.
+pub fn init_otlp_logs_with_options(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+) -> Result<(), TelemetryError> {
+    init_otlp_logs_with_options_and_timeout(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        None,
+    )
+}
+
+/// Initialize the OTLP logs exporter with an optional collector RPC timeout.
+///
+/// This installs an OpenTelemetry SDK logger provider. Callers should initialize
+/// this before installing the tracing subscriber so `init_logging` can attach
+/// the tracing-to-OpenTelemetry log bridge.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::LoggingInit`] if the exporter cannot be initialized.
+pub fn init_otlp_logs_with_options_and_timeout(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    validate_otlp_endpoint(endpoint)?;
+    validate_otlp_headers(headers)?;
+    validate_otlp_resource_attributes(resource_attributes)?;
+    validate_otlp_export_timeout(export_timeout)?;
+    init_otlp_logs_with_options_impl(
+        service_name,
+        endpoint,
+        headers,
+        resource_attributes,
+        export_timeout,
+    )
+}
+
 fn validate_otlp_export_timeout(export_timeout: Option<Duration>) -> Result<(), TelemetryError> {
     if export_timeout.is_some_and(|timeout| timeout.is_zero()) {
         return Err(TelemetryError::Config(
@@ -232,6 +288,16 @@ fn validate_otlp_export_timeout(export_timeout: Option<Duration>) -> Result<(), 
         ));
     }
     Ok(())
+}
+
+#[cfg(feature = "otlp")]
+pub fn otlp_logger_provider() -> Option<SdkLoggerProvider> {
+    OTLP_LOGGER_PROVIDER.get().cloned()
+}
+
+#[cfg(not(feature = "otlp"))]
+pub const fn otlp_logger_provider() -> Option<()> {
+    None
 }
 
 #[cfg(feature = "otlp")]
@@ -300,6 +366,47 @@ fn init_otlp_tracer_with_sample_rate_impl(
 }
 
 #[cfg(feature = "otlp")]
+fn init_otlp_logs_with_options_impl(
+    service_name: &str,
+    endpoint: &str,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    let mut exporter_builder = opentelemetry_otlp::LogExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint);
+
+    if let Some(timeout) = export_timeout {
+        exporter_builder = exporter_builder.with_timeout(timeout);
+    }
+
+    if !headers.is_empty() {
+        exporter_builder = exporter_builder.with_metadata(otlp_metadata_from_headers(headers)?);
+    }
+
+    let exporter = exporter_builder
+        .build()
+        .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+    let provider = SdkLoggerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(otlp_resource(service_name, resource_attributes))
+        .build();
+
+    let _ = OTLP_LOGGER_PROVIDER.set(provider);
+
+    tracing::info!(
+        endpoint = %otlp_endpoint_log_label(endpoint),
+        collector_header_count = headers.len(),
+        resource_attribute_count = resource_attributes.len(),
+        export_timeout_ms = export_timeout.map(|timeout| timeout.as_millis()),
+        "OTLP logs exporter initialized"
+    );
+
+    Ok(())
+}
+
+#[cfg(feature = "otlp")]
 fn init_otlp_metrics_with_options_impl(
     service_name: &str,
     endpoint: &str,
@@ -338,6 +445,56 @@ fn init_otlp_metrics_with_options_impl(
         "OTLP metrics exporter initialized"
     );
 
+    Ok(())
+}
+
+/// Force-flush the installed OTLP logger provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::LoggingInit`] if the SDK reports a flush failure.
+#[cfg(feature = "otlp")]
+pub fn flush_otlp_logs() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
+        provider.force_flush().map_err(|e| {
+            TelemetryError::LoggingInit(format!("OTLP logs force_flush failed: {e}"))
+        })?;
+    }
+    Ok(())
+}
+
+/// Force-flush the installed OTLP logger provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so flushing is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn flush_otlp_logs() -> Result<(), TelemetryError> {
+    Ok(())
+}
+
+/// Shut down the installed OTLP logger provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::LoggingInit`] if the SDK reports a shutdown failure.
+#[cfg(feature = "otlp")]
+pub fn shutdown_otlp_logs() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_LOGGER_PROVIDER.get() {
+        provider
+            .shutdown()
+            .map_err(|e| TelemetryError::LoggingInit(format!("OTLP logs shutdown failed: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Shut down the installed OTLP logger provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so shutdown is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn shutdown_otlp_logs() -> Result<(), TelemetryError> {
     Ok(())
 }
 
@@ -457,6 +614,19 @@ fn init_otlp_tracer_with_sample_rate_impl(
 
 #[cfg(not(feature = "otlp"))]
 fn init_otlp_metrics_with_options_impl(
+    _service_name: &str,
+    _endpoint: &str,
+    _headers: &[OtlpHeader],
+    _resource_attributes: &[OtlpResourceAttribute],
+    _export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
+    Err(TelemetryError::Config(
+        "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),
+    ))
+}
+
+#[cfg(not(feature = "otlp"))]
+fn init_otlp_logs_with_options_impl(
     _service_name: &str,
     _endpoint: &str,
     _headers: &[OtlpHeader],

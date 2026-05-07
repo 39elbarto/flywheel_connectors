@@ -8,6 +8,8 @@ use tracing_subscriber::{
     prelude::*,
 };
 
+#[cfg(feature = "otlp")]
+use crate::export::otlp_logger_provider;
 use crate::{TelemetryConfig, TelemetryError};
 
 /// Initialize the logging subsystem.
@@ -21,35 +23,87 @@ pub fn init_logging(config: &TelemetryConfig) -> Result<(), TelemetryError> {
     let subscriber = tracing_subscriber::registry().with(env_filter);
 
     if config.json_logs {
-        let json_layer = fmt::layer()
-            .json()
-            .with_current_span(true)
-            .with_span_list(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_thread_ids(true)
-            .with_target(true)
-            .with_span_events(FmtSpan::CLOSE);
-
-        subscriber
-            .with(json_layer)
-            .try_init()
-            .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+        #[cfg(feature = "otlp")]
+        {
+            match otlp_logger_provider() {
+                Some(otlp_layer) => subscriber
+                    .with(
+                        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                            &otlp_layer,
+                        ),
+                    )
+                    .with(json_logging_layer())
+                    .try_init()
+                    .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?,
+                None => subscriber
+                    .with(json_logging_layer())
+                    .try_init()
+                    .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?,
+            }
+        }
+        #[cfg(not(feature = "otlp"))]
+        {
+            subscriber
+                .with(json_logging_layer())
+                .try_init()
+                .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+        }
     } else {
-        let pretty_layer = fmt::layer()
-            .with_ansi(true)
-            .with_file(true)
-            .with_line_number(true)
-            .with_target(true)
-            .with_span_events(FmtSpan::CLOSE);
-
-        subscriber
-            .with(pretty_layer)
-            .try_init()
-            .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+        #[cfg(feature = "otlp")]
+        {
+            match otlp_logger_provider() {
+                Some(otlp_layer) => subscriber
+                    .with(
+                        opentelemetry_appender_tracing::layer::OpenTelemetryTracingBridge::new(
+                            &otlp_layer,
+                        ),
+                    )
+                    .with(pretty_logging_layer())
+                    .try_init()
+                    .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?,
+                None => subscriber
+                    .with(pretty_logging_layer())
+                    .try_init()
+                    .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?,
+            }
+        }
+        #[cfg(not(feature = "otlp"))]
+        {
+            subscriber
+                .with(pretty_logging_layer())
+                .try_init()
+                .map_err(|e| TelemetryError::LoggingInit(e.to_string()))?;
+        }
     }
 
     Ok(())
+}
+
+fn json_logging_layer<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    fmt::layer()
+        .json()
+        .with_current_span(true)
+        .with_span_list(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_thread_ids(true)
+        .with_target(true)
+        .with_span_events(FmtSpan::CLOSE)
+}
+
+fn pretty_logging_layer<S>() -> impl tracing_subscriber::Layer<S>
+where
+    S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
+{
+    fmt::layer()
+        .with_ansi(true)
+        .with_file(true)
+        .with_line_number(true)
+        .with_target(true)
+        .with_span_events(FmtSpan::CLOSE)
 }
 
 const MAX_REDACTION_DEPTH: usize = 128;

@@ -34,7 +34,14 @@ mod tracing_layer;
 mod usage;
 
 pub use context::*;
-pub use export::*;
+pub use export::{
+    HealthCheck, HealthResponse, flush_otlp_logs, flush_otlp_metrics, flush_otlp_tracer,
+    init_otlp_logs_with_options, init_otlp_logs_with_options_and_timeout,
+    init_otlp_metrics_with_options, init_otlp_metrics_with_options_and_timeout, init_otlp_tracer,
+    init_otlp_tracer_with_sample_rate, init_otlp_tracer_with_sample_rate_and_options,
+    init_otlp_tracer_with_sample_rate_options_and_timeout, init_prometheus_exporter,
+    prometheus_text_format, shutdown_otlp_logs, shutdown_otlp_metrics, shutdown_otlp_tracer,
+};
 pub use logging::*;
 pub use usage::*;
 // Re-export tracing_layer items explicitly to avoid TraceContext collision
@@ -838,18 +845,20 @@ pub fn validate_otlp_endpoint(endpoint: &str) -> Result<(), TelemetryError> {
     Ok(())
 }
 
-fn init_telemetry_with<L, P, O>(
+fn init_telemetry_with<L, P, G, T>(
     state: &OnceLock<TelemetryState>,
     config: TelemetryConfig,
     otlp_enabled: bool,
     init_logging_fn: L,
     init_prometheus_fn: P,
-    init_otlp_fn: O,
+    init_otlp_logs_fn: G,
+    init_otlp_traces_fn: T,
 ) -> Result<(), TelemetryError>
 where
     L: Fn(&TelemetryConfig) -> Result<(), TelemetryError>,
     P: Fn(u16) -> Result<(), TelemetryError>,
-    O: Fn(&str, &str, f64, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
+    G: Fn(&str, &str, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
+    T: Fn(&str, &str, f64, &[OtlpHeader], &[OtlpResourceAttribute]) -> Result<(), TelemetryError>,
 {
     if state.get().is_some() {
         return Ok(());
@@ -874,6 +883,15 @@ where
     validate_otlp_headers(&config.otlp_headers)?;
     validate_otlp_resource_attributes(&config.otlp_resource_attributes)?;
 
+    if let Some(endpoint) = otlp_endpoint {
+        init_otlp_logs_fn(
+            &config.service_name,
+            endpoint,
+            &config.otlp_headers,
+            &config.otlp_resource_attributes,
+        )?;
+    }
+
     init_logging_fn(&config)?;
 
     if config.prometheus_enabled {
@@ -886,7 +904,7 @@ where
         // sampling rate rather than silently exporting 100% of
         // spans. Prior behavior silently dropped the rate on the
         // floor and used Sampler::AlwaysOn unconditionally.
-        init_otlp_fn(
+        init_otlp_traces_fn(
             &config.service_name,
             endpoint,
             config.trace_sample_rate,
@@ -914,6 +932,7 @@ pub fn init_telemetry(config: TelemetryConfig) -> Result<(), TelemetryError> {
         true,
         init_logging,
         init_prometheus_exporter,
+        init_otlp_logs_with_options,
         init_otlp_tracer_with_sample_rate_and_options,
     )
 }
@@ -930,6 +949,7 @@ pub fn init_telemetry_sync(config: TelemetryConfig) -> Result<(), TelemetryError
         false,
         init_logging,
         init_prometheus_exporter,
+        init_otlp_logs_with_options,
         init_otlp_tracer_with_sample_rate_and_options,
     )
 }
@@ -967,6 +987,9 @@ pub fn shutdown_telemetry() {
     }
     if let Err(error) = crate::export::shutdown_otlp_tracer() {
         tracing::warn!(?error, "OTLP tracer shutdown failed");
+    }
+    if let Err(error) = crate::export::shutdown_otlp_logs() {
+        tracing::warn!(?error, "OTLP logs shutdown failed");
     }
 }
 
@@ -1457,7 +1480,8 @@ mod tests {
         let state = OnceLock::new();
         let logging_calls = AtomicUsize::new(0);
         let prometheus_calls = AtomicUsize::new(0);
-        let otlp_calls = AtomicUsize::new(0);
+        let otlp_log_calls = AtomicUsize::new(0);
+        let otlp_trace_calls = AtomicUsize::new(0);
 
         let config = TelemetryConfig::new("test-service")
             .with_prometheus(9091)
@@ -1475,8 +1499,12 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
             |_, _, _, _, _| {
-                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         )
@@ -1494,8 +1522,12 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
             |_, _, _, _, _| {
-                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         )
@@ -1503,7 +1535,8 @@ mod tests {
 
         assert_eq!(logging_calls.load(Ordering::SeqCst), 1);
         assert_eq!(prometheus_calls.load(Ordering::SeqCst), 1);
-        assert_eq!(otlp_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             state.get().unwrap().config.service_name,
             "test-service".to_string()
@@ -1524,6 +1557,7 @@ mod tests {
                 Err(TelemetryError::LoggingInit("boom".to_string()))
             },
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         );
 
@@ -1539,6 +1573,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         )
         .unwrap();
@@ -1569,6 +1604,7 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, rate, _, _| {
                 *captured_rate.lock().expect("lock") = Some(rate);
                 Ok(())
@@ -1587,7 +1623,9 @@ mod tests {
     fn test_init_telemetry_threads_otlp_headers_and_resource_attributes()
     -> Result<(), TelemetryError> {
         let state = OnceLock::new();
-        let captured: std::sync::Mutex<Option<(usize, usize, String, String)>> =
+        let captured_logs: std::sync::Mutex<Option<(usize, usize, String, String)>> =
+            std::sync::Mutex::new(None);
+        let captured_traces: std::sync::Mutex<Option<(usize, usize, String, String)>> =
             std::sync::Mutex::new(None);
         let headers = vec![OtlpHeader::new("authorization", "Bearer secret")?];
         let attributes = vec![OtlpResourceAttribute::new(
@@ -1604,6 +1642,24 @@ mod tests {
             true,
             |_| Ok(()),
             |_| Ok(()),
+            |_, _, headers, attributes| {
+                let header_name = headers
+                    .first()
+                    .ok_or_else(|| TelemetryError::Config("expected OTLP header".to_string()))?
+                    .name
+                    .clone();
+                let attribute_key = attributes
+                    .first()
+                    .ok_or_else(|| {
+                        TelemetryError::Config("expected OTLP resource attribute".to_string())
+                    })?
+                    .key
+                    .clone();
+                *captured_logs.lock().map_err(|_| {
+                    TelemetryError::Config("captured OTLP logs config lock poisoned".to_string())
+                })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
+                Ok(())
+            },
             |_, _, _, headers, attributes| {
                 let header_name = headers
                     .first()
@@ -1617,18 +1673,30 @@ mod tests {
                     })?
                     .key
                     .clone();
-                *captured.lock().map_err(|_| {
-                    TelemetryError::Config("captured OTLP config lock poisoned".to_string())
+                *captured_traces.lock().map_err(|_| {
+                    TelemetryError::Config("captured OTLP traces config lock poisoned".to_string())
                 })? = Some((headers.len(), attributes.len(), header_name, attribute_key));
                 Ok(())
             },
         )?;
 
-        let captured = captured.into_inner().map_err(|_| {
-            TelemetryError::Config("captured OTLP config lock poisoned".to_string())
+        let captured_logs = captured_logs.into_inner().map_err(|_| {
+            TelemetryError::Config("captured OTLP logs config lock poisoned".to_string())
+        })?;
+        let captured_traces = captured_traces.into_inner().map_err(|_| {
+            TelemetryError::Config("captured OTLP traces config lock poisoned".to_string())
         })?;
         assert_eq!(
-            captured,
+            captured_logs,
+            Some((
+                1,
+                1,
+                "authorization".to_string(),
+                "deployment.environment".to_string(),
+            )),
+        );
+        assert_eq!(
+            captured_traces,
             Some((
                 1,
                 1,
@@ -1642,7 +1710,8 @@ mod tests {
     #[test]
     fn test_init_telemetry_sync_skips_otlp_side_effects() {
         let state = OnceLock::new();
-        let otlp_calls = AtomicUsize::new(0);
+        let otlp_log_calls = AtomicUsize::new(0);
+        let otlp_trace_calls = AtomicUsize::new(0);
 
         init_telemetry_with(
             &state,
@@ -1650,14 +1719,19 @@ mod tests {
             false,
             |_| Ok(()),
             |_| Ok(()),
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
             |_, _, _, _, _| {
-                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         )
         .unwrap();
 
-        assert_eq!(otlp_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1753,7 +1827,8 @@ mod tests {
         let state = OnceLock::new();
         let logging_calls = AtomicUsize::new(0);
         let prometheus_calls = AtomicUsize::new(0);
-        let otlp_calls = AtomicUsize::new(0);
+        let otlp_log_calls = AtomicUsize::new(0);
+        let otlp_trace_calls = AtomicUsize::new(0);
 
         let result = init_telemetry_with(
             &state,
@@ -1769,8 +1844,12 @@ mod tests {
                 prometheus_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
+            |_, _, _, _| {
+                otlp_log_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            },
             |_, _, _, _, _| {
-                otlp_calls.fetch_add(1, Ordering::SeqCst);
+                otlp_trace_calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             },
         );
@@ -1779,7 +1858,8 @@ mod tests {
         assert!(state.get().is_none());
         assert_eq!(logging_calls.load(Ordering::SeqCst), 0);
         assert_eq!(prometheus_calls.load(Ordering::SeqCst), 0);
-        assert_eq!(otlp_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_log_calls.load(Ordering::SeqCst), 0);
+        assert_eq!(otlp_trace_calls.load(Ordering::SeqCst), 0);
     }
 
     #[test]
@@ -1801,6 +1881,7 @@ mod tests {
                 Ok(())
             },
             |_| Ok(()),
+            |_, _, _, _| Ok(()),
             |_, _, _, _, _| Ok(()),
         );
 

@@ -18,12 +18,23 @@ use fcp_dockerhub::error::DockerHubError;
 use fcp_dockerhub::types::{CreateRepositoryRequest, DockerHubAuth, LoginRequest, LoginResponse};
 use fcp_prelude::{ApprovalMode, FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_TOKEN: &str = "dockerhub-token-for-tests";
 const AUTH_HEADER: &str = "Bearer dockerhub-token-for-tests";
+const EXPECTED_MANIFEST_SCHEMA_OPS: [&str; 9] = [
+    "repos_list",
+    "repos_get",
+    "repos_create",
+    "repos_delete",
+    "tags_list",
+    "tags_get",
+    "tags_delete",
+    "orgs_list",
+    "health",
+];
 
 static LOG_INIT: Once = Once::new();
 
@@ -53,6 +64,57 @@ fn test_runtime() -> ConnectorRuntime {
     ConnectorRuntime::new(
         ConnectorRuntimeConfig::default().with_request_timeout(Duration::from_millis(500)),
     )
+}
+
+fn dockerhub_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("Docker Hub manifest TOML should parse")
+}
+
+fn manifest_operations(
+    manifest: &toml::Value,
+) -> &toml::map::Map<String, toml::Value> {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should declare operation tables")
+}
+
+fn operation_schema(manifest: &toml::Value, operation_id: &str, field: &str) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .and_then(|operation| operation.get(field))
+        .expect("operation should declare schema field");
+    assert!(
+        schema.as_table().is_some_and(|table| !table.is_empty()),
+        "{operation_id}.{field} should be a non-empty schema table"
+    );
+    serde_json::to_value(schema).expect("manifest schema table should convert to JSON")
+}
+
+fn validator_for(schema: &Value) -> jsonschema::Validator {
+    jsonschema::Validator::new(schema).expect("manifest operation schema should compile")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept {payload}; errors: {errors:?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    assert!(
+        validator.iter_errors(payload).next().is_some(),
+        "schema should reject {payload}"
+    );
 }
 
 async fn client(server: &MockServer) -> DockerHubClient {
@@ -421,6 +483,107 @@ fn operation_catalog_preserves_risk_and_approval_metadata() {
     assert_eq!(list_repos.risk_level, RiskLevel::Low);
     assert_eq!(list_repos.safety_tier, SafetyTier::Safe);
     assert_eq!(list_repos.requires_approval, None);
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = dockerhub_manifest();
+    let operations = manifest_operations(&manifest);
+
+    for operation_id in EXPECTED_MANIFEST_SCHEMA_OPS {
+        assert!(
+            operations.contains_key(operation_id),
+            "manifest should declare operation {operation_id}"
+        );
+        for field in ["input_schema", "output_schema"] {
+            let schema = operation_schema(&manifest, operation_id, field);
+            let _validator = validator_for(&schema);
+        }
+    }
+
+    let repos_list_input = operation_schema(&manifest, "repos_list", "input_schema");
+    assert_schema_accepts(&repos_list_input, &json!({"namespace": "acme"}));
+    assert_schema_rejects(&repos_list_input, &json!({}));
+    assert_schema_rejects(&repos_list_input, &json!({"namespace": "acme", "extra": true}));
+
+    let repos_create_input = operation_schema(&manifest, "repos_create", "input_schema");
+    assert_schema_accepts(
+        &repos_create_input,
+        &json!({
+            "namespace": "acme",
+            "name": "created-widget",
+            "description": "created by test",
+            "is_private": true,
+            "full_description": "longer description"
+        }),
+    );
+    assert_schema_rejects(&repos_create_input, &json!({"namespace": "acme"}));
+
+    let tags_get_input = operation_schema(&manifest, "tags_get", "input_schema");
+    assert_schema_accepts(
+        &tags_get_input,
+        &json!({"namespace": "acme", "name": "widget", "tag": "latest"}),
+    );
+    assert_schema_rejects(&tags_get_input, &json!({"namespace": "acme", "name": "widget"}));
+
+    let orgs_input = operation_schema(&manifest, "orgs_list", "input_schema");
+    assert_schema_accepts(&orgs_input, &json!({}));
+    assert_schema_rejects(&orgs_input, &json!({"namespace": "acme"}));
+
+    let repos_list_output = operation_schema(&manifest, "repos_list", "output_schema");
+    assert_schema_accepts(
+        &repos_list_output,
+        &json!([{
+            "name": "widget",
+            "namespace": "acme",
+            "description": "primary image",
+            "is_private": true,
+            "star_count": 7,
+            "pull_count": 42,
+            "last_updated": null,
+            "date_registered": null,
+            "status": 1,
+            "full_description": null
+        }]),
+    );
+    assert_schema_rejects(&repos_list_output, &json!([{"namespace": "acme"}]));
+
+    let tags_list_output = operation_schema(&manifest, "tags_list", "output_schema");
+    assert_schema_accepts(
+        &tags_list_output,
+        &json!([{
+            "name": "latest",
+            "full_size": 7340032,
+            "images": [{
+                "architecture": "amd64",
+                "os": "linux",
+                "size": 7340032,
+                "digest": "sha256:abc123"
+            }],
+            "last_updated": null,
+            "last_updater": null,
+            "last_updater_username": null,
+            "tag_status": "active",
+            "digest": "sha256:abc123",
+            "content_type": null
+        }]),
+    );
+
+    let repos_delete_output = operation_schema(&manifest, "repos_delete", "output_schema");
+    assert_schema_accepts(
+        &repos_delete_output,
+        &json!({"deleted": true, "namespace": "acme", "name": "widget"}),
+    );
+    assert_schema_rejects(
+        &repos_delete_output,
+        &json!({"deleted": false, "namespace": "acme", "name": "widget"}),
+    );
+
+    let health_output = operation_schema(&manifest, "health", "output_schema");
+    assert_schema_accepts(
+        &health_output,
+        &json!({"healthy": true, "user_id": "user-1", "username": null}),
+    );
 }
 
 #[fcp_async_core::runtime::test]

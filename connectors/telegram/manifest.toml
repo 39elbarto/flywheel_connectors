@@ -13,13 +13,14 @@ name = "Telegram Connector"
 version = "0.1.0"
 description = "FCP connector for Telegram Bot API — messaging, media, file retrieval, callback queries, and event streaming"
 archetypes = [
-    "messaging",
+    "bidirectional",
     "operational",
+    "streaming",
 ]
 format = "wasi"
 
 [connector.state]
-model = "cursor"
+model = "singleton_writer"
 state_schema_version = "1"
 migration_hint = "init"
 
@@ -208,6 +209,7 @@ description = "Get file information for downloading"
 capability = "telegram.read"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
 
@@ -265,6 +267,7 @@ description = "Answer a callback query (button press)"
 capability = "telegram.send"
 risk_level = "low"
 safety_tier = "safe"
+requires_approval = "none"
 idempotency = "none"
 revocation_freshness = "safe"
 
@@ -426,19 +429,33 @@ deny_ptrace = true
 
 # --- Rate Limits ---
 
-[rate_limits.pools."telegram.send"]
+[[rate_limits.pools]]
+id = "telegram.send"
 description = "Telegram Bot API send rate limit (30 messages/sec globally, 1/sec per chat)"
-max_per_minute = 1800
+requests = 1800
+window_ms = 60000
 burst = 30
+scope = "instance"
 
-[rate_limits.pools."telegram.read"]
+[[rate_limits.pools]]
+id = "telegram.read"
 description = "Telegram Bot API read operations"
-max_per_minute = 600
+requests = 600
+window_ms = 60000
 burst = 20
+scope = "instance"
+
+[[rate_limits.pools]]
+id = "telegram.webhook"
+description = "Telegram host-forwarded webhook ingest operations"
+requests = 600
+window_ms = 60000
+burst = 100
+scope = "instance"
 
 [rate_limits.operation_pools]
-"telegram.send_message" = "telegram.send"
-"telegram.send_media" = "telegram.send"
-"telegram.answer_callback_query" = "telegram.send"
-"telegram.get_file" = "telegram.read"
-"telegram.ingest_webhook_update" = "telegram.webhook"
+"telegram.send_message" = ["telegram.send"]
+"telegram.send_media" = ["telegram.send"]
+"telegram.answer_callback_query" = ["telegram.send"]
+"telegram.get_file" = ["telegram.read"]
+"telegram.ingest_webhook_update" = ["telegram.webhook"]

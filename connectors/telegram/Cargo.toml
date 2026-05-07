@@ -47,7 +47,6 @@ uuid.workspace = true
 
 [dev-dependencies]
 ciborium.workspace = true
-fcp-manifest.workspace = true
 wiremock.workspace = true
 fcp-e2e = { path = "../../crates/fcp-e2e", default-features = false, features = ["telegram"] }
 fcp-async-core = { path = "../../crates/fcp-async-core" }

@@ -15,7 +15,6 @@
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
-use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
@@ -48,9 +47,84 @@ fn test_bot_credential() -> String {
     format!("{TEST_BOT_ID}:{TEST_BOT_SUFFIX}")
 }
 
-fn parsed_manifest() -> ConnectorManifest {
-    ConnectorManifest::parse_str(include_str!("../manifest.toml"))
-        .expect("Telegram manifest should parse with per-operation network constraints")
+fn parsed_manifest() -> toml::Value {
+    toml::from_str::<toml::Table>(include_str!("../manifest.toml"))
+        .map(toml::Value::Table)
+        .expect("Telegram manifest TOML should parse")
+}
+
+fn constraints_for<'a>(
+    manifest: &'a toml::Value,
+    operation_id: &str,
+) -> &'a toml::map::Map<String, toml::Value> {
+    let operation = manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .and_then(|operations| operations.get(operation_id))
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{operation_id} operation should exist"));
+    operation
+        .get("network_constraints")
+        .and_then(toml::Value::as_table)
+        .unwrap_or_else(|| panic!("{operation_id} should declare network_constraints"))
+}
+
+fn manifest_operation_count(manifest: &toml::Value) -> usize {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("Telegram manifest should declare operations")
+        .len()
+}
+
+fn string_array_field<'a>(
+    constraints: &'a toml::map::Map<String, toml::Value>,
+    field_name: &str,
+) -> Vec<&'a str> {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an array"))
+        .iter()
+        .map(|value| {
+            value.as_str().unwrap_or_else(|| {
+                panic!("network_constraints.{field_name} should contain strings")
+            })
+        })
+        .collect()
+}
+
+fn integer_array_field(
+    constraints: &toml::map::Map<String, toml::Value>,
+    field_name: &str,
+) -> Vec<i64> {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_array)
+        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an array"))
+        .iter()
+        .map(|value| {
+            value.as_integer().unwrap_or_else(|| {
+                panic!("network_constraints.{field_name} should contain integers")
+            })
+        })
+        .collect()
+}
+
+fn bool_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &str) -> bool {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_bool)
+        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be a bool"))
+}
+
+fn integer_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &str) -> i64 {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_integer)
+        .unwrap_or_else(|| panic!("network_constraints.{field_name} should be an integer"))
 }
 
 fn token_path(api_method: &str) -> String {
@@ -73,68 +147,97 @@ fn unique_zone_dir(label: &str) -> String {
 fn manifest_declares_strict_per_operation_network_constraints() {
     let manifest = parsed_manifest();
     assert_eq!(
-        manifest.provides.operations.len(),
+        manifest_operation_count(&manifest),
         TELEGRAM_EGRESS_OPERATION_IDS.len() + TELEGRAM_NO_EGRESS_OPERATION_IDS.len()
     );
 
     for operation_id in TELEGRAM_EGRESS_OPERATION_IDS {
-        let Some(operation) = manifest.provides.operations.get(*operation_id) else {
-            assert!(false, "{operation_id} operation should exist");
-            continue;
-        };
-        let Some(constraints) = operation.network_constraints.as_ref() else {
-            assert!(false, "{operation_id} should declare network_constraints");
-            continue;
-        };
+        let constraints = constraints_for(&manifest, operation_id);
 
         assert_eq!(
-            constraints.host_allow.as_slice(),
+            string_array_field(constraints, "host_allow").as_slice(),
             [TELEGRAM_API_HOST],
             "{operation_id} should only allow Telegram Bot API egress"
         );
-        assert_eq!(constraints.port_allow.as_slice(), [443]);
+        assert_eq!(
+            integer_array_field(constraints, "port_allow").as_slice(),
+            [443]
+        );
         assert!(
-            constraints.require_sni,
+            bool_field(constraints, "require_sni"),
             "{operation_id} should require TLS SNI"
         );
         assert!(
-            constraints.deny_private_ranges,
+            bool_field(constraints, "deny_localhost"),
+            "{operation_id} should deny localhost egress"
+        );
+        assert!(
+            bool_field(constraints, "deny_private_ranges"),
             "{operation_id} should deny private ranges"
         );
-        assert_eq!(constraints.max_redirects, 0);
-        assert_eq!(constraints.connect_timeout_ms, 10_000);
-        assert_eq!(constraints.total_timeout_ms, 60_000);
-        assert_eq!(constraints.max_response_bytes, 10_485_760);
+        assert!(
+            bool_field(constraints, "deny_tailnet_ranges"),
+            "{operation_id} should deny tailnet ranges"
+        );
+        assert!(
+            bool_field(constraints, "deny_ip_literals"),
+            "{operation_id} should deny IP literals"
+        );
+        assert!(
+            bool_field(constraints, "require_host_canonicalization"),
+            "{operation_id} should require canonical hostnames"
+        );
+        assert_eq!(integer_field(constraints, "dns_max_ips"), 16);
+        assert_eq!(integer_field(constraints, "max_redirects"), 0);
+        assert_eq!(integer_field(constraints, "connect_timeout_ms"), 10_000);
+        assert_eq!(integer_field(constraints, "total_timeout_ms"), 60_000);
+        assert_eq!(integer_field(constraints, "max_response_bytes"), 10_485_760);
     }
 
     for operation_id in TELEGRAM_NO_EGRESS_OPERATION_IDS {
-        let Some(operation) = manifest.provides.operations.get(*operation_id) else {
-            assert!(false, "{operation_id} operation should exist");
-            continue;
-        };
-        let Some(constraints) = operation.network_constraints.as_ref() else {
-            assert!(false, "{operation_id} should declare network_constraints");
-            continue;
-        };
+        let constraints = constraints_for(&manifest, operation_id);
 
         assert_eq!(
-            constraints.host_allow.as_slice(),
+            string_array_field(constraints, "host_allow").as_slice(),
             [NO_EGRESS_HOST],
             "{operation_id} should document that host-forwarded ingress performs no connector-owned egress"
         );
-        assert_eq!(constraints.port_allow.as_slice(), [443]);
+        assert_eq!(
+            integer_array_field(constraints, "port_allow").as_slice(),
+            [0]
+        );
+        assert!(string_array_field(constraints, "ip_allow").is_empty());
+        assert!(string_array_field(constraints, "cidr_deny").is_empty());
         assert!(
-            constraints.require_sni,
-            "{operation_id} should keep canonical egress fields explicit"
+            bool_field(constraints, "deny_localhost"),
+            "{operation_id} should deny localhost egress"
         );
         assert!(
-            constraints.deny_private_ranges,
+            bool_field(constraints, "deny_private_ranges"),
             "{operation_id} should deny private ranges"
         );
-        assert_eq!(constraints.max_redirects, 0);
-        assert_eq!(constraints.connect_timeout_ms, 1_000);
-        assert_eq!(constraints.total_timeout_ms, 1_000);
-        assert_eq!(constraints.max_response_bytes, 1_048_576);
+        assert!(
+            bool_field(constraints, "deny_tailnet_ranges"),
+            "{operation_id} should deny tailnet ranges"
+        );
+        assert!(
+            !bool_field(constraints, "require_sni"),
+            "{operation_id} performs no connector-owned TLS egress"
+        );
+        assert!(string_array_field(constraints, "spki_pins").is_empty());
+        assert!(
+            bool_field(constraints, "deny_ip_literals"),
+            "{operation_id} should deny IP literals"
+        );
+        assert!(
+            bool_field(constraints, "require_host_canonicalization"),
+            "{operation_id} should require canonical hostnames"
+        );
+        assert_eq!(integer_field(constraints, "dns_max_ips"), 0);
+        assert_eq!(integer_field(constraints, "max_redirects"), 0);
+        assert_eq!(integer_field(constraints, "connect_timeout_ms"), 1_000);
+        assert_eq!(integer_field(constraints, "total_timeout_ms"), 1_000);
+        assert_eq!(integer_field(constraints, "max_response_bytes"), 1_048_576);
     }
 }
 

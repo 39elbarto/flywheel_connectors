@@ -9,11 +9,11 @@
     clippy::unused_async
 )]
 
+use fcp_manifest::ConnectorManifest;
 use fcp_mysql::connector::MysqlConnector;
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
-use fcp_manifest::ConnectorManifest;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -78,18 +78,23 @@ async fn doctor_unconfigured_reports_operator_guidance() {
 #[test]
 fn manifest_declares_strict_per_operation_network_constraints() {
     let manifest = parsed_manifest();
-    assert_eq!(manifest.provides.operations.len(), MYSQL_OPERATION_IDS.len());
+    assert_eq!(
+        manifest.provides.operations.len(),
+        MYSQL_OPERATION_IDS.len()
+    );
 
     for operation_id in MYSQL_OPERATION_IDS {
-        let operation = manifest
-            .provides
-            .operations
-            .get(*operation_id)
-            .unwrap_or_else(|| panic!("{operation_id} operation should exist"));
-        let constraints = operation
-            .network_constraints
-            .as_ref()
-            .unwrap_or_else(|| panic!("{operation_id} should declare network_constraints"));
+        let Some(operation) = manifest.provides.operations.get(*operation_id) else {
+            assert!(false, "{operation_id} operation should exist");
+            continue;
+        };
+        let Some(constraints) = operation.network_constraints.as_ref() else {
+            assert!(
+                false,
+                "{operation_id} should declare network_constraints"
+            );
+            continue;
+        };
 
         assert_eq!(
             constraints.host_allow.as_slice(),

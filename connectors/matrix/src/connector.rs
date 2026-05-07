@@ -203,7 +203,7 @@ struct MatrixSyncTelemetry {
 
 #[derive(Debug, Default)]
 struct MatrixSyncState {
-    last_sync_token: Option<String>,
+    last_sync_cursor: Option<String>,
     rooms: BTreeMap<String, MatrixRoomSummary>,
     dynamic_direct_message_rooms: BTreeSet<String>,
     thread_participation_roots: BTreeSet<String>,
@@ -585,7 +585,7 @@ impl MatrixConnector {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let telemetry = &state.telemetry;
         json!({
-            "last_sync_token": state.last_sync_token.clone(),
+            "last_sync_token": state.last_sync_cursor.clone(),
             "tracked_rooms": state.rooms.len(),
             "dynamic_direct_message_rooms": state.dynamic_direct_message_rooms.iter().cloned().collect::<Vec<_>>(),
             "thread_participation_roots": state.thread_participation_roots.iter().cloned().collect::<Vec<_>>(),
@@ -1001,7 +1001,7 @@ impl MatrixConnector {
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         Self::tracked_state_json_value(
-            state.last_sync_token.as_deref(),
+            state.last_sync_cursor.as_deref(),
             &state.rooms,
             &state.dynamic_direct_message_rooms,
             &state.thread_participation_roots,
@@ -1220,7 +1220,7 @@ impl MatrixSupervisedSyncWorker {
                     .read()
                     .unwrap_or_else(std::sync::PoisonError::into_inner);
                 (
-                    state.last_sync_token.clone(),
+                    state.last_sync_cursor.clone(),
                     inbound_policy_with_state(&self.policy, &state),
                 )
             };
@@ -1818,7 +1818,7 @@ fn persist_projection_state(
     next_batch: &str,
     projection: &SyncProjection,
 ) {
-    state.last_sync_token = Some(next_batch.to_string());
+    state.last_sync_cursor = Some(next_batch.to_string());
     for (room_id, summary) in &projection.tracked_updates {
         state.rooms.insert(room_id.clone(), summary.clone());
     }
@@ -1834,7 +1834,7 @@ fn sync_state_from_persistence_config(config: &MatrixStatePersistenceConfig) -> 
     let mut state = MatrixSyncState::default();
     if config.enabled {
         state
-            .last_sync_token
+            .last_sync_cursor
             .clone_from(&config.restore.last_sync_token);
         state
             .dynamic_direct_message_rooms
@@ -3530,7 +3530,7 @@ impl FcpConnector for MatrixConnector {
             .sync_state
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .last_sync_token
+            .last_sync_cursor
             .clone();
         let cursors = cursor.map_or_else(HashMap::new, |cursor| {
             confirmed_topics
@@ -3727,7 +3727,7 @@ impl MatrixConnector {
                         .read()
                         .unwrap_or_else(std::sync::PoisonError::into_inner);
                     (
-                        state.last_sync_token.clone(),
+                        state.last_sync_cursor.clone(),
                         inbound_policy_with_state(&configured_policy, &state),
                     )
                 };
@@ -4020,7 +4020,7 @@ mod tests {
         ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
         let now = chrono::Utc::now();
         let expires = now + chrono::Duration::hours(1);
-        let cose_token = CapabilityTokenBuilder::new()
+        let signed_capability = CapabilityTokenBuilder::new()
             .capability_id(capability_id)
             .zone_id("z:work")
             .principal("test-principal")
@@ -4044,7 +4044,7 @@ mod tests {
             .expect("valid test constraints")
             .sign(signing_key)
             .expect("Failed to create test token");
-        CapabilityToken::from_raw(cose_token)
+        CapabilityToken::from_raw(signed_capability)
     }
 
     struct IndeterminateThreadOwnershipChecker {
@@ -5900,7 +5900,7 @@ mod tests {
                 .sync_state
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            state.last_sync_token = Some("batch_1".into());
+            state.last_sync_cursor = Some("batch_1".into());
             state.rooms.insert(
                 "!old:matrix.org".into(),
                 MatrixRoomSummary::with_membership("join"),

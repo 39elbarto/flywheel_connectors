@@ -24,6 +24,7 @@ members = [
     "crates/fcp-prelude",
     "crates/fcp-evidence",
     "crates/fcp-oauth",
+    "crates/fcp-provider-auth",
     "crates/fcp-protocol",
     "crates/fcp-raptorq",
     "crates/fcp-ratelimit",
@@ -357,6 +358,7 @@ fcp-manifest = { path = "crates/fcp-manifest" }
 fcp-mesh = { path = "crates/fcp-mesh" }
 fcp-openai-compat = { path = "crates/fcp-openai-compat" }
 fcp-oauth = { path = "crates/fcp-oauth" }
+fcp-provider-auth = { path = "crates/fcp-provider-auth" }
 fcp-policy = { path = "crates/fcp-policy" }
 fcp-prelude = { path = "crates/fcp-prelude" }
 fcp-evidence = { path = "crates/fcp-evidence" }

@@ -1,18 +1,19 @@
 //! FCP Whisper Connector implementation.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::{sync::Arc, time::Duration};
 
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityId, ConnectorId, CredentialId, FcpError, FcpResult,
-    IdempotencyClass, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    AgentHint, BaseConnector, CapabilityId, CapabilityVerifier, ConnectorId, CredentialId,
+    FcpError, FcpResult, HandshakeRequest, IdempotencyClass, OperationId, OperationInfo, RiskLevel,
+    SafetyTier, SimulateRequest, SimulateResponse,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::{info, instrument};
 
 use crate::{
-    client::{DEFAULT_BASE_URL, WhisperAuth, WhisperClient},
+    client::{DEFAULT_BASE_URL, DEFAULT_REQUEST_TIMEOUT, WhisperAuth, WhisperClient},
     error::WhisperError,
 };
 
@@ -37,6 +38,7 @@ const SUPPORTED_FORMATS: &[(&str, &str, &str)] = &[
 struct WhisperConfig {
     auth: WhisperAuth,
     base_url: String,
+    request_timeout: Duration,
 }
 
 impl WhisperConfig {
@@ -87,7 +89,38 @@ impl WhisperConfig {
             .unwrap_or(DEFAULT_BASE_URL)
             .to_string();
 
-        Ok(Self { auth, base_url })
+        let request_timeout = match params.get("request_timeout_ms") {
+            Some(value) => {
+                let timeout_ms = value.as_u64().ok_or_else(|| FcpError::InvalidRequest {
+                    code: 1003,
+                    message: "request_timeout_ms must be an integer".into(),
+                })?;
+                if timeout_ms == 0 {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: "request_timeout_ms must be greater than zero".into(),
+                    });
+                }
+                let timeout = Duration::from_millis(timeout_ms);
+                if timeout > DEFAULT_REQUEST_TIMEOUT {
+                    return Err(FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!(
+                            "request_timeout_ms must be at most {}",
+                            DEFAULT_REQUEST_TIMEOUT.as_millis()
+                        ),
+                    });
+                }
+                timeout
+            }
+            None => DEFAULT_REQUEST_TIMEOUT,
+        };
+
+        Ok(Self {
+            auth,
+            base_url,
+            request_timeout,
+        })
     }
 }
 
@@ -136,6 +169,7 @@ pub struct WhisperConnector {
     base: Arc<BaseConnector>,
     config: Option<WhisperConfig>,
     client: Option<Arc<WhisperClient>>,
+    verifier: Option<CapabilityVerifier>,
     session_id: Option<String>,
     request_count: AtomicU64,
     error_count: AtomicU64,
@@ -148,6 +182,7 @@ impl WhisperConnector {
             base: Arc::new(BaseConnector::new(ConnectorId::from_static("whisper"))),
             config: None,
             client: None,
+            verifier: None,
             session_id: None,
             request_count: AtomicU64::new(0),
             error_count: AtomicU64::new(0),
@@ -162,6 +197,12 @@ impl Default for WhisperConnector {
 }
 
 impl WhisperConnector {
+    /// Runtime instance identifier used for host-minted capability binding.
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     /// Handle the `configure` method.
     pub async fn handle_configure(
         &mut self,
@@ -170,8 +211,12 @@ impl WhisperConnector {
         let config = WhisperConfig::from_params(&params)?;
         info!(auth = %config.auth.redacted_label(), base_url = %config.base_url, "Configuring Whisper connector");
 
-        let client = WhisperClient::new(config.auth.clone(), Some(&config.base_url))
-            .map_err(|e| e.to_fcp_error())?;
+        let client = WhisperClient::new_with_timeout(
+            config.auth.clone(),
+            Some(&config.base_url),
+            config.request_timeout,
+        )
+        .map_err(|e| e.to_fcp_error())?;
 
         self.client = Some(Arc::new(client));
         self.config = Some(config);
@@ -191,10 +236,23 @@ impl WhisperConnector {
             });
         }
 
+        let canonical_session =
+            if let Ok(req) = serde_json::from_value::<HandshakeRequest>(params.clone()) {
+                self.verifier = Some(CapabilityVerifier::new(
+                    req.host_public_key,
+                    req.zone,
+                    self.base.instance_id.clone(),
+                ));
+                Some(format!("session-{}", self.base.instance_id.as_str()))
+            } else {
+                None
+            };
+
         let session_id = params
             .get("session_id")
             .and_then(serde_json::Value::as_str)
-            .map(str::to_string);
+            .map(str::to_string)
+            .or(canonical_session);
 
         self.session_id = session_id;
         self.base.set_handshaken(true);
@@ -345,20 +403,76 @@ impl WhisperConnector {
 
     /// Handle the `simulate` method.
     pub async fn handle_simulate(&self, params: serde_json::Value) -> FcpResult<serde_json::Value> {
+        if let Ok(req) = serde_json::from_value::<SimulateRequest>(params.clone()) {
+            return self.handle_canonical_simulate(req);
+        }
+
         let operation = params
             .get("operation_id")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("");
 
-        let allowed = operations_info().as_array().is_some_and(|ops| {
-            ops.iter()
-                .any(|o| o.get("id").and_then(serde_json::Value::as_str) == Some(operation))
-        });
+        let allowed = required_capability_for_operation(operation).is_ok();
 
         Ok(json!({
             "allowed": allowed,
             "reason": if allowed { "Operation supported" } else { "Unknown operation" },
         }))
+    }
+
+    fn handle_canonical_simulate(&self, req: SimulateRequest) -> FcpResult<serde_json::Value> {
+        let capability = match required_capability_for_operation(req.operation.as_str()) {
+            Ok(capability) => capability,
+            Err(error) => {
+                return serde_json::to_value(SimulateResponse::denied(
+                    req.id,
+                    error.to_string(),
+                    error.error_code(),
+                ))
+                .map_err(|error| FcpError::Internal {
+                    message: format!("Failed to serialize simulate denial: {error}"),
+                });
+            }
+        };
+        if self.client.is_none() {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector is not configured",
+                FcpError::NotConfigured.error_code(),
+            ))
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        }
+        let Some(verifier) = self.verifier.as_ref() else {
+            return serde_json::to_value(SimulateResponse::denied(
+                req.id,
+                "Connector handshake not completed",
+                FcpError::NotHandshaken.error_code(),
+            ))
+            .map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        };
+        if let Err(error) =
+            verifier.verify_bound(req.capability_token, &capability, &req.operation, &[])
+        {
+            let denial_code = error.error_code();
+            let mut response =
+                SimulateResponse::denied(req.id, error.to_string(), denial_code.as_str());
+            if denial_code == "FCP-3001" || denial_code == "FCP-3003" {
+                response =
+                    response.with_missing_capabilities(vec![capability.as_str().to_string()]);
+            }
+            return serde_json::to_value(response).map_err(|error| FcpError::Internal {
+                message: format!("Failed to serialize simulate denial: {error}"),
+            });
+        }
+        serde_json::to_value(SimulateResponse::allowed(req.id)).map_err(|error| {
+            FcpError::Internal {
+                message: format!("Failed to serialize simulate response: {error}"),
+            }
+        })
     }
 
     /// Handle the `shutdown` method.
@@ -372,6 +486,7 @@ impl WhisperConnector {
         }
         self.client = None;
         self.config = None;
+        self.verifier = None;
         self.base.set_configured(false);
         self.base.set_handshaken(false);
         Ok(json!({}))
@@ -577,6 +692,22 @@ fn validate_audio_input(input: &serde_json::Value) -> Result<(), WhisperError> {
     }
 
     Ok(())
+}
+
+fn required_capability_for_operation(operation: &str) -> FcpResult<CapabilityId> {
+    match operation {
+        "whisper.transcribe" | "whisper.detect_language" | "whisper.transcribe_verbose" => {
+            Ok(CapabilityId::from_static("whisper.transcription"))
+        }
+        "whisper.translate" => Ok(CapabilityId::from_static("whisper.translation")),
+        "whisper.list_models" | "whisper.health" | "whisper.usage" | "whisper.formats" => {
+            Ok(CapabilityId::from_static("whisper.info"))
+        }
+        _ => Err(FcpError::InvalidRequest {
+            code: 1004,
+            message: format!("Unknown operation: {operation}"),
+        }),
+    }
 }
 
 /// Build the typed operations info for introspection.

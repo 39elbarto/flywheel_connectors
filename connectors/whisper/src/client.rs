@@ -17,6 +17,8 @@ use crate::{
 
 /// Default API base URL for the Whisper service.
 pub const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+/// Default request timeout for Whisper API calls.
+pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Authentication mode for the Whisper API.
 #[derive(Clone)]
@@ -74,12 +76,20 @@ impl fmt::Debug for WhisperClient {
 impl WhisperClient {
     /// Create a new Whisper API client.
     pub fn new(auth: WhisperAuth, base_url: Option<&str>) -> WhisperResult<Self> {
+        Self::new_with_timeout(auth, base_url, DEFAULT_REQUEST_TIMEOUT)
+    }
+
+    /// Create a new Whisper API client with an explicit request timeout.
+    pub fn new_with_timeout(
+        auth: WhisperAuth,
+        base_url: Option<&str>,
+        request_timeout: Duration,
+    ) -> WhisperResult<Self> {
         let client = Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(request_timeout)
             .user_agent("fcp-whisper/0.1.0 (FCP connector)")
             .build()?;
 
-        let request_timeout = Duration::from_secs(120);
         Ok(Self {
             client,
             auth,

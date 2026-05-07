@@ -30,6 +30,11 @@ const fn default_freshness_class() -> RevocationFreshnessClass {
     RevocationFreshnessClass::Safe
 }
 
+#[allow(clippy::trivially_copy_pass_by_ref)]
+const fn is_false(value: &bool) -> bool {
+    !*value
+}
+
 #[derive(Debug, Serialize)]
 struct InterfaceDescriptorV2<'a> {
     connector_id: &'a str,
@@ -55,6 +60,8 @@ struct InterfaceOperationDescriptor<'a> {
     safety_tier: SafetyTier,
     requires_approval: ManifestApprovalMode,
     idempotency: IdempotencyClass,
+    #[serde(skip_serializing_if = "is_false")]
+    migration_supported: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     rate_limit: Option<&'a RateLimit>,
     input_schema: &'a serde_json::Value,
@@ -364,6 +371,7 @@ impl ConnectorManifest {
                     safety_tier: op.safety_tier,
                     requires_approval: op.requires_approval,
                     idempotency: op.idempotency,
+                    migration_supported: op.migration_supported,
                     rate_limit: op.rate_limit.as_ref(),
                     input_schema: &op.input_schema,
                     output_schema: &op.output_schema,
@@ -1732,6 +1740,9 @@ pub struct OperationSection {
     pub requires_approval: ManifestApprovalMode,
     pub rate_limit: Option<RateLimit>,
     pub idempotency: IdempotencyClass,
+    /// Whether this operation may participate in computation migration flows.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub migration_supported: bool,
     /// Revocation freshness class declared by the connector author.
     ///
     /// Determines the minimum [`FreshnessPolicy`] the host MUST enforce.

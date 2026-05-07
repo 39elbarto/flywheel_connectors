@@ -2274,7 +2274,7 @@ pub enum SandboxProfile {
 }
 
 /// Operation-level network constraints (NORMATIVE).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct NetworkConstraints {

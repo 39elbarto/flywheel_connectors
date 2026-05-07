@@ -4518,6 +4518,7 @@ dependencies = [
  "fcp-crypto",
  "fcp-evidence",
  "fcp-kernel",
+ "fcp-manifest",
  "fcp-mesh",
  "fcp-policy",
  "fcp-prelude",

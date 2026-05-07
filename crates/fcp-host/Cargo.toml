@@ -21,6 +21,7 @@ fcp-evidence = { path = "../fcp-evidence" }
 fcp-kernel = { path = "../fcp-kernel" }
 fcp-mesh = { path = "../fcp-mesh" }
 fcp-policy = { path = "../fcp-policy" }
+fcp-manifest = { path = "../fcp-manifest" }
 fcp-async-core = { path = "../fcp-async-core" }
 fcp-cbor = { path = "../fcp-cbor" }
 fcp-crypto = { path = "../fcp-crypto" }

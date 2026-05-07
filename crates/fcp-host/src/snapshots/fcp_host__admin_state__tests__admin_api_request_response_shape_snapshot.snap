@@ -74,11 +74,13 @@ expression: canonicalize_json(snapshot)
         "workspace_root": "[workspace-root]"
       },
       "description": "GitHub connector",
+      "enforce_operation_network_constraints": true,
       "env": {
         "FCP_LOG": "info",
         "FCP_PROFILE": "work"
       },
       "id": "fcp.github",
+      "manifest_path": "connectors/github/manifest.toml",
       "name": "GitHub",
       "version": "1.2.3"
     },

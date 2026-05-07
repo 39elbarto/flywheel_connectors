@@ -62,22 +62,22 @@ use fcp_host::{
     ConnectorInventoryApplyReport, ConnectorInventoryMutationKind,
     ConnectorInventoryMutationRequest, ConnectorInventoryMutationResponse,
     ConnectorInventoryResponse, ConnectorRegistry, ConnectorSummary, CredentialCooldown,
-    CredentialMutationOutcome, CredentialPoolAuditOperation, CredentialPoolError,
-    CredentialPoolKey, CredentialPoolRegistry, CredentialPoolStrategy, CredentialPoolView,
-    CredentialUpsertMode, DiscoveryEndpoint, DiscoveryFilter, DiscoveryResponse, DoctorReport,
-    DoctorRequest, DoctorService, EventAcknowledgeRequest, EventAcknowledgeResponse,
-    EventQueryRequest, EventQueryResponse, GateOutcome, HostAdminStateStore, HostHealthResponse,
-    HostHealthStatus, HostPreflightRequest, HostSimulateRequest, HostSimulateResponse,
-    IntrospectionResponse, JournalQueryRequest, JournalQueryResponse, LifecycleTransitionRequest,
-    LifecycleTransitionResponse, LogQueryRequest, LogQueryResponse, ManagedConnectorConfig,
-    MeshQuorumSignals, OperationResult, OperationResultStatus, PoolExhaustedBehavior,
-    PooledCredentialInput, PreflightRequest, PreflightResponse, ProviderKey, ReceiptQueryRequest,
-    ReceiptQueryResponse, ReceiptSummary, RequestPriority, ResilienceError, ResilienceLayer,
-    RevocationCascadeVerifier, RolloutController, RolloutDecision, RolloutObservation,
-    RolloutOutcome, SafetyTierExt, SanitizedConnectorConfig, SimulateCostConfidence,
-    SimulateCostEstimate, SimulatePhase, SimulateReceipt, SimulateReceiptQueryRequest,
-    SimulateReceiptQueryResponse, SimulateResourceAvailability, StartupReconciliationReport,
-    SupplyChainGate, SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
+    CredentialMutationOutcome, CredentialPoolError, CredentialPoolKey, CredentialPoolRegistry,
+    CredentialPoolStrategy, CredentialPoolView, CredentialUpsertMode, DiscoveryEndpoint,
+    DiscoveryFilter, DiscoveryResponse, DoctorReport, DoctorRequest, DoctorService,
+    EventAcknowledgeRequest, EventAcknowledgeResponse, EventQueryRequest, EventQueryResponse,
+    GateOutcome, HostAdminStateStore, HostHealthResponse, HostHealthStatus, HostPreflightRequest,
+    HostSimulateRequest, HostSimulateResponse, IntrospectionResponse, JournalQueryRequest,
+    JournalQueryResponse, LifecycleTransitionRequest, LifecycleTransitionResponse, LogQueryRequest,
+    LogQueryResponse, ManagedConnectorConfig, MeshQuorumSignals, OperationResult,
+    OperationResultStatus, PoolExhaustedBehavior, PooledCredentialInput, PreflightRequest,
+    PreflightResponse, ProviderKey, ReceiptQueryRequest, ReceiptQueryResponse, ReceiptSummary,
+    RequestPriority, ResilienceError, ResilienceLayer, RevocationCascadeVerifier,
+    RolloutController, RolloutDecision, RolloutObservation, RolloutOutcome, SafetyTierExt,
+    SanitizedConnectorConfig, SimulateCostConfidence, SimulateCostEstimate, SimulatePhase,
+    SimulateReceipt, SimulateReceiptQueryRequest, SimulateReceiptQueryResponse,
+    SimulateResourceAvailability, StartupReconciliationReport, SupplyChainGate,
+    SupplyChainGateConfig, ToolDescriptor, admit_safety_tier,
     capability_constraint_audit_descriptor, classify_deployment_mode, diff_sanitized_config_values,
     emit_boot_log, emit_capability_constraint_denial_audit_event, merge_connector_health,
 };
@@ -89,6 +89,7 @@ use fcp_kernel::{
     RateLimitDeclarations, RateLimitEnforcement, RateLimitPool, RateLimitScope, RateLimitUnit,
     RequestId, SelfCheckReport, SimulateRequest, SimulateResponse,
 };
+use fcp_manifest::{ConnectorManifest, NetworkConstraints};
 use fcp_policy::{
     CapabilityConstraintEnforcer, ConstraintEvaluation, DefaultConstraintEnforcer,
     OperationalModelSelection, PrincipalId, RequestDescriptor,
@@ -565,18 +566,95 @@ struct SubprocessRegistry {
 struct RegistryEntry {
     config: ConnectorConfig,
     connector: Arc<SubprocessConnector>,
+    manifest_constraints: ManifestOperationConstraintCatalog,
 }
 
 /// br-l9tt6: atomic snapshot of a connector's allow-list governance
-/// fields. Captured under a single registry read-lock so the
-/// `allowed_zones`, `allowed_operations`, and `enforce_empty_allow_lists`
-/// values are guaranteed to come from the SAME admin-state generation.
+/// fields. Captured under a single registry read-lock so allow-list fields
+/// and manifest-derived operation network constraints are guaranteed to come
+/// from the SAME admin-state generation.
 /// See `SubprocessRegistry::allow_list_snapshot`.
 #[derive(Debug, Clone)]
 struct AllowListSnapshot {
     allowed_zones: Vec<String>,
     allowed_operations: Vec<String>,
+    enforce_operation_network_constraints: bool,
     enforce_empty_allow_lists: bool,
+    manifest_constraints: ManifestOperationConstraintCatalog,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ManifestOperationConstraintCatalog {
+    source: Option<String>,
+    declared_operations: HashSet<String>,
+    network_constraints: HashMap<String, NetworkConstraints>,
+}
+
+impl ManifestOperationConstraintCatalog {
+    fn from_manifest(manifest: &ConnectorManifest, source: impl Into<String>) -> Self {
+        let declared_operations = manifest
+            .provides
+            .operations
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
+        let network_constraints = manifest
+            .provides
+            .operations
+            .iter()
+            .filter_map(|(operation, section)| {
+                section
+                    .network_constraints
+                    .clone()
+                    .map(|constraints| (operation.clone(), constraints))
+            })
+            .collect::<HashMap<_, _>>();
+        Self {
+            source: Some(source.into()),
+            declared_operations,
+            network_constraints,
+        }
+    }
+}
+
+fn load_manifest_operation_constraints(
+    config: &ConnectorConfig,
+) -> HostResult<ManifestOperationConstraintCatalog> {
+    let Some(path) = config.manifest_path.as_deref() else {
+        return Ok(ManifestOperationConstraintCatalog::default());
+    };
+    let raw = std::fs::read_to_string(path).map_err(|err| {
+        HostError::Internal(format!(
+            "failed to read manifest for connector '{}' from '{}': {err}",
+            config.id, path
+        ))
+    })?;
+    let manifest = ConnectorManifest::parse_str(&raw).map_err(|err| {
+        HostError::InvalidFilter(format!(
+            "invalid manifest for connector '{}' at '{}': {err}",
+            config.id, path
+        ))
+    })?;
+    Ok(ManifestOperationConstraintCatalog::from_manifest(
+        &manifest,
+        path.to_string(),
+    ))
+}
+
+async fn build_registry_entry(
+    config: ConnectorConfig,
+    resilience: Arc<ResilienceLayer>,
+    capability_verifying_key: Option<[u8; PUBLIC_KEY_SIZE]>,
+) -> HostResult<RegistryEntry> {
+    let manifest_constraints = load_manifest_operation_constraints(&config)?;
+    let connector = Arc::new(
+        SubprocessConnector::spawn(config.clone(), resilience, capability_verifying_key).await?,
+    );
+    Ok(RegistryEntry {
+        config,
+        connector,
+        manifest_constraints,
+    })
 }
 
 #[derive(Default)]
@@ -693,15 +771,10 @@ impl SubprocessRegistry {
                     "duplicate connector id in managed inventory: {connector_id}"
                 )));
             }
-            let connector = Arc::new(
-                SubprocessConnector::spawn(
-                    config.clone(),
-                    Arc::clone(&resilience),
-                    capability_verifying_key,
-                )
-                .await?,
-            );
-            map.insert(connector_id, RegistryEntry { config, connector });
+            let entry =
+                build_registry_entry(config, Arc::clone(&resilience), capability_verifying_key)
+                    .await?;
+            map.insert(connector_id, entry);
         }
         Ok(Self {
             state: Arc::new(RwLock::new(RegistryState { connectors: map })),
@@ -757,39 +830,23 @@ impl SubprocessRegistry {
                     unchanged.push(connector_id.to_string());
                 }
                 Some(_) => {
-                    let connector = Arc::new(
-                        SubprocessConnector::spawn(
-                            config.clone(),
-                            Arc::clone(&self.resilience),
-                            self.capability_verifying_key,
-                        )
-                        .await?,
-                    );
-                    replacement_entries.insert(
-                        connector_id.clone(),
-                        RegistryEntry {
-                            config: config.clone(),
-                            connector,
-                        },
-                    );
+                    let entry = build_registry_entry(
+                        config.clone(),
+                        Arc::clone(&self.resilience),
+                        self.capability_verifying_key,
+                    )
+                    .await?;
+                    replacement_entries.insert(connector_id.clone(), entry);
                     updated.push(connector_id.to_string());
                 }
                 None => {
-                    let connector = Arc::new(
-                        SubprocessConnector::spawn(
-                            config.clone(),
-                            Arc::clone(&self.resilience),
-                            self.capability_verifying_key,
-                        )
-                        .await?,
-                    );
-                    replacement_entries.insert(
-                        connector_id.clone(),
-                        RegistryEntry {
-                            config: config.clone(),
-                            connector,
-                        },
-                    );
+                    let entry = build_registry_entry(
+                        config.clone(),
+                        Arc::clone(&self.resilience),
+                        self.capability_verifying_key,
+                    )
+                    .await?;
+                    replacement_entries.insert(connector_id.clone(), entry);
                     added.push(connector_id.to_string());
                 }
             }
@@ -866,13 +923,13 @@ impl SubprocessRegistry {
         connector.invoke(request).await
     }
 
-    /// br-l9tt6: snapshot the three allow-list governance fields
-    /// (`allowed_zones`, `allowed_operations`, `enforce_empty_allow_lists`)
+    /// br-l9tt6: snapshot connector governance fields
+    /// (`allowed_zones`, `allowed_operations`, `enforce_empty_allow_lists`,
+    /// and manifest-derived operation network constraints)
     /// under a SINGLE read-lock acquisition.
     ///
-    /// Each individual accessor (`allowed_zones`, `allowed_operations`,
-    /// `enforce_empty_allow_lists`) takes its own `state.read().await`,
-    /// so callers that needed all three were exposed to a TOCTOU race
+    /// Earlier individual accessors took their own `state.read().await`,
+    /// so callers that needed multiple fields were exposed to a TOCTOU race
     /// between reads: a concurrent admin-state writer could update the
     /// connector entry between the two awaits, letting a request gate
     /// mix a STALE allow-list snapshot with a FRESH `enforce_empty`
@@ -892,7 +949,9 @@ impl SubprocessRegistry {
             AllowListSnapshot {
                 allowed_zones: cfg.allowed_zones.clone(),
                 allowed_operations: cfg.allowed_operations.clone(),
+                enforce_operation_network_constraints: cfg.enforce_operation_network_constraints,
                 enforce_empty_allow_lists: cfg.enforce_empty_allow_lists,
+                manifest_constraints: entry.manifest_constraints.clone(),
             }
         })
     }
@@ -3035,6 +3094,65 @@ const CANCEL_SELF_CONNECTOR_ID: &str = "fcp.host.cancel-self:test:1.0.0";
 const CANCEL_SELF_CAPABILITY_ID: &str = "host.cancel-self";
 const CANCEL_SELF_OPERATION_ID: &str = "host.cancel-self";
 
+fn enforce_operation_network_constraint_dispatch(
+    snapshot: &AllowListSnapshot,
+    request: &InvokeRequest,
+) -> HostResult<()> {
+    if !snapshot.enforce_operation_network_constraints {
+        return Ok(());
+    }
+
+    let Some(source) = snapshot.manifest_constraints.source.as_deref() else {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` has enforce_operation_network_constraints=true but no `manifest_path` was configured; deny-all",
+            request.connector_id
+        )));
+    };
+    let operation = request.operation.as_str();
+    if !snapshot
+        .manifest_constraints
+        .declared_operations
+        .contains(operation)
+    {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` manifest `{source}` does not declare operation `{operation}`; deny-all",
+            request.connector_id
+        )));
+    }
+    let Some(constraints) = snapshot
+        .manifest_constraints
+        .network_constraints
+        .get(operation)
+    else {
+        return Err(HostError::PreflightFailed(format!(
+            "connector `{}` operation `{operation}` has no manifest `network_constraints` in `{source}`; deny-all",
+            request.connector_id
+        )));
+    };
+
+    let correlation_id = request
+        .correlation_id
+        .as_ref()
+        .map(std::string::ToString::to_string);
+    tracing::warn!(
+        connector_id = %request.connector_id,
+        operation,
+        zone_id = %request.zone_id,
+        correlation_id = correlation_id.as_deref().unwrap_or(""),
+        constraint_source = source,
+        allowed_host_count = constraints.host_allow.len(),
+        allowed_port_count = constraints.port_allow.len(),
+        connect_timeout_ms = constraints.connect_timeout_ms,
+        total_timeout_ms = constraints.total_timeout_ms,
+        max_response_bytes = constraints.max_response_bytes,
+        "refusing native subprocess invoke because no host-mediated egress guard is wired for selected operation network constraints"
+    );
+    Err(HostError::PreflightFailed(format!(
+        "connector `{}` operation `{operation}` selected manifest network_constraints from `{source}`, but native subprocess dispatch has no host-mediated egress guard; refusing direct egress",
+        request.connector_id
+    )))
+}
+
 async fn verify_live_request(
     state: &AppState,
     request: &InvokeRequest,
@@ -3130,6 +3248,10 @@ async fn verify_live_request(
                 allowed_ops.join(", ")
             )));
         }
+    }
+
+    if let Some(snapshot) = &allow_snapshot {
+        enforce_operation_network_constraint_dispatch(snapshot, request)?;
     }
 
     let introspection = state.discovery.introspect(&request.connector_id).await?;
@@ -8305,7 +8427,7 @@ mod tests {
 
     use chrono::TimeZone;
     use fcp_core::FcpConnector;
-    use fcp_host::{CancelReason, CleanupBehavior};
+    use fcp_host::{CancelReason, CleanupBehavior, CredentialPoolAuditOperation};
     use fcp_kernel::{
         AgentHint, BudgetEnforcement, HealthState, IdempotencyClass, LifecycleRecord, OperationId,
         OperationInfo, SelfCheckStatus, TransitionReason, UsageBudgetLimit, UsageBudgetPolicy,
@@ -8344,6 +8466,7 @@ mod tests {
         ConnectorConfig {
             id: connector_id.to_string(),
             binary: compiled_test_connector_binary().display().to_string(),
+            manifest_path: None,
             name: Some("Test Connector".to_string()),
             description: Some("Subprocess test connector".to_string()),
             args: Vec::new(),
@@ -8356,6 +8479,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         }
     }
@@ -8365,6 +8489,7 @@ mod tests {
         let existing = ConnectorConfig {
             id: "fcp.test.replace:utility:1.0.0".to_string(),
             binary: "/old/bin".to_string(),
+            manifest_path: None,
             name: Some("Old Name".to_string()),
             description: Some("old description".to_string()),
             args: vec!["--old".to_string()],
@@ -8374,11 +8499,13 @@ mod tests {
             version: Some("1.0.0".to_string()),
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         };
         let incoming = ConnectorConfig {
             id: existing.id.clone(),
             binary: "/new/bin".to_string(),
+            manifest_path: None,
             name: None,
             description: None,
             args: Vec::new(),
@@ -8388,6 +8515,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         };
 
@@ -8402,7 +8530,194 @@ mod tests {
         assert!(updated.config.is_none());
         assert!(updated.categories.is_empty());
         assert!(updated.version.is_none());
+        assert!(updated.manifest_path.is_none());
         assert!(updated.allowed_zones.is_empty());
+    }
+
+    fn two_operation_network_manifest() -> ConnectorManifest {
+        let raw = r#"
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["fcps.aead.xchacha20poly1305"]
+max_datagram_bytes = 1200
+interface_hash = "blake3-256:fcp.interface.v2:0000000000000000000000000000000000000000000000000000000000000000"
+
+[connector]
+id = "fcp.test"
+name = "Test Connector"
+version = "2026.1.0"
+description = "Test connector"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:work"]
+allowed_targets = ["z:work"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = []
+forbidden = []
+
+[provides.operations."op.a"]
+description = "Operation A"
+capability = "test.network"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api-a.example"], port_allow = [443], require_sni = true }
+
+[provides.operations."op.b"]
+description = "Operation B"
+capability = "test.network"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object" }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["api-b.example"], port_allow = [8443], require_sni = true }
+
+[sandbox]
+profile = "strict"
+memory_mb = 256
+cpu_percent = 50
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = []
+fs_writable_paths = []
+deny_exec = true
+deny_ptrace = true
+"#;
+        ConnectorManifest::parse_str_unchecked(raw).expect("test manifest should parse")
+    }
+
+    fn operation_network_snapshot(
+        enforce: bool,
+        manifest_constraints: ManifestOperationConstraintCatalog,
+    ) -> AllowListSnapshot {
+        AllowListSnapshot {
+            allowed_zones: Vec::new(),
+            allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: enforce,
+            enforce_empty_allow_lists: false,
+            manifest_constraints,
+        }
+    }
+
+    fn operation_network_request(operation_id: &'static str) -> InvokeRequest {
+        let signing_key = fcp_crypto::ed25519::Ed25519SigningKey::generate();
+        InvokeRequest {
+            r#type: "invoke".to_string(),
+            id: RequestId::random(),
+            connector_id: ConnectorId::from_static("fcp.test:network:1.0.0"),
+            operation: OperationId::from_static(operation_id),
+            zone_id: ZoneId::work(),
+            input: json!({}),
+            capability_token: test_capability_token(
+                &signing_key,
+                "test.network",
+                operation_id,
+                ZoneId::work().as_str(),
+            ),
+            holder_proof: None,
+            context: None,
+            idempotency_key: None,
+            lease_seq: None,
+            deadline_ms: None,
+            correlation_id: None,
+            provenance: None,
+            approval_tokens: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn manifest_operation_constraint_catalog_keeps_per_operation_constraints() {
+        let manifest = two_operation_network_manifest();
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+
+        let op_a = catalog
+            .network_constraints
+            .get("op.a")
+            .expect("op.a constraints");
+        let op_b = catalog
+            .network_constraints
+            .get("op.b")
+            .expect("op.b constraints");
+
+        assert_eq!(op_a.host_allow, vec!["api-a.example"]);
+        assert_eq!(op_a.port_allow, vec![443]);
+        assert_eq!(op_b.host_allow, vec!["api-b.example"]);
+        assert_eq!(op_b.port_allow, vec![8443]);
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_rejects_missing_manifest_path_when_enforced() {
+        let snapshot =
+            operation_network_snapshot(true, ManifestOperationConstraintCatalog::default());
+        let request = operation_network_request("op.a");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("enforced mode without manifest path must deny all");
+
+        assert!(error.to_string().contains("no `manifest_path`"), "{error}");
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_rejects_missing_operation_constraints() {
+        let manifest = two_operation_network_manifest();
+        let mut catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+        catalog.network_constraints.remove("op.b");
+        let snapshot = operation_network_snapshot(true, catalog);
+        let request = operation_network_request("op.b");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("declared operation without network constraints must deny all");
+
+        assert!(
+            error
+                .to_string()
+                .contains("has no manifest `network_constraints`"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn operation_network_constraint_dispatch_denies_native_subprocess_direct_egress() {
+        let manifest = two_operation_network_manifest();
+        let catalog = ManifestOperationConstraintCatalog::from_manifest(
+            &manifest,
+            "inline-test-manifest".to_string(),
+        );
+        let snapshot = operation_network_snapshot(true, catalog);
+        let request = operation_network_request("op.b");
+
+        let error = enforce_operation_network_constraint_dispatch(&snapshot, &request)
+            .expect_err("native subprocess path must deny strict network enforcement");
+
+        let message = error.to_string();
+        assert!(message.contains("operation `op.b`"), "{message}");
+        assert!(
+            message.contains("native subprocess dispatch has no host-mediated egress guard"),
+            "{message}"
+        );
     }
 
     fn subprocess_test_connector_config_requiring_handshake(connector_id: &str) -> ConnectorConfig {
@@ -8470,7 +8785,14 @@ mod tests {
     ) -> Arc<SubprocessRegistry> {
         let connector_key = ConnectorId::from_static(connector_id);
         let mut connectors = HashMap::new();
-        connectors.insert(connector_key, RegistryEntry { config, connector });
+        connectors.insert(
+            connector_key,
+            RegistryEntry {
+                config,
+                connector,
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
+            },
+        );
         Arc::new(SubprocessRegistry {
             state: Arc::new(RwLock::new(RegistryState { connectors })),
             resilience: Arc::new(ResilienceLayer::default()),
@@ -8487,7 +8809,11 @@ mod tests {
         for (connector_id, connector, config) in entries {
             connectors.insert(
                 ConnectorId::from_static(connector_id),
-                RegistryEntry { config, connector },
+                RegistryEntry {
+                    config,
+                    connector,
+                    manifest_constraints: ManifestOperationConstraintCatalog::default(),
+                },
             );
         }
         Arc::new(SubprocessRegistry {
@@ -8585,6 +8911,7 @@ mod tests {
         ConnectorConfig {
             id: connector_id.to_string(),
             binary: "dispatcher-test".to_string(),
+            manifest_path: None,
             name: Some(format!("{connector_id} test connector")),
             description: None,
             args: Vec::new(),
@@ -8594,6 +8921,7 @@ mod tests {
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         }
     }
@@ -9858,6 +10186,7 @@ mod tests {
         let initial_config = ConnectorConfig {
             id: connector_id.to_string(),
             binary: "dispatcher-test".to_string(),
+            manifest_path: None,
             name: Some("l9tt6 snapshot race fixture".to_string()),
             description: None,
             args: Vec::new(),
@@ -9867,6 +10196,7 @@ mod tests {
             version: None,
             allowed_zones: vec!["z:work".to_string()],
             allowed_operations: vec!["op.a".to_string()],
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         };
         let registry = dispatcher_registry_with_connector(connector_id, connector, initial_config);
@@ -10011,6 +10341,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("HRW Lease Refuse Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -10020,6 +10351,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
             },
         );
@@ -10168,6 +10500,7 @@ mod tests {
                 config: ConnectorConfig {
                     id: connector_id.to_string(),
                     binary: "dispatcher-test".to_string(),
+                    manifest_path: None,
                     name: Some("Admit Safety Test Connector".to_string()),
                     description: None,
                     args: Vec::new(),
@@ -10177,9 +10510,11 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                 },
                 connector,
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -10361,6 +10696,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("Invoke Token Bucket Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -10370,6 +10706,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
             },
         );
@@ -10551,6 +10888,7 @@ mod tests {
                 config: ConnectorConfig {
                     id: connector_id.to_string(),
                     binary: "dispatcher-test".to_string(),
+                    manifest_path: None,
                     name: Some("Cascade Caller Test Connector".to_string()),
                     description: None,
                     args: Vec::new(),
@@ -10560,9 +10898,11 @@ mod tests {
                     version: None,
                     allowed_zones: Vec::new(),
                     allowed_operations: Vec::new(),
+                    enforce_operation_network_constraints: false,
                     enforce_empty_allow_lists: false,
                 },
                 connector,
+                manifest_constraints: ManifestOperationConstraintCatalog::default(),
             },
         );
         let registry = Arc::new(SubprocessRegistry {
@@ -10695,6 +11035,7 @@ mod tests {
             ConnectorConfig {
                 id: connector_id.to_string(),
                 binary: "dispatcher-test".to_string(),
+                manifest_path: None,
                 name: Some("Hybrid Owner Production Test Connector".to_string()),
                 description: None,
                 args: Vec::new(),
@@ -10704,6 +11045,7 @@ mod tests {
                 version: None,
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: false,
                 enforce_empty_allow_lists: false,
             },
         );
@@ -13865,6 +14207,7 @@ done"#;
         let connector_config = ConnectorConfig {
             id: connector_id.to_string(),
             binary: "in-process-telegram-test".to_string(),
+            manifest_path: None,
             name: Some("Telegram".to_string()),
             description: Some("Telegram webhook ingress test connector".to_string()),
             args: Vec::new(),
@@ -13874,6 +14217,7 @@ done"#;
             version: Some("1.0.0".to_string()),
             allowed_zones: vec![zone_id.to_string()],
             allowed_operations: vec![TELEGRAM_WEBHOOK_INGRESS_OPERATION.to_string()],
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: true,
         };
         let registry =
@@ -14840,6 +15184,7 @@ done"#;
         let config = ConnectorConfig {
             id: "fcp.test:echo:1.0.0".to_string(),
             binary: "/bin/echo".to_string(),
+            manifest_path: None,
             name: None,
             description: None,
             args: vec![],
@@ -14849,6 +15194,7 @@ done"#;
             version: None,
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         };
         let dbg = format!("{config:?}");

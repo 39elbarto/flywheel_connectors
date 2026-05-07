@@ -36,6 +36,14 @@ pub struct ManagedConnectorConfig {
     pub id: String,
     /// Executable path for the connector binary.
     pub binary: String,
+    /// Optional connector manifest TOML path used by the host to derive
+    /// operation-level enforcement metadata, including
+    /// `provides.operations.*.network_constraints`.
+    ///
+    /// Relative paths are resolved by the host process from its current
+    /// working directory when it loads the managed inventory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_path: Option<String>,
     /// Optional display name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -91,6 +99,17 @@ pub struct ManagedConnectorConfig {
     /// `allowed_zones`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_operations: Vec<String>,
+    /// Fail closed on live invokes unless `manifest_path` declares
+    /// `network_constraints` for the requested operation and the selected
+    /// execution path can enforce them.
+    ///
+    /// Native subprocess connectors can open their own sockets unless a
+    /// host-mediated egress path is explicitly wired. This flag keeps
+    /// sandbox-enforced deployments honest by refusing to dispatch operations
+    /// whose operation-level network constraints cannot be proven from the
+    /// connector manifest.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce_operation_network_constraints: bool,
     /// br-v2kt4: explicit fail-closed flag for empty `allowed_zones`
     /// / `allowed_operations` lists. The pre-v2kt4 semantics treated
     /// `Some(empty)` as "no restriction" (back-compat permissive)
@@ -10442,6 +10461,7 @@ mod tests {
         let config = ManagedConnectorConfig {
             id: "test-connector".to_string(),
             binary: "/usr/bin/test".to_string(),
+            manifest_path: None,
             name: Some("Test".to_string()),
             description: Some("A test connector".to_string()),
             args: vec!["--verbose".to_string()],
@@ -10451,6 +10471,7 @@ mod tests {
             version: Some("1.0.0".to_string()),
             allowed_zones: Vec::new(),
             allowed_operations: Vec::new(),
+            enforce_operation_network_constraints: false,
             enforce_empty_allow_lists: false,
         };
         let json = serde_json::to_string(&config).unwrap();
@@ -10469,6 +10490,7 @@ mod tests {
             connector: ManagedConnectorConfig {
                 id: "fcp.github".to_string(),
                 binary: "[connector-binary]".to_string(),
+                manifest_path: Some("connectors/github/manifest.toml".to_string()),
                 name: Some("GitHub".to_string()),
                 description: Some("GitHub connector".to_string()),
                 args: vec![
@@ -10489,6 +10511,7 @@ mod tests {
                 version: Some("1.2.3".to_string()),
                 allowed_zones: Vec::new(),
                 allowed_operations: Vec::new(),
+                enforce_operation_network_constraints: true,
                 enforce_empty_allow_lists: false,
             },
         };

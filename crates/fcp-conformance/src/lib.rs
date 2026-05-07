@@ -26,6 +26,7 @@ pub mod compliance;
 pub mod harness;
 pub mod interop;
 pub mod log_capture;
+pub mod manifest_operations;
 pub mod reqcheck;
 pub mod schemas;
 pub mod vecgen;

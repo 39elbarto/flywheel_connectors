@@ -23,6 +23,7 @@ clap = { workspace = true, features = ["derive"] }
 ciborium.workspace = true
 rand.workspace = true
 rand_chacha = "0.3"
+toml.workspace = true
 
 # FCP crates (for types and encoding)
 fcp-core = { path = "../fcp-core" }
@@ -44,6 +45,10 @@ path = "src/bin/vecgen.rs"
 [[bin]]
 name = "fcp-reqcheck"
 path = "src/bin/reqcheck.rs"
+
+[[bin]]
+name = "fcp-manifest-ops-audit"
+path = "src/bin/manifest_ops_audit.rs"
 
 [dev-dependencies]
 pretty_assertions.workspace = true

@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:firecrawl-search-scrape-crawl"
+interface_hash = "blake3-256:fcp.interface.v2:82ceb569449290e15db3d25514259d40b18e0145b48dd1c5f5bf5b5427b11ef3"
 
 [connector]
 id = "fcp.firecrawl"
 name = "Firecrawl"
 version = "0.1.0"
 description = "Firecrawl connector for search, scrape, and crawl orchestration"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -27,8 +27,352 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["firecrawl.search", "firecrawl.scrape", "firecrawl.crawl"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."firecrawl.search"]
+description = "Search the web with Firecrawl"
+capability = "firecrawl.search"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."firecrawl.search".input_schema]
+type = "object"
+required = ["query"]
+
+[provides.operations."firecrawl.search".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 500
+
+[provides.operations."firecrawl.search".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 100
+
+[provides.operations."firecrawl.search".input_schema.properties.sources]
+type = "array"
+
+[provides.operations."firecrawl.search".input_schema.properties.sources.items]
+type = "string"
+enum = ["web", "images", "news"]
+
+[provides.operations."firecrawl.search".input_schema.properties.categories]
+type = "array"
+
+[provides.operations."firecrawl.search".input_schema.properties.categories.items]
+type = "string"
+enum = ["github", "research", "pdf"]
+
+[provides.operations."firecrawl.search".input_schema.properties.scrape_results]
+type = "boolean"
+
+[provides.operations."firecrawl.search".input_schema.properties.timeout]
+type = "integer"
+minimum = 1
+
+[provides.operations."firecrawl.search".input_schema.properties.country]
+type = "string"
+minLength = 2
+maxLength = 2
+
+[provides.operations."firecrawl.search".input_schema.properties.location]
+type = "string"
+minLength = 1
+
+[provides.operations."firecrawl.search".input_schema.properties.ignore_invalid_urls]
+type = "boolean"
+
+[provides.operations."firecrawl.search".input_schema.properties.enterprise]
+type = "array"
+
+[provides.operations."firecrawl.search".input_schema.properties.enterprise.items]
+type = "string"
+enum = ["anon", "zdr"]
+
+[provides.operations."firecrawl.search".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.search".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."firecrawl.search".output_schema.properties.data]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.search".output_schema.properties.warning]
+type = "string"
+
+[provides.operations."firecrawl.search".output_schema.properties.id]
+type = "string"
+
+[provides.operations."firecrawl.search".output_schema.properties.creditsUsed]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.search".network_constraints]
+host_allow = ["api.firecrawl.dev"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."firecrawl.search".ai_hints]
+when_to_use = "Use for read-only Firecrawl web search when the caller needs current web results and optional Firecrawl scraping of result pages."
+common_mistakes = ["Do not include API keys or private credentials in query text.", "Use scrape or crawl operations when the caller already has target URLs."]
+examples = ['{"query":"Firecrawl API docs","limit":5,"sources":["web"]}']
+related = ["firecrawl.scrape", "firecrawl.crawl.start"]
+
+[provides.operations."firecrawl.scrape"]
+description = "Scrape a single URL with Firecrawl"
+capability = "firecrawl.scrape"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."firecrawl.scrape".input_schema]
+type = "object"
+required = ["url"]
+
+[provides.operations."firecrawl.scrape".input_schema.properties.url]
+type = "string"
+format = "uri"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.formats]
+type = "array"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.formats.items]
+type = "string"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.only_main_content]
+type = "boolean"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.include_tags]
+type = "array"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.include_tags.items]
+type = "string"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.exclude_tags]
+type = "array"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.exclude_tags.items]
+type = "string"
+
+[provides.operations."firecrawl.scrape".input_schema.properties.wait_for]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.scrape".input_schema.properties.timeout]
+type = "integer"
+minimum = 1
+
+[provides.operations."firecrawl.scrape".input_schema.properties.max_age_ms]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.scrape".input_schema.properties.proxy]
+type = "string"
+enum = ["auto", "basic", "stealth"]
+
+[provides.operations."firecrawl.scrape".input_schema.properties.store_in_cache]
+type = "boolean"
+
+[provides.operations."firecrawl.scrape".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.scrape".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."firecrawl.scrape".output_schema.properties.data]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.scrape".network_constraints]
+host_allow = ["api.firecrawl.dev"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."firecrawl.scrape".ai_hints]
+when_to_use = "Use when the caller provides one public HTTP(S) URL and wants Firecrawl to return page content such as markdown."
+common_mistakes = ["Do not pass localhost, private network, metadata-service, or credentialed URLs.", "Do not use this for multi-page crawls; use firecrawl.crawl.start instead."]
+examples = ['{"url":"https://example.com","formats":["markdown"]}']
+related = ["firecrawl.search", "firecrawl.crawl.start"]
+
+[provides.operations."firecrawl.crawl.start"]
+description = "Start a Firecrawl crawl job"
+capability = "firecrawl.crawl"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."firecrawl.crawl.start".input_schema]
+type = "object"
+required = ["url"]
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.url]
+type = "string"
+format = "uri"
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.limit]
+type = "integer"
+minimum = 1
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.max_depth]
+type = "integer"
+minimum = 1
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.exclude_paths]
+type = "array"
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.exclude_paths.items]
+type = "string"
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.include_paths]
+type = "array"
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.include_paths.items]
+type = "string"
+
+[provides.operations."firecrawl.crawl.start".input_schema.properties.allow_external_links]
+type = "boolean"
+
+[provides.operations."firecrawl.crawl.start".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.crawl.start".output_schema.properties.success]
+type = "boolean"
+
+[provides.operations."firecrawl.crawl.start".output_schema.properties.id]
+type = "string"
+
+[provides.operations."firecrawl.crawl.start".output_schema.properties.url]
+type = "string"
+
+[provides.operations."firecrawl.crawl.start".network_constraints]
+host_allow = ["api.firecrawl.dev"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."firecrawl.crawl.start".ai_hints]
+when_to_use = "Use when the caller needs Firecrawl to crawl multiple pages from one public HTTP(S) starting URL."
+common_mistakes = ["Do not use for a single-page scrape.", "Do not pass localhost, private network, metadata-service, or credentialed URLs."]
+examples = ['{"url":"https://docs.firecrawl.dev","limit":10,"max_depth":2}']
+related = ["firecrawl.crawl.status", "firecrawl.scrape"]
+
+[provides.operations."firecrawl.crawl.status"]
+description = "Check Firecrawl crawl status"
+capability = "firecrawl.crawl"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."firecrawl.crawl.status".input_schema]
+type = "object"
+required = ["crawl_id"]
+
+[provides.operations."firecrawl.crawl.status".input_schema.properties.crawl_id]
+type = "string"
+minLength = 1
+
+[provides.operations."firecrawl.crawl.status".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.status]
+type = "string"
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.total]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.completed]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.creditsUsed]
+type = "integer"
+minimum = 0
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.data]
+type = "array"
+
+[provides.operations."firecrawl.crawl.status".output_schema.properties.data.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."firecrawl.crawl.status".network_constraints]
+host_allow = ["api.firecrawl.dev"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."firecrawl.crawl.status".ai_hints]
+when_to_use = "Use after Firecrawl firecrawl.crawl.start returns a crawl id and the caller needs completion status or crawled page results."
+common_mistakes = ["Do not pass full crawl URLs; pass only the crawl_id returned by Firecrawl.", "Do not use this to start new crawl work."]
+examples = ['{"crawl_id":"crawl-abc-123"}']
+related = ["firecrawl.crawl.start"]
 
 [sandbox]
 profile = "strict"

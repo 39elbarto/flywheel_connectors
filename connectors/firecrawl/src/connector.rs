@@ -2,6 +2,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{
     BaseConnector, ConnectorId, FcpError, FcpResult, RequestId, SimulateRequest, SimulateResponse,
 };
@@ -27,6 +28,8 @@ const FIRECRAWL_PROXY_MODES: &[&str] = &["auto", "basic", "stealth"];
 const FIRECRAWL_SEARCH_SOURCES: &[&str] = &["web", "images", "news"];
 const FIRECRAWL_SEARCH_CATEGORIES: &[&str] = &["github", "research", "pdf"];
 const FIRECRAWL_ENTERPRISE_OPTIONS: &[&str] = &["anon", "zdr"];
+const FIRECRAWL_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 4] = [OP_SEARCH, OP_SCRAPE, OP_CRAWL_START, OP_CRAWL_STATUS];
 
 #[derive(Clone, serde::Deserialize)]
 pub struct FirecrawlConfig {
@@ -309,12 +312,7 @@ impl FirecrawlConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                { "id": OP_SEARCH, "summary": "Search the web with Firecrawl", "capability": "firecrawl.search", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live },
-                { "id": OP_SCRAPE, "summary": "Scrape a single URL with Firecrawl", "capability": "firecrawl.scrape", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live },
-                { "id": OP_CRAWL_START, "summary": "Start a Firecrawl crawl job", "capability": "firecrawl.crawl", "risk_level": "medium", "safety_tier": "safe", "idempotency": "best_effort", "implemented": live },
-                { "id": OP_CRAWL_STATUS, "summary": "Check Firecrawl crawl status", "capability": "firecrawl.crawl", "risk_level": "low", "safety_tier": "safe", "idempotency": "strict", "implemented": live }
-            ],
+            "operations": operations_info(live)?,
             "surface_status": if live { "live" } else { "planned_only" },
             "events": [],
             "resource_types": []
@@ -568,6 +566,71 @@ impl Default for FirecrawlConnector {
     }
 }
 
+fn operations_info(implemented: bool) -> FcpResult<Vec<Value>> {
+    let manifest = ConnectorManifest::parse_str(FIRECRAWL_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded Firecrawl manifest is invalid: {error}"),
+        }
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation, implemented))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(
+    id: String,
+    operation: fcp_manifest::OperationSection,
+    implemented: bool,
+) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    entry.insert("implemented".into(), Value::Bool(implemented));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
+}
+
 fn require_str<'a>(input: &'a Value, key: &str) -> FcpResult<&'a str> {
     let value = input
         .get(key)
@@ -812,10 +875,133 @@ mod tests {
         assert!(MANIFEST_TOML.contains(
             "description = \"Firecrawl connector for search, scrape, and crawl orchestration\""
         ));
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"firecrawl.search\"]"));
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"firecrawl.scrape\"]"));
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"firecrawl.crawl.start\"]"));
+        assert!(MANIFEST_TOML.contains("[provides.operations.\"firecrawl.crawl.status\"]"));
         assert!(MANIFEST_TOML.contains(
             "migration_hint = \"Current slice: search, scrape, crawl.start, and crawl.status. Extract, map, browser sessions, and private self-hosted endpoints are deferred.\""
         ));
         assert!(!MANIFEST_TOML.contains("Search and extract are deferred"));
+    }
+
+    #[test]
+    fn manifest_declares_valid_firecrawl_operation_metadata() {
+        let unchecked = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("embedded manifest should parse");
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "manifest interface_hash must match computed operation metadata hash"
+        );
+
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation_id in OPERATION_ORDER {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("operation should be declared");
+            assert!(operation.input_schema.is_object());
+            assert!(operation.output_schema.is_object());
+            let network_constraints = operation
+                .network_constraints
+                .as_ref()
+                .expect("operation should declare network constraints");
+            assert_eq!(network_constraints.host_allow, vec!["api.firecrawl.dev"]);
+            assert_eq!(network_constraints.port_allow, vec![443]);
+            assert!(network_constraints.require_sni);
+            assert!(operation.ai_hints.when_to_use.contains("Firecrawl"));
+        }
+
+        let search = manifest
+            .provides
+            .operations
+            .get(OP_SEARCH)
+            .expect("search operation should be declared");
+        assert_eq!(search.capability.as_str(), "firecrawl.search");
+        assert_eq!(search.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            search.input_schema["properties"]["query"]["maxLength"],
+            json!(500)
+        );
+        assert_eq!(
+            search.input_schema["properties"]["limit"]["maximum"],
+            json!(100)
+        );
+        assert_eq!(
+            search.input_schema["properties"]["sources"]["items"]["enum"],
+            json!(FIRECRAWL_SEARCH_SOURCES)
+        );
+
+        let crawl_start = manifest
+            .provides
+            .operations
+            .get(OP_CRAWL_START)
+            .expect("crawl start operation should be declared");
+        assert_eq!(crawl_start.capability.as_str(), "firecrawl.crawl");
+        assert_eq!(json!(crawl_start.risk_level), json!("medium"));
+        assert_eq!(json!(crawl_start.idempotency), json!("best_effort"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_uses_manifest_operation_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let connector = FirecrawlConnector::new();
+        let introspection = connector
+            .handle_introspect()
+            .await
+            .expect("introspection should succeed");
+        let operations = introspection
+            .get("operations")
+            .and_then(Value::as_array)
+            .expect("operations should be an array");
+        assert_eq!(operations.len(), manifest.provides.operations.len());
+
+        for (expected_index, operation_id) in OPERATION_ORDER.iter().enumerate() {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(*operation_id)
+                .expect("operation should exist");
+            let operation = operations
+                .get(expected_index)
+                .expect("operation should be in manifest order");
+            assert_eq!(operation["id"], json!(operation_id));
+            assert_eq!(
+                operation["summary"],
+                json!(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                operation["description"],
+                json!(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                operation["capability"],
+                json!(manifest_operation.capability.as_str())
+            );
+            assert_eq!(&operation["input_schema"], &manifest_operation.input_schema);
+            assert_eq!(
+                &operation["output_schema"],
+                &manifest_operation.output_schema
+            );
+            assert_eq!(
+                operation["network_constraints"]["host_allow"],
+                json!(["api.firecrawl.dev"])
+            );
+            assert_eq!(
+                operation["ai_hints"]["when_to_use"],
+                json!(manifest_operation.ai_hints.when_to_use.as_str())
+            );
+            assert_eq!(operation["implemented"], json!(false));
+        }
     }
 
     #[fcp_async_core::runtime::test]

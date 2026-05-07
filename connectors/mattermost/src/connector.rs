@@ -402,6 +402,14 @@ impl MattermostConnector {
     ///
     /// Returns an error if the handshake parameters are invalid.
     pub fn handshake(&mut self, req: &HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            let base = Arc::get_mut(&mut self.base).ok_or_else(|| FcpError::Internal {
+                message:
+                    "Mattermost connector instance id cannot change after shared runtime state exists"
+                        .into(),
+            })?;
+            base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,

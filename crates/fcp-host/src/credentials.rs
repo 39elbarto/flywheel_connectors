@@ -1,8 +1,9 @@
 //! Host-side credential pooling primitives.
 //!
-//! This module is deliberately pure state for now: it models provider/zone
-//! pools, selection strategies, active leases, cooldowns, and redacted public
-//! views without wiring admin HTTP routes or connector SDK calls.
+//! This module models provider/zone pools, selection strategies, active leases,
+//! cooldowns, audit events, and redacted public views. Host admin routes wire
+//! these primitives in `bin/fcp-host.rs`; connector-facing transport remains a
+//! separate integration layer.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -130,7 +131,7 @@ pub enum CredentialPoolStrategy {
 pub enum PoolExhaustedBehavior {
     /// Return an explicit exhausted error immediately.
     FailFast,
-    /// Reserve future wait semantics for the admin/API wiring slice.
+    /// Return deterministic wait advice when the next available credential is known.
     Wait,
 }
 
@@ -149,6 +150,13 @@ impl CredentialCooldown {
         match self {
             Self::Until { until } => now < *until,
             Self::Permanent => true,
+        }
+    }
+
+    fn available_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Until { until } if now < *until => Some(*until),
+            Self::Until { .. } | Self::Permanent => None,
         }
     }
 }
@@ -759,17 +767,16 @@ impl CredentialPool {
     /// # Errors
     ///
     /// Returns [`CredentialPoolError::PoolExhausted`] if no credential is
-    /// currently available, or [`CredentialPoolError::WaitNotImplemented`] for
-    /// pools configured with reserved wait semantics.
+    /// currently available with no known wait deadline, or
+    /// [`CredentialPoolError::PoolWaitRequired`] when wait mode can report the
+    /// earliest cooldown expiry.
     pub fn acquire(&mut self, now: DateTime<Utc>) -> Result<CredentialLease, CredentialPoolError> {
         let Some(index) = self.select_index(now) else {
             return match self.exhausted_behavior {
                 PoolExhaustedBehavior::FailFast => Err(CredentialPoolError::PoolExhausted {
                     key: self.key.clone(),
                 }),
-                PoolExhaustedBehavior::Wait => Err(CredentialPoolError::WaitNotImplemented {
-                    key: self.key.clone(),
-                }),
+                PoolExhaustedBehavior::Wait => self.wait_required_or_exhausted(now),
             };
         };
 
@@ -979,6 +986,34 @@ impl CredentialPool {
             .get(&credential_id)
             .copied()
             .unwrap_or_default()
+    }
+
+    fn wait_required_or_exhausted<T>(&self, now: DateTime<Utc>) -> Result<T, CredentialPoolError> {
+        if let Some(available_at) = self.next_available_at(now) {
+            return Err(CredentialPoolError::PoolWaitRequired {
+                key: self.key.clone(),
+                available_at,
+            });
+        }
+
+        Err(CredentialPoolError::PoolExhausted {
+            key: self.key.clone(),
+        })
+    }
+
+    fn next_available_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                self.active_count(entry.credential_id) < self.max_concurrent_per_credential
+            })
+            .filter_map(|entry| {
+                entry
+                    .cooldown
+                    .as_ref()
+                    .and_then(|cooldown| cooldown.available_at(now))
+            })
+            .min()
     }
 
     fn decrement_active_lease(&mut self, credential_id: CredentialId) {
@@ -1326,11 +1361,13 @@ pub enum CredentialPoolError {
         /// Provider+zone pool key.
         key: CredentialPoolKey,
     },
-    /// Wait semantics are reserved for a later host orchestration slice.
-    #[error("credential pool wait semantics are not implemented for {key}")]
-    WaitNotImplemented {
+    /// Pool is configured to wait and has a known future availability deadline.
+    #[error("credential pool wait required for {key}; next credential available at {available_at}")]
+    PoolWaitRequired {
         /// Provider+zone pool key.
         key: CredentialPoolKey,
+        /// Earliest known cooldown expiry.
+        available_at: DateTime<Utc>,
     },
     /// Lease token is unknown or already released.
     #[error("unknown credential lease token {token}")]
@@ -2036,14 +2073,51 @@ mod tests {
         pool.set_exhausted_behavior(PoolExhaustedBehavior::Wait);
         assert_eq!(pool.exhausted_behavior(), PoolExhaustedBehavior::Wait);
         assert!(matches!(
-            pool.acquire(now()).expect_err("wait is reserved"),
-            CredentialPoolError::WaitNotImplemented { .. }
+            pool.acquire(now())
+                .expect_err("active lease has no wait deadline"),
+            CredentialPoolError::PoolExhausted { .. }
         ));
 
         pool.set_exhausted_behavior(PoolExhaustedBehavior::FailFast);
         assert!(matches!(
             pool.acquire(now()).expect_err("fail fast exhausted"),
             CredentialPoolError::PoolExhausted { .. }
+        ));
+    }
+
+    #[test]
+    fn wait_exhausted_behavior_reports_earliest_cooldown_deadline() {
+        let current_time = now();
+        let mut pool = three_entry_pool(CredentialPoolStrategy::Priority);
+        pool.set_exhausted_behavior(PoolExhaustedBehavior::Wait);
+
+        pool.set_cooldown(
+            cred(0x01),
+            Some(CredentialCooldown::Until {
+                until: current_time + Duration::seconds(30),
+            }),
+        )
+        .expect("cool down first");
+        pool.set_cooldown(
+            cred(0x02),
+            Some(CredentialCooldown::Until {
+                until: current_time + Duration::seconds(10),
+            }),
+        )
+        .expect("cool down second");
+        pool.set_cooldown(cred(0x03), Some(CredentialCooldown::Permanent))
+            .expect("permanent cooldown third");
+
+        let err = pool
+            .acquire(current_time)
+            .expect_err("all credentials unavailable");
+
+        assert!(matches!(
+            err,
+            CredentialPoolError::PoolWaitRequired {
+                available_at,
+                ..
+            } if available_at == current_time + Duration::seconds(10)
         ));
     }
 

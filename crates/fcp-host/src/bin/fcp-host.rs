@@ -4728,7 +4728,7 @@ fn map_credential_pool_error(error: CredentialPoolError) -> (StatusCode, String)
         | CredentialPoolError::CredentialNotFound { .. }
         | CredentialPoolError::UnknownLease { .. } => StatusCode::NOT_FOUND,
         CredentialPoolError::PoolExhausted { .. }
-        | CredentialPoolError::WaitNotImplemented { .. } => StatusCode::CONFLICT,
+        | CredentialPoolError::PoolWaitRequired { .. } => StatusCode::CONFLICT,
         CredentialPoolError::SelectionIndexInvalid { .. } => StatusCode::INTERNAL_SERVER_ERROR,
     };
     (status, error.to_string())

@@ -25,6 +25,94 @@ use tempfile::TempDir;
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/obsidian_connector_verification.sh";
 const ARTIFACT_ROOT_HINT: &str = "artifacts/e2e/obsidian_connector/<timestamp>";
 const OP_NOTES_DELETE: &str = "obsidian.notes.delete";
+const NO_EGRESS_HOST: &str = "none.invalid";
+const OBSIDIAN_OPERATION_IDS: &[&str] = &[
+    "obsidian.backlinks.get",
+    "obsidian.health",
+    "obsidian.notes.create",
+    "obsidian.notes.delete",
+    "obsidian.notes.get",
+    "obsidian.notes.list",
+    "obsidian.notes.update",
+    "obsidian.search",
+    "obsidian.tags.list",
+];
+
+fn parsed_manifest() -> toml::Value {
+    toml::from_str::<toml::Table>(include_str!("../manifest.toml"))
+        .map(toml::Value::Table)
+        .expect("Obsidian manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::map::Map<String, toml::Value> {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("Obsidian manifest should declare operations")
+}
+
+fn constraints_for<'a>(
+    operations: &'a toml::map::Map<String, toml::Value>,
+    operation_id: &str,
+) -> &'a toml::map::Map<String, toml::Value> {
+    let operation = operations
+        .get(operation_id)
+        .and_then(toml::Value::as_table)
+        .expect("Obsidian operation should exist");
+    operation
+        .get("network_constraints")
+        .and_then(toml::Value::as_table)
+        .expect("Obsidian operation should declare network_constraints")
+}
+
+fn string_array_field<'a>(
+    constraints: &'a toml::map::Map<String, toml::Value>,
+    field_name: &str,
+) -> Vec<&'a str> {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_array)
+        .expect("network_constraints field should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_str()
+                .expect("network_constraints array field should contain strings")
+        })
+        .collect()
+}
+
+fn integer_array_field(
+    constraints: &toml::map::Map<String, toml::Value>,
+    field_name: &str,
+) -> Vec<i64> {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_array)
+        .expect("network_constraints field should be an array")
+        .iter()
+        .map(|value| {
+            value
+                .as_integer()
+                .expect("network_constraints array field should contain integers")
+        })
+        .collect()
+}
+
+fn bool_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &str) -> bool {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_bool)
+        .expect("network_constraints field should be a bool")
+}
+
+fn integer_field(constraints: &toml::map::Map<String, toml::Value>, field_name: &str) -> i64 {
+    constraints
+        .get(field_name)
+        .and_then(toml::Value::as_integer)
+        .expect("network_constraints field should be an integer")
+}
 
 fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     HandshakeRequest {
@@ -43,11 +131,7 @@ fn handshake_req(host_public_key: [u8; 32]) -> HandshakeRequest {
     }
 }
 
-fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> CapabilityToken {
-    let capability = match op {
-        OP_NOTES_DELETE => "obsidian.write",
-        _ => panic!("unsupported Obsidian integration operation: {op}"),
-    };
+fn generate_delete_token(signing_key: &Ed25519SigningKey) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -57,16 +141,50 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &'static str) -> Ca
     let mut cbor = Vec::new();
     ciborium::into_writer(&constraints, &mut cbor).expect("serialize constraints");
     let raw = CapabilityTokenBuilder::new()
-        .capability_id(capability)
+        .capability_id("obsidian.write")
         .zone_id("z:work")
         .principal("user:test")
-        .operations(&[op])
+        .operations(&[OP_NOTES_DELETE])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
-        .constraints_cbor(&cbor)
+        .try_constraints_cbor(&cbor)
+        .expect("constraints CBOR should be accepted")
         .sign(signing_key)
         .expect("capability token signing should succeed");
     CapabilityToken::from_raw(raw)
+}
+
+#[test]
+fn manifest_declares_no_egress_network_constraints() {
+    let manifest = parsed_manifest();
+    let operations = manifest_operations(&manifest);
+
+    assert_eq!(operations.len(), OBSIDIAN_OPERATION_IDS.len());
+
+    for operation_id in OBSIDIAN_OPERATION_IDS {
+        let constraints = constraints_for(operations, operation_id);
+
+        assert_eq!(
+            string_array_field(constraints, "host_allow").as_slice(),
+            [NO_EGRESS_HOST],
+            "{operation_id} should be explicitly no-egress"
+        );
+        assert_eq!(
+            integer_array_field(constraints, "port_allow").as_slice(),
+            [0]
+        );
+        assert!(!bool_field(constraints, "require_sni"));
+        assert!(bool_field(constraints, "deny_localhost"));
+        assert!(bool_field(constraints, "deny_private_ranges"));
+        assert!(bool_field(constraints, "deny_tailnet_ranges"));
+        assert!(bool_field(constraints, "deny_ip_literals"));
+        assert!(bool_field(constraints, "require_host_canonicalization"));
+        assert_eq!(integer_field(constraints, "dns_max_ips"), 0);
+        assert_eq!(integer_field(constraints, "max_redirects"), 0);
+        assert_eq!(integer_field(constraints, "connect_timeout_ms"), 1000);
+        assert_eq!(integer_field(constraints, "total_timeout_ms"), 15_000);
+        assert_eq!(integer_field(constraints, "max_response_bytes"), 1_048_576);
+    }
 }
 
 fn invoke_req(
@@ -203,7 +321,7 @@ async fn invoke_delete_note_removes_target_file() {
         .invoke(invoke_req(
             OP_NOTES_DELETE,
             json!({ "path": note_path }),
-            generate_valid_token(&signing_key, OP_NOTES_DELETE),
+            generate_delete_token(&signing_key),
         ))
         .await
         .unwrap();

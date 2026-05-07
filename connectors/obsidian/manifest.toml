@@ -57,6 +57,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
 
+[provides.operations."obsidian.backlinks.get".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
 [provides.operations."obsidian.backlinks.get".input_schema]
 required = ["path"]
 type = "object"
@@ -87,6 +105,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."obsidian.health".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."obsidian.health".input_schema]
 type = "object"
@@ -122,6 +158,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."obsidian.notes.create".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."obsidian.notes.create".input_schema]
 required = [
@@ -167,6 +221,24 @@ safety_tier = "dangerous"
 requires_approval = "interactive"
 idempotency = "strict"
 
+[provides.operations."obsidian.notes.delete".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
 [provides.operations."obsidian.notes.delete".input_schema]
 required = ["path"]
 type = "object"
@@ -197,6 +269,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."obsidian.notes.get".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."obsidian.notes.get".input_schema]
 required = ["path"]
@@ -244,6 +334,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."obsidian.notes.list".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
 [provides.operations."obsidian.notes.list".input_schema]
 type = "object"
 
@@ -273,6 +381,24 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."obsidian.notes.update".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."obsidian.notes.update".input_schema]
 required = [
@@ -315,6 +441,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
 
+[provides.operations."obsidian.search".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
 [provides.operations."obsidian.search".input_schema]
 required = ["query"]
 type = "object"
@@ -345,6 +489,24 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "none"
+
+[provides.operations."obsidian.tags.list".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."obsidian.tags.list".input_schema]
 type = "object"

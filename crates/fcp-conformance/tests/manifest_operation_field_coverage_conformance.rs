@@ -58,7 +58,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "microsoft365",
     "nextcloud-talk",
     "nostr",
-    "obsidian",
     "openai",
     "plivo",
     "qq",

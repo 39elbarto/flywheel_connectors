@@ -119,7 +119,7 @@ impl BrowserConfig {
             .and_then(|v| v.as_str())
             .unwrap_or(DEFAULT_BROWSER_URL)
             .to_string();
-        validate_browser_control_plane_url(&browser_url)?;
+        validate_browser_control_endpoint_url(&browser_url)?;
 
         Ok(Self { auth, browser_url })
     }
@@ -2067,37 +2067,12 @@ fn browser_placement_profile() -> BrowserPlacementProfile {
     }
 }
 
-fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
+fn validate_browser_control_endpoint_url(browser_url: &str) -> FcpResult<()> {
     let parsed = reqwest::Url::parse(browser_url).map_err(|e| FcpError::InvalidRequest {
         code: 1003,
         message: format!("browser_url must be an absolute URL: {e}"),
     })?;
     let redacted_url = redact_browser_endpoint_url(&parsed);
-
-    if is_direct_cdp_websocket_endpoint(&parsed) {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!(
-                "browser_url points at a direct Chrome DevTools WebSocket endpoint ({redacted_url}); configure an FCP browser-control HTTP(S) endpoint"
-            ),
-        });
-    }
-
-    if matches!(parsed.scheme(), "ws" | "wss") {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!(
-                "browser_url must be an FCP browser-control HTTP(S) base URL, not a WebSocket endpoint ({redacted_url})"
-            ),
-        });
-    }
-
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: "browser_url scheme must be http or https".into(),
-        });
-    }
 
     if !parsed.username().is_empty() || parsed.password().is_some() {
         return Err(FcpError::InvalidRequest {
@@ -2120,15 +2095,6 @@ fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
         });
     }
 
-    if is_chrome_cdp_discovery_path(parsed.path()) {
-        return Err(FcpError::InvalidRequest {
-            code: 1003,
-            message: format!(
-                "browser_url points at a raw Chrome DevTools discovery endpoint ({redacted_url}); configure the FCP browser-control base URL"
-            ),
-        });
-    }
-
     let host = parsed.host_str().ok_or(FcpError::InvalidRequest {
         code: 1003,
         message: "browser_url must include a host".into(),
@@ -2137,6 +2103,61 @@ fn validate_browser_control_plane_url(browser_url: &str) -> FcpResult<()> {
     if !is_browser_control_host_allowlisted(host) {
         return Err(FcpError::ResourceNotAllowed {
             resource: format!("browser.control_plane.host:{host}"),
+        });
+    }
+
+    if matches!(parsed.scheme(), "ws" | "wss") {
+        if parsed.scheme() == "wss" {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "direct Chrome DevTools WebSocket browser_url must use ws:// loopback transport until TLS WebSocket support is wired ({redacted_url})"
+                ),
+            });
+        }
+
+        if !is_direct_cdp_page_websocket_endpoint(&parsed) {
+            let message = if is_direct_cdp_websocket_endpoint(&parsed) {
+                format!(
+                    "direct Chrome DevTools WebSocket browser_url must target a page endpoint under /devtools/page/<target-id> ({redacted_url})"
+                )
+            } else {
+                format!(
+                    "browser_url WebSocket endpoints must be direct Chrome DevTools page endpoints under /devtools/page/<target-id> ({redacted_url})"
+                )
+            };
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message,
+            });
+        }
+
+        if !is_loopback_host(host) {
+            return Err(FcpError::InvalidRequest {
+                code: 1003,
+                message: format!(
+                    "direct Chrome DevTools WebSocket browser_url must use a loopback host (got host '{host}')"
+                ),
+            });
+        }
+
+        return Ok(());
+    }
+
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "browser_url scheme must be http, https, or ws for loopback direct Chrome DevTools page endpoints"
+                .into(),
+        });
+    }
+
+    if is_chrome_cdp_discovery_path(parsed.path()) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!(
+                "browser_url points at a raw Chrome DevTools discovery endpoint ({redacted_url}); configure the FCP browser-control base URL"
+            ),
         });
     }
 
@@ -2181,6 +2202,26 @@ fn is_direct_cdp_websocket_endpoint(parsed: &reqwest::Url) -> bool {
     ) {
         return false;
     }
+    let Some(target_id) = segments.next() else {
+        return false;
+    };
+    !target_id.is_empty() && segments.next().is_none()
+}
+
+fn is_direct_cdp_page_websocket_endpoint(parsed: &reqwest::Url) -> bool {
+    if !matches!(parsed.scheme(), "ws" | "wss") {
+        return false;
+    }
+
+    let Some(mut segments) = parsed.path_segments() else {
+        return false;
+    };
+    let Some("devtools") = segments.next() else {
+        return false;
+    };
+    let Some("page") = segments.next() else {
+        return false;
+    };
     let Some(target_id) = segments.next() else {
         return false;
     };
@@ -2686,20 +2727,78 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
-    async fn test_configure_rejects_direct_cdp_websocket_url() {
+    async fn test_configure_accepts_loopback_direct_cdp_page_websocket_url() {
+        let mut connector = BrowserConnector::new();
+        connector
+            .handle_configure(json!({
+                "browser_url": "ws://localhost:9222/devtools/page/target-1"
+            }))
+            .await
+            .unwrap();
+
+        let health = connector.handle_health().await.unwrap();
+        assert_eq!(
+            health["browser_url"],
+            "ws://localhost:9222/devtools/page/target-1"
+        );
+        assert_eq!(health["network_guard"]["allowlisted"], true);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_unsupported_direct_cdp_websocket_urls() {
+        for (browser_url, expected) in [
+            (
+                "wss://localhost:9222/devtools/page/target-1",
+                "must use ws:// loopback",
+            ),
+            (
+                "ws://control.browser.flywheel.internal:9222/devtools/page/target-1",
+                "must use a loopback host",
+            ),
+            (
+                "ws://localhost:9222/devtools/browser/browser-1",
+                "must target a page endpoint",
+            ),
+            (
+                "ws://localhost:9222/devtools/service_worker/sw-1",
+                "must target a page endpoint",
+            ),
+            (
+                "ws://localhost:9222/fcp-control",
+                "must be direct Chrome DevTools page endpoints",
+            ),
+        ] {
+            let mut connector = BrowserConnector::new();
+            let result = connector
+                .handle_configure(json!({ "browser_url": browser_url }))
+                .await;
+            assert!(result.is_err(), "{browser_url} should be rejected");
+            match result.unwrap_err() {
+                FcpError::InvalidRequest { message, .. } => {
+                    assert!(
+                        message.contains(expected),
+                        "{browser_url} should fail with {expected}, got {message}"
+                    );
+                }
+                e => panic!("Expected InvalidRequest, got: {e:?}"),
+            }
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_disallowed_direct_cdp_host() {
         let mut connector = BrowserConnector::new();
         let result = connector
             .handle_configure(json!({
-                "browser_url": "ws://localhost:9222/devtools/page/target-1"
+                "browser_url": "ws://evil.example.net:9222/devtools/page/target-1"
             }))
             .await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("direct Chrome DevTools WebSocket"));
-                assert!(message.contains("ws://localhost:9222/devtools/page/target-1"));
+            FcpError::ResourceNotAllowed { resource } => {
+                assert!(resource.contains("browser.control_plane.host"));
             }
-            e => panic!("Expected InvalidRequest, got: {e:?}"),
+            e => panic!("Expected ResourceNotAllowed, got: {e:?}"),
         }
     }
 
@@ -2716,6 +2815,18 @@ mod tests {
             ),
             (
                 "https://control.browser.flywheel.internal:9222#private-value",
+                "must not include a URL fragment",
+            ),
+            (
+                "ws://user:private-value@localhost:9222/devtools/page/target-1",
+                "must not include userinfo",
+            ),
+            (
+                "ws://localhost:9222/devtools/page/target-1?token=private-value",
+                "must not include query parameters",
+            ),
+            (
+                "ws://localhost:9222/devtools/page/target-1#private-value",
                 "must not include a URL fragment",
             ),
         ] {
@@ -2740,16 +2851,24 @@ mod tests {
         let direct =
             reqwest::Url::parse("wss://localhost:9222/devtools/browser/browser-target").unwrap();
         assert!(is_direct_cdp_websocket_endpoint(&direct));
+        assert!(!is_direct_cdp_page_websocket_endpoint(&direct));
+
+        let page = reqwest::Url::parse("ws://localhost:9222/devtools/page/page-target").unwrap();
+        assert!(is_direct_cdp_websocket_endpoint(&page));
+        assert!(is_direct_cdp_page_websocket_endpoint(&page));
 
         let worker =
             reqwest::Url::parse("ws://localhost:9222/devtools/service_worker/sw-target").unwrap();
         assert!(is_direct_cdp_websocket_endpoint(&worker));
+        assert!(!is_direct_cdp_page_websocket_endpoint(&worker));
 
         let missing_target = reqwest::Url::parse("ws://localhost:9222/devtools/page/").unwrap();
         assert!(!is_direct_cdp_websocket_endpoint(&missing_target));
+        assert!(!is_direct_cdp_page_websocket_endpoint(&missing_target));
 
         let non_cdp_ws = reqwest::Url::parse("ws://localhost:9222/fcp-control").unwrap();
         assert!(!is_direct_cdp_websocket_endpoint(&non_cdp_ws));
+        assert!(!is_direct_cdp_page_websocket_endpoint(&non_cdp_ws));
     }
 
     #[test]

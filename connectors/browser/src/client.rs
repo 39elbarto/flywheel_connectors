@@ -9,9 +9,9 @@ use std::time::Duration;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use fcp_async_core::{
-    Cx,
+    AsyncError, Cx,
     net::TcpStream,
-    websocket::{Message as WebSocketMessage, WebSocket, WsError},
+    websocket::{Message as WebSocketMessage, WebSocket, WebSocketConfig, WsError, WsUrl},
 };
 use fcp_prelude::CredentialId;
 use fcp_sdk::migration::{
@@ -58,6 +58,17 @@ struct BrowserControlOperation {
     timeout_ms: u64,
     target_policy: BrowserTargetPolicy,
     implementation: BrowserControlImplementation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectCdpEndpoint {
+    url: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum BrowserControlEndpoint {
+    FcpControlPlane,
+    DirectCdp(DirectCdpEndpoint),
 }
 
 impl BrowserControlOperation {
@@ -217,6 +228,58 @@ impl BrowserControlImplementation {
     }
 }
 
+fn browser_control_endpoint_for_url(url: &str) -> BrowserResult<BrowserControlEndpoint> {
+    if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        return Ok(BrowserControlEndpoint::FcpControlPlane);
+    }
+
+    let parsed = WsUrl::parse(url).map_err(|err| {
+        BrowserError::InvalidConfig(format!(
+            "invalid direct Chrome DevTools WebSocket URL: {err}"
+        ))
+    })?;
+    let authority = url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split('/').next())
+        .unwrap_or_default();
+    if authority.contains('@') {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URL must not contain userinfo".into(),
+        ));
+    }
+    if parsed.tls {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URLs must use ws:// until the asupersync TLS WebSocket transport is wired"
+                .into(),
+        ));
+    }
+    if parsed.path.contains('?') || parsed.path.contains('#') {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools WebSocket URL must not contain query strings or fragments"
+                .into(),
+        ));
+    }
+    let target_id = parsed
+        .path
+        .strip_prefix("/devtools/page/")
+        .filter(|target_id| !target_id.is_empty())
+        .ok_or_else(|| {
+            BrowserError::InvalidConfig(
+                "direct Chrome DevTools WebSocket URL must target a page endpoint under /devtools/page/<target-id>"
+                    .into(),
+            )
+        })?;
+    if target_id.contains('/') {
+        return Err(BrowserError::InvalidConfig(
+            "direct Chrome DevTools page target id must be a single path segment".into(),
+        ));
+    }
+
+    Ok(BrowserControlEndpoint::DirectCdp(DirectCdpEndpoint {
+        url: url.to_string(),
+    }))
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 struct CdpCommand {
     id: u64,
@@ -243,6 +306,24 @@ impl CdpCommand {
 struct CdpNavigateResponse {
     frame_id: String,
     loader_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CdpNavigationWait {
+    DomContentLoaded,
+    Load,
+    NetworkIdle,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CdpNavigationCompletion {
+    status: Option<u16>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CdpEvent {
+    method: String,
+    params: serde_json::Value,
 }
 
 impl CdpNavigateResponse {
@@ -281,6 +362,47 @@ impl CdpNavigateResponse {
             frame_id,
             loader_id,
         })
+    }
+}
+
+impl CdpNavigationWait {
+    fn from_wait_until(wait_until: Option<&str>) -> BrowserResult<Self> {
+        let Some(wait_until) = wait_until else {
+            return Ok(Self::Load);
+        };
+        match wait_until.to_ascii_lowercase().as_str() {
+            "domcontentloaded" | "dom_content_loaded" => Ok(Self::DomContentLoaded),
+            "load" => Ok(Self::Load),
+            "networkidle" | "network_idle" => Ok(Self::NetworkIdle),
+            other => Err(BrowserError::InvalidConfig(format!(
+                "direct Chrome DevTools navigation wait_until must be domcontentloaded, load, or networkidle, got `{other}`"
+            ))),
+        }
+    }
+
+    fn matches_event(self, event: &CdpEvent, navigation: &CdpNavigateResponse) -> bool {
+        match event.method.as_str() {
+            "Page.domContentEventFired" => {
+                self == Self::DomContentLoaded
+                    && cdp_event_matches_navigation_frame(&event.params, navigation)
+            }
+            "Page.loadEventFired" => {
+                self == Self::Load && cdp_event_matches_navigation_frame(&event.params, navigation)
+            }
+            "Page.lifecycleEvent" => {
+                cdp_event_matches_navigation_frame(&event.params, navigation)
+                    && event
+                        .params
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|name| match self {
+                            Self::DomContentLoaded => name == "DOMContentLoaded",
+                            Self::Load => name == "load",
+                            Self::NetworkIdle => name == "networkIdle",
+                        })
+            }
+            _ => false,
+        }
     }
 }
 
@@ -1220,6 +1342,91 @@ fn cookie_matches_domain_filter(cookie_domain: Option<&str>, domain_filter: Opti
             .is_some_and(|prefix| prefix.ends_with('.'))
 }
 
+fn decode_cdp_event_message(message: WebSocketMessage) -> BrowserResult<Option<CdpEvent>> {
+    match message {
+        WebSocketMessage::Text(text) => decode_cdp_event_text(&text),
+        WebSocketMessage::Binary(_) => Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol event must be UTF-8 text JSON".into(),
+            status_code: None,
+        }),
+        WebSocketMessage::Close(_) => Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol connection closed before event stream completed"
+                .into(),
+            status_code: None,
+        }),
+        WebSocketMessage::Ping(_) | WebSocketMessage::Pong(_) => Ok(None),
+    }
+}
+
+fn decode_cdp_event_text(text: &str) -> BrowserResult<Option<CdpEvent>> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let Some(method) = value.get("method").and_then(serde_json::Value::as_str) else {
+        return Ok(None);
+    };
+    let params = value
+        .get("params")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Ok(Some(CdpEvent {
+        method: method.to_string(),
+        params,
+    }))
+}
+
+fn cdp_event_matches_navigation_frame(
+    params: &serde_json::Value,
+    navigation: &CdpNavigateResponse,
+) -> bool {
+    if let Some(frame_id) = params.get("frameId").and_then(serde_json::Value::as_str)
+        && frame_id != navigation.frame_id
+    {
+        return false;
+    }
+    if let Some(expected_loader_id) = navigation.loader_id.as_deref()
+        && let Some(loader_id) = params.get("loaderId").and_then(serde_json::Value::as_str)
+        && loader_id != expected_loader_id
+    {
+        return false;
+    }
+    true
+}
+
+fn cdp_navigation_response_status(
+    event: &CdpEvent,
+    navigation: &CdpNavigateResponse,
+) -> BrowserResult<Option<u16>> {
+    if event.method != "Network.responseReceived" {
+        return Ok(None);
+    }
+    if !cdp_event_matches_navigation_frame(&event.params, navigation) {
+        return Ok(None);
+    }
+    if event.params.get("type").and_then(serde_json::Value::as_str) != Some("Document") {
+        return Ok(None);
+    }
+
+    let Some(status) = event
+        .params
+        .pointer("/response/status")
+        .and_then(serde_json::Value::as_u64)
+    else {
+        return Err(BrowserError::Api {
+            message: "Chrome DevTools Protocol Network.responseReceived document event is missing response.status"
+                .into(),
+            status_code: None,
+        });
+    };
+    let status = u16::try_from(status).map_err(|_| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol Network.responseReceived status {status} exceeds u16"
+        ),
+        status_code: None,
+    })?;
+
+    Ok(Some(status))
+}
+
 #[async_trait::async_trait]
 trait CdpCommandTransport {
     async fn send_cdp_message(&mut self, cx: &Cx, message: WebSocketMessage) -> BrowserResult<()>;
@@ -1290,6 +1497,45 @@ fn cdp_websocket_error(error: &WsError) -> BrowserError {
     }
 }
 
+fn direct_cdp_context_error(operation: &str, error: AsyncError) -> BrowserError {
+    match error {
+        AsyncError::Timeout { timeout_ms } => BrowserError::Api {
+            message: format!(
+                "Chrome DevTools Protocol direct {operation} exceeded {timeout_ms}ms timeout"
+            ),
+            status_code: Some(408),
+        },
+        AsyncError::Cancelled => BrowserError::Api {
+            message: format!("Chrome DevTools Protocol direct {operation} was cancelled"),
+            status_code: None,
+        },
+        other => BrowserError::Api {
+            message: format!("Chrome DevTools Protocol direct {operation} failed: {other}"),
+            status_code: None,
+        },
+    }
+}
+
+async fn connect_direct_cdp_session(
+    cx: &Cx,
+    endpoint: &DirectCdpEndpoint,
+    timeout: Duration,
+    max_response_bytes: usize,
+) -> BrowserResult<CdpSession<WebSocket<TcpStream>>> {
+    let config = WebSocketConfig::new()
+        .connect_timeout(Some(timeout))
+        .max_frame_size(max_response_bytes)
+        .max_message_size(max_response_bytes)
+        .ping_interval(None);
+    let websocket = WebSocket::connect_with_config(cx, &endpoint.url, config)
+        .await
+        .map_err(|err| BrowserError::Api {
+            message: format!("Chrome DevTools Protocol WebSocket connect failed: {err}"),
+            status_code: None,
+        })?;
+    Ok(CdpSession::new(websocket))
+}
+
 struct CdpSession<T> {
     transport: T,
     next_command_id: u64,
@@ -1324,6 +1570,12 @@ where
     ) -> BrowserResult<CdpNavigateResponse> {
         self.call_method(cx, "Page.enable", None).await?;
         self.call_method(cx, "Network.enable", None).await?;
+        self.call_method(
+            cx,
+            "Page.setLifecycleEventsEnabled",
+            Some(serde_json::json!({ "enabled": true })),
+        )
+        .await?;
 
         if let Some(user_agent) = user_agent {
             self.call_method(
@@ -1338,6 +1590,46 @@ where
             .call_method(cx, "Page.navigate", Some(serde_json::json!({ "url": url })))
             .await?;
         CdpNavigateResponse::from_result(&result)
+    }
+
+    async fn wait_for_navigation(
+        &mut self,
+        cx: &Cx,
+        navigation: &CdpNavigateResponse,
+        wait_until: Option<&str>,
+    ) -> BrowserResult<CdpNavigationCompletion> {
+        let wait = CdpNavigationWait::from_wait_until(wait_until)?;
+        let mut status = None;
+
+        loop {
+            cx.checkpoint().map_err(|err| BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol navigation wait cancelled for frame {}: {err}",
+                    navigation.frame_id
+                ),
+                status_code: None,
+            })?;
+
+            let Some(message) = self.transport.recv_cdp_message(cx).await? else {
+                return Err(BrowserError::Api {
+                    message: format!(
+                        "Chrome DevTools Protocol connection closed before navigation completed for frame {}",
+                        navigation.frame_id
+                    ),
+                    status_code: None,
+                });
+            };
+
+            let Some(event) = decode_cdp_event_message(message)? else {
+                continue;
+            };
+            if let Some(response_status) = cdp_navigation_response_status(&event, navigation)? {
+                status = Some(response_status);
+            }
+            if wait.matches_event(&event, navigation) {
+                return Ok(CdpNavigationCompletion { status });
+            }
+        }
     }
 
     async fn evaluate_expression(
@@ -1738,6 +2030,7 @@ const WORKER_NAVIGATE: BrowserControlOperation = BrowserControlOperation {
         methods: &[
             "Page.enable",
             "Network.enable",
+            "Page.setLifecycleEventsEnabled",
             "Network.setUserAgentOverride",
             "Page.navigate",
         ],
@@ -2128,6 +2421,10 @@ impl BrowserClient {
 
     /// Lightweight connectivity probe for the FCP browser-control plane.
     pub async fn health_check(&self) -> BrowserResult<()> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_health_check(&endpoint).await;
+        }
+
         let url = format!("{}/health", self.browser_url);
         let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
         match self
@@ -2171,6 +2468,271 @@ impl BrowserClient {
         self
     }
 
+    fn control_endpoint(&self) -> BrowserResult<BrowserControlEndpoint> {
+        browser_control_endpoint_for_url(&self.browser_url)
+    }
+
+    async fn direct_cdp_health_check(&self, endpoint: &DirectCdpEndpoint) -> BrowserResult<()> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_SHORT);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_SMALL)
+                    .await?;
+            session.evaluate_expression(&cx, "1").await.map(|_| ())
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("health_check", err))?
+    }
+
+    async fn direct_cdp_navigate(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        url: &str,
+        wait_until: Option<&str>,
+        timeout_ms: Option<u64>,
+        user_agent: Option<&str>,
+    ) -> BrowserResult<NavigateResult> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            let navigation = session.navigate_page(&cx, url, user_agent).await?;
+            let completion = session
+                .wait_for_navigation(&cx, &navigation, wait_until)
+                .await?;
+            let title = session
+                .evaluate_expression(&cx, "document.title")
+                .await?
+                .result;
+            Ok(NavigateResult {
+                url: url.to_string(),
+                status: completion.status.unwrap_or(0),
+                title: (!title.is_empty()).then_some(title),
+            })
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("navigate", err))?
+    }
+
+    async fn direct_cdp_screenshot(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        selector: Option<&str>,
+        full_page: Option<bool>,
+        format: Option<&str>,
+        quality: Option<u32>,
+    ) -> BrowserResult<ScreenshotResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_CAPTURE)
+                    .await?;
+            let response = session
+                .capture_screenshot(&cx, selector, full_page.unwrap_or(false), format, quality)
+                .await?;
+            Ok(ScreenshotResult {
+                image_data: response.image_data,
+                width: response.width,
+                height: response.height,
+            })
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("screenshot", err))?
+    }
+
+    async fn direct_cdp_render_pdf(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        format: Option<&str>,
+        landscape: Option<bool>,
+        print_background: Option<bool>,
+    ) -> BrowserResult<PdfResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_CAPTURE);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_CAPTURE)
+                    .await?;
+            let response = session
+                .render_pdf(&cx, format, landscape, print_background)
+                .await?;
+            Ok(PdfResult {
+                pdf_data: response.pdf_data,
+                page_count: response.page_count,
+            })
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("render_pdf", err))?
+    }
+
+    async fn direct_cdp_extract_text(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        selector: Option<&str>,
+        include_hidden: Option<bool>,
+    ) -> BrowserResult<TextResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session.extract_text(&cx, selector, include_hidden).await
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("extract_text", err))?
+    }
+
+    async fn direct_cdp_extract_links(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        selector: Option<&str>,
+    ) -> BrowserResult<LinksResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session.extract_links(&cx, selector).await
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("extract_links", err))?
+    }
+
+    async fn direct_cdp_wait_for_selector(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        selector: &str,
+        state: Option<&str>,
+        timeout_ms: Option<u64>,
+    ) -> BrowserResult<WaitResult> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session
+                .wait_for_selector(&cx, selector, state, timeout_ms)
+                .await
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("wait_for_selector", err))?
+    }
+
+    async fn direct_cdp_click(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        selector: &str,
+        timeout_ms: Option<u64>,
+    ) -> BrowserResult<ClickResult> {
+        let timeout = Duration::from_millis(timeout_ms.unwrap_or(CONTROL_TIMEOUT_MS_STANDARD));
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session.click(&cx, selector, timeout_ms).await
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("click", err))?
+    }
+
+    async fn direct_cdp_fill_form(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        fields: &serde_json::Value,
+        submit_selector: Option<&str>,
+    ) -> BrowserResult<FormResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session.fill_form(&cx, fields, submit_selector).await
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("fill_form", err))?
+    }
+
+    async fn direct_cdp_evaluate_js(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        expression: &str,
+    ) -> BrowserResult<JsResult> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            let response = session.evaluate_expression(&cx, expression).await?;
+            Ok(JsResult {
+                result: response.result,
+            })
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("evaluate_js", err))?
+    }
+
+    async fn direct_cdp_get_cookies(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        domain: Option<&str>,
+    ) -> BrowserResult<Vec<Cookie>> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session
+                .get_cookies(&cx, domain)
+                .await
+                .map(|response| response.cookies)
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("get_cookies", err))?
+    }
+
+    async fn direct_cdp_set_cookies(
+        &self,
+        endpoint: &DirectCdpEndpoint,
+        cookies: &[Cookie],
+    ) -> BrowserResult<u32> {
+        let timeout = Duration::from_millis(CONTROL_TIMEOUT_MS_STANDARD);
+        let ctx = self.request_context_for_timeout(timeout);
+        ctx.run(async {
+            let cx = fcp_async_core::compatibility_cx();
+            let mut session =
+                connect_direct_cdp_session(&cx, endpoint, timeout, CONTROL_RESPONSE_BYTES_STANDARD)
+                    .await?;
+            session
+                .set_cookies(&cx, cookies)
+                .await
+                .map(|response| response.set_count)
+        })
+        .await
+        .map_err(|err| direct_cdp_context_error("set_cookies", err))?
+    }
+
     // -- Navigation --
 
     /// Navigate to a URL.
@@ -2181,6 +2743,12 @@ impl BrowserClient {
         timeout_ms: Option<u64>,
         user_agent: Option<&str>,
     ) -> BrowserResult<NavigateResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_navigate(&endpoint, url, wait_until, timeout_ms, user_agent)
+                .await;
+        }
+
         let mut body = serde_json::json!({ "url": url });
         if let Some(w) = wait_until {
             body["wait_until"] = serde_json::Value::String(w.to_string());
@@ -2205,6 +2773,12 @@ impl BrowserClient {
         format: Option<&str>,
         quality: Option<u32>,
     ) -> BrowserResult<ScreenshotResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_screenshot(&endpoint, selector, full_page, format, quality)
+                .await;
+        }
+
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -2231,6 +2805,12 @@ impl BrowserClient {
         landscape: Option<bool>,
         print_background: Option<bool>,
     ) -> BrowserResult<PdfResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_render_pdf(&endpoint, format, landscape, print_background)
+                .await;
+        }
+
         let mut body = serde_json::json!({});
         if let Some(f) = format {
             body["format"] = serde_json::Value::String(f.to_string());
@@ -2253,6 +2833,12 @@ impl BrowserClient {
         selector: Option<&str>,
         include_hidden: Option<bool>,
     ) -> BrowserResult<TextResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_extract_text(&endpoint, selector, include_hidden)
+                .await;
+        }
+
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -2266,6 +2852,10 @@ impl BrowserClient {
 
     /// Extract links from the page.
     pub async fn extract_links(&self, selector: Option<&str>) -> BrowserResult<LinksResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_extract_links(&endpoint, selector).await;
+        }
+
         let mut body = serde_json::json!({});
         if let Some(s) = selector {
             body["selector"] = serde_json::Value::String(s.to_string());
@@ -2283,6 +2873,12 @@ impl BrowserClient {
         state: Option<&str>,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<WaitResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_wait_for_selector(&endpoint, selector, state, timeout_ms)
+                .await;
+        }
+
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(s) = state {
             body["state"] = serde_json::Value::String(s.to_string());
@@ -2302,6 +2898,10 @@ impl BrowserClient {
         selector: &str,
         timeout_ms: Option<u64>,
     ) -> BrowserResult<ClickResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_click(&endpoint, selector, timeout_ms).await;
+        }
+
         let mut body = serde_json::json!({ "selector": selector });
         if let Some(t) = timeout_ms {
             body["timeout_ms"] = serde_json::Value::Number(t.into());
@@ -2316,6 +2916,12 @@ impl BrowserClient {
         fields: &serde_json::Value,
         submit_selector: Option<&str>,
     ) -> BrowserResult<FormResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self
+                .direct_cdp_fill_form(&endpoint, fields, submit_selector)
+                .await;
+        }
+
         let mut body = serde_json::json!({ "fields": fields });
         if let Some(ss) = submit_selector {
             body["submit_selector"] = serde_json::Value::String(ss.to_string());
@@ -2328,6 +2934,10 @@ impl BrowserClient {
 
     /// Evaluate JavaScript in the page context.
     pub async fn evaluate_js(&self, expression: &str) -> BrowserResult<JsResult> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_evaluate_js(&endpoint, expression).await;
+        }
+
         let body = serde_json::json!({ "expression": expression });
         let data = self.post_json(WORKER_EVALUATE_JS, &body).await?;
         Ok(serde_json::from_value(data)?)
@@ -2337,6 +2947,10 @@ impl BrowserClient {
 
     /// Get cookies.
     pub async fn get_cookies(&self, domain: Option<&str>) -> BrowserResult<Vec<Cookie>> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_get_cookies(&endpoint, domain).await;
+        }
+
         let mut body = serde_json::json!({});
         if let Some(d) = domain {
             body["domain"] = serde_json::Value::String(d.to_string());
@@ -2352,6 +2966,10 @@ impl BrowserClient {
 
     /// Set cookies.
     pub async fn set_cookies(&self, cookies: &[Cookie]) -> BrowserResult<u32> {
+        if let BrowserControlEndpoint::DirectCdp(endpoint) = self.control_endpoint()? {
+            return self.direct_cdp_set_cookies(&endpoint, cookies).await;
+        }
+
         let body = serde_json::json!({ "cookies": cookies });
         let data = self.post_json(WORKER_SET_COOKIES, &body).await?;
         let count = data.get("set_count").and_then(|v| v.as_u64()).unwrap_or(0);
@@ -2362,6 +2980,13 @@ impl BrowserClient {
 
     /// Configure outbound proxy for browser traffic.
     pub async fn set_proxy(&self, proxy: &ProxyConfig) -> BrowserResult<ProxyResult> {
+        if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
+            return Err(BrowserError::InvalidConfig(
+                "browser.set_proxy requires the fcp-browser-control worker policy path; direct CDP WebSocket mode cannot reconfigure browser launch proxy"
+                    .into(),
+            ));
+        }
+
         let body = serde_json::to_value(proxy)?;
         let data = self.post_json(WORKER_SET_PROXY, &body).await?;
         Ok(serde_json::from_value(data)?)
@@ -2369,6 +2994,13 @@ impl BrowserClient {
 
     /// Clear outbound proxy configuration.
     pub async fn clear_proxy(&self) -> BrowserResult<ProxyResult> {
+        if let BrowserControlEndpoint::DirectCdp(_) = self.control_endpoint()? {
+            return Err(BrowserError::InvalidConfig(
+                "browser.clear_proxy requires the fcp-browser-control worker policy path; direct CDP WebSocket mode cannot reconfigure browser launch proxy"
+                    .into(),
+            ));
+        }
+
         let data = self
             .post_json(WORKER_CLEAR_PROXY, &serde_json::json!({}))
             .await?;
@@ -2910,6 +3542,88 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_direct_cdp_endpoint_accepts_page_websocket_url() {
+        let endpoint =
+            browser_control_endpoint_for_url("ws://127.0.0.1:9222/devtools/page/page-1").unwrap();
+
+        assert_eq!(
+            endpoint,
+            BrowserControlEndpoint::DirectCdp(DirectCdpEndpoint {
+                url: "ws://127.0.0.1:9222/devtools/page/page-1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn test_direct_cdp_endpoint_rejects_unsafe_or_unsupported_urls() {
+        for (url, expected) in [
+            (
+                "wss://127.0.0.1:9222/devtools/page/page-1",
+                "must use ws://",
+            ),
+            (
+                "ws://user:pass@127.0.0.1:9222/devtools/page/page-1",
+                "must not contain userinfo",
+            ),
+            (
+                "ws://127.0.0.1:9222/devtools/page/page-1?token=secret",
+                "must not contain query",
+            ),
+            (
+                "ws://127.0.0.1:9222/devtools/browser/browser-1",
+                "must target a page endpoint",
+            ),
+            (
+                "ws://127.0.0.1:9222/devtools/page/",
+                "must target a page endpoint",
+            ),
+        ] {
+            let error = browser_control_endpoint_for_url(url).unwrap_err();
+            assert!(
+                format!("{error}").contains(expected),
+                "{url} should fail with {expected}, got {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_http_browser_url_remains_fcp_control_plane_endpoint() {
+        let endpoint = browser_control_endpoint_for_url("http://127.0.0.1:9222").unwrap();
+
+        assert_eq!(endpoint, BrowserControlEndpoint::FcpControlPlane);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_proxy_operations_fail_closed_before_network() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url("ws://127.0.0.1:9222/devtools/page/page-1");
+        let proxy = ProxyConfig {
+            server: "http://proxy.example.test:8080".to_string(),
+            bypass_list: None,
+            username: None,
+            password: None,
+        };
+
+        let set_error = client.set_proxy(&proxy).await.unwrap_err();
+        let clear_error = client.clear_proxy().await.unwrap_err();
+
+        assert!(format!("{set_error}").contains("worker policy path"));
+        assert!(format!("{clear_error}").contains("worker policy path"));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_direct_cdp_health_rejects_invalid_endpoint_before_network() {
+        let client = BrowserClient::new(None)
+            .unwrap()
+            .with_browser_url("ws://127.0.0.1:9222/json/version");
+
+        let error = client.health_check().await.unwrap_err();
+
+        assert!(format!("{error}").contains("must target a page endpoint"));
+    }
+
     #[fcp_async_core::runtime::test]
     async fn test_health_check_accepts_fcp_browser_control_plane() {
         let mock_server = MockServer::start().await;
@@ -2982,6 +3696,7 @@ mod tests {
             serde_json::json!([
                 "Page.enable",
                 "Network.enable",
+                "Page.setLifecycleEventsEnabled",
                 "Network.setUserAgentOverride",
                 "Page.navigate"
             ])
@@ -3180,6 +3895,33 @@ mod tests {
     }
 
     #[test]
+    fn test_cdp_event_decoder_extracts_methods_and_ignores_command_responses() {
+        let event = decode_cdp_event_message(WebSocketMessage::Text(
+            r#"{"method":"Page.lifecycleEvent","params":{"name":"networkIdle"}}"#.into(),
+        ))
+        .unwrap();
+        let command_response =
+            decode_cdp_event_message(WebSocketMessage::Text(r#"{"id":7,"result":{}}"#.into()))
+                .unwrap();
+
+        assert_eq!(
+            event,
+            Some(CdpEvent {
+                method: "Page.lifecycleEvent".to_string(),
+                params: serde_json::json!({ "name": "networkIdle" }),
+            })
+        );
+        assert_eq!(command_response, None);
+    }
+
+    #[test]
+    fn test_cdp_navigation_wait_rejects_unsupported_wait_until() {
+        let error = CdpNavigationWait::from_wait_until(Some("commit")).unwrap_err();
+
+        assert!(format!("{error}").contains("wait_until"));
+    }
+
+    #[test]
     fn test_cdp_response_decoder_redacts_error_payloads() {
         let err = decode_cdp_response_message(
             WebSocketMessage::Text(
@@ -3325,8 +4067,9 @@ mod tests {
             WebSocketMessage::Text(r#"{"id":1,"result":{}}"#.into()),
             WebSocketMessage::Text(r#"{"id":2,"result":{}}"#.into()),
             WebSocketMessage::Text(r#"{"id":3,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":4,"result":{}}"#.into()),
             WebSocketMessage::Text(
-                r#"{"id":4,"result":{"frameId":"frame-1","loaderId":"loader-1"}}"#.into(),
+                r#"{"id":5,"result":{"frameId":"frame-1","loaderId":"loader-1"}}"#.into(),
             ),
         ]));
 
@@ -3343,7 +4086,7 @@ mod tests {
                 loader_id: Some("loader-1".to_string()),
             }
         );
-        assert_eq!(transport.sent.len(), 4);
+        assert_eq!(transport.sent.len(), 5);
         assert!(matches!(
             &transport.sent[0],
             WebSocketMessage::Text(text) if text == r#"{"id":1,"method":"Page.enable"}"#
@@ -3355,13 +4098,61 @@ mod tests {
         assert!(matches!(
             &transport.sent[2],
             WebSocketMessage::Text(text)
-                if text == r#"{"id":3,"method":"Network.setUserAgentOverride","params":{"userAgent":"FCP Browser/1.0"}}"#
+                if text == r#"{"id":3,"method":"Page.setLifecycleEventsEnabled","params":{"enabled":true}}"#
         ));
         assert!(matches!(
             &transport.sent[3],
             WebSocketMessage::Text(text)
-                if text == r#"{"id":4,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+                if text == r#"{"id":4,"method":"Network.setUserAgentOverride","params":{"userAgent":"FCP Browser/1.0"}}"#
         ));
+        assert!(matches!(
+            &transport.sent[4],
+            WebSocketMessage::Text(text)
+                if text == r#"{"id":5,"method":"Page.navigate","params":{"url":"https://example.com"}}"#
+        ));
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_wait_for_navigation_captures_document_status() {
+        let cx = fcp_async_core::compatibility_cx();
+        let navigation = CdpNavigateResponse {
+            frame_id: "frame-1".to_string(),
+            loader_id: Some("loader-1".to_string()),
+        };
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Network.responseReceived",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-1",
+                        "type": "Document",
+                        "response": { "status": 201 }
+                    }
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "method": "Page.lifecycleEvent",
+                    "params": {
+                        "frameId": "frame-1",
+                        "loaderId": "loader-1",
+                        "name": "networkIdle"
+                    }
+                })
+                .to_string(),
+            ),
+        ]));
+
+        let completion = session
+            .wait_for_navigation(&cx, &navigation, Some("networkidle"))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(completion, CdpNavigationCompletion { status: Some(201) });
+        assert!(transport.sent.is_empty());
     }
 
     #[test]

@@ -12,6 +12,7 @@ tailscale_tag = "tag:fcp-work"
 
 [capabilities]
 required = ["network.dns", "network.outbound"]
+optional = ["teams.read", "teams.write"]
 forbidden = ["system.exec", "system.privileged"]
 
 [sandbox]
@@ -170,6 +171,539 @@ id = "teams.ingest_activity"
 
 [[operations]]
 id = "teams.get_conversation_state"
+
+[provides.operations."teams.list_teams"]
+description = "Lists teams the authenticated user has joined"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.list_teams".input_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."teams.list_teams".output_schema]
+type = "object"
+
+[provides.operations."teams.list_teams".output_schema.properties.teams]
+type = "array"
+
+[provides.operations."teams.list_teams".output_schema.properties.teams.items]
+type = "object"
+
+[provides.operations."teams.list_teams".ai_hints]
+when_to_use = "When you need to discover which Teams the user belongs to."
+common_mistakes = ["Requires delegated Microsoft Graph permissions such as Team.ReadBasic.All."]
+examples = ['{}']
+related = ["teams.list_channels"]
+
+[provides.operations."teams.get_team"]
+description = "Retrieves details of a specific team by ID"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.get_team".input_schema]
+type = "object"
+required = ["team_id"]
+additionalProperties = true
+
+[provides.operations."teams.get_team".input_schema.properties.team_id]
+type = "string"
+description = "Team ID"
+
+[provides.operations."teams.get_team".output_schema]
+type = "object"
+
+[provides.operations."teams.get_team".ai_hints]
+when_to_use = "When you need details about a specific team."
+common_mistakes = []
+examples = ['{"team_id":"team_123"}']
+related = ["teams.list_teams"]
+
+[provides.operations."teams.list_channels"]
+description = "Lists all channels in the specified team"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.list_channels".input_schema]
+type = "object"
+required = ["team_id"]
+additionalProperties = true
+
+[provides.operations."teams.list_channels".input_schema.properties.team_id]
+type = "string"
+description = "Team ID"
+
+[provides.operations."teams.list_channels".output_schema]
+type = "object"
+
+[provides.operations."teams.list_channels".output_schema.properties.channels]
+type = "array"
+
+[provides.operations."teams.list_channels".output_schema.properties.channels.items]
+type = "object"
+
+[provides.operations."teams.list_channels".ai_hints]
+when_to_use = "When you need to list channels available in a team."
+common_mistakes = []
+examples = ['{"team_id":"team_123"}']
+related = ["teams.send_channel_message"]
+
+[provides.operations."teams.get_channel"]
+description = "Retrieves details of a specific channel"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.get_channel".input_schema]
+type = "object"
+required = ["team_id", "channel_id"]
+additionalProperties = true
+
+[provides.operations."teams.get_channel".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."teams.get_channel".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."teams.get_channel".output_schema]
+type = "object"
+
+[provides.operations."teams.get_channel".ai_hints]
+when_to_use = "When you need details about a specific channel."
+common_mistakes = []
+examples = ['{"team_id":"team_123","channel_id":"19:channel"}']
+related = ["teams.list_channels"]
+
+[provides.operations."teams.send_channel_message"]
+description = "Posts a message to a Teams channel"
+capability = "teams.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.send_channel_message".input_schema]
+type = "object"
+required = ["team_id", "channel_id", "content"]
+additionalProperties = true
+
+[provides.operations."teams.send_channel_message".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."teams.send_channel_message".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."teams.send_channel_message".input_schema.properties.content]
+type = "string"
+description = "Message content"
+
+[provides.operations."teams.send_channel_message".input_schema.properties.content_type]
+type = "string"
+default = "text"
+description = "text or html"
+
+[provides.operations."teams.send_channel_message".output_schema]
+type = "object"
+
+[provides.operations."teams.send_channel_message".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.send_channel_message".ai_hints]
+when_to_use = "When you need to post a message in a Teams channel."
+common_mistakes = ["Requires ChannelMessage.Send permission.", "HTML content needs content_type set to html."]
+examples = ['{"team_id":"team_123","channel_id":"19:channel","content":"Build is green","content_type":"text"}']
+related = ["teams.list_channels"]
+
+[provides.operations."teams.list_chats"]
+description = "Lists the authenticated user's 1:1 and group chats"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.list_chats".input_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."teams.list_chats".output_schema]
+type = "object"
+
+[provides.operations."teams.list_chats".output_schema.properties.chats]
+type = "array"
+
+[provides.operations."teams.list_chats".output_schema.properties.chats.items]
+type = "object"
+
+[provides.operations."teams.list_chats".ai_hints]
+when_to_use = "When you need to list the user's chat conversations."
+common_mistakes = []
+examples = ['{}']
+related = ["teams.send_chat_message"]
+
+[provides.operations."teams.send_chat_message"]
+description = "Sends a message in a 1:1 or group chat"
+capability = "teams.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.send_chat_message".input_schema]
+type = "object"
+required = ["chat_id", "content"]
+additionalProperties = true
+
+[provides.operations."teams.send_chat_message".input_schema.properties.chat_id]
+type = "string"
+
+[provides.operations."teams.send_chat_message".input_schema.properties.content]
+type = "string"
+
+[provides.operations."teams.send_chat_message".input_schema.properties.content_type]
+type = "string"
+default = "text"
+
+[provides.operations."teams.send_chat_message".output_schema]
+type = "object"
+
+[provides.operations."teams.send_chat_message".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.send_chat_message".ai_hints]
+when_to_use = "When you need to send a direct or group chat message."
+common_mistakes = ["Requires Chat.ReadWrite permission."]
+examples = ['{"chat_id":"19:chat","content":"Status updated","content_type":"text"}']
+related = ["teams.list_chats"]
+
+[provides.operations."teams.list_chat_messages"]
+description = "Lists messages in a 1:1 or group chat"
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.list_chat_messages".input_schema]
+type = "object"
+required = ["chat_id"]
+additionalProperties = true
+
+[provides.operations."teams.list_chat_messages".input_schema.properties.chat_id]
+type = "string"
+
+[provides.operations."teams.list_chat_messages".output_schema]
+type = "object"
+
+[provides.operations."teams.list_chat_messages".output_schema.properties.messages]
+type = "array"
+
+[provides.operations."teams.list_chat_messages".output_schema.properties.messages.items]
+type = "object"
+
+[provides.operations."teams.list_chat_messages".ai_hints]
+when_to_use = "When you need to read chat history."
+common_mistakes = []
+examples = ['{"chat_id":"19:chat"}']
+related = ["teams.list_chats"]
+
+[provides.operations."teams.send_card"]
+description = "Sends an adaptive card to either a Teams channel or a chat using Graph attachments."
+capability = "teams.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.send_card".input_schema]
+type = "object"
+required = ["adaptive_card"]
+additionalProperties = true
+
+[provides.operations."teams.send_card".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."teams.send_card".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."teams.send_card".input_schema.properties.chat_id]
+type = "string"
+
+[provides.operations."teams.send_card".input_schema.properties.content]
+type = "string"
+
+[provides.operations."teams.send_card".input_schema.properties.adaptive_card]
+type = "object"
+
+[provides.operations."teams.send_card".output_schema]
+type = "object"
+
+[provides.operations."teams.send_card".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.send_card".output_schema.properties.target]
+type = "string"
+
+[provides.operations."teams.send_card".ai_hints]
+when_to_use = "When you need to deliver a rich adaptive card instead of plain text."
+common_mistakes = ["Provide either chat_id or both team_id and channel_id, not both target types."]
+examples = ['{"chat_id":"19:chat","adaptive_card":{"type":"AdaptiveCard","version":"1.4","body":[]}}']
+related = ["teams.send_channel_message", "teams.send_chat_message"]
+
+[provides.operations."teams.reply_message"]
+description = "Replies to a channel message or replies with quote in a chat."
+capability = "teams.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.reply_message".input_schema]
+type = "object"
+required = ["message_id"]
+additionalProperties = true
+
+[provides.operations."teams.reply_message".input_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.reply_message".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."teams.reply_message".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."teams.reply_message".input_schema.properties.chat_id]
+type = "string"
+
+[provides.operations."teams.reply_message".input_schema.properties.content]
+type = "string"
+
+[provides.operations."teams.reply_message".input_schema.properties.content_type]
+type = "string"
+default = "text"
+
+[provides.operations."teams.reply_message".input_schema.properties.adaptive_card]
+type = "object"
+
+[provides.operations."teams.reply_message".output_schema]
+type = "object"
+
+[provides.operations."teams.reply_message".output_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.reply_to_id]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.target]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.conversation_id]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.threaded_attempted]
+type = "boolean"
+
+[provides.operations."teams.reply_message".output_schema.properties.delivery_mode]
+type = "string"
+enum = ["threaded", "flat_fallback"]
+
+[provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic]
+type = "object"
+
+[provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic.properties.reason]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic.properties.provider]
+type = "string"
+
+[provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic.properties.status_code]
+type = "integer"
+
+[provides.operations."teams.reply_message".output_schema.properties.fallback_diagnostic.properties.code]
+type = "string"
+
+[provides.operations."teams.reply_message".ai_hints]
+when_to_use = "When you need to continue an existing Teams thread or quote a chat message."
+common_mistakes = ["Channel replies require team_id and channel_id; chat replies require chat_id."]
+examples = ['{"message_id":"msg_1","chat_id":"19:chat","content":"Ack"}']
+related = ["teams.update_message"]
+
+[provides.operations."teams.update_message"]
+description = "Updates a previously sent chat or channel message using delegated Graph permissions."
+capability = "teams.write"
+risk_level = "medium"
+safety_tier = "risky"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+network_constraints = { host_allow = ["graph.microsoft.com"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+
+[provides.operations."teams.update_message".input_schema]
+type = "object"
+required = ["message_id"]
+additionalProperties = true
+
+[provides.operations."teams.update_message".input_schema.properties.message_id]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.reply_id]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.team_id]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.channel_id]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.chat_id]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.content]
+type = "string"
+
+[provides.operations."teams.update_message".input_schema.properties.content_type]
+type = "string"
+default = "text"
+
+[provides.operations."teams.update_message".input_schema.properties.adaptive_card]
+type = "object"
+
+[provides.operations."teams.update_message".output_schema]
+type = "object"
+
+[provides.operations."teams.update_message".output_schema.properties.status]
+type = "string"
+
+[provides.operations."teams.update_message".output_schema.properties.target]
+type = "string"
+
+[provides.operations."teams.update_message".ai_hints]
+when_to_use = "When you need to edit the body or attachments of an existing Teams message."
+common_mistakes = ["Only delegated senders can edit normal messages; make sure the token matches the author."]
+examples = ['{"message_id":"msg_1","chat_id":"19:chat","content":"Updated"}']
+related = ["teams.reply_message"]
+
+[provides.operations."teams.ingest_activity"]
+description = "Validates and normalizes a Bot Framework activity, updating cached conversation state."
+capability = "teams.write"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+revocation_freshness = "safe"
+
+[provides.operations."teams.ingest_activity".input_schema]
+type = "object"
+required = ["type"]
+additionalProperties = true
+
+[provides.operations."teams.ingest_activity".input_schema.properties.type]
+type = "string"
+
+[provides.operations."teams.ingest_activity".input_schema.properties.id]
+type = "string"
+
+[provides.operations."teams.ingest_activity".input_schema.properties.conversation]
+type = "object"
+
+[provides.operations."teams.ingest_activity".input_schema.properties.channelData]
+type = "object"
+
+[provides.operations."teams.ingest_activity".output_schema]
+type = "object"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.accepted]
+type = "boolean"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.duplicate]
+type = "boolean"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.diagnostic]
+type = ["object", "null"]
+
+[provides.operations."teams.ingest_activity".output_schema.properties.event]
+type = "object"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.conversation_state]
+type = ["object", "null"]
+
+[provides.operations."teams.ingest_activity".output_schema.properties.conversation_reference]
+type = ["object", "null"]
+
+[provides.operations."teams.ingest_activity".output_schema.properties.attachments]
+type = "array"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.attachments.items]
+type = "object"
+
+[provides.operations."teams.ingest_activity".output_schema.properties.file_consent]
+type = ["object", "null"]
+
+[provides.operations."teams.ingest_activity".ai_hints]
+when_to_use = "When the host delivers a Teams Bot Framework activity for normalization."
+common_mistakes = ["This does not open a webhook listener; it validates payloads the host already received."]
+examples = ['{"type":"message","conversation":{"id":"chat_1"}}']
+related = ["teams.get_conversation_state"]
+
+[provides.operations."teams.get_conversation_state"]
+description = "Returns the connector's latest normalized state for a Teams conversation."
+capability = "teams.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."teams.get_conversation_state".input_schema]
+type = "object"
+required = ["conversation_id"]
+additionalProperties = true
+
+[provides.operations."teams.get_conversation_state".input_schema.properties.conversation_id]
+type = "string"
+
+[provides.operations."teams.get_conversation_state".output_schema]
+type = "object"
+
+[provides.operations."teams.get_conversation_state".output_schema.properties.conversation_state]
+type = "object"
+
+[provides.operations."teams.get_conversation_state".ai_hints]
+when_to_use = "When you need the last known routing and installation state for a Teams conversation."
+common_mistakes = ["Conversation state only exists after activity ingestion or outbound messaging creates it."]
+examples = ['{"conversation_id":"chat_1"}']
+related = ["teams.ingest_activity"]
 
 [provisioning]
 note = "Requires a non-production Microsoft 365 tenant plus Azure AD app registration with the exact Microsoft Graph permissions you intend to exercise. `/me`-backed flows such as health, list_teams, and list_chats, plus standard send/reply/update message operations, require a delegated user bearer token; `credential_id` mode requires the host to inject that token at runtime. App-only client credentials require tenant admin consent and only cover a narrower subset of Graph reads plus migration-only Teams message send permissions, so they do not prove full connector readiness."

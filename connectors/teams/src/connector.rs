@@ -1,7 +1,7 @@
 //! Teams connector implementation.
 
 use std::{
-    collections::{HashMap, HashSet, VecDeque},
+    collections::{BTreeMap, HashMap, HashSet, VecDeque},
     fmt::Write as _,
     sync::{Mutex, atomic::Ordering},
     time::{Duration, Instant},
@@ -9,15 +9,15 @@ use std::{
 
 use async_trait::async_trait;
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection,
-    InvokeRequest, InvokeResponse, OperationId, OperationInfo, Principal, RiskLevel, SafetyTier,
-    SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse, ThreadInfo,
-    ThreadKind, TrustLevel,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId, EventCaps,
+    EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo,
+    Principal, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    ThreadInfo, ThreadKind, TrustLevel,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -47,6 +47,21 @@ const OP_REPLY_MSG: &str = "teams.reply_message";
 const OP_UPDATE_MSG: &str = "teams.update_message";
 const OP_INGEST_ACTIVITY: &str = "teams.ingest_activity";
 const OP_GET_CONVERSATION_STATE: &str = "teams.get_conversation_state";
+const OPERATION_ORDER: [&str; 13] = [
+    OP_LIST_TEAMS,
+    OP_GET_TEAM,
+    OP_LIST_CHANNELS,
+    OP_GET_CHANNEL,
+    OP_SEND_CHANNEL_MSG,
+    OP_LIST_CHATS,
+    OP_SEND_CHAT_MSG,
+    OP_LIST_CHAT_MSGS,
+    OP_SEND_CARD,
+    OP_REPLY_MSG,
+    OP_UPDATE_MSG,
+    OP_INGEST_ACTIVITY,
+    OP_GET_CONVERSATION_STATE,
+];
 
 // Capability IDs
 const CAP_READ: &str = "teams.read";
@@ -1631,469 +1646,99 @@ impl Default for TeamsConnector {
     }
 }
 
-/// Build the typed operations catalog.
+#[derive(Debug, Default, Deserialize)]
+struct TeamsManifestOperationCatalog {
+    #[serde(default)]
+    provides: TeamsManifestProvides,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct TeamsManifestProvides {
+    #[serde(default)]
+    operations: BTreeMap<String, fcp_manifest::OperationSection>,
+}
+
+fn manifest_operation_catalog() -> Result<BTreeMap<String, fcp_manifest::OperationSection>, String>
+{
+    toml::from_str::<TeamsManifestOperationCatalog>(MANIFEST_TOML)
+        .map(|manifest| manifest.provides.operations)
+        .map_err(|error| format!("embedded Teams manifest operation catalog is invalid: {error}"))
+}
+
+/// Build the typed operations catalog from `manifest.toml`.
+///
+/// # Panics
+///
+/// Panics if the embedded Teams manifest operation catalog cannot be parsed or
+/// contains an invalid operation identifier.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_TEAMS),
-            summary: "List joined teams".into(),
-            description: Some("Lists teams the authenticated user has joined".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "teams": { "type": "array", "items": { "type": "object" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to discover which Teams the user belongs to".into(),
-                common_mistakes: vec![
-                    "Requires delegated permissions (Team.ReadBasic.All or similar)".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_LIST_CHANNELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_TEAM),
-            summary: "Get team details".into(),
-            description: Some("Retrieves details of a specific team by ID".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["team_id"],
-                "properties": {
-                    "team_id": { "type": "string", "description": "Team ID" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific team".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_CHANNELS),
-            summary: "List channels in a team".into(),
-            description: Some("Lists all channels in the specified team".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["team_id"],
-                "properties": {
-                    "team_id": { "type": "string", "description": "Team ID" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "channels": { "type": "array", "items": { "type": "object" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list channels available in a team".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_SEND_CHANNEL_MSG)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_CHANNEL),
-            summary: "Get channel details".into(),
-            description: Some("Retrieves details of a specific channel".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["team_id", "channel_id"],
-                "properties": {
-                    "team_id": { "type": "string" },
-                    "channel_id": { "type": "string" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need details about a specific channel".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SEND_CHANNEL_MSG),
-            summary: "Send a message to a channel".into(),
-            description: Some("Posts a message to a Teams channel".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["team_id", "channel_id", "content"],
-                "properties": {
-                    "team_id": { "type": "string" },
-                    "channel_id": { "type": "string" },
-                    "content": { "type": "string", "description": "Message content" },
-                    "content_type": { "type": "string", "default": "text", "description": "text or html" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": { "message_id": { "type": "string" } }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to post a message in a Teams channel".into(),
-                common_mistakes: vec![
-                    "Requires ChannelMessage.Send permission".into(),
-                    "HTML content needs content_type set to 'html'".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_LIST_CHANNELS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_CHATS),
-            summary: "List user's chats".into(),
-            description: Some("Lists the authenticated user's 1:1 and group chats".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "chats": { "type": "array", "items": { "type": "object" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to list the user's chat conversations".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_SEND_CHAT_MSG)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SEND_CHAT_MSG),
-            summary: "Send a chat message".into(),
-            description: Some("Sends a message in a 1:1 or group chat".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["chat_id", "content"],
-                "properties": {
-                    "chat_id": { "type": "string" },
-                    "content": { "type": "string" },
-                    "content_type": { "type": "string", "default": "text" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": { "message_id": { "type": "string" } }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to send a direct or group chat message".into(),
-                common_mistakes: vec!["Requires Chat.ReadWrite permission".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_LIST_CHATS)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_CHAT_MSGS),
-            summary: "List messages in a chat".into(),
-            description: Some("Lists messages in a 1:1 or group chat".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["chat_id"],
-                "properties": {
-                    "chat_id": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "messages": { "type": "array", "items": { "type": "object" } }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to read chat history".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SEND_CARD),
-            summary: "Send an adaptive card".into(),
-            description: Some(
-                "Sends an adaptive card to either a Teams channel or a chat using Graph attachments."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["adaptive_card"],
-                "properties": {
-                    "team_id": { "type": "string" },
-                    "channel_id": { "type": "string" },
-                    "chat_id": { "type": "string" },
-                    "content": { "type": "string" },
-                    "adaptive_card": { "type": "object" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message_id": { "type": "string" },
-                    "target": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to deliver a rich adaptive card instead of plain text."
-                    .into(),
-                common_mistakes: vec![
-                    "Provide either chat_id or both team_id and channel_id, not both target types."
-                        .into(),
-                ],
-                examples: Vec::new(),
-                related: vec![
-                    CapabilityId::from_static(OP_SEND_CHANNEL_MSG),
-                    CapabilityId::from_static(OP_SEND_CHAT_MSG),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_REPLY_MSG),
-            summary: "Reply to a Teams message".into(),
-            description: Some(
-                "Replies to a channel message or replies with quote in a chat.".into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["message_id"],
-                "properties": {
-                    "message_id": { "type": "string" },
-                    "team_id": { "type": "string" },
-                    "channel_id": { "type": "string" },
-                    "chat_id": { "type": "string" },
-                    "content": { "type": "string" },
-                    "content_type": { "type": "string", "default": "text" },
-                    "adaptive_card": { "type": "object" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "message_id": { "type": "string" },
-                    "reply_to_id": { "type": "string" },
-                    "target": { "type": "string" },
-                    "conversation_id": { "type": "string" },
-                    "threaded_attempted": { "type": "boolean" },
-                    "delivery_mode": {
-                        "type": "string",
-                        "enum": ["threaded", "flat_fallback"]
-                    },
-                    "fallback_diagnostic": {
-                        "type": "object",
-                        "properties": {
-                            "reason": { "type": "string" },
-                            "provider": { "type": "string" },
-                            "status_code": { "type": "integer" },
-                            "code": { "type": "string" }
-                        }
-                    }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to continue an existing Teams thread or quote a chat message."
-                    .into(),
-                common_mistakes: vec![
-                    "Channel replies require team_id and channel_id; chat replies require chat_id."
-                        .into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_UPDATE_MSG)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_UPDATE_MSG),
-            summary: "Update a Teams message".into(),
-            description: Some(
-                "Updates a previously sent chat or channel message using delegated Graph permissions."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["message_id"],
-                "properties": {
-                    "message_id": { "type": "string" },
-                    "reply_id": { "type": "string" },
-                    "team_id": { "type": "string" },
-                    "channel_id": { "type": "string" },
-                    "chat_id": { "type": "string" },
-                    "content": { "type": "string" },
-                    "content_type": { "type": "string", "default": "text" },
-                    "adaptive_card": { "type": "object" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string" },
-                    "target": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to edit the body or attachments of an existing Teams message."
-                    .into(),
-                common_mistakes: vec![
-                    "Only delegated senders can edit normal messages; make sure the token matches the author."
-                        .into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_REPLY_MSG)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_INGEST_ACTIVITY),
-            summary: "Normalize an inbound Teams activity".into(),
-            description: Some(
-                "Validates and normalizes a Bot Framework activity, updating cached conversation state."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["type"],
-                "properties": {
-                    "type": { "type": "string" },
-                    "id": { "type": "string" },
-                    "conversation": { "type": "object" },
-                    "channelData": { "type": "object" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "accepted": { "type": "boolean" },
-                    "duplicate": { "type": "boolean" },
-                    "diagnostic": { "type": ["object", "null"] },
-                    "event": { "type": "object" },
-                    "conversation_state": { "type": ["object", "null"] },
-                    "conversation_reference": { "type": ["object", "null"] },
-                    "attachments": { "type": "array", "items": { "type": "object" } },
-                    "file_consent": { "type": ["object", "null"] }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::BestEffort,
-            ai_hints: AgentHint {
-                when_to_use: "When the host delivers a Teams Bot Framework activity for normalization."
-                    .into(),
-                common_mistakes: vec![
-                    "This does not open a webhook listener; it validates payloads the host already received."
-                        .into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_GET_CONVERSATION_STATE)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_CONVERSATION_STATE),
-            summary: "Get cached Teams conversation state".into(),
-            description: Some(
-                "Returns the connector's latest normalized state for a Teams conversation.".into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["conversation_id"],
-                "properties": {
-                    "conversation_id": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "conversation_state": { "type": "object" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need the last known routing and installation state for a Teams conversation."
-                    .into(),
-                common_mistakes: vec![
-                    "Conversation state only exists after activity ingestion or outbound messaging creates it."
-                        .into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_INGEST_ACTIVITY)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    try_operations_info().expect("embedded Teams manifest operations must parse")
+}
+
+fn try_operations_info() -> Result<Vec<OperationInfo>, String> {
+    let mut operations: Vec<_> = manifest_operation_catalog()?.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(&id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(
+    id: &str,
+    operation: fcp_manifest::OperationSection,
+) -> Result<OperationInfo, String> {
+    let summary = teams_operation_summary(id, &operation.description);
+    let operation_id = OperationId::new(id.to_string())
+        .map_err(|error| format!("manifest operation `{id}` has invalid ID: {error}"))?;
+    Ok(OperationInfo {
+        id: operation_id,
+        summary,
+        description: Some(operation.description),
+        input_schema: operation.input_schema,
+        output_schema: operation.output_schema,
+        capability: operation.capability,
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints,
+        rate_limit: operation
+            .rate_limit
+            .map(|rate_limit| rate_limit.as_inner().clone()),
+        requires_approval: Some(operation.requires_approval.into()),
+    })
+}
+
+fn teams_operation_summary(operation_id: &str, fallback: &str) -> String {
+    match operation_id {
+        OP_LIST_TEAMS => "List joined teams",
+        OP_GET_TEAM => "Get team details",
+        OP_LIST_CHANNELS => "List channels in a team",
+        OP_GET_CHANNEL => "Get channel details",
+        OP_SEND_CHANNEL_MSG => "Send a message to a channel",
+        OP_LIST_CHATS => "List user's chats",
+        OP_SEND_CHAT_MSG => "Send a chat message",
+        OP_LIST_CHAT_MSGS => "List messages in a chat",
+        OP_SEND_CARD => "Send an adaptive card",
+        OP_REPLY_MSG => "Reply to a Teams message",
+        OP_UPDATE_MSG => "Update a Teams message",
+        OP_INGEST_ACTIVITY => "Normalize an inbound Teams activity",
+        OP_GET_CONVERSATION_STATE => "Get cached Teams conversation state",
+        _ => fallback,
+    }
+    .to_owned()
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
@@ -2603,6 +2248,8 @@ impl TeamsConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_prelude::{IdempotencyClass, SafetyTier};
+    use std::collections::BTreeSet;
 
     fn manually_configured_connector(
         auth: TeamsAuth,
@@ -2649,6 +2296,143 @@ mod tests {
     fn test_operations_info_count() {
         let ops = operations_info();
         assert_eq!(ops.len(), 13);
+    }
+
+    #[test]
+    fn manifest_declares_teams_operation_metadata() {
+        let operations =
+            manifest_operation_catalog().expect("embedded manifest operation catalog should parse");
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+
+        let manifest_ids = operations
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let runtime_ids = OPERATION_ORDER.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(manifest_ids, runtime_ids);
+
+        for operation_id in OPERATION_ORDER {
+            let operation = operations
+                .get(operation_id)
+                .expect("operation should be declared in manifest");
+            assert!(operation.input_schema.is_object());
+            assert!(operation.output_schema.is_object());
+            assert!(!operation.ai_hints.when_to_use.is_empty());
+        }
+
+        for operation_id in [
+            OP_LIST_TEAMS,
+            OP_GET_TEAM,
+            OP_LIST_CHANNELS,
+            OP_GET_CHANNEL,
+            OP_SEND_CHANNEL_MSG,
+            OP_LIST_CHATS,
+            OP_SEND_CHAT_MSG,
+            OP_LIST_CHAT_MSGS,
+            OP_SEND_CARD,
+            OP_REPLY_MSG,
+            OP_UPDATE_MSG,
+        ] {
+            let operation = operations
+                .get(operation_id)
+                .expect("Graph operation should be declared");
+            let network_constraints = operation
+                .network_constraints
+                .as_ref()
+                .expect("Graph operation should declare network metadata");
+            assert_eq!(network_constraints.host_allow, vec!["graph.microsoft.com"]);
+            assert_eq!(network_constraints.port_allow, vec![443]);
+            assert!(network_constraints.require_sni);
+            assert!(network_constraints.deny_localhost);
+            assert!(network_constraints.deny_private_ranges);
+            assert!(network_constraints.deny_tailnet_ranges);
+            assert!(network_constraints.deny_ip_literals);
+            assert_eq!(network_constraints.max_redirects, 0);
+        }
+
+        assert!(
+            operations
+                .get(OP_INGEST_ACTIVITY)
+                .expect("ingest operation")
+                .network_constraints
+                .is_none()
+        );
+        assert!(
+            operations
+                .get(OP_GET_CONVERSATION_STATE)
+                .expect("conversation state operation")
+                .network_constraints
+                .is_none()
+        );
+
+        let send = operations
+            .get(OP_SEND_CHANNEL_MSG)
+            .expect("send channel operation should be declared");
+        assert_eq!(send.capability.as_str(), CAP_WRITE);
+        assert_eq!(
+            send.input_schema["required"],
+            json!(["team_id", "channel_id", "content"])
+        );
+
+        let ingest = operations
+            .get(OP_INGEST_ACTIVITY)
+            .expect("ingest activity operation should be declared");
+        assert_eq!(ingest.capability.as_str(), CAP_WRITE);
+        assert_eq!(
+            ingest.output_schema["properties"]["accepted"]["type"],
+            json!("boolean")
+        );
+        assert_eq!(
+            ingest.output_schema["properties"]["attachments"]["type"],
+            json!("array")
+        );
+    }
+
+    #[test]
+    fn operations_info_uses_manifest_operation_metadata() {
+        let operations =
+            manifest_operation_catalog().expect("embedded manifest operation catalog should parse");
+        let runtime_operations = operations_info();
+        assert_eq!(runtime_operations.len(), operations.len());
+
+        for (index, operation_id) in OPERATION_ORDER.iter().enumerate() {
+            let manifest_operation = operations
+                .get(*operation_id)
+                .expect("operation should be declared in manifest");
+            let runtime_operation = runtime_operations
+                .get(index)
+                .expect("operation should use manifest order");
+            assert_eq!(runtime_operation.id.as_str(), *operation_id);
+            assert_eq!(
+                runtime_operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                runtime_operation.capability.as_str(),
+                manifest_operation.capability.as_str()
+            );
+            assert_eq!(runtime_operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(
+                runtime_operation.safety_tier,
+                manifest_operation.safety_tier
+            );
+            assert_eq!(
+                runtime_operation.idempotency,
+                manifest_operation.idempotency
+            );
+            assert_eq!(
+                &runtime_operation.input_schema,
+                &manifest_operation.input_schema
+            );
+            assert_eq!(
+                &runtime_operation.output_schema,
+                &manifest_operation.output_schema
+            );
+            assert_eq!(
+                runtime_operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+        }
     }
 
     #[test]

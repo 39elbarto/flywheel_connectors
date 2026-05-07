@@ -354,7 +354,10 @@ impl IrcConnector {
                 RiskLevel::Low,
                 SafetyTier::Safe,
                 IdempotencyClass::Strict,
-                json!({ "type": "object" }),
+                json!({
+                    "type": "object",
+                    "properties": {}
+                }),
                 transcript_output_schema(&[
                     "status",
                     "server",
@@ -552,6 +555,9 @@ impl FcpConnector for IrcConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id.clone() {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -864,6 +870,7 @@ mod tests {
         net::TcpListener as StdTcpListener,
         sync::Mutex,
         thread,
+        time::{Duration, Instant},
     };
 
     fn handshake_request_for(host_public_key: [u8; 32]) -> HandshakeRequest {
@@ -1037,6 +1044,17 @@ mod tests {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .clone()
+        }
+
+        fn wait_for_line(&self, expected: &str) -> Vec<String> {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            loop {
+                let lines = self.received_lines();
+                if lines.iter().any(|line| line == expected) || Instant::now() >= deadline {
+                    return lines;
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
         }
 
         fn join(self) {
@@ -1322,7 +1340,7 @@ mod tests {
         assert_eq!(coordination[1]["outcome"], "granted");
         assert_eq!(coordination[2]["event"], "send_executed");
 
-        let lines = server.received_lines();
+        let lines = server.wait_for_line("PRIVMSG #Ops :hello from coordination");
         assert!(
             lines
                 .iter()

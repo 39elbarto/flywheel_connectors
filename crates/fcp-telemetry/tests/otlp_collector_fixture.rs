@@ -105,7 +105,7 @@ fn now_millis() -> u128 {
         .map_or(0, |duration| duration.as_millis())
 }
 
-fn append_evidence(value: serde_json::Value) -> Result<(), Box<dyn Error>> {
+fn append_evidence(value: &serde_json::Value) -> Result<(), Box<dyn Error>> {
     println!("{value}");
     let Some(path) = evidence_path() else {
         return Ok(());
@@ -118,8 +118,8 @@ fn append_evidence(value: serde_json::Value) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn string_value(value: &Option<opentelemetry_proto::tonic::common::v1::AnyValue>) -> Option<&str> {
-    match value.as_ref()?.value.as_ref()? {
+fn string_value(value: Option<&opentelemetry_proto::tonic::common::v1::AnyValue>) -> Option<&str> {
+    match value?.value.as_ref()? {
         any_value::Value::StringValue(value) => Some(value.as_str()),
         _ => None,
     }
@@ -134,7 +134,7 @@ fn resource_attribute<'a>(request: &'a ExportTraceServiceRequest, key: &str) -> 
         .attributes
         .iter()
         .find(|attribute| attribute.key == key)
-        .and_then(|attribute| string_value(&attribute.value))
+        .and_then(|attribute| string_value(attribute.value.as_ref()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -143,7 +143,7 @@ async fn otlp_trace_exporter_reaches_local_collector_and_flushes() -> Result<(),
         "cargo test -p fcp-telemetry --test otlp_collector_fixture --features otlp".to_string()
     });
     let git_revision = std::env::var("FCP_GIT_REVISION").unwrap_or_else(|_| "unknown".to_string());
-    append_evidence(json!({
+    append_evidence(&json!({
         "event": "otlp_e2e_start",
         "ts_ms": now_millis(),
         "command_line": command_line,
@@ -225,7 +225,7 @@ async fn otlp_trace_exporter_reaches_local_collector_and_flushes() -> Result<(),
         "cleanup_result": "shutdown_and_abort_server",
         "skip_reason": null
     });
-    append_evidence(evidence)?;
+    append_evidence(&evidence)?;
 
     Ok(())
 }

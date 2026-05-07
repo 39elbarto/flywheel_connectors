@@ -98,9 +98,20 @@ type = "integer"
 [provides.operations."telegram.send_message".output_schema.properties.chat_id]
 type = "integer"
 
-[provides.operations."telegram.send_message".network]
-allowed_hosts = ["api.telegram.org"]
-protocol = "https"
+[provides.operations."telegram.send_message".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."telegram.send_message".ai_hints]
 when_to_use = "Send a text message to a Telegram user, group, or channel."
@@ -166,9 +177,20 @@ type = "integer"
 [provides.operations."telegram.send_media".output_schema.properties.chat_id]
 type = "integer"
 
-[provides.operations."telegram.send_media".network]
-allowed_hosts = ["api.telegram.org"]
-protocol = "https"
+[provides.operations."telegram.send_media".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."telegram.send_media".ai_hints]
 when_to_use = "Send a photo, document, audio, video, or voice message to a Telegram chat."
@@ -215,9 +237,20 @@ type = "string"
 [provides.operations."telegram.get_file".output_schema.properties.download_url]
 type = "string"
 
-[provides.operations."telegram.get_file".network]
-allowed_hosts = ["api.telegram.org"]
-protocol = "https"
+[provides.operations."telegram.get_file".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."telegram.get_file".ai_hints]
 when_to_use = "Get file metadata and download URL for files attached to messages."
@@ -253,9 +286,20 @@ type = "object"
 [provides.operations."telegram.answer_callback_query".output_schema.properties.success]
 type = "boolean"
 
-[provides.operations."telegram.answer_callback_query".network]
-allowed_hosts = ["api.telegram.org"]
-protocol = "https"
+[provides.operations."telegram.answer_callback_query".network_constraints]
+host_allow = ["api.telegram.org"]
+port_allow = [443]
+require_sni = true
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
 
 [provides.operations."telegram.answer_callback_query".ai_hints]
 when_to_use = "Respond to a button press (callback query) to dismiss the loading indicator."
@@ -271,6 +315,24 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
+
+[provides.operations."telegram.ingest_webhook_update".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 1000
+max_response_bytes = 1048576
 
 [provides.operations."telegram.ingest_webhook_update".input_schema]
 type = "object"

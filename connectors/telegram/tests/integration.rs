@@ -15,6 +15,7 @@
 use chrono::{Duration, Utc};
 use fcp_crypto::cose::CapabilityTokenBuilder;
 use fcp_crypto::ed25519::Ed25519SigningKey;
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{CapabilityConstraints, FcpError};
 use fcp_testkit::AsyncTestContext;
 use serde_json::json;
@@ -33,9 +34,23 @@ use fcp_telegram::{connector::TelegramConnector, limits as telegram_limits};
 const TEST_BOT_ID: &str = "123456";
 const TEST_BOT_SUFFIX: &str = "ABCDEFGHIJKLMNOPQRSTUVWXyz012345";
 const TEST_INSTANCE_ID: &str = "inst_telegram_integration";
+const TELEGRAM_API_HOST: &str = "api.telegram.org";
+const NO_EGRESS_HOST: &str = "none.invalid";
+const TELEGRAM_EGRESS_OPERATION_IDS: &[&str] = &[
+    "telegram.answer_callback_query",
+    "telegram.get_file",
+    "telegram.send_media",
+    "telegram.send_message",
+];
+const TELEGRAM_NO_EGRESS_OPERATION_IDS: &[&str] = &["telegram.ingest_webhook_update"];
 
 fn test_bot_credential() -> String {
     format!("{TEST_BOT_ID}:{TEST_BOT_SUFFIX}")
+}
+
+fn parsed_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+        .expect("Telegram manifest should parse with per-operation network constraints")
 }
 
 fn token_path(api_method: &str) -> String {
@@ -53,6 +68,75 @@ fn unique_zone_dir(label: &str) -> String {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = parsed_manifest();
+    assert_eq!(
+        manifest.provides.operations.len(),
+        TELEGRAM_EGRESS_OPERATION_IDS.len() + TELEGRAM_NO_EGRESS_OPERATION_IDS.len()
+    );
+
+    for operation_id in TELEGRAM_EGRESS_OPERATION_IDS {
+        let Some(operation) = manifest.provides.operations.get(*operation_id) else {
+            assert!(false, "{operation_id} operation should exist");
+            continue;
+        };
+        let Some(constraints) = operation.network_constraints.as_ref() else {
+            assert!(false, "{operation_id} should declare network_constraints");
+            continue;
+        };
+
+        assert_eq!(
+            constraints.host_allow.as_slice(),
+            [TELEGRAM_API_HOST],
+            "{operation_id} should only allow Telegram Bot API egress"
+        );
+        assert_eq!(constraints.port_allow.as_slice(), [443]);
+        assert!(
+            constraints.require_sni,
+            "{operation_id} should require TLS SNI"
+        );
+        assert!(
+            constraints.deny_private_ranges,
+            "{operation_id} should deny private ranges"
+        );
+        assert_eq!(constraints.max_redirects, 0);
+        assert_eq!(constraints.connect_timeout_ms, 10_000);
+        assert_eq!(constraints.total_timeout_ms, 60_000);
+        assert_eq!(constraints.max_response_bytes, 10_485_760);
+    }
+
+    for operation_id in TELEGRAM_NO_EGRESS_OPERATION_IDS {
+        let Some(operation) = manifest.provides.operations.get(*operation_id) else {
+            assert!(false, "{operation_id} operation should exist");
+            continue;
+        };
+        let Some(constraints) = operation.network_constraints.as_ref() else {
+            assert!(false, "{operation_id} should declare network_constraints");
+            continue;
+        };
+
+        assert_eq!(
+            constraints.host_allow.as_slice(),
+            [NO_EGRESS_HOST],
+            "{operation_id} should document that host-forwarded ingress performs no connector-owned egress"
+        );
+        assert_eq!(constraints.port_allow.as_slice(), [443]);
+        assert!(
+            constraints.require_sni,
+            "{operation_id} should keep canonical egress fields explicit"
+        );
+        assert!(
+            constraints.deny_private_ranges,
+            "{operation_id} should deny private ranges"
+        );
+        assert_eq!(constraints.max_redirects, 0);
+        assert_eq!(constraints.connect_timeout_ms, 1_000);
+        assert_eq!(constraints.total_timeout_ms, 1_000);
+        assert_eq!(constraints.max_response_bytes, 1_048_576);
+    }
+}
 
 /// Map an operation ID to the capability ID that governs it.
 fn capability_for_operation(op: &str) -> &str {

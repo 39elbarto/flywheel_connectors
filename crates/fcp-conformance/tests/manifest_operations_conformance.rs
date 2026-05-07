@@ -852,7 +852,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
         "sonos",
         "synology-chat",
         "teams",
-        "telegram",
         "telnyx",
         "tlon",
         "twilio",

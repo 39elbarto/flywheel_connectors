@@ -1,10 +1,60 @@
 use fcp_deepgram::DeepgramConnector;
+use fcp_manifest::ConnectorManifest;
 use fcp_testkit::provider_contract::{
     ProviderAuthMethodContract, ProviderBaseUrlContract, ProviderContract,
     ProviderImportSideEffectContract, ProviderModelCatalogContract, ProviderModelContract,
     ProviderOperationContract, ProviderRedactionPayload, assert_provider_contract,
 };
 use serde_json::{Value, json};
+
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const EXPECTED_OPERATION_IDS: [&str; 2] = ["deepgram.listen.transcribe", "deepgram.listen.stream"];
+
+fn deepgram_manifest_unchecked() -> ConnectorManifest {
+    ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+        .expect("Deepgram manifest should parse before hash validation")
+}
+
+fn manifest_input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {
+    &manifest
+        .provides
+        .operations
+        .get(operation_id)
+        .expect("manifest operation should be declared")
+        .input_schema
+}
+
+fn json_string<T: serde::Serialize>(value: T) -> String {
+    serde_json::to_value(value)
+        .expect("value should serialize")
+        .as_str()
+        .expect("serialized value should be a string")
+        .to_string()
+}
+
+fn validator_for(schema: &Value) -> jsonschema::Validator {
+    jsonschema::Validator::new(schema).expect("manifest operation schema should compile")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    let errors: Vec<_> = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect();
+    assert!(
+        errors.is_empty(),
+        "schema should accept {payload}; errors: {errors:?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = validator_for(schema);
+    assert!(
+        validator.iter_errors(payload).next().is_some(),
+        "schema should reject {payload}"
+    );
+}
 
 #[fcp_async_core::runtime::test]
 async fn deepgram_provider_contract_is_advertised() {
@@ -169,6 +219,154 @@ async fn deepgram_provider_contract_is_advertised() {
         .expect("manifest migration_hint should parse");
     assert!(migration_hint.contains("retired from connector-local invoke"));
     assert!(migration_hint.contains("host owns stream session lifecycle"));
+}
+
+#[fcp_async_core::runtime::test]
+async fn deepgram_manifest_operations_match_runtime_introspection() {
+    let manifest = deepgram_manifest_unchecked();
+    manifest
+        .validate()
+        .expect("Deepgram manifest should validate with its checked interface hash");
+
+    let connector = DeepgramConnector::new();
+    let introspection = connector
+        .handle_introspect()
+        .await
+        .expect("introspection should serialize");
+    let runtime_operations = introspection
+        .get("operations")
+        .and_then(Value::as_array)
+        .expect("introspection operations should be an array");
+    let runtime_ids: Vec<_> = runtime_operations
+        .iter()
+        .map(|operation| {
+            operation
+                .get("id")
+                .and_then(Value::as_str)
+                .expect("operation id should be a string")
+        })
+        .collect();
+    assert_eq!(runtime_ids, EXPECTED_OPERATION_IDS);
+    assert_eq!(
+        manifest.provides.operations.len(),
+        EXPECTED_OPERATION_IDS.len()
+    );
+
+    for operation_id in EXPECTED_OPERATION_IDS {
+        let manifest_operation = manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("manifest operation should be declared");
+        let runtime_operation = operation(&introspection, operation_id);
+
+        assert_eq!(
+            runtime_operation.get("summary").and_then(Value::as_str),
+            Some(manifest_operation.description.as_str())
+        );
+        assert_eq!(
+            runtime_operation.get("capability").and_then(Value::as_str),
+            Some(manifest_operation.capability.as_str())
+        );
+        assert_eq!(
+            runtime_operation
+                .get("risk_level")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.risk_level))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("safety_tier")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.safety_tier))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("idempotency")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.idempotency))
+        );
+        assert_eq!(
+            runtime_operation
+                .get("requires_approval")
+                .and_then(Value::as_str)
+                .map(ToOwned::to_owned),
+            Some(json_string(manifest_operation.requires_approval))
+        );
+        assert_eq!(
+            runtime_operation.get("input_schema"),
+            Some(&manifest_operation.input_schema)
+        );
+        assert_eq!(
+            runtime_operation.get("output_schema"),
+            Some(&manifest_operation.output_schema)
+        );
+        assert!(
+            manifest_operation.network_constraints.is_some(),
+            "{operation_id} should declare network constraints"
+        );
+        assert!(
+            !manifest_operation.ai_hints.when_to_use.trim().is_empty(),
+            "{operation_id} should declare AI guidance"
+        );
+    }
+}
+
+#[test]
+fn deepgram_manifest_input_schemas_validate_representative_payloads() {
+    let manifest = deepgram_manifest_unchecked();
+
+    let transcribe_schema = manifest_input_schema(&manifest, "deepgram.listen.transcribe");
+    assert_schema_accepts(
+        transcribe_schema,
+        &json!({
+            "audio_url": "https://example.com/meeting.wav",
+            "media_byte_count": 1_048_576,
+            "model": "nova-3",
+            "smart_format": true
+        }),
+    );
+    assert_schema_rejects(transcribe_schema, &json!({}));
+    assert_schema_rejects(transcribe_schema, &json!({"audio_url": ""}));
+    assert_schema_rejects(
+        transcribe_schema,
+        &json!({"audio_url": "https://example.com/meeting.wav", "media_byte_count": 1_073_741_825}),
+    );
+
+    let stream_schema = manifest_input_schema(&manifest, "deepgram.listen.stream");
+    assert_schema_accepts(
+        stream_schema,
+        &json!({
+            "audio_chunks_base64": ["bXVsYXctYXVkaW8="],
+            "encoding": "mulaw",
+            "sample_rate": 8000,
+            "max_events": 1024,
+            "max_reconnect_attempts": 0
+        }),
+    );
+    assert_schema_accepts(
+        stream_schema,
+        &json!({
+            "audio_base64": "bXVsYXctYXVkaW8=",
+            "audio_format": {
+                "encoding": "linear16",
+                "sample_rate": 16000
+            }
+        }),
+    );
+    assert_schema_rejects(stream_schema, &json!({}));
+    assert_schema_rejects(stream_schema, &json!({"audio_chunks_base64": []}));
+    assert_schema_rejects(
+        stream_schema,
+        &json!({"audio_base64": "bXVsYXctYXVkaW8=", "sample_rate": 7999}),
+    );
+    assert_schema_rejects(
+        stream_schema,
+        &json!({"audio_base64": "bXVsYXctYXVkaW8=", "encoding": "unsupported"}),
+    );
 }
 
 fn assert_connector_local_retired(

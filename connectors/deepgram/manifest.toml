@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:deepgram-first-slice"
+interface_hash = "blake3-256:fcp.interface.v2:4977218facab16c5a169e3bc2aab8f73cc547cbfdf48d753db7b8f53ec5d8b4f"
 
 [connector]
 id = "fcp.deepgram"
 name = "Deepgram"
 version = "0.1.0"
 description = "Deepgram prerecorded and bounded realtime transcription connector"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -27,7 +27,7 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["deepgram.listen", "deepgram.listen.streaming"]
 forbidden = ["network.listen", "system.exec"]
 
 [sandbox]
@@ -37,3 +37,233 @@ cpu_percent = 25
 wall_clock_timeout_ms = 60000
 deny_exec = true
 deny_ptrace = true
+
+[provides.operations."deepgram.listen.transcribe"]
+description = "Create a Deepgram prerecorded transcription"
+capability = "deepgram.listen"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."deepgram.listen.transcribe".input_schema]
+type = "object"
+required = ["audio_url"]
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.audio_url]
+type = "string"
+minLength = 1
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.media_byte_count]
+type = "integer"
+minimum = 1
+maximum = 1073741824
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.model]
+type = "string"
+default = "nova-3"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.language]
+type = "string"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.detect_language]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.smart_format]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.punctuate]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.diarize]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.utterances]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.paragraphs]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.summarize]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.topics]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".input_schema.properties.intents]
+type = "boolean"
+
+[provides.operations."deepgram.listen.transcribe".output_schema]
+type = "object"
+
+[provides.operations."deepgram.listen.transcribe".network_constraints]
+host_allow = ["api.deepgram.com", "developers.deepgram.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."deepgram.listen.transcribe".ai_hints]
+when_to_use = "Use for a bounded prerecorded Deepgram Listen API transcription when the caller has an HTTPS audio URL."
+common_mistakes = ["Provide an HTTPS audio_url; connector-local file upload is not implemented in this slice.", "Do not include API keys or private credentials in audio URLs.", "media_byte_count is a caller declaration used for preflight bounds, not a provider upload."]
+examples = ['{"audio_url":"https://example.com/meeting.wav","model":"nova-3","smart_format":true}']
+related = ["deepgram.listen.stream"]
+
+[provides.operations."deepgram.listen.stream"]
+description = "Run a finite Deepgram realtime transcription WebSocket session"
+capability = "deepgram.listen.streaming"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."deepgram.listen.stream".input_schema]
+type = "object"
+
+[[provides.operations."deepgram.listen.stream".input_schema.anyOf]]
+required = ["audio_base64"]
+
+[[provides.operations."deepgram.listen.stream".input_schema.anyOf]]
+required = ["audio_b64"]
+
+[[provides.operations."deepgram.listen.stream".input_schema.anyOf]]
+required = ["audio_chunks_base64"]
+
+[[provides.operations."deepgram.listen.stream".input_schema.anyOf]]
+required = ["audio_chunks_b64"]
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_base64]
+type = "string"
+minLength = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_b64]
+type = "string"
+minLength = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_chunks_base64]
+type = "array"
+minItems = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_chunks_base64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_chunks_b64]
+type = "array"
+minItems = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_chunks_b64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.session_id]
+type = "string"
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.model]
+type = "string"
+default = "nova-3"
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_format]
+type = "object"
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_format.properties.encoding]
+type = "string"
+default = "mulaw"
+enum = ["linear16", "linear32", "mulaw", "alaw", "opus", "ogg-opus", "flac", "amr-nb", "amr-wb", "speex", "g729"]
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.audio_format.properties.sample_rate]
+type = "integer"
+default = 8000
+minimum = 8000
+maximum = 192000
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.encoding]
+type = "string"
+default = "mulaw"
+enum = ["linear16", "linear32", "mulaw", "alaw", "opus", "ogg-opus", "flac", "amr-nb", "amr-wb", "speex", "g729"]
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.sample_rate]
+type = "integer"
+default = 8000
+minimum = 8000
+maximum = 192000
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.endpointing_ms]
+type = "integer"
+default = 800
+minimum = 0
+maximum = 30000
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.interim_results]
+type = "boolean"
+default = true
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.connect_timeout_ms]
+type = "integer"
+default = 10000
+minimum = 100
+maximum = 120000
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.timeout_ms]
+type = "integer"
+default = 30000
+minimum = 100
+maximum = 300000
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.max_events]
+type = "integer"
+default = 128
+minimum = 1
+maximum = 1024
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.max_reconnect_attempts]
+type = "integer"
+default = 5
+minimum = 0
+maximum = 5
+
+[provides.operations."deepgram.listen.stream".input_schema.properties.reconnect_delay_ms]
+type = "integer"
+default = 1000
+minimum = 100
+maximum = 30000
+
+[provides.operations."deepgram.listen.stream".output_schema]
+type = "object"
+
+[provides.operations."deepgram.listen.stream".network_constraints]
+host_allow = ["api.deepgram.com", "developers.deepgram.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."deepgram.listen.stream".ai_hints]
+when_to_use = "Use for a bounded realtime Deepgram Listen WebSocket session when the caller already has audio bytes in memory."
+common_mistakes = ["This is a finite connector-local WebSocket session, not an unbounded microphone subscription.", "Use either audio_base64/audio_b64 or audio_chunks_base64/audio_chunks_b64, not both.", "Keep per-frame audio chunks under 256 KiB and total session audio under 2 MiB."]
+examples = ['{"audio_base64":"<base64-mulaw>","encoding":"mulaw","sample_rate":8000,"timeout_ms":30000}']
+related = ["deepgram.listen.transcribe"]

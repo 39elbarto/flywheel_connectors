@@ -10,17 +10,17 @@ use base64::Engine as _;
 use fcp_async_core::channel::{broadcast, watch};
 use fcp_async_core::task::JoinHandle;
 use fcp_prelude::{
-    AgentHint, ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier,
-    ConnectorId, EventCaps, EventData, EventEnvelope, EventInfo, FcpError, FcpResult,
-    HandshakeRequest, HandshakeResponse, HealthSnapshot, IdempotencyClass, InstanceId,
-    Introspection, InvokeRequest, InvokeResponse, OperationId, OperationInfo, OrderingPolicy,
-    Principal, ReplayBufferInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
+    BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId, EventCaps,
+    EventData, EventEnvelope, EventInfo, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
+    HealthSnapshot, InstanceId, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, OrderingPolicy, Principal, ReplayBufferInfo, SelfCheckReport, SessionId,
     ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeResult, ThreadInfo, ThreadKind,
     TrustLevel, ZoneId,
 };
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
 use fcp_sdk::runtime::SupervisorConfig;
+use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
@@ -54,6 +54,19 @@ const OP_GET_ROOM_STATE: &str = "matrix.get_room_state";
 const OP_LIST_MEMBERS: &str = "matrix.list_members";
 const OP_UPLOAD_MEDIA: &str = "matrix.upload_media";
 const OP_DOWNLOAD_MEDIA: &str = "matrix.download_media";
+const OPERATION_ORDER: [&str; 11] = [
+    OP_JOINED_ROOMS,
+    OP_CREATE_ROOM,
+    OP_JOIN_ROOM,
+    OP_LEAVE_ROOM,
+    OP_SEND_MESSAGE,
+    OP_GET_MESSAGES,
+    OP_SYNC,
+    OP_GET_ROOM_STATE,
+    OP_LIST_MEMBERS,
+    OP_UPLOAD_MEDIA,
+    OP_DOWNLOAD_MEDIA,
+];
 
 const CAP_READ: &str = "matrix.read";
 const CAP_WRITE: &str = "matrix.write";
@@ -1468,377 +1481,97 @@ fn supervised_sync_backoff(
     )
 }
 
-/// Build the typed operations catalog.
+#[derive(Debug, Default, Deserialize)]
+struct MatrixManifestOperationCatalog {
+    #[serde(default)]
+    provides: MatrixManifestProvides,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct MatrixManifestProvides {
+    #[serde(default)]
+    operations: BTreeMap<String, fcp_manifest::OperationSection>,
+}
+
+fn manifest_operation_catalog() -> Result<BTreeMap<String, fcp_manifest::OperationSection>, String>
+{
+    toml::from_str::<MatrixManifestOperationCatalog>(MANIFEST_TOML)
+        .map(|manifest| manifest.provides.operations)
+        .map_err(|error| format!("embedded Matrix manifest operation catalog is invalid: {error}"))
+}
+
+/// Build the typed operations catalog from `manifest.toml`.
+///
+/// # Panics
+///
+/// Panics if the embedded Matrix manifest operation catalog cannot be parsed or
+/// contains an invalid operation identifier.
 #[must_use]
-#[allow(clippy::too_many_lines)]
 pub fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_JOINED_ROOMS),
-            summary: "List joined rooms".into(),
-            description: Some("Lists all rooms the authenticated user has joined".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": { "rooms": { "type": "array", "items": { "type": "string" } } }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to discover which rooms the bot is in".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_JOIN_ROOM)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_CREATE_ROOM),
-            summary: "Create a room".into(),
-            description: Some("Creates a new Matrix room".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "name": { "type": "string" },
-                    "topic": { "type": "string" },
-                    "invite": { "type": "array", "items": { "type": "string" } },
-                    "visibility": { "type": "string", "enum": ["public", "private"] },
-                    "preset": { "type": "string", "enum": ["private_chat", "public_chat", "trusted_private_chat"] }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": { "room_id": { "type": "string" } }
-            }),
-            capability: CapabilityId::from_static(CAP_MANAGE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to create a new conversation space".into(),
-                common_mistakes: vec![
-                    "Room names are optional; room IDs are auto-generated".into(),
-                ],
-                examples: Vec::new(),
-                related: Vec::new(),
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_JOIN_ROOM),
-            summary: "Join a room".into(),
-            description: Some("Joins a room by ID or alias".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id_or_alias"],
-                "properties": {
-                    "room_id_or_alias": { "type": "string", "description": "Room ID (!...) or alias (#...)" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MANAGE),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to join a room before sending messages".into(),
-                common_mistakes: vec!["Room IDs start with !, aliases start with #".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_LEAVE_ROOM)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LEAVE_ROOM),
-            summary: "Leave a room".into(),
-            description: Some("Leaves a room".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id"],
-                "properties": {
-                    "room_id": { "type": "string" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
-            capability: CapabilityId::from_static(CAP_MANAGE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to leave a room you no longer need".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_JOIN_ROOM)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SEND_MESSAGE),
-            summary: "Send a message to a room".into(),
-            description: Some("Sends a text message to a Matrix room".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id", "body"],
-                "properties": {
-                    "room_id": { "type": "string" },
-                    "body": { "type": "string" },
-                    "msgtype": { "type": "string", "default": "m.text", "description": "m.text, m.notice, m.emote" },
-                    "thread_root_event_id": { "type": "string", "description": "Existing Matrix thread root event ID used as the chat-coordination ownership key when supplied" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "event_id": { "type": "string" },
-                    "coordination": { "type": "array" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to send a message in a Matrix room".into(),
-                common_mistakes: vec![
-                    "Must be joined to the room first".into(),
-                    "Use m.notice for bot messages to avoid notification spam".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_GET_MESSAGES)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_MESSAGES),
-            summary: "Get messages from a room".into(),
-            description: Some("Retrieves messages from a room with pagination".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id"],
-                "properties": {
-                    "room_id": { "type": "string" },
-                    "from": { "type": "string", "description": "Pagination token" },
-                    "limit": { "type": "integer", "default": 20 }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "messages": { "type": "array" },
-                    "end": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to read chat history from a room".into(),
-                common_mistakes: Vec::new(),
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_SEND_MESSAGE)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_SYNC),
-            summary: "Run a sync cycle".into(),
-            description: Some(
-                "Long-polls the homeserver sync endpoint, translates room/message/member deltas, and optionally updates the connector's tracked state for in-memory delivery or host-managed snapshot persistence".into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "since": { "type": "string", "description": "Optional explicit sync token. Falls back to the tracked token when omitted." },
-                    "timeout_ms": { "type": "integer", "default": 30000, "minimum": 0 },
-                    "persist": { "type": "boolean", "default": true, "description": "Whether to update the connector's tracked state. Hosts that need durable resume should persist the returned tracked_state and restore it through state_persistence on configure." }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "used_since": { "type": ["string", "null"] },
-                    "next_batch": { "type": "string" },
-                    "rooms": { "type": "array" },
-                    "message_events": { "type": "array" },
-                    "authorized_message_events": { "type": "array" },
-                    "decrypted_message_events": { "type": "array" },
-                    "dropped_events": { "type": "array" },
-                    "reaction_events": { "type": "array" },
-                    "encrypted_events": { "type": "array" },
-                    "emitted_event_count": { "type": "integer" },
-                    "membership_changes": { "type": "array" },
-                    "state_changes": { "type": "array" },
-                    "inbound_policy": { "type": "object" },
-                    "tracked_state": { "type": "object" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need a truthful incremental view of room timeline, membership, and state changes from the Matrix sync loop".into(),
-                common_mistakes: vec![
-                    "Use the returned next_batch token for subsequent sync calls".into(),
-                    "Set persist=false if you want to inspect a sync result without advancing tracked state".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![
-                    CapabilityId::from_static(OP_GET_ROOM_STATE),
-                    CapabilityId::from_static(OP_LIST_MEMBERS),
-                ],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_GET_ROOM_STATE),
-            summary: "Get room state".into(),
-            description: Some("Fetches the current state event set for a room and summarizes the tracked room metadata".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id"],
-                "properties": {
-                    "room_id": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "room_id": { "type": "string" },
-                    "summary": { "type": "object" },
-                    "state_events": { "type": "array" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need room metadata such as name, topic, avatar, or other stateful settings".into(),
-                common_mistakes: vec!["State events use state_key; empty state_key is common for singleton room settings".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_SYNC)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_LIST_MEMBERS),
-            summary: "List room members".into(),
-            description: Some("Lists membership state events for a room, optionally filtering by membership kind".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["room_id"],
-                "properties": {
-                    "room_id": { "type": "string" },
-                    "membership": { "type": "string", "description": "Optional Matrix membership filter such as join, invite, or leave" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "room_id": { "type": "string" },
-                    "members": { "type": "array" },
-                    "summary": { "type": "object" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need the current membership roster or to inspect membership transitions for a room".into(),
-                common_mistakes: vec!["Membership filters apply to the returned room member events, not to sync state tracking".into()],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_GET_ROOM_STATE)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_UPLOAD_MEDIA),
-            summary: "Upload media".into(),
-            description: Some("Uploads raw media bytes to the homeserver and returns an MXC content URI".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["content_type", "body_base64"],
-                "properties": {
-                    "content_type": { "type": "string" },
-                    "body_base64": { "type": "string", "description": "Base64-encoded file bytes" },
-                    "filename": { "type": "string" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "content_uri": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_WRITE),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Risky,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to attach files or images before sending Matrix message content that references MXC media".into(),
-                common_mistakes: vec![
-                    "body_base64 must contain raw bytes, not a data URI".into(),
-                    "Use the returned content_uri in subsequent room message content".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_DOWNLOAD_MEDIA)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_DOWNLOAD_MEDIA),
-            summary: "Download media".into(),
-            description: Some("Downloads Matrix media by MXC URI or explicit server/media identifiers".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "mxc_uri": { "type": "string", "description": "Convenience MXC URI such as mxc://matrix.org/media123" },
-                    "server_name": { "type": "string" },
-                    "media_id": { "type": "string" },
-                    "allow_remote": { "type": "boolean", "default": true }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "content_type": { "type": ["string", "null"] },
-                    "content_disposition": { "type": ["string", "null"] },
-                    "size_bytes": { "type": "integer" },
-                    "data_base64": { "type": "string" }
-                }
-            }),
-            capability: CapabilityId::from_static(CAP_READ),
-            risk_level: RiskLevel::Low,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::Strict,
-            ai_hints: AgentHint {
-                when_to_use: "When you need to retrieve a previously uploaded Matrix media object".into(),
-                common_mistakes: vec![
-                    "Provide either mxc_uri or the explicit server_name/media_id pair".into(),
-                    "Large media responses are returned as base64 in the JSON result".into(),
-                ],
-                examples: Vec::new(),
-                related: vec![CapabilityId::from_static(OP_UPLOAD_MEDIA)],
-            },
-            rate_limit: None,
-            requires_approval: Some(ApprovalMode::None),
-        },
-    ]
+    try_operations_info().expect("embedded Matrix manifest operations must parse")
+}
+
+fn try_operations_info() -> Result<Vec<OperationInfo>, String> {
+    let mut operations: Vec<_> = manifest_operation_catalog()?.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(&id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(
+    id: &str,
+    operation: fcp_manifest::OperationSection,
+) -> Result<OperationInfo, String> {
+    let summary = matrix_operation_summary(id, &operation.description);
+    let operation_id = OperationId::new(id.to_string())
+        .map_err(|error| format!("manifest operation `{id}` has invalid ID: {error}"))?;
+    Ok(OperationInfo {
+        id: operation_id,
+        summary,
+        description: Some(operation.description),
+        input_schema: operation.input_schema,
+        output_schema: operation.output_schema,
+        capability: operation.capability,
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints,
+        rate_limit: operation
+            .rate_limit
+            .map(|rate_limit| rate_limit.as_inner().clone()),
+        requires_approval: Some(operation.requires_approval.into()),
+    })
+}
+
+fn matrix_operation_summary(operation_id: &str, fallback: &str) -> String {
+    match operation_id {
+        OP_JOINED_ROOMS => "List joined rooms",
+        OP_CREATE_ROOM => "Create a room",
+        OP_JOIN_ROOM => "Join a room",
+        OP_LEAVE_ROOM => "Leave a room",
+        OP_SEND_MESSAGE => "Send a message to a room",
+        OP_GET_MESSAGES => "Get messages from a room",
+        OP_SYNC => "Run a sync cycle",
+        OP_GET_ROOM_STATE => "Get room state",
+        OP_LIST_MEMBERS => "List room members",
+        OP_UPLOAD_MEDIA => "Upload media",
+        OP_DOWNLOAD_MEDIA => "Download media",
+        _ => fallback,
+    }
+    .to_owned()
 }
 
 fn require_str<'a>(input: &'a serde_json::Value, field: &str) -> FcpResult<&'a str> {
@@ -4409,6 +4142,115 @@ mod tests {
     #[test]
     fn operations_count() {
         assert_eq!(operations_info().len(), 11);
+    }
+
+    #[test]
+    fn manifest_declares_matrix_operation_metadata() {
+        let operations =
+            manifest_operation_catalog().expect("embedded manifest operation catalog should parse");
+        assert_eq!(operations.len(), OPERATION_ORDER.len());
+
+        let manifest_ids = operations
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let runtime_ids = OPERATION_ORDER.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(manifest_ids, runtime_ids);
+
+        for operation_id in OPERATION_ORDER {
+            let operation = operations
+                .get(operation_id)
+                .expect("operation should be declared in manifest");
+            assert!(operation.input_schema.is_object());
+            assert!(operation.output_schema.is_object());
+            assert!(!operation.ai_hints.when_to_use.is_empty());
+            let network_constraints = operation
+                .network_constraints
+                .as_ref()
+                .expect("Matrix operation should declare network metadata");
+            assert!(
+                network_constraints.host_allow.is_empty(),
+                "Matrix homeserver host is runtime-configured"
+            );
+            assert!(
+                network_constraints.port_allow.is_empty(),
+                "Matrix homeserver port is runtime-configured"
+            );
+            assert!(network_constraints.require_sni);
+            assert!(!network_constraints.deny_localhost);
+        }
+
+        let send = operations
+            .get(OP_SEND_MESSAGE)
+            .expect("send operation should be declared");
+        assert_eq!(send.capability.as_str(), CAP_WRITE);
+        assert_eq!(send.input_schema["required"], json!(["room_id", "body"]));
+        assert_eq!(
+            send.input_schema["properties"]["thread_root_event_id"]["type"],
+            json!("string")
+        );
+
+        let sync = operations.get(OP_SYNC).expect("sync operation");
+        assert_eq!(sync.capability.as_str(), CAP_READ);
+        assert_eq!(
+            sync.output_schema["properties"]["tracked_state"]["type"],
+            json!("object")
+        );
+
+        let download = operations
+            .get(OP_DOWNLOAD_MEDIA)
+            .expect("download media operation");
+        assert_eq!(
+            download.output_schema["properties"]["data_base64"]["type"],
+            json!("string")
+        );
+    }
+
+    #[test]
+    fn operations_info_uses_manifest_operation_metadata() {
+        let operations =
+            manifest_operation_catalog().expect("embedded manifest operation catalog should parse");
+        let runtime_operations = operations_info();
+        assert_eq!(runtime_operations.len(), operations.len());
+
+        for (index, operation_id) in OPERATION_ORDER.iter().enumerate() {
+            let manifest_operation = operations
+                .get(*operation_id)
+                .expect("operation should be declared in manifest");
+            let runtime_operation = runtime_operations
+                .get(index)
+                .expect("operation should use manifest order");
+            assert_eq!(runtime_operation.id.as_str(), *operation_id);
+            assert_eq!(
+                runtime_operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                runtime_operation.capability.as_str(),
+                manifest_operation.capability.as_str()
+            );
+            assert_eq!(runtime_operation.risk_level, manifest_operation.risk_level);
+            assert_eq!(
+                runtime_operation.safety_tier,
+                manifest_operation.safety_tier
+            );
+            assert_eq!(
+                runtime_operation.idempotency,
+                manifest_operation.idempotency
+            );
+            assert_eq!(
+                &runtime_operation.input_schema,
+                &manifest_operation.input_schema
+            );
+            assert_eq!(
+                &runtime_operation.output_schema,
+                &manifest_operation.output_schema
+            );
+            assert_eq!(
+                runtime_operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+        }
     }
 
     #[test]

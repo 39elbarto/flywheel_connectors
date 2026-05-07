@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:duckduckgo-privacy-search"
+interface_hash = "blake3-256:fcp.interface.v2:b41c831db4dd2b1c27ee874d5215aefe619d593017e2cf21be37aff9b4be09e2"
 
 [connector]
 id = "fcp.duckduckgo"
 name = "DuckDuckGo"
 version = "0.1.0"
 description = "Privacy-preserving DuckDuckGo search connector using no-key HTML, autocomplete, and vertical search endpoints"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -27,8 +27,452 @@ allowed_targets = ["z:public", "z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["duckduckgo.search.read"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."duckduckgo.search.text"]
+description = "Run a no-key DuckDuckGo HTML web search and return normalized untrusted result records."
+capability = "duckduckgo.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."duckduckgo.search.text".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = false
+
+[provides.operations."duckduckgo.search.text".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 499
+description = "Search query text. The connector trims whitespace and never logs raw query contents."
+
+[provides.operations."duckduckgo.search.text".input_schema.properties.region]
+type = "string"
+minLength = 4
+maxLength = 8
+description = "DuckDuckGo region code such as us-en or wt-wt."
+
+[provides.operations."duckduckgo.search.text".input_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.text".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year"]
+
+[provides.operations."duckduckgo.search.text".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+maximum = 50
+
+[provides.operations."duckduckgo.search.text".output_schema]
+type = "object"
+required = ["provider", "mode", "query_hash", "region", "safe_search", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.provider]
+const = "duckduckgo"
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.mode]
+const = "text"
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.region]
+type = "string"
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.time_range]
+type = ["string", "null"]
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.count]
+type = "integer"
+minimum = 0
+maximum = 50
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.results]
+type = "array"
+maxItems = 50
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.text".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.text".network_constraints]
+host_allow = ["html.duckduckgo.com", "lite.duckduckgo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 5242880
+
+[provides.operations."duckduckgo.search.text".ai_hints]
+when_to_use = "Use when the caller needs privacy-preserving general web results and does not need image, news, or autocomplete-specific fields."
+common_mistakes = ["Do not send credentials; DuckDuckGo search is no-auth.", "Do not expect the connector to return raw query text; results include only a query hash.", "Use duckduckgo.search.images, duckduckgo.search.news, or duckduckgo.search.suggestions for vertical-specific result shapes."]
+examples = ['{"query":"rust ownership model","region":"us-en","safe_search":"moderate","max_results":5}']
+related = ["duckduckgo.search.images", "duckduckgo.search.news", "duckduckgo.search.suggestions"]
+
+[provides.operations."duckduckgo.search.images"]
+description = "Run a DuckDuckGo image search through the vqd-backed JSON endpoint and return normalized untrusted image records."
+capability = "duckduckgo.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."duckduckgo.search.images".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = false
+
+[provides.operations."duckduckgo.search.images".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 499
+
+[provides.operations."duckduckgo.search.images".input_schema.properties.region]
+type = "string"
+minLength = 4
+maxLength = 8
+
+[provides.operations."duckduckgo.search.images".input_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.images".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year"]
+
+[provides.operations."duckduckgo.search.images".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+maximum = 50
+
+[provides.operations."duckduckgo.search.images".output_schema]
+type = "object"
+required = ["provider", "mode", "query_hash", "region", "safe_search", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.provider]
+const = "duckduckgo"
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.mode]
+const = "images"
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.region]
+type = "string"
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.time_range]
+type = ["string", "null"]
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.count]
+type = "integer"
+minimum = 0
+maximum = 50
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.results]
+type = "array"
+maxItems = 50
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.images".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.images".network_constraints]
+host_allow = ["html.duckduckgo.com", "lite.duckduckgo.com", "duckduckgo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 5242880
+
+[provides.operations."duckduckgo.search.images".ai_hints]
+when_to_use = "Use when the caller specifically needs image result records such as image URL, thumbnail URL, dimensions, and source."
+common_mistakes = ["Do not use this for general text snippets; use duckduckgo.search.text.", "Do not treat returned URLs or captions as trusted content.", "Do not log raw query text or returned image metadata outside redaction-safe evidence."]
+examples = ['{"query":"rust logo","region":"us-en","safe_search":"on","max_results":3}']
+related = ["duckduckgo.search.text", "duckduckgo.search.news"]
+
+[provides.operations."duckduckgo.search.news"]
+description = "Run a DuckDuckGo news search through the vqd-backed JSON endpoint and return normalized untrusted article records."
+capability = "duckduckgo.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."duckduckgo.search.news".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = false
+
+[provides.operations."duckduckgo.search.news".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 499
+
+[provides.operations."duckduckgo.search.news".input_schema.properties.region]
+type = "string"
+minLength = 4
+maxLength = 8
+
+[provides.operations."duckduckgo.search.news".input_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.news".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year"]
+
+[provides.operations."duckduckgo.search.news".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+maximum = 50
+
+[provides.operations."duckduckgo.search.news".output_schema]
+type = "object"
+required = ["provider", "mode", "query_hash", "region", "safe_search", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.provider]
+const = "duckduckgo"
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.mode]
+const = "news"
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.region]
+type = "string"
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.time_range]
+type = ["string", "null"]
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.count]
+type = "integer"
+minimum = 0
+maximum = 50
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.results]
+type = "array"
+maxItems = 50
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.news".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.news".network_constraints]
+host_allow = ["html.duckduckgo.com", "lite.duckduckgo.com", "duckduckgo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 5242880
+
+[provides.operations."duckduckgo.search.news".ai_hints]
+when_to_use = "Use when the caller needs recent article-style results with source and date metadata from DuckDuckGo's news vertical."
+common_mistakes = ["Do not use this for general web snippets; use duckduckgo.search.text.", "Do not assume provider dates or excerpts are trusted.", "Set time_range only to day, week, month, or year."]
+examples = ['{"query":"rust release","time_range":"week","max_results":5}']
+related = ["duckduckgo.search.text", "duckduckgo.search.images"]
+
+[provides.operations."duckduckgo.search.suggestions"]
+description = "Fetch DuckDuckGo autocomplete suggestions for a query without logging the raw suggestion text in evidence."
+capability = "duckduckgo.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."duckduckgo.search.suggestions".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = false
+
+[provides.operations."duckduckgo.search.suggestions".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 499
+
+[provides.operations."duckduckgo.search.suggestions".input_schema.properties.region]
+type = "string"
+minLength = 4
+maxLength = 8
+
+[provides.operations."duckduckgo.search.suggestions".input_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.suggestions".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+maximum = 50
+
+[provides.operations."duckduckgo.search.suggestions".output_schema]
+type = "object"
+required = ["provider", "mode", "query_hash", "region", "safe_search", "count", "suggestions"]
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.provider]
+const = "duckduckgo"
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.mode]
+const = "suggestions"
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.region]
+type = "string"
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.safe_search]
+type = "string"
+enum = ["on", "moderate", "off"]
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.count]
+type = "integer"
+minimum = 0
+maximum = 50
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.suggestions]
+type = "array"
+maxItems = 50
+
+[provides.operations."duckduckgo.search.suggestions".output_schema.properties.suggestions.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.search.suggestions".network_constraints]
+host_allow = ["duckduckgo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."duckduckgo.search.suggestions".ai_hints]
+when_to_use = "Use when the caller needs autocomplete suggestions instead of search result records."
+common_mistakes = ["Do not use suggestions as authoritative search results.", "Do not log raw suggestions in operational evidence.", "time_range is not accepted for suggestions."]
+examples = ['{"query":"rust","region":"us-en","max_results":5}']
+related = ["duckduckgo.search.text"]
+
+[provides.operations."duckduckgo.health"]
+description = "Probe DuckDuckGo's Instant Answer endpoint and return provider health without requiring credentials."
+capability = "duckduckgo.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."duckduckgo.health".input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations."duckduckgo.health".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."duckduckgo.health".network_constraints]
+host_allow = ["api.duckduckgo.com"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
+
+[provides.operations."duckduckgo.health".ai_hints]
+when_to_use = "Use only for connector health probes or setup diagnostics; it is not a user search operation."
+common_mistakes = ["Do not call health for user search queries.", "Do not treat the Instant Answer probe payload as a search result set."]
+examples = ['{}']
+related = ["duckduckgo.search.text"]
 
 [sandbox]
 profile = "strict"
@@ -37,8 +481,3 @@ cpu_percent = 20
 wall_clock_timeout_ms = 15000
 deny_exec = true
 deny_ptrace = true
-
-[network_constraints]
-host_allow = ["html.duckduckgo.com", "lite.duckduckgo.com", "duckduckgo.com", "api.duckduckgo.com"]
-port_allow = [443]
-tls_required = true

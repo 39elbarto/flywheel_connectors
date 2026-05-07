@@ -12,6 +12,9 @@ const OP_TEXT: &str = "duckduckgo.search.text";
 const OP_IMAGES: &str = "duckduckgo.search.images";
 const OP_NEWS: &str = "duckduckgo.search.news";
 const OP_SUGGESTIONS: &str = "duckduckgo.search.suggestions";
+const OP_HEALTH: &str = "duckduckgo.health";
+const EXPECTED_OPERATION_ORDER: [&str; 5] =
+    [OP_TEXT, OP_IMAGES, OP_NEWS, OP_SUGGESTIONS, OP_HEALTH];
 
 #[fcp_async_core::runtime::test]
 async fn text_search_posts_html_form_and_normalizes_results() {
@@ -244,13 +247,36 @@ async fn lifecycle_advertises_no_auth_privacy_boundary() {
         .handle_introspect()
         .await
         .expect("introspect should work");
-    assert!(
-        introspect["operations"]
-            .as_array()
-            .expect("operations should be an array")
-            .iter()
-            .any(|operation| operation["id"] == OP_IMAGES)
-    );
+    let operations = introspect["operations"]
+        .as_array()
+        .expect("operations should be an array");
+    let operation_ids: Vec<_> = operations
+        .iter()
+        .map(|operation| operation["id"].as_str().expect("operation id"))
+        .collect();
+    assert_eq!(operation_ids, EXPECTED_OPERATION_ORDER);
+    for operation in operations {
+        assert_eq!(operation["capability"], "duckduckgo.search.read");
+        assert_eq!(operation["input_schema"]["type"], "object");
+        assert_eq!(operation["output_schema"]["type"], "object");
+        assert!(
+            operation["network_constraints"]["host_allow"]
+                .as_array()
+                .expect("host_allow should be present")
+                .iter()
+                .all(|host| host
+                    .as_str()
+                    .is_some_and(|value| value.ends_with("duckduckgo.com")))
+        );
+        assert!(
+            operation["ai_hints"]["when_to_use"]
+                .as_str()
+                .is_some_and(|value| !value.is_empty())
+        );
+    }
+    let manifest = fcp_manifest::ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+        .expect("manifest should validate");
+    assert_eq!(manifest.provides.operations.len(), operations.len());
     let simulate = connector
         .handle_simulate(json!({"operation_id": OP_TEXT}))
         .await

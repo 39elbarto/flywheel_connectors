@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use reqwest::header::{
     ACCEPT, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, REFERER, USER_AGENT,
@@ -13,6 +14,7 @@ use url::Url;
 
 pub const CONNECTOR_ID: &str = "fcp.duckduckgo";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const DEFAULT_HTML_BASE_URL: &str = "https://html.duckduckgo.com";
 const DEFAULT_API_BASE_URL: &str = "https://duckduckgo.com";
@@ -28,6 +30,7 @@ const OP_IMAGES: &str = "duckduckgo.search.images";
 const OP_NEWS: &str = "duckduckgo.search.news";
 const OP_SUGGESTIONS: &str = "duckduckgo.search.suggestions";
 const OP_HEALTH: &str = "duckduckgo.health";
+const OPERATION_ORDER: [&str; 5] = [OP_TEXT, OP_IMAGES, OP_NEWS, OP_SUGGESTIONS, OP_HEALTH];
 
 const CAP_SEARCH: &str = "duckduckgo.search.read";
 
@@ -581,22 +584,7 @@ impl DuckDuckGoConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                operation_schema(OP_TEXT, "Run a DuckDuckGo no-JS web search"),
-                operation_schema(OP_IMAGES, "Run a DuckDuckGo image search"),
-                operation_schema(OP_NEWS, "Run a DuckDuckGo news search"),
-                operation_schema(OP_SUGGESTIONS, "Fetch DuckDuckGo autocomplete suggestions"),
-                {
-                    "id": OP_HEALTH,
-                    "summary": "Probe DuckDuckGo Instant Answer health",
-                    "capability": CAP_SEARCH,
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "input_schema": {"type": "object"},
-                    "output_schema": {"type": "object"}
-                }
-            ],
+            "operations": operations_info(),
             "events": [],
             "resource_types": []
         }))
@@ -667,27 +655,48 @@ impl Default for DuckDuckGoConnector {
     }
 }
 
-fn operation_schema(id: &str, summary: &str) -> Value {
-    json!({
+fn operations_info() -> Vec<Value> {
+    let manifest = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+        .expect("embedded DuckDuckGo manifest should parse before hash validation");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_json_from_manifest(&id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(usize::MAX)
+}
+
+fn operation_json_from_manifest(id: &str, operation: fcp_manifest::OperationSection) -> Value {
+    let description = operation.description;
+    let mut metadata = json!({
         "id": id,
-        "summary": summary,
-        "capability": CAP_SEARCH,
-        "risk_level": "low",
-        "safety_tier": "safe",
-        "idempotency": "strict",
-        "input_schema": {
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "maxLength": MAX_QUERY_CHARS},
-                "region": {"type": "string"},
-                "safe_search": {"type": "string", "enum": ["on", "moderate", "off"]},
-                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS}
-            }
-        },
-        "output_schema": {"type": "object"}
-    })
+        "summary": description,
+        "description": description,
+        "capability": operation.capability.as_str(),
+        "risk_level": operation.risk_level,
+        "safety_tier": operation.safety_tier,
+        "requires_approval": operation.requires_approval,
+        "idempotency": operation.idempotency,
+        "input_schema": operation.input_schema,
+        "output_schema": operation.output_schema,
+        "network_constraints": operation.network_constraints,
+        "ai_hints": operation.ai_hints
+    });
+    if let Some(rate_limit) = operation.rate_limit {
+        metadata["rate_limit"] = json!(rate_limit.0);
+    }
+    metadata
 }
 
 const fn health_status(configured: bool, handshaken: bool) -> &'static str {
@@ -1067,6 +1076,60 @@ fn map_reqwest_error(error: &reqwest::Error) -> FcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use jsonschema::Validator;
+
+    fn duckduckgo_manifest_unchecked() -> ConnectorManifest {
+        ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("DuckDuckGo manifest should parse before hash validation")
+    }
+
+    fn operation_input_schema<'a>(
+        manifest: &'a ConnectorManifest,
+        operation_id: &str,
+    ) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("operation should be declared")
+            .input_schema
+    }
+
+    fn operation_output_schema<'a>(
+        manifest: &'a ConnectorManifest,
+        operation_id: &str,
+    ) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("operation should be declared")
+            .output_schema
+    }
+
+    fn validator_for(schema: &Value) -> Validator {
+        Validator::new(schema).expect("manifest operation schema should compile")
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        let errors: Vec<_> = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {payload}; errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject {payload}"
+        );
+    }
 
     const HTML_FIXTURE: &str = r#"
       <html><body>
@@ -1138,5 +1201,100 @@ mod tests {
         );
         assert_eq!(objects.len(), 1);
         assert_eq!(objects[0]["text"], "rust ownership");
+    }
+
+    #[test]
+    fn manifest_declares_all_runtime_operations_in_stable_order() {
+        let manifest = duckduckgo_manifest_unchecked();
+        let ids: Vec<_> = operations_info()
+            .into_iter()
+            .map(|operation| {
+                operation["id"]
+                    .as_str()
+                    .expect("operation id should be a string")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(ids, OPERATION_ORDER);
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+        for operation_id in OPERATION_ORDER {
+            assert!(
+                manifest.provides.operations.contains_key(operation_id),
+                "{operation_id} should be declared"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_operation_schemas_cover_boundaries_and_errors() {
+        let manifest = duckduckgo_manifest_unchecked();
+        let text_schema = operation_input_schema(&manifest, OP_TEXT);
+        assert_schema_accepts(
+            text_schema,
+            &json!({"query":"rust","region":"us-en","safe_search":"moderate","time_range":"year","max_results":50}),
+        );
+        assert_schema_rejects(text_schema, &json!({}));
+        assert_schema_rejects(text_schema, &json!({"query": ""}));
+        assert_schema_rejects(
+            text_schema,
+            &json!({"query": "x".repeat(MAX_QUERY_CHARS + 1)}),
+        );
+        assert_schema_rejects(text_schema, &json!({"query":"rust","time_range":"hour"}));
+        assert_schema_rejects(
+            text_schema,
+            &json!({"query":"rust","max_results":MAX_RESULTS + 1}),
+        );
+
+        let health_schema = operation_input_schema(&manifest, OP_HEALTH);
+        assert_schema_accepts(health_schema, &json!({}));
+        assert_schema_rejects(health_schema, &json!({"query":"rust"}));
+    }
+
+    #[test]
+    fn manifest_output_schemas_accept_redacted_null_time_ranges() {
+        let manifest = duckduckgo_manifest_unchecked();
+        for (operation_id, mode) in [(OP_TEXT, "text"), (OP_IMAGES, "images"), (OP_NEWS, "news")] {
+            assert_schema_accepts(
+                operation_output_schema(&manifest, operation_id),
+                &json!({
+                    "provider": "duckduckgo",
+                    "mode": mode,
+                    "query_hash": "blake3:0000000000000000000000000000000000000000000000000000000000000000",
+                    "region": "us-en",
+                    "safe_search": "moderate",
+                    "time_range": null,
+                    "count": 0,
+                    "results": [],
+                    "external_content": {"trusted": false}
+                }),
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_operation_metadata_is_redaction_and_network_aware() {
+        let manifest = duckduckgo_manifest_unchecked();
+        let text = &manifest.provides.operations[OP_TEXT];
+        assert_eq!(text.capability.as_str(), CAP_SEARCH);
+        assert!(text.ai_hints.when_to_use.contains("privacy-preserving"));
+        assert!(
+            text.ai_hints
+                .common_mistakes
+                .iter()
+                .any(|hint| hint.contains("raw query text"))
+        );
+        let text_hosts = &text
+            .network_constraints
+            .as_ref()
+            .expect("text network constraints")
+            .host_allow;
+        assert_eq!(text_hosts, &["html.duckduckgo.com", "lite.duckduckgo.com"]);
+
+        let suggestions_hosts = &manifest.provides.operations[OP_SUGGESTIONS]
+            .network_constraints
+            .as_ref()
+            .expect("suggestions network constraints")
+            .host_allow;
+        assert_eq!(suggestions_hosts, &["duckduckgo.com"]);
     }
 }

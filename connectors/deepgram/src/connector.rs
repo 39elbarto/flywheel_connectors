@@ -5,6 +5,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_async_core::time;
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use reqwest::{
@@ -17,6 +18,8 @@ use url::Url;
 
 const CONNECTOR_ID: &str = "fcp.deepgram";
 const CONNECTOR_VERSION: &str = "0.1.0";
+const DEEPGRAM_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 2] = ["deepgram.listen.transcribe", "deepgram.listen.stream"];
 const BOUNDARY: &str = "This slice covers prerecorded transcription plus finite realtime transcription sessions through the Deepgram Listen WebSocket API.";
 const DEFAULT_BASE_URL: &str = "https://api.deepgram.com";
 const DEFAULT_TRANSCRIPTION_MODEL: &str = "nova-3";
@@ -785,77 +788,7 @@ impl DeepgramConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                {
-                    "id": "deepgram.listen.transcribe",
-                    "summary": "Create a Deepgram prerecorded transcription",
-                    "capability": "deepgram.listen",
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "input_schema": {
-                        "type": "object",
-                        "required": ["audio_url"],
-                        "properties": {
-                            "audio_url": { "type": "string" },
-                            "media_byte_count": {
-                                "type": "integer",
-                                "minimum": 1,
-                                "maximum": MAX_DECLARED_MEDIA_BYTES
-                            },
-                            "model": { "type": "string", "default": DEFAULT_TRANSCRIPTION_MODEL },
-                            "language": { "type": "string" },
-                            "detect_language": { "type": "boolean" },
-                            "smart_format": { "type": "boolean" },
-                            "punctuate": { "type": "boolean" },
-                            "diarize": { "type": "boolean" },
-                            "utterances": { "type": "boolean" },
-                            "paragraphs": { "type": "boolean" },
-                            "summarize": { "type": "boolean" },
-                            "topics": { "type": "boolean" },
-                            "intents": { "type": "boolean" }
-                        }
-                    },
-                    "output_schema": { "type": "object" }
-                },
-                {
-                    "id": "deepgram.listen.stream",
-                    "summary": "Run a finite Deepgram realtime transcription WebSocket session",
-                    "capability": "deepgram.listen.streaming",
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "none",
-                    "input_schema": {
-                        "type": "object",
-                        "required": ["audio_base64"],
-                        "properties": {
-                            "audio_base64": { "type": "string" },
-                            "audio_b64": { "type": "string" },
-                            "audio_chunks_base64": { "type": "array", "items": { "type": "string" } },
-                            "audio_chunks_b64": { "type": "array", "items": { "type": "string" } },
-                            "session_id": { "type": "string" },
-                            "model": { "type": "string", "default": DEFAULT_TRANSCRIPTION_MODEL },
-                            "audio_format": {
-                                "type": "object",
-                                "properties": {
-                                    "encoding": { "type": "string", "default": DEFAULT_STREAMING_ENCODING },
-                                    "sample_rate": { "type": "integer", "default": DEFAULT_STREAMING_SAMPLE_RATE }
-                                }
-                            },
-                            "encoding": { "type": "string", "default": DEFAULT_STREAMING_ENCODING },
-                            "sample_rate": { "type": "integer", "default": DEFAULT_STREAMING_SAMPLE_RATE },
-                            "endpointing_ms": { "type": "integer", "default": DEFAULT_STREAMING_ENDPOINTING_MS },
-                            "interim_results": { "type": "boolean", "default": DEFAULT_STREAMING_INTERIM_RESULTS },
-                            "connect_timeout_ms": { "type": "integer", "default": DEFAULT_STREAMING_CONNECT_TIMEOUT_MS },
-                            "timeout_ms": { "type": "integer", "default": DEFAULT_STREAMING_TIMEOUT_MS },
-                            "max_events": { "type": "integer", "default": DEFAULT_STREAMING_MAX_EVENTS },
-                            "max_reconnect_attempts": { "type": "integer", "default": DEFAULT_STREAMING_MAX_RECONNECT_ATTEMPTS },
-                            "reconnect_delay_ms": { "type": "integer", "default": DEFAULT_STREAMING_RECONNECT_DELAY_MS }
-                        }
-                    },
-                    "output_schema": { "type": "object" }
-                }
-            ],
+            "operations": operations_info()?,
             "deferred_operations": deferred_operations_info(),
             "events": [],
             "resource_types": []
@@ -945,6 +878,66 @@ impl Default for DeepgramConnector {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn operations_info() -> FcpResult<Vec<Value>> {
+    let manifest = ConnectorManifest::parse_str(DEEPGRAM_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded Deepgram manifest is invalid: {error}"),
+        }
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
 }
 
 fn deferred_operations_info() -> Vec<Value> {

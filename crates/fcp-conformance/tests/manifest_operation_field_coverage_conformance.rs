@@ -75,7 +75,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "zalouser",
 ];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
-    "apple-notes",
     "apple-reminders",
     "dingtalk",
     "email-generic",

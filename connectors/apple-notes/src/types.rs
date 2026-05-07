@@ -250,4 +250,32 @@ mod tests {
             "Apple Notes uses a bounded connector-local osascript carveout"
         );
     }
+
+    #[test]
+    fn manifest_ai_hints_cover_all_apple_notes_operations() {
+        let manifest = parsed_manifest();
+
+        for (operation_id, operation) in &manifest.provides.operations {
+            assert!(
+                !operation.ai_hints.when_to_use.trim().is_empty(),
+                "{operation_id} must explain when agents should use it"
+            );
+            assert!(
+                !operation.ai_hints.common_mistakes.is_empty(),
+                "{operation_id} must document common agent mistakes"
+            );
+            assert!(
+                operation
+                    .ai_hints
+                    .common_mistakes
+                    .iter()
+                    .all(|mistake| !mistake.trim().is_empty()),
+                "{operation_id} common mistakes must not contain empty entries"
+            );
+            assert!(
+                !operation.ai_hints.examples.is_empty(),
+                "{operation_id} must include at least one example invocation"
+            );
+        }
+    }
 }

@@ -865,7 +865,6 @@ fn expected_network_constraints_gap_connectors() -> Vec<String> {
 
 fn expected_ai_hints_gap_connectors() -> Vec<String> {
     connector_names(&[
-        "apple-notes",
         "apple-reminders",
         "dingtalk",
         "email-generic",

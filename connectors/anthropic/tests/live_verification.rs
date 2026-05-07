@@ -17,6 +17,10 @@ use chrono::{Duration, Utc};
 use serde_json::json;
 
 type LiveCapability = CapabilityToken;
+struct LiveAuth {
+    signing_key: Ed25519SigningKey,
+    instance_id: String,
+}
 
 // ============================================================================
 // Skip guard
@@ -44,7 +48,7 @@ macro_rules! skip_without_key {
 // Helpers
 // ============================================================================
 
-fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+fn generate_read_token(auth: &LiveAuth, op: &str) -> CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -60,17 +64,15 @@ fn generate_read_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityT
         .operations(&[op])
         .issuer("node:live-test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(&auth.instance_id)
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
-        .sign(signing_key)
+        .sign(&auth.signing_key)
         .unwrap();
     CapabilityToken::from_raw(cose)
 }
 
-async fn setup_live_connector(
-    connector: &mut AnthropicConnector,
-    api_key: &str,
-) -> Ed25519SigningKey {
+async fn setup_live_connector(connector: &mut AnthropicConnector, api_key: &str) -> LiveAuth {
     // Configure with real Anthropic API key
     connector
         .handle_configure(json!({
@@ -95,7 +97,10 @@ async fn setup_live_connector(
         .await
         .expect("handshake should succeed");
 
-    signing_key
+    LiveAuth {
+        signing_key,
+        instance_id: connector.instance_id().as_str().to_string(),
+    }
 }
 
 // ============================================================================
@@ -107,8 +112,8 @@ async fn live_messages_create() {
     skip_without_key!(api_key);
 
     let mut connector = AnthropicConnector::new();
-    let signing_key = setup_live_connector(&mut connector, &api_key).await;
-    let cap_token: LiveCapability = generate_read_token(&signing_key, "anthropic.chat");
+    let auth = setup_live_connector(&mut connector, &api_key).await;
+    let cap_token: LiveCapability = generate_read_token(&auth, "anthropic.chat");
 
     let result = connector
         .handle_invoke(json!({
@@ -177,7 +182,11 @@ async fn live_error_mapping_invalid_key() {
         .await
         .expect("handshake should succeed");
 
-    let cap_token: LiveCapability = generate_read_token(&signing_key, "anthropic.chat");
+    let auth = LiveAuth {
+        signing_key,
+        instance_id: connector.instance_id().as_str().to_string(),
+    };
+    let cap_token: LiveCapability = generate_read_token(&auth, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({

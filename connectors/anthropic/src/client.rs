@@ -19,8 +19,8 @@ use tracing::{debug, instrument};
 use crate::{
     error::{AnthropicError, AnthropicResult},
     types::{
-        ApiError, Message, MessagesRequest, MessagesResponse, Model, StreamEvent, Tool, ToolChoice,
-        Usage,
+        ApiError, Message, MessageRequestOptions, MessagesRequest, MessagesResponse, Model,
+        StreamEvent, Tool, ToolChoice, Usage,
     },
 };
 
@@ -51,6 +51,12 @@ fn resolve_api_version(config_override: Option<&str>) -> String {
 pub enum AnthropicAuth {
     /// Direct API key (legacy; avoided in secretless deployments).
     ApiKey(String),
+    /// Bearer token supplied by an operator or gateway.
+    BearerToken(String),
+    /// Claude Code OAuth/setup-token bearer token.
+    ClaudeCodeOAuth(String),
+    /// Short-lived setup token from `claude setup-token`.
+    SetupToken(String),
     /// Secretless credential reference (egress proxy injection).
     CredentialId(CredentialId),
 }
@@ -61,6 +67,9 @@ impl AnthropicAuth {
     pub fn redacted_label(&self) -> String {
         match self {
             Self::ApiKey(_) => "api_key:redacted".to_string(),
+            Self::BearerToken(_) => "bearer_token:redacted".to_string(),
+            Self::ClaudeCodeOAuth(_) => "claude_code_oauth:redacted".to_string(),
+            Self::SetupToken(_) => "setup_token:redacted".to_string(),
             Self::CredentialId(id) => format!("credential_id:{id}"),
         }
     }
@@ -70,12 +79,36 @@ impl AnthropicAuth {
     pub const fn is_secretless(&self) -> bool {
         matches!(self, Self::CredentialId(_))
     }
+
+    /// Auth method name for diagnostics and request-policy decisions.
+    #[must_use]
+    pub const fn method_name(&self) -> &'static str {
+        match self {
+            Self::ApiKey(_) => "api_key",
+            Self::BearerToken(_) => "bearer_token",
+            Self::ClaudeCodeOAuth(_) => "claude_code_oauth",
+            Self::SetupToken(_) => "setup_token",
+            Self::CredentialId(_) => "credential_id",
+        }
+    }
+
+    /// Whether this token path needs Claude Code OAuth beta headers.
+    #[must_use]
+    pub const fn uses_claude_code_oauth(&self) -> bool {
+        matches!(self, Self::ClaudeCodeOAuth(_) | Self::SetupToken(_))
+    }
 }
 
 impl fmt::Debug for AnthropicAuth {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::ApiKey(_) => f.debug_tuple("ApiKey").field(&"<redacted>").finish(),
+            Self::BearerToken(_) => f.debug_tuple("BearerToken").field(&"<redacted>").finish(),
+            Self::ClaudeCodeOAuth(_) => f
+                .debug_tuple("ClaudeCodeOAuth")
+                .field(&"<redacted>")
+                .finish(),
+            Self::SetupToken(_) => f.debug_tuple("SetupToken").field(&"<redacted>").finish(),
             Self::CredentialId(id) => f.debug_tuple("CredentialId").field(id).finish(),
         }
     }
@@ -242,7 +275,7 @@ impl AnthropicClient {
             .header("content-type", "application/json");
         let request = self.apply_auth(request)?;
         let request = request.json(&serde_json::json!({
-            "model": "claude-3-5-haiku-20241022",
+            "model": Model::default().as_str(),
             "max_tokens": 1,
             "messages": [{"role": "user", "content": "hi"}]
         }));
@@ -268,6 +301,12 @@ impl AnthropicClient {
             AnthropicAuth::ApiKey(key) => {
                 let value = auth_header_value(key, "API key")?;
                 headers.insert("x-api-key", value);
+            }
+            AnthropicAuth::BearerToken(token)
+            | AnthropicAuth::ClaudeCodeOAuth(token)
+            | AnthropicAuth::SetupToken(token) => {
+                let value = auth_header_value(&format!("Bearer {token}"), "bearer token")?;
+                headers.insert("authorization", value);
             }
             AnthropicAuth::CredentialId(credential_id) => {
                 let credential_id = credential_id.to_string();
@@ -295,19 +334,55 @@ impl AnthropicClient {
         tools: Option<Vec<Tool>>,
         tool_choice: Option<ToolChoice>,
     ) -> AnthropicResult<MessagesResponse> {
+        self.message_with_options(
+            model,
+            messages,
+            max_tokens,
+            system.map(|value| serde_json::Value::String(value.to_string())),
+            MessageRequestOptions {
+                temperature,
+                tools,
+                tool_choice,
+                ..MessageRequestOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Send a message with explicit Anthropic advanced options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, authentication errors,
+    /// or context length violations.
+    #[instrument(skip(self, messages, system, options))]
+    pub async fn message_with_options(
+        &self,
+        model: Model,
+        messages: Vec<Message>,
+        max_tokens: u32,
+        system: Option<serde_json::Value>,
+        options: MessageRequestOptions,
+    ) -> AnthropicResult<MessagesResponse> {
         let request = MessagesRequest {
             model: model.as_str().into(),
             messages,
             max_tokens,
-            system: system.map(Into::into),
-            temperature,
+            system,
+            temperature: options.temperature,
             stream: Some(false),
-            tools,
-            tool_choice,
+            tools: options.tools,
+            tool_choice: options.tool_choice,
             stop_sequences: None,
+            cache_control: options.cache_control,
+            service_tier: options.service_tier,
+            thinking: options.thinking,
+            output_config: options.output_config,
         };
 
-        let response: MessagesResponse = self.post("/v1/messages", &request).await?;
+        let response: MessagesResponse = self
+            .post_with_betas("/v1/messages", &request, &options.anthropic_betas)
+            .await?;
         self.track_usage(&response.usage);
         Ok(response)
     }
@@ -361,24 +436,73 @@ impl AnthropicClient {
         tools: Option<Vec<Tool>>,
         tool_choice: Option<ToolChoice>,
     ) -> AnthropicResult<impl Stream<Item = AnthropicResult<StreamEvent>>> {
+        self.message_stream_with_options(
+            model,
+            messages,
+            max_tokens,
+            system.map(|value| serde_json::Value::String(value.to_string())),
+            MessageRequestOptions {
+                temperature,
+                tools,
+                tool_choice,
+                ..MessageRequestOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Stream a message response with explicit Anthropic advanced options.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error on HTTP failures, rate limiting, or authentication errors.
+    #[instrument(skip(self, messages, system, options))]
+    pub async fn message_stream_with_options(
+        &self,
+        model: Model,
+        messages: Vec<Message>,
+        max_tokens: u32,
+        system: Option<serde_json::Value>,
+        options: MessageRequestOptions,
+    ) -> AnthropicResult<impl Stream<Item = AnthropicResult<StreamEvent>>> {
         let request = MessagesRequest {
             model: model.as_str().into(),
             messages,
             max_tokens,
-            system: system.map(Into::into),
-            temperature,
+            system,
+            temperature: options.temperature,
             stream: Some(true),
-            tools,
-            tool_choice,
+            tools: options.tools,
+            tool_choice: options.tool_choice,
             stop_sequences: None,
+            cache_control: options.cache_control,
+            service_tier: options.service_tier,
+            thinking: options.thinking,
+            output_config: options.output_config,
         };
 
-        let response = self.post_stream("/v1/messages", &request).await?;
+        let response = self
+            .post_stream_with_betas("/v1/messages", &request, &options.anthropic_betas)
+            .await?;
         Ok(parse_sse_stream(response))
     }
 
     /// Make a POST request with automatic retry via [`RetryLoop`].
     async fn post<T, R>(&self, endpoint: &str, body: &T) -> AnthropicResult<R>
+    where
+        T: serde::Serialize + Sync,
+        R: serde::de::DeserializeOwned + Send,
+    {
+        self.post_with_betas(endpoint, body, &[]).await
+    }
+
+    /// Make a POST request with optional Anthropic beta headers.
+    async fn post_with_betas<T, R>(
+        &self,
+        endpoint: &str,
+        body: &T,
+        betas: &[String],
+    ) -> AnthropicResult<R>
     where
         T: serde::Serialize + Sync,
         R: serde::de::DeserializeOwned + Send,
@@ -400,6 +524,10 @@ impl AnthropicClient {
                     .post(url.as_str())
                     .header("anthropic-version", &self.api_version)
                     .header("content-type", "application/json");
+                let request = match apply_beta_headers(request, betas) {
+                    Ok(request) => request,
+                    Err(error) => return AttemptOutcome::Terminal(error),
+                };
                 let request = match self.apply_auth(request) {
                     Ok(request) => request,
                     Err(error) => return AttemptOutcome::Terminal(error),
@@ -430,6 +558,19 @@ impl AnthropicClient {
     where
         T: serde::Serialize + Sync,
     {
+        self.post_stream_with_betas(endpoint, body, &[]).await
+    }
+
+    /// Make a streaming POST request with optional Anthropic beta headers.
+    async fn post_stream_with_betas<T>(
+        &self,
+        endpoint: &str,
+        body: &T,
+        betas: &[String],
+    ) -> AnthropicResult<Response>
+    where
+        T: serde::Serialize + Sync,
+    {
         let url = format!("{}{endpoint}", self.base_url);
 
         let request = self
@@ -437,6 +578,7 @@ impl AnthropicClient {
             .post(&url)
             .header("anthropic-version", &self.api_version)
             .header("content-type", "application/json");
+        let request = apply_beta_headers(request, betas)?;
         let request = self.apply_auth(request)?;
         let response = request.json(body).send().await?;
 
@@ -465,6 +607,20 @@ impl AnthropicClient {
             Err(parse_error_response(status, &bytes, retry_after))
         }
     }
+}
+
+fn apply_beta_headers(
+    request: reqwest::RequestBuilder,
+    betas: &[String],
+) -> AnthropicResult<reqwest::RequestBuilder> {
+    if betas.is_empty() {
+        return Ok(request);
+    }
+    let joined = betas.join(",");
+    let value = auth_header_value(&joined, "beta header")?;
+    let mut headers = HeaderMap::new();
+    headers.insert("anthropic-beta", value);
+    Ok(request.headers(headers))
 }
 
 /// Extract the `retry-after` header as milliseconds.
@@ -1090,8 +1246,8 @@ mod tests {
 
     #[fcp_async_core::runtime::test]
     async fn test_model_pricing() {
-        assert_eq!(Model::ClaudeOpus4_5.input_price_per_million(), 15.0);
-        assert_eq!(Model::ClaudeOpus4_5.output_price_per_million(), 75.0);
+        assert_eq!(Model::ClaudeOpus4_5.input_price_per_million(), 5.0);
+        assert_eq!(Model::ClaudeOpus4_5.output_price_per_million(), 25.0);
         assert_eq!(Model::ClaudeSonnet4.input_price_per_million(), 3.0);
         assert_eq!(Model::ClaudeSonnet4.output_price_per_million(), 15.0);
         assert_eq!(Model::Claude3_5Haiku.input_price_per_million(), 0.25);
@@ -1105,6 +1261,7 @@ mod tests {
             output_tokens: 500,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            service_tier: None,
         };
 
         // Sonnet: 1000 input * $3/1M + 500 output * $15/1M
@@ -1254,6 +1411,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            service_tier: None,
         };
         client.track_usage(&usage);
         assert_eq!(client.total_input_tokens(), 100);

@@ -35,8 +35,13 @@ type TestCapability = fcp_core::CapabilityToken;
 // Helpers
 // ============================================================================
 
+struct TestAuth {
+    signing_key: Ed25519SigningKey,
+    instance_id: String,
+}
+
 /// Generate a valid COSE capability token signed by the given key.
-fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core::CapabilityToken {
+fn generate_valid_token(auth: &TestAuth, cap: &str) -> fcp_core::CapabilityToken {
     let now = Utc::now();
     // C3.4: tokens MUST include constraints (default-deny)
     let constraints = CapabilityConstraints {
@@ -52,15 +57,16 @@ fn generate_valid_token(signing_key: &Ed25519SigningKey, cap: &str) -> fcp_core:
         .operations(&[cap])
         .issuer("node:test")
         .validity(now, now + Duration::hours(1))
+        .target_instance(&auth.instance_id)
         .try_constraints_cbor(&cbor)
         .expect("constraints CBOR should validate")
-        .sign(signing_key)
+        .sign(&auth.signing_key)
         .unwrap();
     fcp_core::CapabilityToken::from_raw(cose)
 }
 
 /// Perform handshake on a connector, returning the signing key for token generation.
-async fn setup_handshake(connector: &mut AnthropicConnector, caps: &[&str]) -> Ed25519SigningKey {
+async fn setup_handshake(connector: &mut AnthropicConnector, caps: &[&str]) -> TestAuth {
     let signing_key = Ed25519SigningKey::generate();
     let verifying_key = signing_key.verifying_key();
 
@@ -75,7 +81,10 @@ async fn setup_handshake(connector: &mut AnthropicConnector, caps: &[&str]) -> E
         .await
         .expect("handshake should succeed");
 
-    signing_key
+    TestAuth {
+        signing_key,
+        instance_id: connector.instance_id().as_str().to_string(),
+    }
 }
 
 /// Configure connector with a mock server URL.
@@ -657,6 +666,7 @@ async fn tool_use_streaming_shape() {
         name: "get_weather".into(),
         description: "Get weather".into(),
         input_schema: json!({"type": "object", "properties": {"city": {"type": "string"}}}),
+        eager_input_streaming: Some(true),
     }];
 
     let stream = client
@@ -1059,7 +1069,11 @@ async fn capability_no_handshake_fails() {
 
     // Generate token with arbitrary key (no handshake, so no verifier)
     let signing_key = Ed25519SigningKey::generate();
-    let token: TestCapability = generate_valid_token(&signing_key, "anthropic.chat");
+    let auth = TestAuth {
+        signing_key,
+        instance_id: "inst_test".into(),
+    };
+    let token: TestCapability = generate_valid_token(&auth, "anthropic.chat");
 
     let err = connector
         .handle_invoke(json!({
@@ -2167,7 +2181,7 @@ async fn config_no_auth_rejected() {
     match &err {
         fcp_core::FcpError::InvalidRequest { message, .. } => {
             assert!(
-                message.contains("Missing api_key or credential_id"),
+                message.contains("Missing api_key"),
                 "error should mention missing auth: {message}"
             );
         }
@@ -2480,8 +2494,8 @@ async fn chat_opus_model_higher_cost() {
         .expect("opus model should work");
 
     let cost = result["cost_usd"].as_f64().unwrap();
-    // Opus: 100 * $15/M + 50 * $75/M = 0.0015 + 0.00375 = 0.00525
-    assert!(cost > 0.005, "opus cost should be substantial: {cost}");
+    // Opus 4.5: 100 * $5/M + 50 * $25/M = 0.0005 + 0.00125 = 0.00175
+    assert!(cost > 0.0015, "opus cost should be substantial: {cost}");
 }
 
 /// Chat with Claude 3.5 Sonnet model works.

@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:1261a99c14d2550855dbdf05cc995bbdcb04861d1606b06d6e338d4f7b5fc1ad"
+interface_hash = "blake3-256:fcp.interface.v2:802fdc5f20104e4fe4e5cc21150596812bb45a9e193f9d067bb522fcf3a134c8"
 
 [connector]
 id = "fcp.anthropic"
@@ -40,10 +40,12 @@ required = [
     "network.tls.sni",
 ]
 optional = [
+    "anthropic.auth",
     "anthropic.chat",
     "anthropic.get_usage",
     "anthropic.message",
     "anthropic.message.stream",
+    "anthropic.models",
 ]
 forbidden = [
     "system.exec",
@@ -75,16 +77,53 @@ maximum = 100000
 minimum = 1
 type = "integer"
 
+[provides.operations."anthropic.chat".input_schema.properties.anthropic_betas]
+description = "Optional Anthropic beta headers to include for this request"
+type = "array"
+
+[provides.operations."anthropic.chat".input_schema.properties.anthropic_betas.items]
+type = "string"
+
+[provides.operations."anthropic.chat".input_schema.properties.service_tier]
+description = "Anthropic service-tier routing preference"
+enum = [
+    "auto",
+    "standard_only",
+]
+type = "string"
+
+[provides.operations."anthropic.chat".input_schema.properties.thinking]
+description = "Extended-thinking request configuration"
+type = "object"
+
+[provides.operations."anthropic.chat".input_schema.properties.output_config]
+description = "Output configuration, including adaptive-thinking effort"
+type = "object"
+
+[provides.operations."anthropic.chat".input_schema.properties.cache_control]
+description = "Top-level prompt cache-control object"
+type = "object"
+
+[provides.operations."anthropic.chat".input_schema.properties.enable_1m_context]
+default = false
+description = "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header."
+type = "boolean"
+
 [provides.operations."anthropic.chat".input_schema.properties.message]
 description = "Single user message"
 minLength = 1
 type = "string"
 
 [provides.operations."anthropic.chat".input_schema.properties.model]
-default = "claude-sonnet-4-20250514"
+default = "claude-sonnet-4-6"
 description = "Anthropic model to use"
 enum = [
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
     "claude-sonnet-4-20250514",
     "claude-3-5-haiku-20241022",
     "claude-3-5-sonnet-20241022",
@@ -92,7 +131,7 @@ enum = [
 type = "string"
 
 [provides.operations."anthropic.chat".input_schema.properties.system]
-description = "Optional system prompt"
+description = "Optional system prompt, either a string or an Anthropic content-block array"
 type = "string"
 
 [provides.operations."anthropic.chat".output_schema]
@@ -118,6 +157,9 @@ type = "integer"
 
 [provides.operations."anthropic.chat".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.chat".output_schema.properties.usage.properties.service_tier]
+type = "string"
 
 [provides.operations."anthropic.chat".output_schema.properties.provenance]
 description = "Provenance and taint metadata for the AI-generated output"
@@ -168,7 +210,7 @@ common_mistakes = [
 ]
 examples = [
     '{"message": "Summarize this text"}',
-    '{"message": "Use the get_weather tool to find the forecast for Seattle", "model": "claude-sonnet-4-20250514", "system": "You have access to tools. Call them when the user asks for real-time data.", "max_tokens": 1024}',
+    '{"message": "Use the get_weather tool to find the forecast for Seattle", "model": "claude-sonnet-4-6", "system": "You have access to tools. Call them when the user asks for real-time data.", "max_tokens": 1024}',
 ]
 related = [
     "anthropic.message",
@@ -223,6 +265,56 @@ related = [
     "anthropic.message",
 ]
 
+[provides.operations."anthropic.auth.list_methods"]
+description = "List supported Anthropic authentication methods and the active configured method"
+capability = "anthropic.auth"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."anthropic.auth.list_methods".input_schema]
+type = "object"
+
+[provides.operations."anthropic.auth.list_methods".output_schema]
+type = "object"
+
+[provides.operations."anthropic.auth.refresh_oauth"]
+description = "Report whether the configured Claude Code OAuth credential path is refreshable by the host"
+capability = "anthropic.auth"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."anthropic.auth.refresh_oauth".input_schema]
+type = "object"
+
+[provides.operations."anthropic.auth.refresh_oauth".output_schema]
+type = "object"
+
+[provides.operations."anthropic.models.normalize"]
+description = "Normalize an Anthropic model alias to the connector's canonical Claude API model ID"
+capability = "anthropic.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."anthropic.models.normalize".input_schema]
+required = ["model"]
+type = "object"
+
+[provides.operations."anthropic.models.normalize".input_schema.properties.model]
+description = "Model ID or alias to normalize"
+type = "string"
+
+[provides.operations."anthropic.models.normalize".output_schema]
+type = "object"
+
 [provides.operations."anthropic.message"]
 description = "Send a structured message request to Claude models with optional tools"
 capability = "anthropic.message"
@@ -260,6 +352,7 @@ required = [
 type = "object"
 
 [provides.operations."anthropic.message".input_schema.properties.messages.items.properties.content]
+description = "Message content, either a string or an Anthropic content-block array with optional cache_control annotations"
 type = "string"
 
 [provides.operations."anthropic.message".input_schema.properties.messages.items.properties.role]
@@ -270,10 +363,15 @@ enum = [
 type = "string"
 
 [provides.operations."anthropic.message".input_schema.properties.model]
-default = "claude-sonnet-4-20250514"
+default = "claude-sonnet-4-6"
 description = "Anthropic model to use"
 enum = [
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
     "claude-sonnet-4-20250514",
     "claude-3-5-haiku-20241022",
     "claude-3-5-sonnet-20241022",
@@ -281,7 +379,7 @@ enum = [
 type = "string"
 
 [provides.operations."anthropic.message".input_schema.properties.system]
-description = "Optional system prompt"
+description = "Optional system prompt, either a string or an Anthropic content-block array"
 type = "string"
 
 [provides.operations."anthropic.message".input_schema.properties.temperature]
@@ -295,8 +393,40 @@ description = "Optional tool selection policy"
 type = "object"
 
 [provides.operations."anthropic.message".input_schema.properties.tools]
-description = "Optional tool definitions for model tool use"
+description = "Optional tool definitions for model tool use; set eager_input_streaming=true per tool for fine-grained input streaming"
 type = "array"
+
+[provides.operations."anthropic.message".input_schema.properties.anthropic_betas]
+description = "Optional Anthropic beta headers to include for this request"
+type = "array"
+
+[provides.operations."anthropic.message".input_schema.properties.anthropic_betas.items]
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.service_tier]
+description = "Anthropic service-tier routing preference"
+enum = [
+    "auto",
+    "standard_only",
+]
+type = "string"
+
+[provides.operations."anthropic.message".input_schema.properties.thinking]
+description = "Extended-thinking request configuration"
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.output_config]
+description = "Output configuration, including adaptive-thinking effort"
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.cache_control]
+description = "Top-level prompt cache-control object"
+type = "object"
+
+[provides.operations."anthropic.message".input_schema.properties.enable_1m_context]
+default = false
+description = "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header."
+type = "boolean"
 
 [provides.operations."anthropic.message".output_schema]
 required = [
@@ -336,6 +466,9 @@ type = "integer"
 
 [provides.operations."anthropic.message".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.message".output_schema.properties.usage.properties.service_tier]
+type = "string"
 
 [provides.operations."anthropic.message".output_schema.properties.provenance]
 description = "Provenance and taint metadata for the AI-generated output"
@@ -388,7 +521,7 @@ common_mistakes = [
 ]
 examples = [
     '{"messages": [{"role": "user", "content": "Hello Claude"}]}',
-    '{"messages": [{"role": "user", "content": "What is the weather in Tokyo?"}, {"role": "assistant", "content": "I can look that up for you using the get_weather tool."}, {"role": "user", "content": "Yes please, and also check Paris."}], "tools": [{"name": "get_weather", "description": "Get current weather for a city", "input_schema": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}}}], "model": "claude-sonnet-4-20250514", "max_tokens": 4096}',
+    '{"messages": [{"role": "user", "content": "What is the weather in Tokyo?"}, {"role": "assistant", "content": "I can look that up for you using the get_weather tool."}, {"role": "user", "content": "Yes please, and also check Paris."}], "tools": [{"name": "get_weather", "description": "Get current weather for a city", "input_schema": {"type": "object", "required": ["city"], "properties": {"city": {"type": "string"}}}, "eager_input_streaming": true}], "model": "claude-sonnet-4-6", "max_tokens": 4096}',
 ]
 related = [
     "anthropic.chat",
@@ -432,6 +565,7 @@ required = [
 type = "object"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.messages.items.properties.content]
+description = "Message content, either a string or an Anthropic content-block array with optional cache_control annotations"
 type = "string"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.messages.items.properties.role]
@@ -442,10 +576,15 @@ enum = [
 type = "string"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.model]
-default = "claude-sonnet-4-20250514"
+default = "claude-sonnet-4-6"
 description = "Anthropic model to use"
 enum = [
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
     "claude-opus-4-5-20251101",
+    "claude-sonnet-4-5-20250929",
+    "claude-haiku-4-5-20251001",
     "claude-sonnet-4-20250514",
     "claude-3-5-haiku-20241022",
     "claude-3-5-sonnet-20241022",
@@ -453,7 +592,7 @@ enum = [
 type = "string"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.system]
-description = "Optional system prompt"
+description = "Optional system prompt, either a string or an Anthropic content-block array"
 type = "string"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.temperature]
@@ -467,8 +606,40 @@ description = "Optional tool selection policy"
 type = "object"
 
 [provides.operations."anthropic.message.stream".input_schema.properties.tools]
-description = "Optional tool definitions for model tool use"
+description = "Optional tool definitions for model tool use; set eager_input_streaming=true per tool for fine-grained input streaming"
 type = "array"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.anthropic_betas]
+description = "Optional Anthropic beta headers to include for this request"
+type = "array"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.anthropic_betas.items]
+type = "string"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.service_tier]
+description = "Anthropic service-tier routing preference"
+enum = [
+    "auto",
+    "standard_only",
+]
+type = "string"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.thinking]
+description = "Extended-thinking request configuration"
+type = "object"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.output_config]
+description = "Output configuration, including adaptive-thinking effort"
+type = "object"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.cache_control]
+description = "Top-level prompt cache-control object"
+type = "object"
+
+[provides.operations."anthropic.message.stream".input_schema.properties.enable_1m_context]
+default = false
+description = "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header."
+type = "boolean"
 
 [provides.operations."anthropic.message.stream".output_schema]
 required = [
@@ -512,6 +683,9 @@ type = "integer"
 
 [provides.operations."anthropic.message.stream".output_schema.properties.usage.properties.output_tokens]
 type = "integer"
+
+[provides.operations."anthropic.message.stream".output_schema.properties.usage.properties.service_tier]
+type = "string"
 
 [provides.operations."anthropic.message.stream".output_schema.properties.provenance]
 description = "Provenance and taint metadata for the AI-generated output"

@@ -43,20 +43,43 @@ async fn anthropic_provider_contract_is_advertised() {
         &ProviderContract::new("anthropic", "Anthropic")
             .with_docs_path("/connectors/anthropic/manifest.toml")
             .with_config_key("api_key")
+            .with_config_key("auth_token")
+            .with_config_key("bearer_token")
+            .with_config_key("claude_code_oauth_token")
+            .with_config_key("oauth_token")
+            .with_config_key("setup_token")
             .with_config_key("credential_id")
             .with_config_key("base_url")
+            .with_config_key("default_betas")
             .with_auth_method(
                 ProviderAuthMethodContract::new("api_key", "API key").with_config_key("api_key"),
+            )
+            .with_auth_method(
+                ProviderAuthMethodContract::new("bearer_token", "Bearer token")
+                    .with_config_key("bearer_token"),
+            )
+            .with_auth_method(
+                ProviderAuthMethodContract::new("claude_code_oauth", "Claude Code OAuth token")
+                    .with_config_key("claude_code_oauth_token"),
+            )
+            .with_auth_method(
+                ProviderAuthMethodContract::new("setup_token", "Setup token")
+                    .with_config_key("setup_token"),
             )
             .with_auth_method(
                 ProviderAuthMethodContract::new("credential_id", "Host credential reference")
                     .with_config_key("credential_id"),
             )
             .with_model_picker_method("api_key")
-            .with_default_model("claude-sonnet-4-20250514")
+            .with_default_model("claude-sonnet-4-6")
             .with_model_catalog(
                 ProviderModelCatalogContract::new("claude")
+                    .with_model(ProviderModelContract::new("claude-opus-4-7"))
+                    .with_model(ProviderModelContract::new("claude-opus-4-6"))
+                    .with_model(ProviderModelContract::new("claude-sonnet-4-6"))
                     .with_model(ProviderModelContract::new("claude-opus-4-5-20251101"))
+                    .with_model(ProviderModelContract::new("claude-sonnet-4-5-20250929"))
+                    .with_model(ProviderModelContract::new("claude-haiku-4-5-20251001"))
                     .with_model(ProviderModelContract::new("claude-sonnet-4-20250514"))
                     .with_model(ProviderModelContract::new("claude-3-5-haiku-20241022"))
                     .with_model(ProviderModelContract::new("claude-3-5-sonnet-20241022")),

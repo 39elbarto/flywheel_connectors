@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use fcp_prelude::{
     AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityToken, CapabilityVerifier,
     ConnectorId, CredentialId, EventCaps, FcpError, FcpResult, HandshakeRequest, HandshakeResponse,
-    IdempotencyClass, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
+    IdempotencyClass, InstanceId, Introspection, OperationId, OperationInfo, RiskLevel, SafetyTier,
     SelfCheckReport, SessionId, SimulateRequest, SimulateResponse,
 };
 use reqwest::Url;
@@ -17,7 +17,10 @@ use tracing::{info, instrument};
 use crate::{
     client::{AnthropicAuth, AnthropicClient, DEFAULT_API_VERSION, DEFAULT_BASE_URL},
     error::AnthropicError,
-    types::{Message, Model, Role, Tool, ToolChoice, Usage},
+    types::{
+        BETA_INTERLEAVED_THINKING, DEFAULT_MODEL, Message, MessageContent, MessageRequestOptions,
+        Model, Role, SUPPORTED_MODEL_IDS, ServiceTier, Tool, ToolChoice, Usage,
+    },
 };
 
 /// Parsed and validated Anthropic connector configuration.
@@ -26,12 +29,33 @@ struct AnthropicConfig {
     auth: AnthropicAuth,
     base_url: String,
     api_version: Option<String>,
+    default_betas: Vec<String>,
 }
 
 impl AnthropicConfig {
     fn from_params(params: &serde_json::Value) -> FcpResult<Self> {
-        let direct_auth_value = params
+        let key_config_value = params
             .get("api_key")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        let bearer_config_value = params
+            .get("auth_token")
+            .or_else(|| params.get("bearer_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        let claude_code_oauth = params
+            .get("claude_code_oauth_token")
+            .or_else(|| params.get("oauth_token"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_string);
+        let setup_config_value = params
+            .get("setup_token")
             .and_then(|v| v.as_str())
             .map(str::trim)
             .filter(|v| !v.is_empty())
@@ -53,19 +77,39 @@ impl AnthropicConfig {
             None => None,
         };
 
-        let auth = match (direct_auth_value, credential_id) {
-            (Some(key), None) => AnthropicAuth::ApiKey(key),
-            (None, Some(cred_id)) => AnthropicAuth::CredentialId(cred_id),
-            (Some(_), Some(_)) => {
+        let mut auth_modes = Vec::new();
+        if let Some(key) = key_config_value {
+            auth_modes.push(AnthropicAuth::ApiKey(key));
+        }
+        if let Some(token) = bearer_config_value {
+            auth_modes.push(AnthropicAuth::BearerToken(token));
+        }
+        if let Some(token) = claude_code_oauth {
+            auth_modes.push(AnthropicAuth::ClaudeCodeOAuth(token));
+        }
+        if let Some(token) = setup_config_value {
+            auth_modes.push(AnthropicAuth::SetupToken(token));
+        }
+        if let Some(cred_id) = credential_id {
+            auth_modes.push(AnthropicAuth::CredentialId(cred_id));
+        }
+
+        let auth = match auth_modes.as_slice() {
+            [auth] => auth.clone(),
+            [] => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Provide exactly one of api_key or credential_id".into(),
+                    message:
+                        "Missing api_key, auth_token, claude_code_oauth_token, setup_token, or credential_id in configuration"
+                            .into(),
                 });
             }
-            (None, None) => {
+            _ => {
                 return Err(FcpError::InvalidRequest {
                     code: 1003,
-                    message: "Missing api_key or credential_id in configuration".into(),
+                    message:
+                        "Provide exactly one Anthropic auth method: api_key, auth_token, claude_code_oauth_token, setup_token, or credential_id"
+                            .into(),
                 });
             }
         };
@@ -89,11 +133,49 @@ impl AnthropicConfig {
             }
             None => None,
         };
+        let default_betas = parse_beta_array(params.get("default_betas"))?;
 
         Ok(Self {
             auth,
             base_url,
             api_version,
+            default_betas,
+        })
+    }
+}
+
+fn parse_beta_array(value: Option<&serde_json::Value>) -> FcpResult<Vec<String>> {
+    let Some(value) = value else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "default_betas must be an array of strings".into(),
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "default_betas entries must be strings".into(),
+            })?;
+            normalize_beta_name(raw)
+        })
+        .collect()
+}
+
+fn normalize_beta_name(raw: &str) -> FcpResult<String> {
+    let beta = raw.trim();
+    let valid = !beta.is_empty()
+        && beta
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'));
+    if valid {
+        Ok(beta.to_string())
+    } else {
+        Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid Anthropic beta header value: {raw}"),
         })
     }
 }
@@ -152,6 +234,8 @@ fn required_capability(operation: &str) -> FcpResult<CapabilityId> {
         "anthropic.message.stream" => "anthropic.message.stream",
         "anthropic.chat" => "anthropic.chat",
         "anthropic.get_usage" => "anthropic.get_usage",
+        "anthropic.auth.list_methods" | "anthropic.auth.refresh_oauth" => "anthropic.auth",
+        "anthropic.models.normalize" => "anthropic.models",
         _ => {
             return Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
@@ -167,10 +251,222 @@ fn resource_uris_for_operation(operation: &str, input: &serde_json::Value) -> Ve
             let model = input
                 .get("model")
                 .and_then(|v| v.as_str())
-                .unwrap_or("claude-sonnet-4-20250514");
+                .unwrap_or(DEFAULT_MODEL.as_str());
             vec![format!("anthropic:model:{model}")]
         }
         _ => Vec::new(),
+    }
+}
+
+fn parse_model_from_input(input: &serde_json::Value) -> FcpResult<(Model, String)> {
+    let raw = input
+        .get("model")
+        .and_then(|v| v.as_str())
+        .unwrap_or(Model::default().as_str());
+    let model = Model::normalize(raw).ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: format!("Unknown model: {raw}"),
+    })?;
+    Ok((model, model.as_str().to_string()))
+}
+
+fn parse_max_tokens(input: &serde_json::Value) -> FcpResult<u32> {
+    match input.get("max_tokens").and_then(|v| v.as_u64()) {
+        Some(v) if v > u64::from(u32::MAX) => Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
+        }),
+        Some(v) => Ok(v as u32),
+        None => Ok(4096),
+    }
+}
+
+fn parse_service_tier(input: &serde_json::Value) -> FcpResult<Option<ServiceTier>> {
+    let Some(value) = input.get("service_tier") else {
+        return Ok(None);
+    };
+    let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "service_tier must be a string".into(),
+    })?;
+    ServiceTier::parse(raw)
+        .map(Some)
+        .ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "service_tier must be 'auto' or 'standard_only'".into(),
+        })
+}
+
+fn parse_cache_control(input: &serde_json::Value) -> FcpResult<Option<crate::types::CacheControl>> {
+    input
+        .get("cache_control")
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()
+        .map_err(|error| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid cache_control format: {error}"),
+        })
+}
+
+fn parse_optional_value(input: &serde_json::Value, key: &str) -> Option<serde_json::Value> {
+    input.get(key).cloned()
+}
+
+fn parse_request_betas(input: &serde_json::Value) -> FcpResult<Vec<String>> {
+    let Some(value) = input.get("anthropic_betas") else {
+        return Ok(Vec::new());
+    };
+    let values = value.as_array().ok_or(FcpError::InvalidRequest {
+        code: 1003,
+        message: "anthropic_betas must be an array of strings".into(),
+    })?;
+    values
+        .iter()
+        .map(|value| {
+            let raw = value.as_str().ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "anthropic_betas entries must be strings".into(),
+            })?;
+            normalize_beta_name(raw)
+        })
+        .collect()
+}
+
+fn request_uses_1m_context(input: &serde_json::Value) -> FcpResult<bool> {
+    let explicit = match input.get("enable_1m_context") {
+        Some(value) => Some(value.as_bool().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "enable_1m_context must be a boolean".into(),
+        })?),
+        None => None,
+    };
+    let context_window = match input.get("context_window_tokens") {
+        Some(value) => Some(value.as_u64().ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: "context_window_tokens must be an integer".into(),
+        })?),
+        None => None,
+    };
+
+    Ok(explicit.unwrap_or(false) || context_window.is_some_and(|tokens| tokens > 200_000))
+}
+
+fn push_beta_once(betas: &mut Vec<String>, beta: &str) {
+    if !betas.iter().any(|existing| existing == beta) {
+        betas.push(beta.to_string());
+    }
+}
+
+fn thinking_type(thinking: Option<&serde_json::Value>) -> Option<&str> {
+    thinking
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn should_add_interleaved_thinking_beta(
+    model: Model,
+    thinking: Option<&serde_json::Value>,
+) -> bool {
+    let Some(mode) = thinking_type(thinking) else {
+        return false;
+    };
+    match model {
+        Model::ClaudeSonnet4_6 => mode == "enabled",
+        Model::ClaudeOpus4_5 | Model::ClaudeSonnet4_5 | Model::ClaudeSonnet4 => true,
+        Model::ClaudeOpus4_7
+        | Model::ClaudeOpus4_6
+        | Model::ClaudeHaiku4_5
+        | Model::Claude3_5Haiku
+        | Model::Claude3_5Sonnet => false,
+    }
+}
+
+fn build_message_options(
+    input: &serde_json::Value,
+    model: Model,
+    config: &AnthropicConfig,
+) -> FcpResult<MessageRequestOptions> {
+    let tools = input
+        .get("tools")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid tools format: {e}"),
+        })?;
+    let tool_choice = input
+        .get("tool_choice")
+        .map(|v| serde_json::from_value(v.clone()))
+        .transpose()
+        .map_err(|e| FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Invalid tool_choice format: {e}"),
+        })?;
+    let thinking = input.get("thinking").cloned();
+
+    if thinking.is_some()
+        && matches!(
+            tool_choice.as_ref(),
+            Some(ToolChoice::Any | ToolChoice::Tool { .. })
+        )
+    {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "thinking is incompatible with forced tool_choice".into(),
+        });
+    }
+
+    let mut anthropic_betas = config.default_betas.clone();
+    for beta in parse_request_betas(input)? {
+        push_beta_once(&mut anthropic_betas, &beta);
+    }
+    if request_uses_1m_context(input)? && !model.supports_1m_context() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("{} does not support the 1M context window", model.as_str()),
+        });
+    }
+    if thinking.is_some()
+        && tools
+            .as_ref()
+            .is_some_and(|available_tools: &Vec<Tool>| !available_tools.is_empty())
+        && should_add_interleaved_thinking_beta(model, thinking.as_ref())
+    {
+        push_beta_once(&mut anthropic_betas, BETA_INTERLEAVED_THINKING);
+    }
+    if config.auth.uses_claude_code_oauth() {
+        push_beta_once(&mut anthropic_betas, "claude-code-20250219");
+        push_beta_once(&mut anthropic_betas, "oauth-2025-04-20");
+    }
+
+    Ok(MessageRequestOptions {
+        temperature: input.get("temperature").and_then(|v| v.as_f64()),
+        tools,
+        tool_choice,
+        service_tier: parse_service_tier(input)?,
+        cache_control: parse_cache_control(input)?,
+        anthropic_betas,
+        thinking,
+        output_config: parse_optional_value(input, "output_config"),
+    })
+}
+
+fn strip_trailing_assistant_prefill_when_thinking(messages: &mut Vec<Message>) -> bool {
+    let Some(last) = messages.last() else {
+        return false;
+    };
+    if last.role != Role::Assistant {
+        return false;
+    }
+    let is_prefill = match &last.content {
+        MessageContent::Text(text) => !text.trim().is_empty(),
+        MessageContent::Blocks(blocks) => !blocks.is_empty(),
+    };
+    if is_prefill {
+        messages.pop();
+        true
+    } else {
+        false
     }
 }
 
@@ -255,6 +551,12 @@ impl AnthropicConnector {
         self.base.metrics().requests_total
     }
 
+    /// Return this connector instance ID for bound capability-token tests.
+    #[must_use]
+    pub fn instance_id(&self) -> &InstanceId {
+        &self.base.instance_id
+    }
+
     /// Get total errors.
     #[must_use]
     pub fn total_errors(&self) -> u64 {
@@ -297,12 +599,23 @@ impl AnthropicConnector {
         let client = client.with_base_url(&config.base_url);
 
         let auth_label = config.auth.redacted_label();
+        let auth_method = config.auth.method_name();
+        let default_betas = config.default_betas.clone();
+        let secretless = config.auth.is_secretless();
+        let api_version = client.api_version().to_string();
         self.client = Some(client);
         self.config = Some(config);
         self.base.set_configured(true);
         info!(auth = %auth_label, "Anthropic connector configured");
 
-        Ok(json!({ "status": "configured" }))
+        Ok(json!({
+            "status": "configured",
+            "auth": auth_label,
+            "auth_method": auth_method,
+            "api_version": api_version,
+            "default_betas": default_betas,
+            "secretless": secretless
+        }))
     }
 
     /// Handle handshake method.
@@ -384,6 +697,7 @@ impl AnthropicConnector {
         Ok(json!({
             "status": if configured { "healthy" } else { "not_configured" },
             "auth": auth,
+            "auth_method": self.config.as_ref().map_or("unconfigured", |c| c.auth.method_name()),
             "base_url": base_url,
             "api_version": api_version,
             "metrics": {
@@ -562,8 +876,8 @@ impl AnthropicConnector {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
-                                "default": "claude-sonnet-4-20250514"
+                                "enum": SUPPORTED_MODEL_IDS,
+                                "default": DEFAULT_MODEL.as_str()
                             },
                             "messages": {
                                 "type": "array",
@@ -571,14 +885,22 @@ impl AnthropicConnector {
                                     "type": "object",
                                     "properties": {
                                         "role": { "type": "string", "enum": ["user", "assistant"] },
-                                        "content": { "type": "string" }
+                                        "content": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "object" } }] }
                                     },
                                     "required": ["role", "content"]
                                 }
                             },
-                            "system": { "type": "string" },
+                            "system": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "object" } }] },
                             "max_tokens": { "type": "integer", "default": 4096 },
-                            "temperature": { "type": "number", "minimum": 0, "maximum": 1 }
+                            "temperature": { "type": "number", "minimum": 0, "maximum": 1 },
+                            "tools": { "type": "array", "description": "Tool definitions; set eager_input_streaming=true per tool for GA fine-grained input streaming." },
+                            "tool_choice": { "type": "object" },
+                            "anthropic_betas": { "type": "array", "items": { "type": "string" } },
+                            "enable_1m_context": { "type": "boolean", "description": "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header." },
+                            "cache_control": { "type": "object", "description": "Top-level automatic prompt caching control." },
+                            "service_tier": { "type": "string", "enum": ["auto", "standard_only"] },
+                            "thinking": { "type": "object" },
+                            "output_config": { "type": "object", "description": "Output configuration such as adaptive-thinking effort." }
                         },
                         "required": ["messages"]
                     }),
@@ -626,12 +948,18 @@ impl AnthropicConnector {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
-                                "default": "claude-sonnet-4-20250514"
+                                "enum": SUPPORTED_MODEL_IDS,
+                                "default": DEFAULT_MODEL.as_str()
                             },
                             "message": { "type": "string" },
-                            "system": { "type": "string" },
-                            "max_tokens": { "type": "integer", "default": 4096 }
+                            "system": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "object" } }] },
+                            "max_tokens": { "type": "integer", "default": 4096 },
+                            "anthropic_betas": { "type": "array", "items": { "type": "string" } },
+                            "enable_1m_context": { "type": "boolean", "description": "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header." },
+                            "cache_control": { "type": "object", "description": "Top-level automatic prompt caching control." },
+                            "service_tier": { "type": "string", "enum": ["auto", "standard_only"] },
+                            "thinking": { "type": "object" },
+                            "output_config": { "type": "object", "description": "Output configuration such as adaptive-thinking effort." }
                         },
                         "required": ["message"]
                     }),
@@ -671,8 +999,8 @@ impl AnthropicConnector {
                         "properties": {
                             "model": {
                                 "type": "string",
-                                "enum": ["claude-opus-4-5-20251101", "claude-sonnet-4-20250514", "claude-3-5-haiku-20241022", "claude-3-5-sonnet-20241022"],
-                                "default": "claude-sonnet-4-20250514"
+                                "enum": SUPPORTED_MODEL_IDS,
+                                "default": DEFAULT_MODEL.as_str()
                             },
                             "messages": {
                                 "type": "array",
@@ -680,16 +1008,22 @@ impl AnthropicConnector {
                                     "type": "object",
                                     "properties": {
                                         "role": { "type": "string", "enum": ["user", "assistant"] },
-                                        "content": { "type": "string" }
+                                        "content": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "object" } }] }
                                     },
                                     "required": ["role", "content"]
                                 }
                             },
-                            "system": { "type": "string" },
+                            "system": { "oneOf": [{ "type": "string" }, { "type": "array", "items": { "type": "object" } }] },
                             "max_tokens": { "type": "integer", "default": 4096 },
                             "temperature": { "type": "number", "minimum": 0, "maximum": 1 },
-                            "tools": { "type": "array", "description": "Optional tool definitions" },
-                            "tool_choice": { "type": "object", "description": "Optional tool selection policy" }
+                            "tools": { "type": "array", "description": "Tool definitions; set eager_input_streaming=true per tool for GA fine-grained input streaming." },
+                            "tool_choice": { "type": "object", "description": "Optional tool selection policy" },
+                            "anthropic_betas": { "type": "array", "items": { "type": "string" } },
+                            "enable_1m_context": { "type": "boolean", "description": "Require a 1M-capable model. Opus 4.7, Opus 4.6, and Sonnet 4.6 are 1M-capable without a beta header." },
+                            "cache_control": { "type": "object", "description": "Top-level automatic prompt caching control." },
+                            "service_tier": { "type": "string", "enum": ["auto", "standard_only"] },
+                            "thinking": { "type": "object" },
+                            "output_config": { "type": "object", "description": "Output configuration such as adaptive-thinking effort." }
                         },
                         "required": ["messages"]
                     }),
@@ -912,6 +1246,9 @@ impl AnthropicConnector {
             "anthropic.message.stream" => self.invoke_message_stream(input).await,
             "anthropic.chat" => self.invoke_chat(input).await,
             "anthropic.get_usage" => self.invoke_get_usage().await,
+            "anthropic.auth.list_methods" => self.invoke_auth_list_methods().await,
+            "anthropic.auth.refresh_oauth" => self.invoke_auth_refresh_oauth().await,
+            "anthropic.models.normalize" => self.invoke_models_normalize(input).await,
             _ => Err(FcpError::OperationNotGranted {
                 operation: operation.into(),
             }),
@@ -921,24 +1258,8 @@ impl AnthropicConnector {
     async fn invoke_message(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
 
-        // Parse model
-        let model_str = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-sonnet-4-20250514");
-
-        let model = match model_str {
-            "claude-opus-4-5-20251101" => Model::ClaudeOpus4_5,
-            "claude-sonnet-4-20250514" => Model::ClaudeSonnet4,
-            "claude-3-5-haiku-20241022" => Model::Claude3_5Haiku,
-            "claude-3-5-sonnet-20241022" => Model::Claude3_5Sonnet,
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Unknown model: {model_str}"),
-                });
-            }
-        };
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let (model, model_str) = parse_model_from_input(&input)?;
 
         // Parse messages
         let messages_json = input.get("messages").ok_or(FcpError::InvalidRequest {
@@ -946,7 +1267,7 @@ impl AnthropicConnector {
             message: "Missing messages".into(),
         })?;
 
-        let messages: Vec<Message> =
+        let mut messages: Vec<Message> =
             serde_json::from_value(messages_json.clone()).map_err(|e| {
                 FcpError::InvalidRequest {
                     code: 1003,
@@ -961,48 +1282,15 @@ impl AnthropicConnector {
             });
         }
 
-        let system = input.get("system").and_then(|v| v.as_str());
-        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
-            Some(v) if v > u64::from(u32::MAX) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
-                });
-            }
-            Some(v) => v as u32,
-            None => 4096,
-        };
-        let temperature = input.get("temperature").and_then(|v| v.as_f64());
-
-        // Parse tools if provided
-        let tools: Option<Vec<Tool>> = input
-            .get("tools")
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()
-            .map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid tools format: {e}"),
-            })?;
-
-        let tool_choice: Option<ToolChoice> = input
-            .get("tool_choice")
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()
-            .map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid tool_choice format: {e}"),
-            })?;
+        let system = parse_optional_value(&input, "system");
+        let max_tokens = parse_max_tokens(&input)?;
+        let options = build_message_options(&input, model, config)?;
+        if config.auth.uses_claude_code_oauth() && options.thinking.is_some() {
+            strip_trailing_assistant_prefill_when_thinking(&mut messages);
+        }
 
         let response = client
-            .message(
-                model,
-                messages,
-                max_tokens,
-                system,
-                temperature,
-                tools,
-                tool_choice,
-            )
+            .message_with_options(model, messages, max_tokens, system, options.clone())
             .await
             .map_err(|e: AnthropicError| e.to_fcp_error())?;
 
@@ -1016,6 +1304,9 @@ impl AnthropicConnector {
             .map(|b| match b {
                 crate::types::ResponseContentBlock::Text { text } => {
                     json!({"type": "text", "text": text})
+                }
+                crate::types::ResponseContentBlock::Thinking { .. } => {
+                    json!({"type": "thinking", "redacted": true})
                 }
                 crate::types::ResponseContentBlock::ToolUse { id, name, input } => {
                     json!({"type": "tool_use", "id": id, "name": name, "input": input})
@@ -1042,9 +1333,15 @@ impl AnthropicConnector {
             "content_blocks": content_blocks,
             "model": response.model,
             "stop_reason": response.stop_reason,
+            "model_canonical": model.as_str(),
+            "anthropic_betas": options.anthropic_betas,
+            "service_tier": options.service_tier,
             "usage": {
                 "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens
+                "output_tokens": response.usage.output_tokens,
+                "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                "service_tier": response.usage.service_tier
             },
             "cost_usd": cost,
             "provenance": {
@@ -1052,6 +1349,7 @@ impl AnthropicConnector {
                 "model": model_str,
                 "integrity": "untrusted",
                 "has_tool_calls": has_tool_calls,
+                "has_thinking": response.content.iter().any(|b| matches!(b, crate::types::ResponseContentBlock::Thinking { .. })),
                 "chunk_count": 1,
                 "taint": ["AI_GENERATED"]
             }
@@ -1066,31 +1364,15 @@ impl AnthropicConnector {
         use std::pin::pin;
 
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-
-        let model_str = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-sonnet-4-20250514");
-
-        let model = match model_str {
-            "claude-opus-4-5-20251101" => Model::ClaudeOpus4_5,
-            "claude-sonnet-4-20250514" => Model::ClaudeSonnet4,
-            "claude-3-5-haiku-20241022" => Model::Claude3_5Haiku,
-            "claude-3-5-sonnet-20241022" => Model::Claude3_5Sonnet,
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Unknown model: {model_str}"),
-                });
-            }
-        };
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let (model, model_str) = parse_model_from_input(&input)?;
 
         let messages_json = input.get("messages").ok_or(FcpError::InvalidRequest {
             code: 1003,
             message: "Missing messages".into(),
         })?;
 
-        let messages: Vec<Message> =
+        let mut messages: Vec<Message> =
             serde_json::from_value(messages_json.clone()).map_err(|e| {
                 FcpError::InvalidRequest {
                     code: 1003,
@@ -1105,48 +1387,16 @@ impl AnthropicConnector {
             });
         }
 
-        let system = input.get("system").and_then(|v| v.as_str());
-        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
-            Some(v) if v > u64::from(u32::MAX) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
-                });
-            }
-            Some(v) => v as u32,
-            None => 4096,
-        };
-        let temperature = input.get("temperature").and_then(|v| v.as_f64());
-
-        let tools: Option<Vec<Tool>> = input
-            .get("tools")
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()
-            .map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid tools format: {e}"),
-            })?;
-
-        let tool_choice: Option<ToolChoice> = input
-            .get("tool_choice")
-            .map(|v| serde_json::from_value(v.clone()))
-            .transpose()
-            .map_err(|e| FcpError::InvalidRequest {
-                code: 1003,
-                message: format!("Invalid tool_choice format: {e}"),
-            })?;
+        let system = parse_optional_value(&input, "system");
+        let max_tokens = parse_max_tokens(&input)?;
+        let options = build_message_options(&input, model, config)?;
+        if config.auth.uses_claude_code_oauth() && options.thinking.is_some() {
+            strip_trailing_assistant_prefill_when_thinking(&mut messages);
+        }
 
         // Use the streaming API and assemble the final response
         let stream = client
-            .message_stream(
-                model,
-                messages,
-                max_tokens,
-                system,
-                temperature,
-                tools,
-                tool_choice,
-            )
+            .message_stream_with_options(model, messages, max_tokens, system, options.clone())
             .await
             .map_err(|e: AnthropicError| e.to_fcp_error())?;
         let mut stream = pin!(stream);
@@ -1159,6 +1409,7 @@ impl AnthropicConnector {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            service_tier: None,
         };
 
         // Accumulate content blocks from the stream
@@ -1166,6 +1417,7 @@ impl AnthropicConnector {
         struct BlockAccumulator {
             block_type: String,
             text: String,
+            thinking_seen: bool,
             tool_id: String,
             tool_name: String,
             tool_input_json: String,
@@ -1245,6 +1497,16 @@ impl AnthropicConnector {
                         crate::types::ContentBlockStartData::Text { text } => BlockAccumulator {
                             block_type: "text".into(),
                             text,
+                            thinking_seen: false,
+                            tool_id: String::new(),
+                            tool_name: String::new(),
+                            tool_input_json: String::new(),
+                            closed: false,
+                        },
+                        crate::types::ContentBlockStartData::Thinking { .. } => BlockAccumulator {
+                            block_type: "thinking".into(),
+                            text: String::new(),
+                            thinking_seen: true,
                             tool_id: String::new(),
                             tool_name: String::new(),
                             tool_input_json: String::new(),
@@ -1254,6 +1516,7 @@ impl AnthropicConnector {
                             BlockAccumulator {
                                 block_type: "tool_use".into(),
                                 text: String::new(),
+                                thinking_seen: false,
                                 tool_id: id,
                                 tool_name: name,
                                 tool_input_json: String::new(),
@@ -1287,6 +1550,14 @@ impl AnthropicConnector {
                             }
                             block.text.push_str(&text);
                         }
+                        crate::types::ContentDelta::ThinkingDelta { .. } => {
+                            if block.block_type != "thinking" {
+                                return Err(invalid_stream_error(format!(
+                                    "Anthropic stream sent thinking delta for non-thinking block at index {index}"
+                                )));
+                            }
+                            block.thinking_seen = true;
+                        }
                         crate::types::ContentDelta::InputJsonDelta { partial_json } => {
                             if block.block_type != "tool_use" {
                                 return Err(invalid_stream_error(format!(
@@ -1305,6 +1576,9 @@ impl AnthropicConnector {
                         stop_reason = Some(stop_reason_value(sr)?);
                     }
                     usage.output_tokens = delta_usage.output_tokens;
+                    if delta_usage.service_tier.is_some() {
+                        usage.service_tier = delta_usage.service_tier;
+                    }
                 }
                 crate::types::StreamEvent::ContentBlockStop { index } => {
                     let block_index = block_slot(index)?;
@@ -1348,6 +1622,8 @@ impl AnthropicConnector {
                     parse_tool_input_json(&b.tool_input_json).map(|parsed_input| {
                         json!({"type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": parsed_input})
                     })
+                } else if b.block_type == "thinking" {
+                    Ok(json!({"type": "thinking", "redacted": true}))
                 } else {
                     Ok(json!({"type": "text", "text": b.text}))
                 }
@@ -1366,6 +1642,10 @@ impl AnthropicConnector {
             .iter()
             .filter_map(Option::as_ref)
             .any(|b| b.block_type == "tool_use");
+        let has_thinking = blocks
+            .iter()
+            .filter_map(Option::as_ref)
+            .any(|b| b.thinking_seen);
         let chunk_count = content_blocks.len();
 
         Ok(json!({
@@ -1374,9 +1654,15 @@ impl AnthropicConnector {
             "content_blocks": content_blocks,
             "model": response_model,
             "stop_reason": stop_reason,
+            "model_canonical": model.as_str(),
+            "anthropic_betas": options.anthropic_betas,
+            "service_tier": options.service_tier,
             "usage": {
                 "input_tokens": usage.input_tokens,
-                "output_tokens": usage.output_tokens
+                "output_tokens": usage.output_tokens,
+                "cache_creation_input_tokens": usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": usage.cache_read_input_tokens,
+                "service_tier": usage.service_tier
             },
             "cost_usd": cost,
             "streamed": true,
@@ -1385,6 +1671,7 @@ impl AnthropicConnector {
                 "model": model_str,
                 "integrity": "untrusted",
                 "has_tool_calls": has_tool_calls,
+                "has_thinking": has_thinking,
                 "chunk_count": chunk_count,
                 "taint": ["AI_GENERATED"]
             }
@@ -1393,25 +1680,8 @@ impl AnthropicConnector {
 
     async fn invoke_chat(&self, input: serde_json::Value) -> FcpResult<serde_json::Value> {
         let client = self.client.as_ref().ok_or(FcpError::NotConfigured)?;
-
-        // Parse model
-        let model_str = input
-            .get("model")
-            .and_then(|v| v.as_str())
-            .unwrap_or("claude-sonnet-4-20250514");
-
-        let model = match model_str {
-            "claude-opus-4-5-20251101" => Model::ClaudeOpus4_5,
-            "claude-sonnet-4-20250514" => Model::ClaudeSonnet4,
-            "claude-3-5-haiku-20241022" => Model::Claude3_5Haiku,
-            "claude-3-5-sonnet-20241022" => Model::Claude3_5Sonnet,
-            _ => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("Unknown model: {model_str}"),
-                });
-            }
-        };
+        let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
+        let (model, model_str) = parse_model_from_input(&input)?;
 
         let message =
             input
@@ -1422,26 +1692,18 @@ impl AnthropicConnector {
                     message: "Missing message".into(),
                 })?;
 
-        let system = input.get("system").and_then(|v| v.as_str());
-        let max_tokens = match input.get("max_tokens").and_then(|v| v.as_u64()) {
-            Some(v) if v > u64::from(u32::MAX) => {
-                return Err(FcpError::InvalidRequest {
-                    code: 1003,
-                    message: format!("max_tokens value {} exceeds maximum {}", v, u32::MAX),
-                });
-            }
-            Some(v) => v as u32,
-            None => 4096,
-        };
+        let system = parse_optional_value(&input, "system");
+        let max_tokens = parse_max_tokens(&input)?;
 
         // Build messages
         let messages = vec![Message {
             role: Role::User,
             content: message.into(),
         }];
+        let options = build_message_options(&input, model, config)?;
 
         let response = client
-            .message(model, messages, max_tokens, system, None, None, None)
+            .message_with_options(model, messages, max_tokens, system, options.clone())
             .await
             .map_err(|e: AnthropicError| e.to_fcp_error())?;
 
@@ -1458,9 +1720,15 @@ impl AnthropicConnector {
 
         Ok(json!({
             "response": text_content,
+            "model_canonical": model.as_str(),
+            "anthropic_betas": options.anthropic_betas,
+            "service_tier": options.service_tier,
             "usage": {
                 "input_tokens": response.usage.input_tokens,
-                "output_tokens": response.usage.output_tokens
+                "output_tokens": response.usage.output_tokens,
+                "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
+                "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                "service_tier": response.usage.service_tier
             },
             "cost_usd": cost,
             "provenance": {
@@ -1488,6 +1756,71 @@ impl AnthropicConnector {
             "total_cost_usd": self.total_cost(),
             "requests_total": requests_total,
             "requests_error": self.total_errors()
+        }))
+    }
+
+    async fn invoke_auth_list_methods(&self) -> FcpResult<serde_json::Value> {
+        let active = self
+            .config
+            .as_ref()
+            .map_or("unconfigured", |config| config.auth.method_name());
+        Ok(json!({
+            "supported_methods": [
+                "api_key",
+                "bearer_token",
+                "claude_code_oauth",
+                "setup_token",
+                "credential_id"
+            ],
+            "active_method": active,
+            "configured": self.config.is_some(),
+            "oauth_refresh_available": self
+                .config
+                .as_ref()
+                .is_some_and(|config| config.auth.uses_claude_code_oauth())
+        }))
+    }
+
+    async fn invoke_auth_refresh_oauth(&self) -> FcpResult<serde_json::Value> {
+        let Some(config) = &self.config else {
+            return Err(FcpError::NotConfigured);
+        };
+        let refreshable = config.auth.uses_claude_code_oauth();
+        Ok(json!({
+            "auth_method": config.auth.method_name(),
+            "refreshed": false,
+            "refreshable": refreshable,
+            "message": if refreshable {
+                "OAuth token refresh is host-managed in this connector; provide a refreshed token via configure."
+            } else {
+                "Active auth method does not use Claude Code OAuth."
+            }
+        }))
+    }
+
+    async fn invoke_models_normalize(
+        &self,
+        input: serde_json::Value,
+    ) -> FcpResult<serde_json::Value> {
+        let raw = input
+            .get("model")
+            .and_then(|v| v.as_str())
+            .ok_or(FcpError::InvalidRequest {
+                code: 1003,
+                message: "Missing model".into(),
+            })?;
+        let model = Model::normalize(raw).ok_or(FcpError::InvalidRequest {
+            code: 1003,
+            message: format!("Unknown model: {raw}"),
+        })?;
+        Ok(json!({
+            "input": raw,
+            "canonical": model.as_str(),
+            "context_window_tokens": model.context_window_tokens(),
+            "supports_1m_context": model.supports_1m_context(),
+            "supports_interleaved_thinking": model.supports_interleaved_thinking(),
+            "input_price_per_million": model.input_price_per_million(),
+            "output_price_per_million": model.output_price_per_million()
         }))
     }
 
@@ -1523,6 +1856,7 @@ impl Default for AnthropicConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::BETA_CONTEXT_1M_RETIRED;
     use chrono::{Duration, Utc};
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
@@ -1534,12 +1868,18 @@ mod tests {
         matchers::{header, method, path},
     };
 
-    fn generate_valid_token(signing_key: &Ed25519SigningKey, op: &str) -> CapabilityToken {
+    fn generate_valid_token(
+        signing_key: &Ed25519SigningKey,
+        connector: &AnthropicConnector,
+        op: &str,
+    ) -> CapabilityToken {
         let cap = match op {
             "anthropic.message" => "anthropic.message",
             "anthropic.chat" => "anthropic.chat",
             "anthropic.message.stream" => "anthropic.message.stream",
             "anthropic.get_usage" => "anthropic.get_usage",
+            "anthropic.auth.list_methods" | "anthropic.auth.refresh_oauth" => "anthropic.auth",
+            "anthropic.models.normalize" => "anthropic.models",
             _ => "anthropic.message",
         };
         let now = Utc::now();
@@ -1557,6 +1897,7 @@ mod tests {
             .operations(&[op])
             .issuer("node:test")
             .validity(now, now + Duration::hours(1))
+            .target_instance(connector.base.instance_id.as_str())
             .try_constraints_cbor(&cbor)
             .expect("constraints CBOR should validate")
             .sign(signing_key)
@@ -1638,6 +1979,30 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_with_claude_code_oauth_and_default_betas() {
+        let mut connector = AnthropicConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "claude_code_oauth_token": "oauth-token",
+                "default_betas": ["code-execution-2025-08-25", "files-api-2025-04-14"]
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["auth_method"], "claude_code_oauth");
+        assert_eq!(result["default_betas"][0], "code-execution-2025-08-25");
+        assert!(
+            connector
+                .config
+                .as_ref()
+                .unwrap()
+                .auth
+                .uses_claude_code_oauth()
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_configure_both_api_key_and_credential_id_rejected() {
         let mut connector = AnthropicConnector::new();
         let cred_uuid = uuid::Uuid::new_v4().to_string();
@@ -1661,6 +2026,28 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_multiple_auth_methods() {
+        let mut connector = AnthropicConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "api_key": "sk-test",
+                "auth_token": "bearer-token"
+            }))
+            .await;
+
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("exactly one"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_configure_no_auth_rejected() {
         let mut connector = AnthropicConnector::new();
         let result = connector.handle_configure(json!({})).await;
@@ -1668,7 +2055,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             FcpError::InvalidRequest { message, .. } => {
-                assert!(message.contains("Missing api_key or credential_id"));
+                assert!(message.contains("Missing api_key"));
             }
             other => assert!(
                 matches!(other, FcpError::InvalidRequest { .. }),
@@ -1711,6 +2098,148 @@ mod tests {
         match err {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("without path, query, or fragment"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_message_options_merge_betas_and_interleaved_thinking() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ClaudeCodeOAuth("oauth-token".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: vec!["files-api-2025-04-14".into()],
+        };
+        let input = json!({
+            "anthropic_betas": ["files-api-2025-04-14", "code-execution-2025-08-25"],
+            "thinking": { "type": "enabled", "budget_tokens": 1024 },
+            "enable_1m_context": true,
+            "tools": [{
+                "name": "lookup",
+                "description": "Lookup data",
+                "input_schema": { "type": "object" }
+            }],
+            "tool_choice": { "type": "auto" },
+            "service_tier": "auto"
+        });
+
+        let options = build_message_options(&input, Model::ClaudeSonnet4_6, &config)
+            .expect("options should parse");
+
+        assert_eq!(options.service_tier, Some(ServiceTier::Auto));
+        assert_eq!(
+            options.anthropic_betas,
+            vec![
+                "files-api-2025-04-14",
+                "code-execution-2025-08-25",
+                "interleaved-thinking-2025-05-14",
+                "claude-code-20250219",
+                "oauth-2025-04-20"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_message_options_do_not_auto_add_retired_1m_beta() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "enable_1m_context": true,
+            "anthropic_betas": [BETA_CONTEXT_1M_RETIRED]
+        });
+
+        let options = build_message_options(&input, Model::ClaudeSonnet4_6, &config)
+            .expect("1M-capable model should accept the request");
+
+        assert_eq!(options.anthropic_betas, vec![BETA_CONTEXT_1M_RETIRED]);
+    }
+
+    #[test]
+    fn test_message_options_current_thinking_does_not_need_interleaved_beta() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "output_config": { "effort": "medium" },
+            "tools": [{
+                "name": "lookup",
+                "description": "Lookup data",
+                "input_schema": { "type": "object" },
+                "eager_input_streaming": true
+            }],
+            "tool_choice": { "type": "auto" }
+        });
+
+        let options = build_message_options(&input, Model::ClaudeOpus4_7, &config)
+            .expect("current model should accept thinking with tools");
+
+        assert!(options.anthropic_betas.is_empty());
+        assert_eq!(
+            options
+                .output_config
+                .as_ref()
+                .and_then(|value| value.get("effort")),
+            Some(&json!("medium"))
+        );
+    }
+
+    #[test]
+    fn test_message_options_reject_invalid_cache_control() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "cache_control": "ephemeral"
+        });
+
+        let error = build_message_options(&input, Model::ClaudeSonnet4_6, &config)
+            .expect_err("cache_control must be an object");
+
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Invalid cache_control format"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_message_options_reject_forced_tool_choice_with_thinking() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "thinking": { "type": "enabled", "budget_tokens": 1024 },
+            "tool_choice": { "type": "any" }
+        });
+
+        let error = build_message_options(&input, Model::ClaudeSonnet4_6, &config)
+            .expect_err("forced tool choice must be rejected with thinking");
+
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("thinking is incompatible"));
             }
             other => assert!(
                 matches!(other, FcpError::InvalidRequest { .. }),
@@ -1809,6 +2338,7 @@ mod tests {
             auth: AnthropicAuth::ApiKey("sk-test".into()),
             base_url: "https://evil.example.com".into(),
             api_version: None,
+            default_betas: Vec::new(),
         });
         connector.client = Some(
             AnthropicClient::new_with_auth(AnthropicAuth::ApiKey("sk-test".into()))
@@ -1837,6 +2367,7 @@ mod tests {
             auth: AnthropicAuth::ApiKey("sk-test".into()),
             base_url: "https://api.anthropic.com/v1".into(),
             api_version: None,
+            default_betas: Vec::new(),
         });
         connector.client = Some(
             AnthropicClient::new_with_auth(AnthropicAuth::ApiKey("sk-test".into()))
@@ -2023,7 +2554,7 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "anthropic.chat");
+        let capability = generate_valid_token(&signing_key, &connector, "anthropic.chat");
 
         let result = connector
             .handle_invoke(json!({
@@ -2052,7 +2583,9 @@ mod tests {
             auth: AnthropicAuth::ApiKey("fake_key".into()),
             base_url: "http://localhost:9999".into(),
             api_version: None,
+            default_betas: Vec::new(),
         });
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2068,7 +2601,7 @@ mod tests {
             .await
             .unwrap();
 
-        let capability = generate_valid_token(&signing_key, "anthropic.message");
+        let capability = generate_valid_token(&signing_key, &connector, "anthropic.message");
 
         let result = connector
             .handle_invoke(json!({
@@ -2092,8 +2625,136 @@ mod tests {
     }
 
     #[fcp_async_core::runtime::test]
+    async fn test_invoke_message_oauth_betas_service_tier_and_thinking_redaction() {
+        let mock_server = MockServer::start().await;
+
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "id": "msg_oauth",
+                "type": "message",
+                "role": "assistant",
+                "content": [
+                    {"type": "thinking", "thinking": "private reasoning", "signature": "sig"},
+                    {"type": "text", "text": "done"}
+                ],
+                "model": "claude-sonnet-4-6",
+                "stop_reason": "end_turn",
+                "usage": {
+                    "input_tokens": 20,
+                    "output_tokens": 10,
+                    "cache_creation_input_tokens": 4,
+                    "cache_read_input_tokens": 6,
+                    "service_tier": "standard"
+                }
+            })))
+            .mount(&mock_server)
+            .await;
+
+        let mut connector = AnthropicConnector::new();
+        connector
+            .handle_configure(json!({
+                "claude_code_oauth_token": "oauth-token",
+                "base_url": mock_server.uri(),
+                "default_betas": ["files-api-2025-04-14"]
+            }))
+            .await
+            .unwrap();
+
+        let signing_key = Ed25519SigningKey::generate();
+        let verifying_key = signing_key.verifying_key();
+        connector
+            .handle_handshake(json!({
+                "protocol_version": "1.0.0",
+                "zone": "z:work",
+                "host_public_key": verifying_key.to_bytes(),
+                "nonce": vec![0u8; 32],
+                "capabilities_requested": ["anthropic.message"]
+            }))
+            .await
+            .unwrap();
+
+        let capability = generate_valid_token(&signing_key, &connector, "anthropic.message");
+        let result = connector
+            .handle_invoke(json!({
+                "operation": "anthropic.message",
+                "input": {
+                    "model": "sonnet-4.6",
+                    "messages": [{
+                        "role": "user",
+                        "content": [{
+                            "type": "text",
+                            "text": "Hello",
+                            "cache_control": {"type": "ephemeral", "ttl": "1h"}
+                        }]
+                    }],
+                    "system": [{"type": "text", "text": "You can use tools."}],
+                    "max_tokens": 4096,
+                    "enable_1m_context": true,
+                    "cache_control": {"type": "ephemeral"},
+                    "service_tier": "auto",
+                    "anthropic_betas": ["code-execution-2025-08-25"],
+                    "thinking": {"type": "enabled", "budget_tokens": 1024},
+                    "output_config": {"effort": "medium"},
+                    "tools": [{
+                        "name": "lookup",
+                        "description": "Lookup data",
+                        "input_schema": {"type": "object"},
+                        "eager_input_streaming": true
+                    }]
+                },
+                "capability_token": capability
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["content"], "done");
+        assert_eq!(result["model_canonical"], "claude-sonnet-4-6");
+        assert_eq!(result["service_tier"], "auto");
+        assert_eq!(result["content_blocks"][0]["type"], "thinking");
+        assert_eq!(result["content_blocks"][0]["redacted"], true);
+        assert!(!result.to_string().contains("private reasoning"));
+        assert_eq!(result["usage"]["cache_creation_input_tokens"], 4);
+        assert_eq!(result["usage"]["service_tier"], "standard");
+        assert_eq!(result["provenance"]["has_thinking"], true);
+
+        let requests = mock_server.received_requests().await.unwrap_or_default();
+        assert_eq!(requests.len(), 1);
+        let request = &requests[0];
+        assert_eq!(
+            request
+                .headers
+                .get("authorization")
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer oauth-token")
+        );
+        assert_eq!(
+            request
+                .headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok()),
+            Some(
+                "files-api-2025-04-14,code-execution-2025-08-25,interleaved-thinking-2025-05-14,claude-code-20250219,oauth-2025-04-20"
+            )
+        );
+        let request_body: serde_json::Value =
+            serde_json::from_slice(&request.body).expect("request body should be JSON");
+        assert_eq!(request_body["service_tier"], "auto");
+        assert_eq!(request_body["cache_control"]["type"], "ephemeral");
+        assert_eq!(request_body["system"][0]["text"], "You can use tools.");
+        assert_eq!(request_body["thinking"]["type"], "enabled");
+        assert_eq!(request_body["output_config"]["effort"], "medium");
+        assert_eq!(request_body["tools"][0]["eager_input_streaming"], true);
+        assert_eq!(
+            request_body["messages"][0]["content"][0]["cache_control"]["type"],
+            "ephemeral"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
     async fn test_get_usage() {
         let mut connector = AnthropicConnector::new();
+        connector.base.set_configured(true);
 
         let signing_key = Ed25519SigningKey::generate();
         let verifying_key = signing_key.verifying_key();
@@ -2110,7 +2771,7 @@ mod tests {
             .unwrap();
 
         // Must grant the specific operation ID
-        let capability = generate_valid_token(&signing_key, "anthropic.get_usage");
+        let capability = generate_valid_token(&signing_key, &connector, "anthropic.get_usage");
 
         let result = connector
             .handle_invoke(json!({
@@ -2399,6 +3060,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            service_tier: None,
         };
         // ClaudeSonnet4 input: 1M * $3/M = $3.00
         connector.track_cost(&usage, Model::ClaudeSonnet4);

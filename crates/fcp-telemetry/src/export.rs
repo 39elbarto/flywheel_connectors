@@ -7,6 +7,7 @@ use std::{
     net::{SocketAddr, TcpListener, TcpStream},
     sync::OnceLock,
     thread,
+    time::Duration,
 };
 
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
@@ -125,15 +126,51 @@ pub fn init_otlp_tracer_with_sample_rate_and_options(
     headers: &[OtlpHeader],
     resource_attributes: &[OtlpResourceAttribute],
 ) -> Result<(), TelemetryError> {
+    init_otlp_tracer_with_sample_rate_options_and_timeout(
+        service_name,
+        endpoint,
+        sample_rate,
+        headers,
+        resource_attributes,
+        None,
+    )
+}
+
+/// Initialize the OTLP trace exporter with collector headers, resource attributes,
+/// and an optional collector RPC timeout.
+///
+/// This is primarily useful for e2e/failure probes and host integrations that need
+/// bounded unavailable-collector behavior instead of relying on SDK defaults.
+///
+/// Header values are only used to configure the exporter and are never emitted
+/// in diagnostics from this crate.
+///
+/// # Errors
+/// Returns [`TelemetryError::Config`] for malformed OTLP settings, or
+/// [`TelemetryError::TracingInit`] if the exporter cannot be initialized.
+pub fn init_otlp_tracer_with_sample_rate_options_and_timeout(
+    service_name: &str,
+    endpoint: &str,
+    sample_rate: f64,
+    headers: &[OtlpHeader],
+    resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
+) -> Result<(), TelemetryError> {
     validate_otlp_endpoint(endpoint)?;
     validate_otlp_headers(headers)?;
     validate_otlp_resource_attributes(resource_attributes)?;
+    if export_timeout.is_some_and(|timeout| timeout.is_zero()) {
+        return Err(TelemetryError::Config(
+            "OTLP export timeout must be greater than zero".to_string(),
+        ));
+    }
     init_otlp_tracer_with_sample_rate_impl(
         service_name,
         endpoint,
         sample_rate,
         headers,
         resource_attributes,
+        export_timeout,
     )
 }
 
@@ -144,10 +181,15 @@ fn init_otlp_tracer_with_sample_rate_impl(
     sample_rate: f64,
     headers: &[OtlpHeader],
     resource_attributes: &[OtlpResourceAttribute],
+    export_timeout: Option<Duration>,
 ) -> Result<(), TelemetryError> {
     let mut exporter_builder = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint);
+
+    if let Some(timeout) = export_timeout {
+        exporter_builder = exporter_builder.with_timeout(timeout);
+    }
 
     if !headers.is_empty() {
         exporter_builder = exporter_builder.with_metadata(otlp_metadata_from_headers(headers)?);
@@ -201,6 +243,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
         sample_rate = clamped,
         collector_header_count = headers.len(),
         resource_attribute_count = resource_attributes.len(),
+        export_timeout_ms = export_timeout.map(|timeout| timeout.as_millis()),
         "OTLP trace exporter initialized"
     );
 
@@ -264,6 +307,7 @@ fn init_otlp_tracer_with_sample_rate_impl(
     _sample_rate: f64,
     _headers: &[OtlpHeader],
     _resource_attributes: &[OtlpResourceAttribute],
+    _export_timeout: Option<Duration>,
 ) -> Result<(), TelemetryError> {
     Err(TelemetryError::Config(
         "OTLP export requires fcp-telemetry to be built with the `otlp` feature".to_string(),

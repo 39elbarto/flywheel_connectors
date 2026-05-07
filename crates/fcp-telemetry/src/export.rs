@@ -26,6 +26,8 @@ use crate::{
 };
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
+#[cfg(feature = "otlp")]
+static OTLP_TRACER_PROVIDER: OnceLock<SdkTracerProvider> = OnceLock::new();
 
 /// Initialize the Prometheus metrics exporter.
 ///
@@ -191,7 +193,8 @@ fn init_otlp_tracer_with_sample_rate_impl(
         .with_resource(resource)
         .build();
 
-    opentelemetry::global::set_tracer_provider(provider);
+    opentelemetry::global::set_tracer_provider(provider.clone());
+    let _ = OTLP_TRACER_PROVIDER.set(provider);
 
     tracing::info!(
         endpoint = %otlp_endpoint_log_label(endpoint),
@@ -201,6 +204,56 @@ fn init_otlp_tracer_with_sample_rate_impl(
         "OTLP trace exporter initialized"
     );
 
+    Ok(())
+}
+
+/// Force-flush the installed OTLP tracer provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::TracingInit`] if the SDK reports a flush failure.
+#[cfg(feature = "otlp")]
+pub fn flush_otlp_tracer() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_TRACER_PROVIDER.get() {
+        provider
+            .force_flush()
+            .map_err(|e| TelemetryError::TracingInit(format!("OTLP force_flush failed: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Force-flush the installed OTLP tracer provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so flushing is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn flush_otlp_tracer() -> Result<(), TelemetryError> {
+    Ok(())
+}
+
+/// Shut down the installed OTLP tracer provider, if one has been installed.
+///
+/// # Errors
+///
+/// Returns [`TelemetryError::TracingInit`] if the SDK reports a shutdown failure.
+#[cfg(feature = "otlp")]
+pub fn shutdown_otlp_tracer() -> Result<(), TelemetryError> {
+    if let Some(provider) = OTLP_TRACER_PROVIDER.get() {
+        provider
+            .shutdown()
+            .map_err(|e| TelemetryError::TracingInit(format!("OTLP shutdown failed: {e}")))?;
+    }
+    Ok(())
+}
+
+/// Shut down the installed OTLP tracer provider, if one has been installed.
+///
+/// # Errors
+///
+/// This build has no OTLP provider, so shutdown is a no-op.
+#[cfg(not(feature = "otlp"))]
+pub fn shutdown_otlp_tracer() -> Result<(), TelemetryError> {
     Ok(())
 }
 

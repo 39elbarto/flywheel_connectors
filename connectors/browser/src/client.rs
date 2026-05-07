@@ -367,6 +367,26 @@ fn cdp_parse_wait_result(response: &CdpEvaluateResponse) -> BrowserResult<WaitRe
     })
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CdpFormField {
+    selector: String,
+    value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+struct CdpFormFieldPlan {
+    text_to_insert: Option<String>,
+}
+
+fn cdp_parse_form_field_plan(response: &CdpEvaluateResponse) -> BrowserResult<CdpFormFieldPlan> {
+    serde_json::from_str::<CdpFormFieldPlan>(&response.result).map_err(|err| BrowserError::Api {
+        message: format!(
+            "Chrome DevTools Protocol Runtime.evaluate returned invalid fill_form payload: {err}"
+        ),
+        status_code: None,
+    })
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CdpScreenshotResponse {
     image_data: String,
@@ -806,6 +826,97 @@ fn cdp_wait_timeout_ms(timeout_ms: Option<u64>) -> BrowserResult<u64> {
             status_code: None,
         })
     }
+}
+
+fn cdp_form_fields(fields: &serde_json::Value) -> BrowserResult<Vec<CdpFormField>> {
+    let object = fields.as_object().ok_or_else(|| BrowserError::Api {
+        message: "Chrome DevTools Protocol fill_form fields must be an object map".into(),
+        status_code: None,
+    })?;
+
+    let mut parsed = Vec::with_capacity(object.len());
+    for (selector, value) in object {
+        if selector.trim().is_empty() {
+            return Err(BrowserError::Api {
+                message: "Chrome DevTools Protocol fill_form field selector cannot be empty".into(),
+                status_code: None,
+            });
+        }
+        if matches!(
+            value,
+            serde_json::Value::Array(_) | serde_json::Value::Object(_)
+        ) {
+            return Err(BrowserError::Api {
+                message: format!(
+                    "Chrome DevTools Protocol fill_form field `{selector}` value must be scalar"
+                ),
+                status_code: None,
+            });
+        }
+        parsed.push(CdpFormField {
+            selector: selector.clone(),
+            value: value.clone(),
+        });
+    }
+
+    Ok(parsed)
+}
+
+fn cdp_fill_form_prepare_expression(
+    selector: &str,
+    value: &serde_json::Value,
+) -> BrowserResult<String> {
+    let selector = serde_json::to_string(selector)?;
+    let value = serde_json::to_string(value)?;
+    Ok(format!(
+        r#"(function() {{
+  const selector = {selector};
+  const value = {value};
+  const element = document.querySelector(selector);
+  if (!element) {{
+    throw new Error("selector not found: " + selector);
+  }}
+  const tagName = element.tagName.toLowerCase();
+  const type = (element.getAttribute("type") ?? "").toLowerCase();
+  const stringValue = value === null ? "" : String(value);
+  const dispatch = () => {{
+    element.dispatchEvent(new Event("input", {{ bubbles: true }}));
+    element.dispatchEvent(new Event("change", {{ bubbles: true }}));
+  }};
+  element.scrollIntoView({{ block: "center", inline: "center" }});
+  element.focus();
+  if (tagName === "select") {{
+    const values = Array.from(element.options).map((option) => option.value);
+    if (!values.includes(stringValue)) {{
+      throw new Error("select option not found for " + selector + ": " + stringValue);
+    }}
+    element.value = stringValue;
+    dispatch();
+    return {{ mode: "direct", text_to_insert: null }};
+  }}
+  if (type === "checkbox" || type === "radio") {{
+    const checked = typeof value === "boolean"
+      ? value
+      : value === null
+        ? false
+        : ["true", "1", "yes", "on", "checked"].includes(String(value).toLowerCase());
+    element.checked = checked;
+    dispatch();
+    return {{ mode: "direct", text_to_insert: null }};
+  }}
+  if (element.isContentEditable) {{
+    element.textContent = "";
+    dispatch();
+    return {{ mode: "text", text_to_insert: stringValue }};
+  }}
+  if ("value" in element) {{
+    element.value = "";
+    dispatch();
+    return {{ mode: "text", text_to_insert: stringValue }};
+  }}
+  throw new Error("unsupported form control for " + selector);
+}})()"#
+    ))
 }
 
 fn cdp_mouse_event_params(
@@ -1345,6 +1456,90 @@ where
         })
     }
 
+    async fn fill_form(
+        &mut self,
+        cx: &Cx,
+        fields: &serde_json::Value,
+        submit_selector: Option<&str>,
+    ) -> BrowserResult<FormResult> {
+        let fields = cdp_form_fields(fields)?;
+        let mut filled_count = 0_u32;
+
+        if !fields.is_empty() {
+            let document = self
+                .call_method(
+                    cx,
+                    "DOM.getDocument",
+                    Some(serde_json::json!({ "depth": 0, "pierce": false })),
+                )
+                .await?;
+            let root_node_id = cdp_required_node_id(&document, "/root/nodeId")?;
+
+            for field in fields {
+                let query = self
+                    .call_method(
+                        cx,
+                        "DOM.querySelector",
+                        Some(serde_json::json!({
+                            "nodeId": root_node_id,
+                            "selector": field.selector.as_str(),
+                        })),
+                    )
+                    .await?;
+                let node_id =
+                    cdp_required_node_id(&query, "/nodeId").map_err(|_| BrowserError::Api {
+                        message: format!(
+                            "Chrome DevTools Protocol fill_form selector `{}` did not match",
+                            field.selector
+                        ),
+                        status_code: None,
+                    })?;
+
+                self.call_method(
+                    cx,
+                    "DOM.focus",
+                    Some(serde_json::json!({ "nodeId": node_id })),
+                )
+                .await?;
+                let expression = cdp_fill_form_prepare_expression(&field.selector, &field.value)?;
+                let response = self.evaluate_expression(cx, &expression).await?;
+                let plan = cdp_parse_form_field_plan(&response)?;
+                if let Some(text) = plan.text_to_insert
+                    && !text.is_empty()
+                {
+                    self.call_method(
+                        cx,
+                        "Input.insertText",
+                        Some(serde_json::json!({ "text": text })),
+                    )
+                    .await?;
+                }
+
+                filled_count = filled_count
+                    .checked_add(1)
+                    .ok_or_else(|| BrowserError::Api {
+                        message: "Chrome DevTools Protocol fill_form filled_count overflowed u32"
+                            .into(),
+                        status_code: None,
+                    })?;
+            }
+        }
+
+        let submitted = if let Some(submit_selector) = submit_selector {
+            let click = self
+                .click(cx, submit_selector, Some(CONTROL_TIMEOUT_MS_STANDARD))
+                .await?;
+            Some(click.clicked)
+        } else {
+            None
+        };
+
+        Ok(FormResult {
+            filled_count,
+            submitted,
+        })
+    }
+
     async fn capture_screenshot(
         &mut self,
         cx: &Cx,
@@ -1638,8 +1833,10 @@ const WORKER_FILL_FORM: BrowserControlOperation = BrowserControlOperation {
             "DOM.getDocument",
             "DOM.querySelector",
             "DOM.focus",
-            "Input.insertText",
             "Runtime.evaluate",
+            "Input.insertText",
+            "DOM.getBoxModel",
+            "Input.dispatchMouseEvent",
         ],
     },
 };
@@ -3548,6 +3745,261 @@ mod tests {
 
         assert!(format!("{error}").contains("not visible before timeout"));
         assert_eq!(transport.sent.len(), 1);
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_fill_form_uses_focus_insert_text_direct_set_and_submit_click() {
+        let cx = fcp_async_core::compatibility_cx();
+        let fields = serde_json::json!({
+            "#email": "agent@example.test",
+            "select[name=role]": "admin",
+        });
+        let email_expression =
+            cdp_fill_form_prepare_expression("#email", &serde_json::json!("agent@example.test"))
+                .unwrap();
+        let role_expression =
+            cdp_fill_form_prepare_expression("select[name=role]", &serde_json::json!("admin"))
+                .unwrap();
+        let submit_wait_expression = cdp_wait_for_selector_expression(
+            "button[type=submit]",
+            Some("visible"),
+            Some(CONTROL_TIMEOUT_MS_STANDARD),
+        )
+        .unwrap();
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":2}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":3,"result":{}}"#.into()),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 4,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "mode": "text",
+                                "text_to_insert": "agent@example.test",
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(r#"{"id":5,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":6,"result":{"nodeId":3}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":7,"result":{}}"#.into()),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 8,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": {
+                                "mode": "direct",
+                                "text_to_insert": null,
+                            },
+                        },
+                    },
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(
+                serde_json::json!({
+                    "id": 9,
+                    "result": {
+                        "result": {
+                            "type": "object",
+                            "value": { "found": true },
+                        },
+                    },
+                })
+                .to_string(),
+            ),
+            WebSocketMessage::Text(r#"{"id":10,"result":{"root":{"nodeId":10}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":11,"result":{"nodeId":11}}"#.into()),
+            WebSocketMessage::Text(
+                r#"{"id":12,"result":{"model":{"content":[0,0,20,0,20,10,0,10]}}}"#.into(),
+            ),
+            WebSocketMessage::Text(r#"{"id":13,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":14,"result":{}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":15,"result":{}}"#.into()),
+        ]));
+
+        let response = session
+            .fill_form(&cx, &fields, Some("button[type=submit]"))
+            .await
+            .unwrap();
+        let transport = session.into_transport();
+
+        assert_eq!(response.filled_count, 2);
+        assert_eq!(response.submitted, Some(true));
+        assert_eq!(transport.sent.len(), 15);
+        assert_cdp_text_message(
+            &transport.sent[0],
+            &serde_json::json!({
+                "id": 1,
+                "method": "DOM.getDocument",
+                "params": { "depth": 0, "pierce": false },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[1],
+            &serde_json::json!({
+                "id": 2,
+                "method": "DOM.querySelector",
+                "params": { "nodeId": 1, "selector": "#email" },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[2],
+            &serde_json::json!({
+                "id": 3,
+                "method": "DOM.focus",
+                "params": { "nodeId": 2 },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[3],
+            &serde_json::json!({
+                "id": 4,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": email_expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[4],
+            &serde_json::json!({
+                "id": 5,
+                "method": "Input.insertText",
+                "params": { "text": "agent@example.test" },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[5],
+            &serde_json::json!({
+                "id": 6,
+                "method": "DOM.querySelector",
+                "params": { "nodeId": 1, "selector": "select[name=role]" },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[6],
+            &serde_json::json!({
+                "id": 7,
+                "method": "DOM.focus",
+                "params": { "nodeId": 3 },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[7],
+            &serde_json::json!({
+                "id": 8,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": role_expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[8],
+            &serde_json::json!({
+                "id": 9,
+                "method": "Runtime.evaluate",
+                "params": {
+                    "awaitPromise": true,
+                    "expression": submit_wait_expression,
+                    "returnByValue": true,
+                },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[9],
+            &serde_json::json!({
+                "id": 10,
+                "method": "DOM.getDocument",
+                "params": { "depth": 0, "pierce": false },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[10],
+            &serde_json::json!({
+                "id": 11,
+                "method": "DOM.querySelector",
+                "params": { "nodeId": 10, "selector": "button[type=submit]" },
+            }),
+        );
+        assert_cdp_text_message(
+            &transport.sent[11],
+            &serde_json::json!({
+                "id": 12,
+                "method": "DOM.getBoxModel",
+                "params": { "nodeId": 11 },
+            }),
+        );
+        for (index, event_type, button, buttons, click_count) in [
+            (12, "mouseMoved", "none", 0, 0),
+            (13, "mousePressed", "left", 1, 1),
+            (14, "mouseReleased", "left", 0, 1),
+        ] {
+            assert_cdp_text_message(
+                &transport.sent[index],
+                &serde_json::json!({
+                    "id": index + 1,
+                    "method": "Input.dispatchMouseEvent",
+                    "params": {
+                        "button": button,
+                        "buttons": buttons,
+                        "clickCount": click_count,
+                        "type": event_type,
+                        "x": 10.0,
+                        "y": 5.0,
+                    },
+                }),
+            );
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_cdp_session_fill_form_rejects_missing_field_selector() {
+        let cx = fcp_async_core::compatibility_cx();
+        let fields = serde_json::json!({ "#missing": "value" });
+        let mut session = CdpSession::new(FakeCdpTransport::with_received([
+            WebSocketMessage::Text(r#"{"id":1,"result":{"root":{"nodeId":1}}}"#.into()),
+            WebSocketMessage::Text(r#"{"id":2,"result":{"nodeId":0}}"#.into()),
+        ]));
+
+        let error = session.fill_form(&cx, &fields, None).await.unwrap_err();
+        let transport = session.into_transport();
+
+        assert!(format!("{error}").contains("selector `#missing` did not match"));
+        assert_eq!(transport.sent.len(), 2);
+    }
+
+    #[test]
+    fn test_cdp_fill_form_rejects_invalid_fields_values_and_payloads() {
+        let not_object = cdp_form_fields(&serde_json::json!(["#email"])).unwrap_err();
+        let empty_selector = cdp_form_fields(&serde_json::json!({ "": "value" })).unwrap_err();
+        let nested_value =
+            cdp_form_fields(&serde_json::json!({ "#profile": { "name": "Agent" } })).unwrap_err();
+        let invalid_plan = cdp_parse_form_field_plan(&CdpEvaluateResponse {
+            result: r#"{"text_to_insert":7}"#.to_string(),
+        })
+        .unwrap_err();
+        let checkbox_expression =
+            cdp_fill_form_prepare_expression("#remember", &serde_json::json!(true)).unwrap();
+
+        assert!(format!("{not_object}").contains("object map"));
+        assert!(format!("{empty_selector}").contains("selector cannot be empty"));
+        assert!(format!("{nested_value}").contains("value must be scalar"));
+        assert!(format!("{invalid_plan}").contains("invalid fill_form payload"));
+        assert!(checkbox_expression.contains("const value = true;"));
+        assert!(checkbox_expression.contains(r#"type === "checkbox""#));
     }
 
     #[fcp_async_core::runtime::test]

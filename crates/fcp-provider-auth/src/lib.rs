@@ -106,6 +106,26 @@ pub enum AuthError {
         /// Operation name.
         operation: &'static str,
     },
+
+    /// Provider returned a terminal OAuth error.
+    #[error("auth method {method} rejected by provider with {code}: {reason}")]
+    ProviderRejected {
+        /// Auth method id.
+        method: &'static str,
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
+        reason: String,
+    },
+
+    /// Provider response was missing a field required by the OAuth state machine.
+    #[error("auth method {method} got invalid provider response: {reason}")]
+    InvalidProviderResponse {
+        /// Auth method id.
+        method: &'static str,
+        /// Redaction-safe response validation reason.
+        reason: String,
+    },
 }
 
 fn invalid_config(field: &'static str, reason: impl Into<String>) -> AuthError {
@@ -174,6 +194,18 @@ fn validate_payload_hash(value: &str) -> AuthResult<()> {
             "must be a SHA-256 hex digest or UNSIGNED-PAYLOAD",
         ))
     }
+}
+
+fn validate_oauth_endpoint(value: &str, field: &'static str) -> AuthResult<()> {
+    validate_non_empty(value, field)?;
+    validate_no_crlf(value, field)
+}
+
+fn validate_oauth_error(code: &str, reason: &str) -> AuthResult<()> {
+    validate_non_empty(code, "oauth_error_code")?;
+    validate_no_crlf(code, "oauth_error_code")?;
+    validate_non_empty(reason, "oauth_error_reason")?;
+    validate_no_crlf(reason, "oauth_error_reason")
 }
 
 fn std_duration_until(expires_at: DateTime<Utc>) -> StdDuration {
@@ -527,6 +559,484 @@ pub struct OAuthDeviceCodeAuth {
     pub refresh_token: Option<RedactedSecret>,
     /// Access-token expiration time.
     pub expires_at: Option<DateTime<Utc>>,
+}
+
+impl OAuthDeviceCodeAuth {
+    /// Construct OAuth device-code auth state without token material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required OAuth fields are empty
+    /// or contain bytes unsafe for logs/HTTP form fields.
+    pub fn new(
+        client_id: impl Into<String>,
+        device_code_url: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let config = OAuthDeviceCodeConfig::new(client_id, device_code_url, token_url, scope)?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct auth state from a validated flow config.
+    #[must_use]
+    pub fn from_config(config: OAuthDeviceCodeConfig) -> Self {
+        Self {
+            client_id: config.client_id,
+            device_code_url: config.device_code_url,
+            token_url: config.token_url,
+            scope: config.scope,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
+
+    /// Replace cached token material after a completed device-code flow.
+    pub fn apply_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(access_token);
+        let refresh_slot = &mut self.refresh_token;
+        *refresh_slot = refresh_token;
+        self.expires_at = expires_at;
+    }
+
+    fn validate_config(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        validate_oauth_endpoint(&self.device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&self.token_url, "token_url")?;
+        validate_no_crlf(&self.scope, "scope")
+    }
+}
+
+#[async_trait]
+impl AuthMethod for OAuthDeviceCodeAuth {
+    fn id(&self) -> &'static str {
+        "oauth_device"
+    }
+
+    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        self.validate_config()
+    }
+
+    async fn build_request_auth(
+        &self,
+        cx: &fcp_async_core::Cx,
+        request: &mut AuthRequest,
+    ) -> AuthResult<()> {
+        self.validate(cx).await?;
+        apply_bearer_token(
+            self.id(),
+            self.access_token.as_ref(),
+            self.expires_at,
+            request,
+        )
+    }
+
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        self.expires_at.map(std_duration_until)
+    }
+}
+
+/// OAuth device-code flow configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceCodeConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Device-code endpoint URL.
+    pub device_code_url: String,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Requested scope string. Empty scope is allowed for providers that infer defaults.
+    pub scope: String,
+    /// Initial provider polling interval.
+    pub default_poll_interval: StdDuration,
+}
+
+impl OAuthDeviceCodeConfig {
+    /// Construct device-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        device_code_url: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let client_id = client_id.into();
+        let device_code_url = device_code_url.into();
+        let token_url = token_url.into();
+        let scope = scope.into();
+        validate_non_empty(&client_id, "client_id")?;
+        validate_no_crlf(&client_id, "client_id")?;
+        validate_oauth_endpoint(&device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&token_url, "token_url")?;
+        validate_no_crlf(&scope, "scope")?;
+        Ok(Self {
+            client_id,
+            device_code_url,
+            token_url,
+            scope,
+            default_poll_interval: StdDuration::from_secs(5),
+        })
+    }
+
+    /// Override the provider polling interval used before a challenge is issued.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the interval is zero.
+    pub fn with_default_poll_interval(mut self, interval: StdDuration) -> AuthResult<Self> {
+        if interval.is_zero() {
+            return Err(invalid_config(
+                "default_poll_interval",
+                "must be greater than zero",
+            ));
+        }
+        self.default_poll_interval = interval;
+        Ok(self)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        validate_oauth_endpoint(&self.device_code_url, "device_code_url")?;
+        validate_oauth_endpoint(&self.token_url, "token_url")?;
+        validate_no_crlf(&self.scope, "scope")?;
+        if self.default_poll_interval.is_zero() {
+            return Err(invalid_config(
+                "default_poll_interval",
+                "must be greater than zero",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Device-code challenge returned by an OAuth provider.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthDeviceCodeChallenge {
+    /// Provider device code. Treated as secret because it authorizes polling.
+    pub device_code: RedactedSecret,
+    /// User-facing short code to enter in a browser.
+    pub user_code: String,
+    /// Browser verification URL.
+    pub verification_uri: String,
+    /// Optional complete verification URL with the user code embedded.
+    pub verification_uri_complete: Option<String>,
+    /// Challenge expiration timestamp.
+    pub expires_at: DateTime<Utc>,
+    /// Provider-requested polling interval.
+    pub interval: StdDuration,
+}
+
+impl OAuthDeviceCodeChallenge {
+    /// Construct a device-code challenge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        device_code: impl Into<String>,
+        user_code: impl Into<String>,
+        verification_uri: impl Into<String>,
+        verification_uri_complete: Option<impl Into<String>>,
+        expires_at: DateTime<Utc>,
+        interval: StdDuration,
+    ) -> AuthResult<Self> {
+        let challenge = Self {
+            device_code: RedactedSecret::new(device_code)?,
+            user_code: user_code.into(),
+            verification_uri: verification_uri.into(),
+            verification_uri_complete: verification_uri_complete.map(Into::into),
+            expires_at,
+            interval,
+        };
+        challenge.validate()?;
+        Ok(challenge)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_no_crlf(self.device_code.expose_secret(), "device_code")?;
+        validate_non_empty(&self.user_code, "user_code")?;
+        validate_no_crlf(&self.user_code, "user_code")?;
+        validate_oauth_endpoint(&self.verification_uri, "verification_uri")?;
+        if let Some(uri) = self.verification_uri_complete.as_deref() {
+            validate_oauth_endpoint(uri, "verification_uri_complete")?;
+        }
+        if self.interval.is_zero() {
+            return Err(invalid_config("interval", "must be greater than zero"));
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OAuthDeviceCodeChallenge {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthDeviceCodeChallenge")
+            .field("device_code", &self.device_code)
+            .field("user_code", &self.user_code)
+            .field("verification_uri", &self.verification_uri)
+            .field("verification_uri_complete", &self.verification_uri_complete)
+            .field("expires_at", &self.expires_at)
+            .field("interval", &self.interval)
+            .finish()
+    }
+}
+
+/// OAuth token set returned by a completed flow.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthTokens {
+    /// Access token used for bearer request auth.
+    pub access_token: RedactedSecret,
+    /// Token type. This slice supports bearer tokens.
+    pub token_type: String,
+    /// Optional refresh token.
+    pub refresh_token: Option<RedactedSecret>,
+    /// Optional expiration timestamp.
+    pub expires_at: Option<DateTime<Utc>>,
+    /// Optional granted scope.
+    pub scope: Option<String>,
+}
+
+impl OAuthTokens {
+    /// Construct a bearer token set.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when token fields are empty or unsafe.
+    pub fn bearer(
+        access_token: impl Into<String>,
+        expires_in: Option<StdDuration>,
+        refresh_token: Option<impl Into<String>>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let scope = scope.map(Into::into);
+        if let Some(scope) = scope.as_deref() {
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(Self {
+            access_token: RedactedSecret::new(access_token)?,
+            token_type: "Bearer".to_string(),
+            refresh_token: refresh_token.map(RedactedSecret::new).transpose()?,
+            expires_at: expires_in
+                .map(chrono_duration)
+                .transpose()?
+                .map(|duration| Utc::now() + duration),
+            scope,
+        })
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.token_type, "token_type")?;
+        validate_no_crlf(&self.token_type, "token_type")?;
+        if !self.token_type.eq_ignore_ascii_case("bearer") {
+            return Err(invalid_config(
+                "token_type",
+                "only bearer tokens are supported in this slice",
+            ));
+        }
+        if let Some(scope) = self.scope.as_deref() {
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OAuthTokens {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthTokens")
+            .field("access_token", &self.access_token)
+            .field("token_type", &self.token_type)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("expires_at", &self.expires_at)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// Provider status returned when polling a device-code token endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthDeviceCodeProviderResponse {
+    /// User has not completed browser authorization yet.
+    AuthorizationPending,
+    /// Provider asked the client to increase the polling interval.
+    SlowDown,
+    /// User completed authorization and the provider returned tokens.
+    Authorized(OAuthTokens),
+    /// User denied authorization.
+    AccessDenied {
+        /// Redaction-safe denial reason.
+        reason: String,
+    },
+    /// Device code expired before authorization completed.
+    ExpiredToken {
+        /// Redaction-safe expiry reason.
+        reason: String,
+    },
+}
+
+/// Public polling result returned by [`OAuthDeviceCodeFlow::poll`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthDeviceCodePoll {
+    /// Authorization is still pending. Caller should wait `retry_after`.
+    Pending {
+        /// Current retry interval.
+        retry_after: StdDuration,
+    },
+    /// Authorization succeeded.
+    Authorized(OAuthTokens),
+}
+
+/// Transport boundary for OAuth device-code providers.
+#[async_trait]
+pub trait OAuthDeviceCodeTransport: Send + Sync {
+    /// Start a provider device-code flow.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn start(&self, config: &OAuthDeviceCodeConfig) -> AuthResult<OAuthDeviceCodeChallenge>;
+
+    /// Poll a provider token endpoint.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn poll(
+        &self,
+        config: &OAuthDeviceCodeConfig,
+        challenge: &OAuthDeviceCodeChallenge,
+    ) -> AuthResult<OAuthDeviceCodeProviderResponse>;
+}
+
+/// OAuth device-code state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthDeviceCodeFlow {
+    config: OAuthDeviceCodeConfig,
+    challenge: OAuthDeviceCodeChallenge,
+    poll_interval: StdDuration,
+}
+
+impl OAuthDeviceCodeFlow {
+    /// Start a device-code flow through the supplied transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config is invalid or the provider
+    /// returns an invalid challenge.
+    pub async fn start<T>(
+        cx: &fcp_async_core::Cx,
+        config: OAuthDeviceCodeConfig,
+        transport: &T,
+    ) -> AuthResult<Self>
+    where
+        T: OAuthDeviceCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        config.validate()?;
+        let challenge = transport.start(&config).await?;
+        challenge
+            .validate()
+            .map_err(|error| AuthError::InvalidProviderResponse {
+                method: "oauth_device",
+                reason: error.to_string(),
+            })?;
+        if Utc::now() >= challenge.expires_at {
+            return Err(AuthError::Expired {
+                method: "oauth_device",
+                expires_at: challenge.expires_at,
+            });
+        }
+        Ok(Self {
+            poll_interval: challenge.interval,
+            config,
+            challenge,
+        })
+    }
+
+    /// Borrow the user-facing challenge.
+    #[must_use]
+    pub const fn challenge(&self) -> &OAuthDeviceCodeChallenge {
+        &self.challenge
+    }
+
+    /// Return the current polling interval.
+    #[must_use]
+    pub const fn poll_interval(&self) -> StdDuration {
+        self.poll_interval
+    }
+
+    /// Poll for authorization completion.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for terminal provider failures, expired
+    /// challenges, or malformed token responses.
+    pub async fn poll<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<OAuthDeviceCodePoll>
+    where
+        T: OAuthDeviceCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        if Utc::now() >= self.challenge.expires_at {
+            return Err(AuthError::Expired {
+                method: "oauth_device",
+                expires_at: self.challenge.expires_at,
+            });
+        }
+        match transport.poll(&self.config, &self.challenge).await? {
+            OAuthDeviceCodeProviderResponse::AuthorizationPending => {
+                Ok(OAuthDeviceCodePoll::Pending {
+                    retry_after: self.poll_interval,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::SlowDown => {
+                self.poll_interval = self
+                    .poll_interval
+                    .checked_add(StdDuration::from_secs(5))
+                    .unwrap_or(StdDuration::MAX);
+                Ok(OAuthDeviceCodePoll::Pending {
+                    retry_after: self.poll_interval,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(OAuthDeviceCodePoll::Authorized(tokens))
+            }
+            OAuthDeviceCodeProviderResponse::AccessDenied { reason } => {
+                validate_oauth_error("access_denied", &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_device",
+                    code: "access_denied".to_string(),
+                    reason,
+                })
+            }
+            OAuthDeviceCodeProviderResponse::ExpiredToken { reason } => {
+                validate_oauth_error("expired_token", &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_device",
+                    code: "expired_token".to_string(),
+                    reason,
+                })
+            }
+        }
+    }
 }
 
 /// OAuth authorization-code auth state.
@@ -1065,11 +1575,7 @@ impl AuthMethod for AuthMethodKind {
     async fn validate(&self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
         match self {
             Self::ApiKey(method) => method.validate(cx).await,
-            Self::OAuthDeviceCode(method) => {
-                validate_non_empty(&method.client_id, "client_id")?;
-                validate_non_empty(&method.device_code_url, "device_code_url")?;
-                validate_non_empty(&method.token_url, "token_url")
-            }
+            Self::OAuthDeviceCode(method) => method.validate(cx).await,
             Self::OAuthAuthCode(method) => {
                 validate_non_empty(&method.client_id, "client_id")?;
                 validate_non_empty(&method.authorize_url, "authorize_url")?;
@@ -1090,12 +1596,7 @@ impl AuthMethod for AuthMethodKind {
         self.validate(cx).await?;
         match self {
             Self::ApiKey(method) => method.build_request_auth(cx, request).await,
-            Self::OAuthDeviceCode(method) => apply_bearer_token(
-                self.id(),
-                method.access_token.as_ref(),
-                method.expires_at,
-                request,
-            ),
+            Self::OAuthDeviceCode(method) => method.build_request_auth(cx, request).await,
             Self::OAuthAuthCode(method) => apply_bearer_token(
                 self.id(),
                 method.access_token.as_ref(),
@@ -1111,7 +1612,7 @@ impl AuthMethod for AuthMethodKind {
     fn requires_refresh_in(&self) -> Option<StdDuration> {
         match self {
             Self::ApiKey(method) => method.requires_refresh_in(),
-            Self::OAuthDeviceCode(method) => method.expires_at.map(std_duration_until),
+            Self::OAuthDeviceCode(method) => method.requires_refresh_in(),
             Self::OAuthAuthCode(method) => method.expires_at.map(std_duration_until),
             Self::SetupToken(method) => method.requires_refresh_in(),
             Self::Jwt(method) => method.requires_refresh_in(),
@@ -1122,12 +1623,11 @@ impl AuthMethod for AuthMethodKind {
     async fn refresh(&mut self, cx: &fcp_async_core::Cx) -> AuthResult<()> {
         match self {
             Self::ApiKey(method) => method.refresh(cx).await,
-            Self::OAuthDeviceCode(_) | Self::OAuthAuthCode(_) => {
-                Err(AuthError::UnsupportedMethod {
-                    method: self.id(),
-                    operation: "refresh",
-                })
-            }
+            Self::OAuthDeviceCode(method) => method.refresh(cx).await,
+            Self::OAuthAuthCode(_) => Err(AuthError::UnsupportedMethod {
+                method: self.id(),
+                operation: "refresh",
+            }),
             Self::SetupToken(method) => method.refresh(cx).await,
             Self::Jwt(method) => method.refresh(cx).await,
             Self::SigV4(method) => method.refresh(cx).await,
@@ -1311,7 +1811,10 @@ impl AuthProfileStore for InMemoryAuthProfileStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use parking_lot::Mutex;
 
     fn cx() -> fcp_async_core::Cx {
         fcp_async_core::Cx::for_testing()
@@ -1349,6 +1852,82 @@ mod tests {
             priority,
         )
         .unwrap()
+    }
+
+    fn oauth_config() -> OAuthDeviceCodeConfig {
+        OAuthDeviceCodeConfig::new(
+            "fixture-client",
+            "https://auth.example.test/device",
+            "https://auth.example.test/token",
+            "chat messages",
+        )
+        .unwrap()
+    }
+
+    fn oauth_challenge() -> OAuthDeviceCodeChallenge {
+        OAuthDeviceCodeChallenge::new(
+            "fixture-device-code",
+            "ABCD-EFGH",
+            "https://auth.example.test/verify",
+            Some("https://auth.example.test/verify?user_code=ABCD-EFGH"),
+            Utc::now() + TimeDelta::minutes(5),
+            StdDuration::from_secs(5),
+        )
+        .unwrap()
+    }
+
+    fn oauth_tokens() -> OAuthTokens {
+        OAuthTokens::bearer(
+            "fixture-access-token",
+            Some(StdDuration::from_secs(3_600)),
+            Some("fixture-refresh-token"),
+            Some("chat messages"),
+        )
+        .unwrap()
+    }
+
+    #[derive(Debug)]
+    struct ScriptedDeviceTransport {
+        challenge: OAuthDeviceCodeChallenge,
+        responses: Mutex<VecDeque<OAuthDeviceCodeProviderResponse>>,
+    }
+
+    impl ScriptedDeviceTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthDeviceCodeProviderResponse>) -> Self {
+            Self {
+                challenge: oauth_challenge(),
+                responses: Mutex::new(responses.into_iter().collect()),
+            }
+        }
+
+        fn with_challenge(mut self, challenge: OAuthDeviceCodeChallenge) -> Self {
+            self.challenge = challenge;
+            self
+        }
+    }
+
+    #[async_trait]
+    impl OAuthDeviceCodeTransport for ScriptedDeviceTransport {
+        async fn start(
+            &self,
+            _config: &OAuthDeviceCodeConfig,
+        ) -> AuthResult<OAuthDeviceCodeChallenge> {
+            Ok(self.challenge.clone())
+        }
+
+        async fn poll(
+            &self,
+            _config: &OAuthDeviceCodeConfig,
+            _challenge: &OAuthDeviceCodeChallenge,
+        ) -> AuthResult<OAuthDeviceCodeProviderResponse> {
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_device",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
     }
 
     #[test]
@@ -1414,6 +1993,152 @@ mod tests {
             request.value_for("Authorization"),
             Some("Bearer fixture-kind")
         );
+    }
+
+    #[test]
+    fn oauth_device_flow_handles_pending_slow_down_and_success() {
+        let expected_tokens = oauth_tokens();
+        let transport = ScriptedDeviceTransport::new([
+            OAuthDeviceCodeProviderResponse::AuthorizationPending,
+            OAuthDeviceCodeProviderResponse::SlowDown,
+            OAuthDeviceCodeProviderResponse::Authorized(expected_tokens.clone()),
+        ]);
+        let mut flow = run(OAuthDeviceCodeFlow::start(
+            &cx(),
+            oauth_config(),
+            &transport,
+        ))
+        .unwrap();
+
+        assert_eq!(flow.challenge().user_code, "ABCD-EFGH");
+        assert_eq!(flow.poll_interval(), StdDuration::from_secs(5));
+        assert_eq!(
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Pending {
+                retry_after: StdDuration::from_secs(5)
+            }
+        );
+        assert_eq!(
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Pending {
+                retry_after: StdDuration::from_secs(10)
+            }
+        );
+
+        assert_eq!(
+            run(flow.poll(&cx(), &transport)).unwrap(),
+            OAuthDeviceCodePoll::Authorized(expected_tokens.clone())
+        );
+        assert_eq!(
+            expected_tokens.access_token.expose_secret(),
+            "fixture-access-token"
+        );
+        assert_eq!(
+            expected_tokens
+                .refresh_token
+                .as_ref()
+                .map(RedactedSecret::expose_secret),
+            Some("fixture-refresh-token")
+        );
+    }
+
+    #[test]
+    fn oauth_device_flow_maps_denied_and_expired_responses() {
+        let denied =
+            ScriptedDeviceTransport::new([OAuthDeviceCodeProviderResponse::AccessDenied {
+                reason: "operator denied browser authorization".to_string(),
+            }]);
+        let mut denied_flow =
+            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &denied)).unwrap();
+
+        let denied_error = run(denied_flow.poll(&cx(), &denied)).unwrap_err();
+        assert_eq!(
+            denied_error,
+            AuthError::ProviderRejected {
+                method: "oauth_device",
+                code: "access_denied".to_string(),
+                reason: "operator denied browser authorization".to_string(),
+            }
+        );
+
+        let expired =
+            ScriptedDeviceTransport::new([OAuthDeviceCodeProviderResponse::ExpiredToken {
+                reason: "device code expired".to_string(),
+            }]);
+        let mut expired_flow =
+            run(OAuthDeviceCodeFlow::start(&cx(), oauth_config(), &expired)).unwrap();
+
+        let expired_error = run(expired_flow.poll(&cx(), &expired)).unwrap_err();
+        assert_eq!(
+            expired_error,
+            AuthError::ProviderRejected {
+                method: "oauth_device",
+                code: "expired_token".to_string(),
+                reason: "device code expired".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_device_flow_rejects_malformed_provider_challenge() {
+        let mut challenge = oauth_challenge();
+        challenge.interval = StdDuration::ZERO;
+        let transport = ScriptedDeviceTransport::new([]).with_challenge(challenge);
+
+        let error = run(OAuthDeviceCodeFlow::start(
+            &cx(),
+            oauth_config(),
+            &transport,
+        ))
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::InvalidProviderResponse {
+                method: "oauth_device",
+                reason: "invalid auth configuration for interval: must be greater than zero"
+                    .to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_device_auth_builds_bearer_header_and_redacts_debug() {
+        let mut auth = OAuthDeviceCodeAuth::new(
+            "fixture-client",
+            "https://auth.example.test/device",
+            "https://auth.example.test/token",
+            "chat messages",
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
+        let mut request = AuthRequest::new();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-access-token")
+        );
+        assert!(auth.requires_refresh_in().is_some());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-access-token"));
+        assert!(!debug.contains("fixture-refresh-token"));
+    }
+
+    #[test]
+    fn oauth_device_debug_redacts_polling_device_code() {
+        let challenge = oauth_challenge();
+        let tokens = oauth_tokens();
+
+        let challenge_debug = format!("{challenge:?}");
+        let tokens_debug = format!("{tokens:?}");
+
+        assert!(challenge_debug.contains("ABCD-EFGH"));
+        assert!(!challenge_debug.contains("fixture-device-code"));
+        assert!(!tokens_debug.contains("fixture-access-token"));
+        assert!(!tokens_debug.contains("fixture-refresh-token"));
     }
 
     #[test]

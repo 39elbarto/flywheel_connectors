@@ -309,6 +309,58 @@ admin mutation audit, SDK lease contract, and wait-exhaustion semantics. The
 parent credential-pooling feature still needs broader connector-boundary or e2e
 proof before it can claim full production load-balancing behavior.
 
+### 7. When administering provider auth profiles
+
+Provider auth profiles are also a live host administration surface. Operators
+should use `fwc auth login`, `fwc auth profiles`, `fwc auth set-priority`,
+`fwc auth refresh`, `fwc auth remove-profile`, and
+`fwc auth migrate-from-claude-code` against a configured host endpoint when they
+need node-local truth about API-key or OAuth provider profiles.
+
+The maintained host admin contract for provider auth profiles is:
+
+| Action | Method and path |
+|---|---|
+| List provider profiles in active-selection order | `GET /rpc/admin/auth/profiles/{provider}` |
+| Create or replace a profile | `POST /rpc/admin/auth/profiles/{provider}` |
+| Inspect one profile | `GET /rpc/admin/auth/profiles/{provider}/{profile_id}` |
+| Remove one profile | `DELETE /rpc/admin/auth/profiles/{provider}/{profile_id}` |
+| Change profile selection priority | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/priority` |
+| Refresh every refreshable profile for a provider | `POST /rpc/admin/auth/profiles/{provider}/refresh` |
+| Refresh one profile | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/refresh` |
+| Start an OAuth device-code login | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/start` |
+| Poll an OAuth device-code login | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/device/poll` |
+| Start an OAuth authorization-code login | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/start` |
+| Complete an OAuth authorization-code login | `POST /rpc/admin/auth/profiles/{provider}/{profile_id}/oauth/auth-code/complete` |
+
+Profile upsert requests carry one method shape. API-key profiles use:
+
+```json
+{
+  "profile_id": "default",
+  "method": "api_key",
+  "label": "default",
+  "priority": 0,
+  "api_key": "..."
+}
+```
+
+OAuth device-code profiles use `method: "oauth_device"` plus `client_id`,
+`device_code_url`, `token_url`, and `scope`. OAuth authorization-code profiles
+use `method: "oauth_auth_code"` plus `client_id`, optional `client_secret`,
+`authorize_url`, `token_url`, `redirect_uri`, `scope`, and optional `use_pkce`.
+
+Responses are redacted operator views. They may expose provider id, profile id,
+method, label, priority, creation time, last-use time, OAuth challenge URLs,
+login ids, refresh actions, and redaction-safe errors. They must not echo raw
+API keys, access tokens, refresh tokens, authorization codes, OAuth client
+secrets, provider error bodies, or signed secret material.
+
+Profile priority is the active-selection contract: lower numeric priority wins,
+and equal priorities are ordered by profile id. `GET /rpc/admin/auth/profiles`
+returns profiles in that same selection order, so the first profile is the
+host's active candidate for provider-level routing.
+
 ## Production Deployment Runbook
 
 This section is the operator-facing deployment guide for the current

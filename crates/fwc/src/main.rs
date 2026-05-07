@@ -1615,6 +1615,9 @@ enum AuthCommand {
     /// List or show host-managed provider auth profiles.
     Profiles(AuthProfilesArgs),
 
+    /// Change the host-managed selection priority for one provider auth profile.
+    SetPriority(AuthSetPriorityArgs),
+
     /// Show one stored credential with redacted fields and status hints.
     Show(TargetArgs),
 
@@ -1749,7 +1752,7 @@ struct AuthLoginArgs {
     label: Option<String>,
 
     /// Lower values are preferred when the host selects an active profile.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     priority: i32,
 
     /// API key or bearer token value to store in the host auth profile.
@@ -1864,6 +1867,20 @@ struct AuthProfilesArgs {
 }
 
 #[derive(Args, Debug, Serialize)]
+struct AuthSetPriorityArgs {
+    /// Provider id to mutate.
+    provider: String,
+
+    /// Profile id to reprioritize.
+    #[arg(long)]
+    profile: String,
+
+    /// Lower values are preferred when the host selects an active profile.
+    #[arg(long, allow_hyphen_values = true)]
+    priority: i32,
+}
+
+#[derive(Args, Debug, Serialize)]
 struct AuthRefreshArgs {
     /// Provider id to refresh.
     provider: String,
@@ -1901,7 +1918,7 @@ struct AuthMigrateFromClaudeCodeArgs {
     label: Option<String>,
 
     /// Lower values are preferred when the host selects an active profile.
-    #[arg(long, default_value_t = 0)]
+    #[arg(long, default_value_t = 0, allow_hyphen_values = true)]
     priority: i32,
 
     /// Path to the Claude Code JSON config. Defaults to ~/.claude.json.
@@ -4551,6 +4568,18 @@ impl HostAdminClient {
 
     fn auth_profile(&self, provider: &str, profile_id: &str) -> Result<Value> {
         self.get_json(&format!("/rpc/admin/auth/profiles/{provider}/{profile_id}"))
+    }
+
+    fn auth_profile_priority(
+        &self,
+        provider: &str,
+        profile_id: &str,
+        priority: i32,
+    ) -> Result<Value> {
+        self.post_json(
+            &format!("/rpc/admin/auth/profiles/{provider}/{profile_id}/priority"),
+            &json!({ "priority": priority }),
+        )
     }
 
     fn auth_profile_refresh(&self, provider: &str, profile_id: Option<&str>) -> Result<Value> {
@@ -12107,6 +12136,9 @@ fn auth_dispatch_with_store_and_host(
         AuthCommand::Profiles(profiles_args) => {
             auth_profiles_dispatch(profiles_args, explicit_host)
         }
+        AuthCommand::SetPriority(priority_args) => {
+            auth_set_priority_dispatch(priority_args, explicit_host)
+        }
         AuthCommand::Show(target) => auth_show_dispatch(target, store),
         AuthCommand::Remove(target) => auth_remove_dispatch(target, store),
         AuthCommand::RemoveProfile(remove_args) => {
@@ -12542,6 +12574,58 @@ fn auth_profiles_dispatch(
         args.profile.as_deref(),
         "provider-auth-profile-read",
         false,
+    );
+    envelope.inject_into(&mut payload);
+    Ok(DispatchOutcome {
+        payload,
+        exit_code: CliExitCode::Success,
+    })
+}
+
+fn auth_set_priority_dispatch(
+    args: &AuthSetPriorityArgs,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let host = match auth_host_config(
+        "set-priority",
+        serde_json::to_value(args)?,
+        vec![
+            format!(
+                "fwc auth set-priority {} --profile {} --priority {} --host <endpoint>",
+                args.provider, args.profile, args.priority
+            ),
+            "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
+        ],
+        explicit_host,
+    ) {
+        Ok(host) => host,
+        Err(outcome) => return Ok(outcome),
+    };
+    let client = HostAdminClient::new(&host.endpoint)?;
+    let response = client.auth_profile_priority(&args.provider, &args.profile, args.priority)?;
+    let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
+    let mut payload = json!({
+        "status": "ok",
+        "command": "auth",
+        "subcommand": "set-priority",
+        "source": "host-admin-api",
+        "message": format!("Set priority {} for host-managed provider auth profile `{}` on `{}`.", args.priority, args.profile, args.provider),
+        "provider": args.provider,
+        "profile_id": args.profile,
+        "priority": args.priority,
+        "profile": response["profile"].clone(),
+        "next_actions": [
+            format!("fwc auth profiles {} --host {}", args.provider, host.endpoint),
+            format!("fwc auth profiles {} --profile {} --host {}", args.provider, args.profile, host.endpoint),
+        ],
+    });
+    attach_auth_host_contract(
+        &mut payload,
+        &host.endpoint,
+        &args.provider,
+        Some(&args.profile),
+        "provider-auth-profile-priority",
+        true,
     );
     envelope.inject_into(&mut payload);
     Ok(DispatchOutcome {
@@ -44633,6 +44717,43 @@ require_attestation_types = ["in-toto"]"#,
                 }),
             ),
             (
+                format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/priority"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "api_key",
+                        "label": "primary",
+                        "priority": -10,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
+                format!("GET /rpc/admin/auth/profiles/{provider}"),
+                json!({
+                    "provider": provider,
+                    "profiles": [
+                        {
+                            "provider": provider,
+                            "profile_id": profile,
+                            "method": "api_key",
+                            "label": "primary",
+                            "priority": -10,
+                            "created_at": "2026-05-07T00:00:00Z"
+                        },
+                        {
+                            "provider": provider,
+                            "profile_id": "backup",
+                            "method": "api_key",
+                            "label": "backup",
+                            "priority": 20,
+                            "created_at": "2026-05-07T00:00:00Z"
+                        }
+                    ]
+                }),
+            ),
+            (
                 format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/refresh"),
                 json!({
                     "provider": provider,
@@ -44690,6 +44811,40 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(profiles_exit, CliExitCode::Success.into());
         assert_eq!(profiles_payload["subcommand"], "profiles");
         assert_eq!(profiles_payload["result"]["profile"]["profile_id"], profile);
+
+        let (priority_exit, priority_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "set-priority",
+            provider,
+            "--profile",
+            profile,
+            "--priority",
+            "-10",
+        ]);
+        assert_eq!(priority_exit, CliExitCode::Success.into());
+        assert_eq!(priority_payload["subcommand"], "set-priority");
+        assert_eq!(priority_payload["profile"]["priority"], -10);
+
+        let (profile_list_exit, profile_list_payload) = execute_json(&[
+            "fwc", "--json", "--host", &host, "auth", "profiles", provider,
+        ]);
+        assert_eq!(profile_list_exit, CliExitCode::Success.into());
+        assert_eq!(
+            profile_list_payload["result"]["profiles"][0]["profile_id"],
+            profile
+        );
+        assert_eq!(
+            profile_list_payload["result"]["profiles"][0]["priority"],
+            -10
+        );
+        assert_eq!(
+            profile_list_payload["result"]["profiles"][1]["profile_id"],
+            "backup"
+        );
 
         let (refresh_exit, refresh_payload) = execute_json(&[
             "fwc",

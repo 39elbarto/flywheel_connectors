@@ -4516,6 +4516,10 @@ async fn async_main() -> HostResult<()> {
             get(auth_profile_get_handler).delete(auth_profile_delete_handler),
         )
         .route(
+            "/rpc/admin/auth/profiles/{provider}/{profile_id}/priority",
+            post(auth_profile_priority_handler),
+        )
+        .route(
             "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
             post(auth_profile_refresh_one_handler),
         )
@@ -5075,6 +5079,11 @@ enum AuthProfileMethodRequest {
         #[serde(default = "default_auth_code_pkce")]
         use_pkce: bool,
     },
+}
+
+#[derive(Debug, Deserialize)]
+struct AuthProfilePriorityRequest {
+    priority: i32,
 }
 
 #[derive(Debug, Serialize)]
@@ -5840,6 +5849,25 @@ async fn auth_profile_delete_handler(
         provider,
         profile_id,
         deleted: true,
+    }))
+}
+
+async fn auth_profile_priority_handler(
+    Path((provider, profile_id)): Path<(String, String)>,
+    Json(request): Json<AuthProfilePriorityRequest>,
+) -> Result<Json<AuthProfileResponse>, (StatusCode, String)> {
+    let store = auth_profile_store();
+    let mut profile = store
+        .get_profile(&provider, &profile_id)
+        .await
+        .map_err(map_auth_profile_error)?;
+    profile.priority = request.priority;
+    store
+        .save_profile(profile.clone())
+        .await
+        .map_err(map_auth_profile_error)?;
+    Ok(Json(AuthProfileResponse {
+        profile: auth_profile_view(profile),
     }))
 }
 
@@ -16754,6 +16782,10 @@ done"#;
                 get(auth_profile_get_handler).delete(auth_profile_delete_handler),
             )
             .route(
+                "/rpc/admin/auth/profiles/{provider}/{profile_id}/priority",
+                post(auth_profile_priority_handler),
+            )
+            .route(
                 "/rpc/admin/auth/profiles/{provider}/{profile_id}/refresh",
                 post(auth_profile_refresh_one_handler),
             )
@@ -17303,6 +17335,7 @@ done"#;
         ];
         let provider = "test-auth-profile-crud";
         let profile_id = "primary";
+        let backup_profile_id = "backup";
         let profile_path = format!("/rpc/admin/auth/profiles/{provider}/{profile_id}");
 
         let upserted = send_json_request(
@@ -17313,7 +17346,7 @@ done"#;
                 "profile_id": profile_id,
                 "method": "api_key",
                 "label": "primary",
-                "priority": -5,
+                "priority": 10,
                 "api_key": "sk-live-primary"
             }),
             &auth,
@@ -17324,13 +17357,48 @@ done"#;
         assert_eq!(upserted_body["profile"]["provider"], provider);
         assert_eq!(upserted_body["profile"]["profile_id"], profile_id);
         assert_eq!(upserted_body["profile"]["method"], "api_key");
-        assert_eq!(upserted_body["profile"]["priority"], -5);
+        assert_eq!(upserted_body["profile"]["priority"], 10);
         let upserted_profile = upserted_body["profile"]
             .as_object()
             .expect("profile should be a JSON object");
         assert!(!upserted_profile.contains_key("api_key"));
         let upserted_text = upserted_body.to_string();
         assert!(!upserted_text.contains("sk-live-primary"));
+
+        let backup = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("/rpc/admin/auth/profiles/{provider}"),
+            json!({
+                "profile_id": backup_profile_id,
+                "method": "api_key",
+                "label": "backup",
+                "priority": 20,
+                "api_key": "sk-live-backup"
+            }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(backup.status(), axum::http::StatusCode::OK);
+        assert!(
+            !response_body_json(backup)
+                .await?
+                .to_string()
+                .contains("sk-live-backup")
+        );
+
+        let reprioritized = send_json_request(
+            app.clone(),
+            axum::http::Method::POST,
+            &format!("{profile_path}/priority"),
+            json!({ "priority": -5 }),
+            &auth,
+        )
+        .await?;
+        assert_eq!(reprioritized.status(), axum::http::StatusCode::OK);
+        let reprioritized_body = response_body_json(reprioritized).await?;
+        assert_eq!(reprioritized_body["profile"]["priority"], -5);
+        assert!(!reprioritized_body.to_string().contains("sk-live-primary"));
 
         let listed = send_json_request(
             app.clone(),
@@ -17343,8 +17411,11 @@ done"#;
         assert_eq!(listed.status(), axum::http::StatusCode::OK);
         let listed_body = response_body_json(listed).await?;
         assert_eq!(listed_body["provider"], provider);
-        assert_eq!(listed_body["profiles"].as_array().map(Vec::len), Some(1));
+        assert_eq!(listed_body["profiles"].as_array().map(Vec::len), Some(2));
         assert_eq!(listed_body["profiles"][0]["profile_id"], profile_id);
+        assert_eq!(listed_body["profiles"][0]["priority"], -5);
+        assert_eq!(listed_body["profiles"][1]["profile_id"], backup_profile_id);
+        assert_eq!(listed_body["profiles"][1]["priority"], 20);
 
         let shown = send_json_request(
             app.clone(),

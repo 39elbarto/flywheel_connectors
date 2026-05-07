@@ -21,6 +21,14 @@ required = ["network.outbound"]
 optional = []
 forbidden = ["system.exec", "system.privileged"]
 
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 60000
+deny_exec = true
+deny_ptrace = true
+
 [provides.operations.health]
 summary = "Check Vercel API credential health"
 capability = "vercel.projects.read"

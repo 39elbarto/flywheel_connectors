@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:0ef3641bf49d5cffa94dd3501590469e13dfae5e443e6ffefa54a3f7c9c9da5e"
+interface_hash = "blake3-256:fcp.interface.v2:b24518e1e14afe702ce373f3659a9845de7242f64e88a68f23849ac5fe1788a5"
 
 [connector]
 id = "fcp.mysql"
@@ -28,7 +28,7 @@ forbidden = ["z:public"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["mysql.read", "mysql.write"]
 forbidden = ["system.exec", "network.listen", "system.privileged"]
 
 [sandbox]
@@ -39,8 +39,9 @@ wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
 
-# The concrete MySQL proxy host is operator-configured at runtime, so host-level
-# network constraints are intentionally not hardcoded in this manifest.
+# The concrete MySQL proxy host is operator-configured at install/runtime.
+# The host/installer must substitute `operator-configured` with the pinned
+# HTTPS proxy host before enforcing these per-operation constraints.
 
 [provides.operations."mysql.query"]
 description = "Execute a read-only parameterized SQL query"
@@ -49,6 +50,16 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."mysql.query".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."mysql.query".input_schema]
 type = "object"
@@ -95,6 +106,16 @@ safety_tier = "risky"
 requires_approval = "interactive"
 idempotency = "none"
 
+[provides.operations."mysql.execute".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."mysql.execute".input_schema]
 type = "object"
 required = ["sql"]
@@ -130,6 +151,16 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."mysql.explain".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."mysql.explain".input_schema]
 type = "object"
 required = ["sql"]
@@ -158,6 +189,16 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."mysql.schema.tables".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."mysql.schema.tables".input_schema]
 type = "object"
 
@@ -177,6 +218,16 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."mysql.schema.columns".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."mysql.schema.columns".input_schema]
 type = "object"
@@ -203,6 +254,16 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."mysql.schema.indexes".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
 [provides.operations."mysql.schema.indexes".input_schema]
 type = "object"
 required = ["table"]
@@ -227,6 +288,16 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."mysql.health".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [443]
+require_sni = true
+deny_private_ranges = true
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
 
 [provides.operations."mysql.health".input_schema]
 type = "object"

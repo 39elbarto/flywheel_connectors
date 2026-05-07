@@ -23,9 +23,10 @@ wall_clock_timeout_s = 30
 deny_exec = true
 deny_ptrace = true
 
-# Note: Matrix homeservers can be at any domain, so we cannot restrict
-# host_allow to a single domain. The operator must configure the homeserver
-# URL and the connector will only connect to that URL.
+# Matrix homeservers are operator-configured, so operation egress is declared
+# against a config-derived homeserver host placeholder rather than a public
+# wildcard. Runtime enforcement must resolve it from homeserver_url before
+# invoking EgressGuard; see flywheel_connectors-4kw5f.9.6.
 [[operations]]
 id = "matrix.joined_rooms"
 
@@ -67,7 +68,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.joined_rooms".input_schema]
 type = "object"
@@ -96,7 +97,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.create_room".input_schema]
 type = "object"
@@ -142,7 +143,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.join_room".input_schema]
 type = "object"
@@ -170,7 +171,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.leave_room".input_schema]
 type = "object"
@@ -197,7 +198,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.send_message".input_schema]
 type = "object"
@@ -242,7 +243,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.get_messages".input_schema]
 type = "object"
@@ -283,7 +284,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.sync".input_schema]
 type = "object"
@@ -362,7 +363,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.get_room_state".input_schema]
 type = "object"
@@ -398,7 +399,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 30000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.list_members".input_schema]
 type = "object"
@@ -438,7 +439,7 @@ safety_tier = "risky"
 requires_approval = "none"
 idempotency = "none"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.upload_media".input_schema]
 type = "object"
@@ -475,7 +476,7 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 revocation_freshness = "safe"
-network_constraints = { host_allow = [], port_allow = [], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
+network_constraints = { host_allow = ["${matrix_homeserver_host}"], port_allow = [443], ip_allow = [], cidr_deny = [], require_sni = true, spki_pins = [], deny_localhost = true, deny_private_ranges = true, deny_tailnet_ranges = true, deny_ip_literals = true, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 60000, max_response_bytes = 10485760 }
 
 [provides.operations."matrix.download_media".input_schema]
 type = "object"

@@ -615,6 +615,15 @@ async fn slow_response_respects_bounded_request_timeout() {
 fn operation_catalog_preserves_risk_approval_and_event_metadata() {
     init_logging();
 
+    let manifest = include_str!("../manifest.toml");
+    assert!(manifest.contains("[sandbox]"));
+    assert!(manifest.contains("profile = \"strict\""));
+    assert!(manifest.contains("memory_mb = 128"));
+    assert!(manifest.contains("cpu_percent = 25"));
+    assert!(manifest.contains("wall_clock_timeout_ms = 60000"));
+    assert!(manifest.contains("deny_exec = true"));
+    assert!(manifest.contains("deny_ptrace = true"));
+
     let introspection = VercelConnector::new().introspect();
     assert!(introspection.events.is_empty());
 

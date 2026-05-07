@@ -502,6 +502,14 @@ async fn operation_catalog_manifest_and_redaction_preserve_security_posture() {
     assert!(manifest.contains("deny_localhost = true"));
     assert!(manifest.contains("require_sni = true"));
     assert!(manifest.contains("deny_ip_literals = true"));
+    assert!(manifest.contains("[sandbox]"));
+    assert!(manifest.contains("profile = \"strict\""));
+    assert!(manifest.contains("memory_mb = 128"));
+    assert!(manifest.contains("cpu_percent = 25"));
+    assert!(manifest.contains("wall_clock_timeout_ms = 30000"));
+    assert!(manifest.contains("fs_writable_paths = [\"$CONNECTOR_STATE\"]"));
+    assert!(manifest.contains("deny_exec = true"));
+    assert!(manifest.contains("deny_ptrace = true"));
 
     let capability_section = manifest_capability_section();
     assert!(capability_section.contains("\"network.dns\""));

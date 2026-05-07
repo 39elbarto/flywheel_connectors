@@ -4168,16 +4168,22 @@ mod tests {
                 .network_constraints
                 .as_ref()
                 .expect("Matrix operation should declare network metadata");
-            assert!(
-                network_constraints.host_allow.is_empty(),
-                "Matrix homeserver host is runtime-configured"
+            assert_eq!(
+                network_constraints.host_allow,
+                vec!["${matrix_homeserver_host}".to_string()],
+                "Matrix egress must stay scoped to the configured homeserver host placeholder"
             );
-            assert!(
-                network_constraints.port_allow.is_empty(),
-                "Matrix homeserver port is runtime-configured"
+            assert_eq!(
+                network_constraints.port_allow,
+                vec![443],
+                "Matrix manifest defaults to HTTPS client-server egress"
             );
             assert!(network_constraints.require_sni);
-            assert!(!network_constraints.deny_localhost);
+            assert!(network_constraints.deny_localhost);
+            assert!(network_constraints.deny_private_ranges);
+            assert!(network_constraints.deny_tailnet_ranges);
+            assert!(network_constraints.deny_ip_literals);
+            assert!(network_constraints.require_host_canonicalization);
         }
 
         let send = operations

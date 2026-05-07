@@ -31,6 +31,18 @@ required = ["network.dns", "network.egress", "network.tls.sni", "storage.state"]
 optional = []
 forbidden = ["system.exec", "network.listen"]
 
+# -- Sandbox -----------------------------------------------------------
+
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 30000
+fs_readonly_paths = ["/usr", "/lib"]
+fs_writable_paths = ["$CONNECTOR_STATE"]
+deny_exec = true
+deny_ptrace = true
+
 [provides.operations."people.list_connections"]
 description = "List the authenticated user's contacts"
 capability = "people.contacts.read"

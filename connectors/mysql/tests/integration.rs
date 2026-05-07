@@ -13,11 +13,27 @@ use fcp_mysql::connector::MysqlConnector;
 use fcp_testkit::readiness_helpers::{
     assert_doctor_response_valid, assert_self_check_not_ready, assert_self_check_ready,
 };
+use fcp_manifest::ConnectorManifest;
 use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const VERIFICATION_SCRIPT_PATH: &str = "scripts/e2e/mysql_connector_verification.sh";
+const MYSQL_PROXY_HOST_PLACEHOLDER: &str = "operator-configured";
+const MYSQL_OPERATION_IDS: &[&str] = &[
+    "mysql.execute",
+    "mysql.explain",
+    "mysql.health",
+    "mysql.query",
+    "mysql.schema.columns",
+    "mysql.schema.indexes",
+    "mysql.schema.tables",
+];
+
+fn parsed_manifest() -> ConnectorManifest {
+    ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+        .expect("MySQL manifest should parse with per-operation network constraints")
+}
 
 async fn configured_connector(base_url: &str, auth: Value) -> MysqlConnector {
     let mut connector = MysqlConnector::new();
@@ -57,6 +73,43 @@ async fn doctor_unconfigured_reports_operator_guidance() {
         doctor["operator_guidance"]["artifact_root_hint"],
         "artifacts/e2e/mysql_connector/<timestamp>"
     );
+}
+
+#[test]
+fn manifest_declares_strict_per_operation_network_constraints() {
+    let manifest = parsed_manifest();
+    assert_eq!(manifest.provides.operations.len(), MYSQL_OPERATION_IDS.len());
+
+    for operation_id in MYSQL_OPERATION_IDS {
+        let operation = manifest
+            .provides
+            .operations
+            .get(*operation_id)
+            .unwrap_or_else(|| panic!("{operation_id} operation should exist"));
+        let constraints = operation
+            .network_constraints
+            .as_ref()
+            .unwrap_or_else(|| panic!("{operation_id} should declare network_constraints"));
+
+        assert_eq!(
+            constraints.host_allow.as_slice(),
+            [MYSQL_PROXY_HOST_PLACEHOLDER],
+            "{operation_id} should only allow the operator-pinned MySQL proxy host"
+        );
+        assert_eq!(constraints.port_allow.as_slice(), [443]);
+        assert!(
+            constraints.require_sni,
+            "{operation_id} should require TLS SNI"
+        );
+        assert!(
+            constraints.deny_private_ranges,
+            "{operation_id} should fail closed on private ranges unless the installer substitutes an approved host policy"
+        );
+        assert_eq!(constraints.max_redirects, 0);
+        assert_eq!(constraints.connect_timeout_ms, 10_000);
+        assert_eq!(constraints.total_timeout_ms, 30_000);
+        assert_eq!(constraints.max_response_bytes, 10_485_760);
+    }
 }
 
 #[fcp_async_core::runtime::test]

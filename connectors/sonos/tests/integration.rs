@@ -432,6 +432,59 @@ async fn operation_catalog_manifest_and_redaction_preserve_security_posture() {
     );
     assert!(manifest.contains("required = [\"network.dns\", \"network.outbound\"]"));
 
+    let manifest_toml: toml::Value =
+        toml::from_str(manifest).expect("Sonos manifest should parse as TOML");
+    let provides = manifest_toml
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("Sonos manifest should declare operations");
+    for operation in &operations {
+        let suffix = operation
+            .strip_prefix("sonos.")
+            .expect("Sonos operation id should use sonos prefix");
+        let hints = provides
+            .get(suffix)
+            .and_then(|operation| operation.get("ai_hints"))
+            .and_then(toml::Value::as_table)
+            .expect("operation should declare ai_hints");
+        let when_to_use = hints
+            .get("when_to_use")
+            .and_then(toml::Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            !when_to_use.trim().is_empty(),
+            "operation {operation} should have non-empty when_to_use"
+        );
+        let examples = hints
+            .get("examples")
+            .and_then(toml::Value::as_array)
+            .expect("operation should declare examples");
+        assert!(
+            !examples.is_empty(),
+            "operation {operation} should include at least one example"
+        );
+        for example in examples {
+            let example = example
+                .as_str()
+                .expect("operation example should be a string");
+            let parsed = serde_json::from_str::<Value>(example)
+                .expect("operation example should parse as JSON");
+            let serialized = parsed.to_string().to_ascii_lowercase();
+            assert!(!serialized.contains("token"));
+            assert!(!serialized.contains("secret"));
+            assert!(!serialized.contains("password"));
+        }
+        let common_mistakes = hints
+            .get("common_mistakes")
+            .and_then(toml::Value::as_array)
+            .expect("operation should declare common_mistakes");
+        assert!(
+            !common_mistakes.is_empty(),
+            "operation {operation} should include Sonos-specific common mistakes"
+        );
+    }
+
     let credential_marker = "redaction-marker";
     let credential_url = SonosConfig::from_value(json!({
         "device_url": format!("http://user:{credential_marker}@127.0.0.1:1400")

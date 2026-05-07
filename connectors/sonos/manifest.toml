@@ -32,7 +32,10 @@ safety_tier = "safe"
 idempotency = "strict"
 
 [provides.operations.health.ai_hints]
-when_to_use = "When you need to confirm the Sonos speaker endpoint is reachable"
+when_to_use = "Use this before playback control when you need to confirm the configured Sonos device endpoint is reachable and identifies as the expected speaker."
+common_mistakes = ["Treating a successful manifest load as proof that the local speaker is reachable; health performs the device-description probe.", "Running playback controls before checking the configured room or speaker identity, which can affect the wrong local device."]
+examples = ['{"device_url": "http://living-room-speaker.local:1400", "expected": {"status": "ok", "friendly_name": "Living Room"}}']
+related = ["sonos.get_status"]
 
 [provides.operations.get_status]
 summary = "Get current Sonos transport and volume state"
@@ -42,7 +45,10 @@ safety_tier = "safe"
 idempotency = "strict"
 
 [provides.operations.get_status.ai_hints]
-when_to_use = "When you need to inspect playback state before sending transport commands"
+when_to_use = "Use this when you need the current transport state and volume before deciding whether to play, pause, skip, or change loudness."
+common_mistakes = ["Assuming the speaker is already playing; inspect transport_state before sending pause or next.", "Using stale volume from a prior run; Sonos volume may have changed outside FCP."]
+examples = ['{"request": {}, "expected": {"transport_state": "PLAYING", "transport_status": "OK", "volume": 18}}']
+related = ["sonos.health", "sonos.set_volume"]
 
 [provides.operations.play]
 summary = "Start or resume playback"
@@ -51,12 +57,24 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.play.ai_hints]
+when_to_use = "Use this to resume playback on the configured Sonos device after confirming the target room and queue state."
+common_mistakes = ["Calling play on the wrong configured local endpoint; run health when speaker identity matters.", "Expecting play to choose media; this only resumes or starts the current Sonos queue."]
+examples = ['{"request": {}, "expected": {"status": "ok", "action": "play"}}']
+related = ["sonos.get_status", "sonos.pause"]
+
 [provides.operations.pause]
 summary = "Pause playback"
 capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+
+[provides.operations.pause.ai_hints]
+when_to_use = "Use this to pause the currently configured Sonos device after verifying playback is active or the user explicitly asked to stop audio."
+common_mistakes = ["Using pause as a mute operation; it stops transport rather than preserving playback with zero volume.", "Assuming pause is harmless in shared rooms; it interrupts all listeners on that speaker or group."]
+examples = ['{"request": {}, "expected": {"status": "ok", "action": "pause"}}']
+related = ["sonos.get_status", "sonos.play"]
 
 [provides.operations.next]
 summary = "Skip to the next track"
@@ -65,12 +83,24 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.next.ai_hints]
+when_to_use = "Use this when the user asks to skip forward in the active Sonos queue on the configured device."
+common_mistakes = ["Assuming every stream supports next; some live radio or external sources may reject queue navigation.", "Sending repeated skips without reading status, which can advance farther than the user intended."]
+examples = ['{"request": {}, "expected": {"status": "ok", "action": "next"}}']
+related = ["sonos.get_status", "sonos.previous"]
+
 [provides.operations.previous]
 summary = "Go to the previous track"
 capability = "sonos.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
+
+[provides.operations.previous.ai_hints]
+when_to_use = "Use this when the user asks to return to the previous item in the active Sonos queue."
+common_mistakes = ["Expecting previous to rewind within the current track; Sonos may restart or move to the previous queue item depending on source behavior.", "Calling previous on a live stream or single-item queue without handling provider rejection."]
+examples = ['{"request": {}, "expected": {"status": "ok", "action": "previous"}}']
+related = ["sonos.get_status", "sonos.next"]
 
 [provides.operations.set_volume]
 summary = "Set Sonos volume"
@@ -79,6 +109,12 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.set_volume.ai_hints]
+when_to_use = "Use this to set an explicit 0-100 volume level on the configured Sonos device when the user gives a target loudness."
+common_mistakes = ["Passing a relative adjustment such as +5; this operation expects an absolute integer volume.", "Sending values outside 0-100; the connector rejects them before making the SOAP call.", "Changing volume without confirming the target speaker in shared spaces."]
+examples = ['{"volume": 18, "expected": {"status": "ok", "volume": 18}}']
+related = ["sonos.get_status"]
+
 [sandbox]
 profile = "strict"
 memory_mb = 64
@@ -86,4 +122,3 @@ cpu_percent = 25
 wall_clock_timeout_ms = 30000
 deny_exec = true
 deny_ptrace = true
-

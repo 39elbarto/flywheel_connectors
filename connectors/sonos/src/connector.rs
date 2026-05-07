@@ -125,9 +125,14 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this before transport control commands.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this before playback control when you need to confirm the configured Sonos device endpoint is reachable and identifies as the expected speaker.".into(),
+                    common_mistakes: vec![
+                        "Treating a successful manifest load as proof that the local speaker is reachable; health performs the device-description probe.".into(),
+                        "Running playback controls before checking the configured room or speaker identity, which can affect the wrong local device.".into(),
+                    ],
+                    examples: vec![
+                        r#"{"device_url":"http://living-room-speaker.local:1400","expected":{"status":"ok","friendly_name":"Living Room"}}"#.into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_GET_STATUS)],
                 },
                 rate_limit: None,
@@ -144,9 +149,14 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to inspect current transport state and volume.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this when you need the current transport state and volume before deciding whether to play, pause, skip, or change loudness.".into(),
+                    common_mistakes: vec![
+                        "Assuming the speaker is already playing; inspect transport_state before sending pause or next.".into(),
+                        "Using stale volume from a prior run; Sonos volume may have changed outside FCP.".into(),
+                    ],
+                    examples: vec![
+                        r#"{"request":{},"expected":{"transport_state":"PLAYING","transport_status":"OK","volume":18}}"#.into(),
+                    ],
                     related: vec![CapabilityId::from_static(OP_PLAY)],
                 },
                 rate_limit: None,
@@ -163,9 +173,12 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to start or resume playback.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this to resume playback on the configured Sonos device after confirming the target room and queue state.".into(),
+                    common_mistakes: vec![
+                        "Calling play on the wrong configured local endpoint; run health when speaker identity matters.".into(),
+                        "Expecting play to choose media; this only resumes or starts the current Sonos queue.".into(),
+                    ],
+                    examples: vec![r#"{"request":{},"expected":{"status":"ok","action":"play"}}"#.into()],
                     related: vec![CapabilityId::from_static(OP_PAUSE)],
                 },
                 rate_limit: None,
@@ -182,9 +195,12 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to pause playback.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this to pause the currently configured Sonos device after verifying playback is active or the user explicitly asked to stop audio.".into(),
+                    common_mistakes: vec![
+                        "Using pause as a mute operation; it stops transport rather than preserving playback with zero volume.".into(),
+                        "Assuming pause is harmless in shared rooms; it interrupts all listeners on that speaker or group.".into(),
+                    ],
+                    examples: vec![r#"{"request":{},"expected":{"status":"ok","action":"pause"}}"#.into()],
                     related: vec![CapabilityId::from_static(OP_PLAY)],
                 },
                 rate_limit: None,
@@ -201,9 +217,12 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to skip forward.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this when the user asks to skip forward in the active Sonos queue on the configured device.".into(),
+                    common_mistakes: vec![
+                        "Assuming every stream supports next; some live radio or external sources may reject queue navigation.".into(),
+                        "Sending repeated skips without reading status, which can advance farther than the user intended.".into(),
+                    ],
+                    examples: vec![r#"{"request":{},"expected":{"status":"ok","action":"next"}}"#.into()],
                     related: vec![CapabilityId::from_static(OP_PREVIOUS)],
                 },
                 rate_limit: None,
@@ -220,9 +239,12 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to step backward in the queue.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this when the user asks to return to the previous item in the active Sonos queue.".into(),
+                    common_mistakes: vec![
+                        "Expecting previous to rewind within the current track; Sonos may restart or move to the previous queue item depending on source behavior.".into(),
+                        "Calling previous on a live stream or single-item queue without handling provider rejection.".into(),
+                    ],
+                    examples: vec![r#"{"request":{},"expected":{"status":"ok","action":"previous"}}"#.into()],
                     related: vec![CapabilityId::from_static(OP_NEXT)],
                 },
                 rate_limit: None,
@@ -245,9 +267,13 @@ impl SonosConnector {
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to set speaker volume directly.".into(),
-                    common_mistakes: vec!["Volume should be in the 0-100 range.".into()],
-                    examples: vec!["{\"volume\":18}".into()],
+                    when_to_use: "Use this to set an explicit 0-100 volume level on the configured Sonos device when the user gives a target loudness.".into(),
+                    common_mistakes: vec![
+                        "Passing a relative adjustment such as +5; this operation expects an absolute integer volume.".into(),
+                        "Sending values outside 0-100; the connector rejects them before making the SOAP call.".into(),
+                        "Changing volume without confirming the target speaker in shared spaces.".into(),
+                    ],
+                    examples: vec![r#"{"volume":18,"expected":{"status":"ok","volume":18}}"#.into()],
                     related: vec![CapabilityId::from_static(OP_GET_STATUS)],
                 },
                 rate_limit: None,

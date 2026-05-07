@@ -43,4 +43,5 @@ hex.workspace = true
 chrono.workspace = true
 ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+toml.workspace = true
 wiremock.workspace = true

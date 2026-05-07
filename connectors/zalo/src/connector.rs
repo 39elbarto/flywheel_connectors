@@ -158,6 +158,11 @@ impl ZaloConnector {
         }
     }
 
+    #[must_use]
+    pub fn instance_id(&self) -> &str {
+        self.base.instance_id.as_str()
+    }
+
     pub async fn handle_configure(&mut self, params: Value) -> FcpResult<Value> {
         let base_url = optional_trimmed_string(&params, "base_url")?
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string());
@@ -388,6 +393,10 @@ impl ZaloConnector {
             .and_then(Value::as_str)
             .unwrap_or("");
 
+        if let Some(denial) = self.simulate_scope_denial(&params) {
+            return Ok(denial);
+        }
+
         if operation == WEBHOOK_VERIFY_OPERATION_ID {
             let input = params.get("input").unwrap_or(&params);
             let supplied_challenge = input
@@ -457,6 +466,36 @@ impl ZaloConnector {
                 "Configure access_token or bot_token before invoking upstream Zalo Bot API operations."
             }
         }))
+    }
+
+    fn simulate_scope_denial(&self, params: &Value) -> Option<Value> {
+        if let Some(zone_id) = params.get("zone_id").and_then(Value::as_str)
+            && zone_id != "z:community"
+        {
+            return Some(json!({
+                "allowed": false,
+                "simulate_capability": "policy",
+                "denial_code": "FCP-4001",
+                "failure_reason": format!("Token zone mismatch: expected z:community, got {zone_id}")
+            }));
+        }
+
+        let requested_instance = params
+            .get("target_instance")
+            .or_else(|| params.get("instance_id"))
+            .and_then(Value::as_str);
+        if let Some(instance_id) = requested_instance
+            && instance_id != self.instance_id()
+        {
+            return Some(json!({
+                "allowed": false,
+                "simulate_capability": "policy",
+                "denial_code": "FCP-4002",
+                "failure_reason": format!("Token instance mismatch: expected {}, got {instance_id}", self.instance_id())
+            }));
+        }
+
+        None
     }
 
     pub async fn handle_shutdown(&mut self, _params: Value) -> FcpResult<Value> {

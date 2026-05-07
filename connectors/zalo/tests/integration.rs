@@ -9,6 +9,7 @@
 )]
 
 use std::{
+    net::TcpListener,
     process::Command,
     time::{Duration, Instant},
 };
@@ -27,8 +28,10 @@ const CONNECTOR_ID: &str = "fcp.zalo";
 const FIXTURE_TOKEN: &str = "fixture-zalo-access-token";
 const FIXTURE_WEBHOOK_SECRET: &str = "fixture-zalo-webhook-secret";
 const SEND_MESSAGE_OP: &str = "zalo.messages.send";
+const SEND_PHOTO_OP: &str = "zalo.messages.send_photo";
 const POLL_UPDATES_OP: &str = "zalo.updates.poll";
 const GET_ME_OP: &str = "zalo.self.get_me";
+const SET_WEBHOOK_OP: &str = "zalo.webhook.set";
 const DELETE_WEBHOOK_OP: &str = "zalo.webhook.delete";
 const WEBHOOK_INFO_OP: &str = "zalo.webhook.info";
 const WEBHOOK_VERIFY_OP: &str = "zalo.webhook.verify";
@@ -80,6 +83,13 @@ fn stable_hash(input: &str) -> String {
 
 fn elapsed_millis(start: Instant) -> u64 {
     u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX)
+}
+
+fn unused_loopback_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind unused loopback port");
+    let addr = listener.local_addr().expect("unused loopback address");
+    drop(listener);
+    format!("http://{addr}")
 }
 
 fn evidence_log(
@@ -179,6 +189,13 @@ fn base_config(base_url: &str, request_timeout_ms: u64) -> Value {
         "rate_limit_max": 100,
         "replay_cache_entries": 32
     })
+}
+
+fn rate_limited_config(base_url: &str) -> Value {
+    let mut config = base_config(base_url, 1_000);
+    config["rate_limit_window_ms"] = json!(60_000);
+    config["rate_limit_max"] = json!(1);
+    config
 }
 
 async fn configured_connector(base_url: &str, request_timeout_ms: u64) -> ZaloConnector {
@@ -355,6 +372,119 @@ async fn lifecycle_webhook_ingest_verify_and_simulate_denials_emit_redacted_logs
 }
 
 #[fcp_async_core::runtime::test]
+async fn webhook_ingest_rejects_malformed_denied_and_rate_limited_events() {
+    let mut connector = ZaloConnector::new();
+    connector
+        .handle_configure(rate_limited_config("http://127.0.0.1:1"))
+        .await
+        .expect("configure should accept rate-limited loopback config");
+    connector
+        .handle_handshake(json!({}))
+        .await
+        .expect("handshake should complete");
+
+    let denied = connector
+        .handle_invoke(webhook_ingest_input(&json!({
+            "update_id": 50,
+            "message": {
+                "message_id": "msg-denied",
+                "from": { "id": "sender-not-allowed" },
+                "chat": { "id": "chat-not-allowed", "type": "private" },
+                "text": "secret message body"
+            }
+        })))
+        .await
+        .expect("unauthorized sender should produce denied event, not provider traffic");
+    assert_eq!(denied["accepted"], 0);
+    assert_eq!(denied["denied"], 1);
+    assert_eq!(denied["denied_events"][0]["authorized"], false);
+    assert_eq!(
+        denied["denied_events"][0]["policy_reason"],
+        "default_deny_sender_or_chat_not_allowed"
+    );
+
+    let rate_limited = connector
+        .handle_invoke(webhook_ingest_input(&json!({
+            "update_id": 51,
+            "message": {
+                "message_id": "msg-rate-limited",
+                "from": { "id": "sender-fixture" },
+                "chat": { "id": "chat-fixture", "type": "private" },
+                "text": "secret message body"
+            }
+        })))
+        .await
+        .expect_err("second request from same client should hit inbound rate limit");
+    assert!(matches!(rate_limited, FcpError::RateLimited { .. }));
+
+    let malformed = connector
+        .handle_invoke(json!({
+            "operation_id": WEBHOOK_INGEST_OP,
+            "input": {
+                "method": "POST",
+                "path": "/zalo/inbound",
+                "headers": webhook_headers(FIXTURE_WEBHOOK_SECRET),
+                "client_id": "malformed-client",
+                "body": "{not-json"
+            }
+        }))
+        .await
+        .expect_err("malformed webhook body should be rejected before event handling");
+    assert!(matches!(
+        malformed,
+        FcpError::InvalidRequest { code: 1003, .. }
+    ));
+}
+
+#[fcp_async_core::runtime::test]
+async fn simulation_denies_wrong_zone_or_instance_before_bot_api_execution() {
+    let connector = configured_connector("http://127.0.0.1:1", 1_000).await;
+    let instance_id = connector.instance_id().to_string();
+
+    let allowed = connector
+        .handle_simulate(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "zone_id": "z:community",
+            "target_instance": instance_id
+        }))
+        .await
+        .expect("simulate should evaluate local policy");
+    assert_eq!(allowed["allowed"], true);
+
+    let wrong_zone = connector
+        .handle_simulate(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "zone_id": "z:private",
+            "target_instance": connector.instance_id()
+        }))
+        .await
+        .expect("wrong zone should return a denial result");
+    assert_eq!(wrong_zone["allowed"], false);
+    assert_eq!(wrong_zone["denial_code"], "FCP-4001");
+    assert!(
+        wrong_zone["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Token zone mismatch"))
+    );
+
+    let wrong_instance = connector
+        .handle_simulate(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "zone_id": "z:community",
+            "target_instance": "inst-zalo-other"
+        }))
+        .await
+        .expect("wrong instance should return a denial result");
+    assert_eq!(wrong_instance["allowed"], false);
+    assert_eq!(wrong_instance["denial_code"], "FCP-4002");
+    assert!(
+        wrong_instance["failure_reason"]
+            .as_str()
+            .is_some_and(|reason| reason.contains("Token instance mismatch"))
+    );
+}
+
+#[fcp_async_core::runtime::test]
 async fn bot_api_loopback_covers_success_errors_polling_timeout_and_redaction() {
     let mut logs = Vec::new();
     let server = MockServer::start().await;
@@ -385,6 +515,32 @@ async fn bot_api_loopback_covers_success_errors_polling_timeout_and_redaction() 
                     "text": "secret message body"
                 }
             }]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/botfixture-zalo-access-token/sendPhoto"))
+        .and(body_partial_json(json!({
+            "chat_id": "recipient-fixture",
+            "photo": "https://example.com/photo.jpg"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": { "message_id": "photo-loopback" }
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/botfixture-zalo-access-token/setWebhook"))
+        .and(body_partial_json(json!({
+            "url": "https://example.com/zalo",
+            "secret_token": FIXTURE_WEBHOOK_SECRET
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "ok": true,
+            "result": { "ok": true }
         })))
         .expect(1)
         .mount(&server)
@@ -471,6 +627,54 @@ async fn bot_api_loopback_covers_success_errors_polling_timeout_and_redaction() 
         None,
     ));
 
+    let start = Instant::now();
+    let photo = connector
+        .handle_invoke(json!({
+            "operation_id": SEND_PHOTO_OP,
+            "input": {
+                "recipient_id": "recipient-fixture",
+                "photo_url": "https://example.com/photo.jpg",
+                "caption": "secret message body"
+            }
+        }))
+        .await
+        .expect("sendPhoto should succeed against loopback");
+    assert_eq!(photo["result"]["message_id"], "photo-loopback");
+    logs.push(evidence_log(
+        SEND_PHOTO_OP,
+        "zalo.media",
+        Some("recipient-fixture"),
+        None,
+        "invoke",
+        elapsed_millis(start),
+        "ok",
+        None,
+        "loopback_photo_sent",
+        None,
+    ));
+
+    let start = Instant::now();
+    let webhook = connector
+        .handle_invoke(json!({
+            "operation_id": SET_WEBHOOK_OP,
+            "input": { "url": "https://example.com/zalo" }
+        }))
+        .await
+        .expect("setWebhook should succeed against loopback");
+    assert_eq!(webhook["result"]["ok"], true);
+    logs.push(evidence_log(
+        SET_WEBHOOK_OP,
+        "zalo.webhook",
+        None,
+        Some("event-set-webhook"),
+        "invoke",
+        elapsed_millis(start),
+        "ok",
+        None,
+        "loopback_webhook_set",
+        None,
+    ));
+
     let unauthorized = connector
         .handle_invoke(json!({"operation_id": GET_ME_OP}))
         .await
@@ -524,6 +728,57 @@ async fn bot_api_loopback_covers_success_errors_polling_timeout_and_redaction() 
         Some(timeout.error_code()),
         "timeout_mapped",
         None,
+    ));
+
+    let missing_recipient = connector
+        .handle_invoke(json!({
+            "operation_id": SEND_MESSAGE_OP,
+            "input": { "message": "secret message body" }
+        }))
+        .await
+        .expect_err("missing recipient should be rejected before provider call");
+    assert!(matches!(
+        missing_recipient,
+        FcpError::InvalidRequest { code: 1003, ref message }
+            if message.contains("recipient_id must not be empty")
+    ));
+
+    let private_photo_url = connector
+        .handle_invoke(json!({
+            "operation_id": SEND_PHOTO_OP,
+            "input": {
+                "recipient_id": "recipient-fixture",
+                "photo_url": "https://127.0.0.1/photo.jpg"
+            }
+        }))
+        .await
+        .expect_err("private photo URL should be rejected before provider call");
+    assert!(matches!(private_photo_url, FcpError::InvalidRequest { .. }));
+
+    let invalid_webhook_url = connector
+        .handle_invoke(json!({
+            "operation_id": SET_WEBHOOK_OP,
+            "input": { "url": "http://hooks.example.com/zalo" }
+        }))
+        .await
+        .expect_err("non-HTTPS webhook URL should be rejected before provider call");
+    assert!(matches!(
+        invalid_webhook_url,
+        FcpError::InvalidRequest { .. }
+    ));
+
+    let network_connector = configured_connector(&unused_loopback_url(), 100).await;
+    let network_error = network_connector
+        .handle_invoke(json!({"operation_id": GET_ME_OP}))
+        .await
+        .expect_err("closed loopback port should map to provider network error");
+    assert!(matches!(
+        network_error,
+        FcpError::External {
+            status_code: Some(503),
+            retryable: true,
+            ..
+        }
     ));
 
     assert_log_shape_and_redaction(&logs);

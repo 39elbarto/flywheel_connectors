@@ -7484,6 +7484,7 @@ dependencies = [
  "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
+ "jsonschema",
  "reqwest 0.13.2",
  "serde",
  "serde_json",

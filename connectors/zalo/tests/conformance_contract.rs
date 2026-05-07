@@ -12,7 +12,7 @@ use fcp_prelude::FcpError;
 use fcp_sdk::migration::ConnectorErrorMapping;
 use fcp_zalo::{ZaloConnector, ZaloError};
 use serde::Serialize;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 const MANIFEST_TOML: &str = include_str!("../manifest.toml");
 const EXPECTED_OPERATION_COUNT: usize = 9;
@@ -125,6 +125,39 @@ fn assert_runtime_schema_covers_manifest(
     }
 }
 
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {
+    &manifest
+        .provides
+        .operations
+        .get(operation_id)
+        .expect("operation should exist")
+        .input_schema
+}
+
 #[fcp_async_core::runtime::test]
 async fn runtime_catalog_matches_manifest_operation_contracts() {
     let manifest = manifest();
@@ -193,6 +226,68 @@ async fn runtime_catalog_matches_manifest_operation_contracts() {
             "{id} should be marked implemented"
         );
     }
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = manifest();
+    for (id, operation) in &manifest.provides.operations {
+        assert!(
+            jsonschema::validator_for(&operation.input_schema).is_ok(),
+            "{id} input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&operation.output_schema).is_ok(),
+            "{id} output_schema should compile"
+        );
+    }
+
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.messages.send"),
+        &json!({"recipient_id": "user-1", "message": "hello"}),
+    );
+    assert_schema_rejects(
+        input_schema(&manifest, "zalo.messages.send"),
+        &json!({"recipient_id": "user-1"}),
+    );
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.messages.send_photo"),
+        &json!({"recipient_id": "user-1", "photo_url": "https://example.com/photo.jpg"}),
+    );
+    assert_schema_rejects(
+        input_schema(&manifest, "zalo.messages.send_photo"),
+        &json!({"recipient_id": "user-1"}),
+    );
+    assert_schema_accepts(input_schema(&manifest, "zalo.self.get_me"), &json!({}));
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.updates.poll"),
+        &json!({"offset": 42, "timeout_seconds": 0}),
+    );
+    assert_schema_accepts(input_schema(&manifest, "zalo.webhook.delete"), &json!({}));
+    assert_schema_accepts(input_schema(&manifest, "zalo.webhook.info"), &json!({}));
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.webhook.ingest"),
+        &json!({
+            "method": "POST",
+            "path": "/zalo/inbound",
+            "headers": {"x-bot-api-secret-token": "redacted"},
+            "body": "{}"
+        }),
+    );
+    assert_schema_rejects(
+        input_schema(&manifest, "zalo.webhook.ingest"),
+        &json!({"method": "POST", "path": "/zalo/inbound"}),
+    );
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.webhook.set"),
+        &json!({"url": "https://hooks.example.com/zalo"}),
+    );
+    assert_schema_rejects(input_schema(&manifest, "zalo.webhook.set"), &json!({}));
+    assert_schema_accepts(
+        input_schema(&manifest, "zalo.webhook.verify"),
+        &json!({"token": "redacted"}),
+    );
+    assert_schema_rejects(input_schema(&manifest, "zalo.webhook.verify"), &json!({}));
 }
 
 #[test]

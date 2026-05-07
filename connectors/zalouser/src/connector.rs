@@ -181,6 +181,50 @@ impl Default for ZalouserConnector {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use fcp_manifest::ConnectorManifest;
+
+    #[test]
+    fn manifest_declares_no_egress_for_planned_helper() {
+        let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let unchecked =
+            ConnectorManifest::parse_str_unchecked(&raw).expect("manifest should parse");
+        let computed_hash = unchecked
+            .compute_interface_hash()
+            .expect("compute interface hash");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            computed_hash.to_string()
+        );
+
+        let manifest = ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+        let operation = manifest
+            .provides
+            .operations
+            .get(PLANNED_HELPER_OPERATION_ID)
+            .expect("planned helper operation");
+        let constraints = operation
+            .network_constraints
+            .as_ref()
+            .expect("planned helper network constraints");
+
+        assert_eq!(constraints.host_allow.as_slice(), ["none.invalid"]);
+        assert_eq!(constraints.port_allow.as_slice(), [0]);
+        assert!(constraints.ip_allow.is_empty());
+        assert!(constraints.cidr_deny.is_empty());
+        assert!(constraints.deny_localhost);
+        assert!(constraints.deny_private_ranges);
+        assert!(constraints.deny_tailnet_ranges);
+        assert!(!constraints.require_sni);
+        assert!(constraints.spki_pins.is_empty());
+        assert!(constraints.deny_ip_literals);
+        assert!(constraints.require_host_canonicalization);
+        assert_eq!(constraints.dns_max_ips, 0);
+        assert_eq!(constraints.max_redirects, 0);
+        assert_eq!(constraints.connect_timeout_ms, 1_000);
+        assert_eq!(constraints.total_timeout_ms, 15_000);
+        assert_eq!(constraints.max_response_bytes, 1_048_576);
+    }
 
     #[fcp_async_core::runtime::test]
     async fn planned_only_connector_reports_degraded_readiness() {

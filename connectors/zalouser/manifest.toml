@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:401f65a8b8a6d6b5891b375a4bc76f4db5b28b537d97bc1028cf016845a2c6e4"
+interface_hash = "blake3-256:fcp.interface.v2:3745534b1dbe2e498aec1ea38a349897e400ebf9e62e784348ebd29b4181a900"
 
 [connector]
 id = "fcp.zalouser"
@@ -60,6 +60,24 @@ type = "object"
 
 [provides.operations."zalouser.helper.exec".output_schema.properties.ok]
 type = "boolean"
+
+[provides.operations."zalouser.helper.exec".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."zalouser.helper.exec".ai_hints]
 when_to_use = "When you intentionally need to drive the guarded Zalo helper process."

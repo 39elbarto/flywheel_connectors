@@ -70,7 +70,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "wecom",
     "whatsapp",
     "zalo",
-    "zalouser",
 ];
 const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "anthropic",

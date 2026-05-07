@@ -2388,6 +2388,161 @@ impl AuthProfile {
     }
 }
 
+/// Refresh scheduling policy for TTL-bounded auth methods.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TokenRefreshPolicy {
+    /// Refresh a token when its remaining lifetime is less than or equal to this duration.
+    pub refresh_before: StdDuration,
+}
+
+impl TokenRefreshPolicy {
+    /// Construct a refresh policy.
+    #[must_use]
+    pub const fn new(refresh_before: StdDuration) -> Self {
+        Self { refresh_before }
+    }
+
+    fn decide(self, refresh_in: Option<StdDuration>) -> TokenRefreshAction {
+        match refresh_in {
+            None => TokenRefreshAction::NotRefreshable,
+            Some(remaining) if remaining.is_zero() => TokenRefreshAction::Expired,
+            Some(remaining) if remaining <= self.refresh_before => TokenRefreshAction::Due,
+            Some(_) => TokenRefreshAction::Fresh,
+        }
+    }
+}
+
+impl Default for TokenRefreshPolicy {
+    fn default() -> Self {
+        Self::new(StdDuration::from_secs(300))
+    }
+}
+
+/// Refresh decision for one provider profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TokenRefreshDecision {
+    /// Canonical provider id.
+    pub provider: String,
+    /// Opaque profile id.
+    pub profile_id: String,
+    /// Auth method id.
+    pub method: &'static str,
+    /// Remaining token lifetime, if the method is TTL-bounded.
+    pub refresh_in: Option<StdDuration>,
+    /// Action selected by the refresh policy.
+    pub action: TokenRefreshAction,
+}
+
+impl TokenRefreshDecision {
+    /// Build a refresh decision for one profile.
+    #[must_use]
+    pub fn for_profile(profile: &AuthProfile, policy: TokenRefreshPolicy) -> Self {
+        let refresh_in = profile.method.requires_refresh_in();
+        Self {
+            provider: profile.provider.clone(),
+            profile_id: profile.id.clone(),
+            method: profile.method.id(),
+            refresh_in,
+            action: policy.decide(refresh_in),
+        }
+    }
+
+    /// Return true when the profile should be refreshed now.
+    #[must_use]
+    pub const fn should_refresh(&self) -> bool {
+        self.action.should_refresh()
+    }
+}
+
+/// Refresh action selected by [`TokenRefreshPolicy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TokenRefreshAction {
+    /// Method has no TTL metadata.
+    NotRefreshable,
+    /// Token is TTL-bounded but outside the proactive refresh window.
+    Fresh,
+    /// Token is inside the proactive refresh window.
+    Due,
+    /// Token has no remaining lifetime.
+    Expired,
+}
+
+impl TokenRefreshAction {
+    /// Return true when this action requires a refresh attempt.
+    #[must_use]
+    pub const fn should_refresh(self) -> bool {
+        matches!(self, Self::Due | Self::Expired)
+    }
+}
+
+/// Result of refreshing or skipping one profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TokenRefreshOutcome {
+    /// Profile refresh succeeded and was persisted through the profile store.
+    Refreshed(TokenRefreshDecision),
+    /// Profile did not require a refresh attempt.
+    Skipped(TokenRefreshDecision),
+    /// Profile needed refresh but the refresh or persistence failed.
+    Failed {
+        /// Refresh decision that led to the attempt.
+        decision: TokenRefreshDecision,
+        /// Redaction-safe error from refresh or persistence.
+        error: AuthError,
+    },
+}
+
+impl TokenRefreshOutcome {
+    /// Borrow the decision associated with this outcome.
+    #[must_use]
+    pub const fn decision(&self) -> &TokenRefreshDecision {
+        match self {
+            Self::Refreshed(decision) | Self::Skipped(decision) | Self::Failed { decision, .. } => {
+                decision
+            }
+        }
+    }
+}
+
+/// Batch refresh report for one provider.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TokenRefreshReport {
+    /// Per-profile refresh outcomes.
+    pub outcomes: Vec<TokenRefreshOutcome>,
+}
+
+impl TokenRefreshReport {
+    fn push(&mut self, outcome: TokenRefreshOutcome) {
+        self.outcomes.push(outcome);
+    }
+
+    /// Count successful refreshes.
+    #[must_use]
+    pub fn refreshed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Refreshed(_)))
+            .count()
+    }
+
+    /// Count skipped profiles.
+    #[must_use]
+    pub fn skipped_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Skipped(_)))
+            .count()
+    }
+
+    /// Count failed refresh attempts.
+    #[must_use]
+    pub fn failed_count(&self) -> usize {
+        self.outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome, TokenRefreshOutcome::Failed { .. }))
+            .count()
+    }
+}
+
 /// Storage boundary for provider auth profiles.
 #[async_trait]
 pub trait AuthProfileStore: Send + Sync {
@@ -2425,6 +2580,116 @@ pub trait AuthProfileStore: Send + Sync {
     ///
     /// Returns [`AuthError::ProviderNotFound`] when the provider has no profiles.
     async fn pick_active(&self, provider: &str) -> AuthResult<AuthProfile>;
+}
+
+/// Store-backed token refresh runner for provider profiles.
+pub struct TokenRefreshActor<S: AuthProfileStore + ?Sized> {
+    store: Arc<S>,
+    policy: TokenRefreshPolicy,
+}
+
+impl<S> TokenRefreshActor<S>
+where
+    S: AuthProfileStore,
+{
+    /// Construct a token refresh actor over an auth profile store.
+    #[must_use]
+    pub const fn new(store: Arc<S>, policy: TokenRefreshPolicy) -> Self {
+        Self { store, policy }
+    }
+}
+
+impl<S> TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    /// Borrow the refresh policy.
+    #[must_use]
+    pub const fn policy(&self) -> TokenRefreshPolicy {
+        self.policy
+    }
+
+    /// Borrow the backing profile store.
+    #[must_use]
+    pub const fn store(&self) -> &Arc<S> {
+        &self.store
+    }
+
+    /// Refresh every due profile for a provider.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when the provider id is invalid or profiles cannot be listed.
+    pub async fn refresh_provider(
+        &self,
+        cx: &fcp_async_core::Cx,
+        provider: &str,
+    ) -> AuthResult<TokenRefreshReport> {
+        let profiles = self.store.list_profiles(provider).await?;
+        let mut report = TokenRefreshReport::default();
+        for profile in profiles {
+            report.push(self.refresh_profile_snapshot(cx, profile).await);
+        }
+        Ok(report)
+    }
+
+    /// Refresh one profile when the policy says it is due.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when the provider/profile id is invalid or the profile is missing.
+    pub async fn refresh_profile(
+        &self,
+        cx: &fcp_async_core::Cx,
+        provider: &str,
+        profile_id: &str,
+    ) -> AuthResult<TokenRefreshOutcome> {
+        let profile = self.store.get_profile(provider, profile_id).await?;
+        Ok(self.refresh_profile_snapshot(cx, profile).await)
+    }
+
+    async fn refresh_profile_snapshot(
+        &self,
+        cx: &fcp_async_core::Cx,
+        mut profile: AuthProfile,
+    ) -> TokenRefreshOutcome {
+        let decision = TokenRefreshDecision::for_profile(&profile, self.policy);
+        if !decision.should_refresh() {
+            return TokenRefreshOutcome::Skipped(decision);
+        }
+
+        if let Err(error) = profile.method.refresh(cx).await {
+            return TokenRefreshOutcome::Failed { decision, error };
+        }
+
+        match self.store.save_profile(profile).await {
+            Ok(()) => TokenRefreshOutcome::Refreshed(decision),
+            Err(error) => TokenRefreshOutcome::Failed { decision, error },
+        }
+    }
+}
+
+impl<S> Clone for TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    fn clone(&self) -> Self {
+        Self {
+            store: Arc::clone(&self.store),
+            policy: self.policy,
+        }
+    }
+}
+
+impl<S> fmt::Debug for TokenRefreshActor<S>
+where
+    S: AuthProfileStore + ?Sized,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TokenRefreshActor")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Concurrency-safe in-memory auth profile store.
@@ -3275,5 +3540,153 @@ mod tests {
 
         let error = run(store.get_profile("openai", "work")).unwrap_err();
         assert!(matches!(error, AuthError::ProfileNotFound { .. }));
+    }
+
+    #[test]
+    fn token_refresh_actor_refreshes_due_jwt_profile_and_persists_it() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let generator_counter = Arc::clone(&counter);
+        let auth = JwtAuth::new("glm", StdDuration::from_secs(3_600), move || {
+            Ok(format!(
+                "fixture-jwt-{}",
+                generator_counter.fetch_add(1, Ordering::SeqCst)
+            ))
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-0")
+        );
+        let profile =
+            AuthProfile::new("work", "glm", AuthMethodKind::Jwt(auth), "work", 0).unwrap();
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(7_200)),
+        );
+
+        let report = run(actor.refresh_provider(&cx(), "GLM")).unwrap();
+
+        assert_eq!(report.refreshed_count(), 1);
+        assert_eq!(report.skipped_count(), 0);
+        assert_eq!(report.failed_count(), 0);
+        assert!(matches!(
+            report.outcomes.as_slice(),
+            [TokenRefreshOutcome::Refreshed(TokenRefreshDecision {
+                provider,
+                profile_id,
+                method: "jwt",
+                action: TokenRefreshAction::Due,
+                ..
+            })] if provider == "glm" && profile_id == "work"
+        ));
+        let refreshed = run(store.get_profile("glm", "work")).unwrap();
+        let mut refreshed_request = AuthRequest::new();
+        run(refreshed
+            .method
+            .build_request_auth(&cx(), &mut refreshed_request))
+        .unwrap();
+        assert_eq!(
+            refreshed_request.value_for("Authorization"),
+            Some("Bearer fixture-jwt-1")
+        );
+        assert_eq!(counter.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn token_refresh_actor_skips_static_and_fresh_profiles() {
+        let auth = JwtAuth::new("glm", StdDuration::from_secs(3_600), || {
+            Ok("fixture-jwt-value".to_string())
+        })
+        .unwrap();
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        let jwt_profile =
+            AuthProfile::new("fresh", "glm", AuthMethodKind::Jwt(auth), "fresh", 10).unwrap();
+        let api_profile = api_profile("static", "glm", 0);
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(jwt_profile)).unwrap();
+        run(store.save_profile(api_profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(1)),
+        );
+
+        let report = run(actor.refresh_provider(&cx(), "glm")).unwrap();
+
+        assert_eq!(report.refreshed_count(), 0);
+        assert_eq!(report.skipped_count(), 2);
+        assert_eq!(report.failed_count(), 0);
+        let actions = report
+            .outcomes
+            .iter()
+            .map(TokenRefreshOutcome::decision)
+            .map(|decision| (decision.profile_id.as_str(), decision.action))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actions,
+            [
+                ("static", TokenRefreshAction::NotRefreshable),
+                ("fresh", TokenRefreshAction::Fresh)
+            ]
+        );
+    }
+
+    #[test]
+    fn token_refresh_actor_reports_unsupported_refresh_failure() {
+        let profile = AuthProfile::new(
+            "setup",
+            "bootstrap",
+            AuthMethodKind::SetupToken(
+                SetupTokenAuth::bearer("setup-token", Utc::now() + TimeDelta::minutes(1)).unwrap(),
+            ),
+            "setup",
+            0,
+        )
+        .unwrap();
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        run(store.save_profile(profile)).unwrap();
+        let actor = TokenRefreshActor::new(
+            Arc::clone(&store),
+            TokenRefreshPolicy::new(StdDuration::from_secs(3_600)),
+        );
+
+        let outcome = run(actor.refresh_profile(&cx(), "bootstrap", "setup")).unwrap();
+
+        assert!(matches!(
+            outcome,
+            TokenRefreshOutcome::Failed {
+                decision: TokenRefreshDecision {
+                    provider,
+                    profile_id,
+                    method: "setup_token",
+                    action: TokenRefreshAction::Due,
+                    ..
+                },
+                error: AuthError::UnsupportedMethod {
+                    method: "setup_token",
+                    operation: "refresh"
+                }
+            } if provider == "bootstrap" && profile_id == "setup"
+        ));
+    }
+
+    #[test]
+    fn token_refresh_actor_reports_missing_profile_before_refresh() {
+        let store = Arc::new(InMemoryAuthProfileStore::new());
+        let actor = TokenRefreshActor::new(Arc::clone(&store), TokenRefreshPolicy::default());
+
+        let error = run(actor.refresh_profile(&cx(), "openai", "work")).unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::ProfileNotFound {
+                provider: "openai".to_string(),
+                profile_id: "work".to_string(),
+            }
+        );
     }
 }

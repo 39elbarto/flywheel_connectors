@@ -4,13 +4,13 @@ use std::net::IpAddr;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use fcp_manifest::{ConnectorManifest, ManifestApprovalMode};
 use fcp_prelude::{
-    AgentHint, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
+    ApprovalMode, BaseConnector, CapabilityGrant, CapabilityId, CapabilityVerifier, ConnectorId,
     ConnectorMetrics, EventCaps, FcpConnector, FcpError, FcpResult, HandshakeRequest,
-    HandshakeResponse, HealthSnapshot, IdempotencyClass, Introspection, InvokeRequest,
-    InvokeResponse, OperationId, OperationInfo, RiskLevel, SafetyTier, SelfCheckReport, SessionId,
-    ShutdownRequest, SimulateRequest, SimulateResponse, SubscribeRequest, SubscribeResponse,
-    UnsubscribeRequest,
+    HandshakeResponse, HealthSnapshot, Introspection, InvokeRequest, InvokeResponse, OperationId,
+    OperationInfo, SelfCheckReport, SessionId, ShutdownRequest, SimulateRequest, SimulateResponse,
+    SubscribeRequest, SubscribeResponse, UnsubscribeRequest,
 };
 use fcp_sdk::migration::HttpRetryConfig;
 use serde::Deserialize;
@@ -30,6 +30,7 @@ const OP_NATIVE_SEARCH: &str = "perplexity-search.search";
 
 const CAP_SEARCH: &str = "perplexity-search.query";
 const CAP_NATIVE_SEARCH: &str = "perplexity-search.search";
+const OPERATION_ORDER: [&str; 2] = [OP_SEARCH, OP_NATIVE_SEARCH];
 
 const DIRECT_PERPLEXITY_BASE_URL: &str = "https://api.perplexity.ai";
 const OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1";
@@ -885,101 +886,54 @@ impl Default for PerplexitySearchConnector {
 
 // ── Helpers ──
 
-fn schema(required: &[&str]) -> serde_json::Value {
-    if required.is_empty() {
-        json!({ "type": "object" })
-    } else {
-        json!({ "type": "object", "required": required })
+fn operations_info() -> Vec<OperationInfo> {
+    let manifest = ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+        .expect("embedded Perplexity Search manifest should parse before hash validation");
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(usize::MAX)
+}
+
+fn approval_mode_from_manifest(mode: ManifestApprovalMode) -> Option<ApprovalMode> {
+    match mode {
+        ManifestApprovalMode::None => None,
+        other => Some(ApprovalMode::from(other)),
     }
 }
 
-fn operations_info() -> Vec<OperationInfo> {
-    vec![
-        OperationInfo {
-            id: OperationId::from_static(OP_SEARCH),
-            summary: "Execute a grounded Perplexity web research query".into(),
-            description: Some(
-                "Sends a query to the Perplexity/OpenRouter chat-completions API \
-                 and returns the answer with web citations."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": { "type": "string", "description": "The research question to answer" },
-                    "model": { "type": "string", "description": "Model to use (default: sonar or perplexity/sonar-pro on OpenRouter)" },
-                    "system_prompt": { "type": "string", "description": "Optional system prompt to guide the search" },
-                    "max_tokens": { "type": "integer", "description": "Maximum tokens in the response" },
-                    "temperature": { "type": "number", "description": "Sampling temperature (0.0-2.0)" },
-                    "top_p": { "type": "number", "description": "Nucleus sampling threshold" },
-                    "top_k": { "type": "integer", "description": "Top-k sampling parameter" },
-                    "search_domain_filter": { "type": "array", "items": { "type": "string" }, "description": "Chat-completions domain filter, max 20, all allowlist or all denylist" },
-                    "return_images": { "type": "boolean", "description": "Include image results" },
-                    "return_related_questions": { "type": "boolean", "description": "Include related questions" },
-                    "freshness": { "type": "string", "enum": ["year", "month", "week", "day", "hour"], "description": "Alias for search_recency_filter" },
-                    "search_recency_filter": { "type": "string", "enum": ["year", "month", "week", "day", "hour"], "description": "Filter results by recency" }
-                }
-            }),
-            output_schema: schema(&["answer"]),
-            capability: CapabilityId::from_static(CAP_SEARCH),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use this operation to search the web for current, grounded information with citations when an answer synthesis is desired.".into(),
-                common_mistakes: vec![
-                    "Sending native Search API filters such as country or date_after to the chat-completions operation".into(),
-                    "Expecting structured result records from the answer-synthesis operation".into(),
-                ],
-                examples: vec![],
-                related: vec![CapabilityId::from_static(CAP_NATIVE_SEARCH)],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-        OperationInfo {
-            id: OperationId::from_static(OP_NATIVE_SEARCH),
-            summary: "Execute a native Perplexity Search API query".into(),
-            description: Some(
-                "Posts to the native Perplexity /search endpoint and returns structured \
-                 untrusted result records with title, URL, snippet, date, and site metadata."
-                    .into(),
-            ),
-            input_schema: json!({
-                "type": "object",
-                "required": ["query"],
-                "properties": {
-                    "query": { "type": "string", "description": "Search query string" },
-                    "count": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Number of results to return" },
-                    "country": { "type": "string", "description": "2-letter country code" },
-                    "language": { "type": "string", "description": "2-letter ISO 639-1 language code" },
-                    "freshness": { "type": "string", "enum": ["year", "month", "week", "day"], "description": "Time freshness filter" },
-                    "date_after": { "type": "string", "description": "Only results after YYYY-MM-DD" },
-                    "date_before": { "type": "string", "description": "Only results before YYYY-MM-DD" },
-                    "domain_filter": { "type": "array", "items": { "type": "string" }, "description": "Domain allowlist or denylist, max 20" },
-                    "max_tokens": { "type": "integer", "minimum": 1, "maximum": 1_000_000, "description": "Total content budget across results" },
-                    "max_tokens_per_page": { "type": "integer", "minimum": 1, "maximum": 1_000_000, "description": "Max extracted tokens per page" }
-                }
-            }),
-            output_schema: schema(&["results"]),
-            capability: CapabilityId::from_static(CAP_NATIVE_SEARCH),
-            risk_level: RiskLevel::Medium,
-            safety_tier: SafetyTier::Safe,
-            idempotency: IdempotencyClass::None,
-            ai_hints: AgentHint {
-                when_to_use: "Use this operation when callers need structured web result records rather than a synthesized answer.".into(),
-                common_mistakes: vec![
-                    "Using this operation with an OpenRouter API key or OpenRouter base URL".into(),
-                    "Combining freshness with date_after/date_before".into(),
-                ],
-                examples: vec![],
-                related: vec![CapabilityId::from_static(CAP_SEARCH)],
-            },
-            rate_limit: None,
-            requires_approval: None,
-        },
-    ]
+fn operation_info_from_manifest(
+    id: String,
+    operation: fcp_manifest::OperationSection,
+) -> OperationInfo {
+    let description = operation.description;
+    OperationInfo {
+        id: OperationId::new(id).expect("manifest operation id should be canonical"),
+        summary: description.clone(),
+        description: Some(description),
+        input_schema: operation.input_schema,
+        output_schema: operation.output_schema,
+        capability: operation.capability,
+        risk_level: operation.risk_level,
+        safety_tier: operation.safety_tier,
+        idempotency: operation.idempotency,
+        ai_hints: operation.ai_hints,
+        rate_limit: operation.rate_limit.map(|rate_limit| rate_limit.0),
+        requires_approval: approval_mode_from_manifest(operation.requires_approval),
+    }
 }
 
 // ── FcpConnector trait impl ──
@@ -1177,8 +1131,52 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{
-        CapabilityConstraints, CapabilityToken, ConnectorId, RequestId, SelfCheckStatus, ZoneId,
+        CapabilityConstraints, CapabilityToken, ConnectorId, RequestId, RiskLevel, SafetyTier,
+        SelfCheckStatus, ZoneId,
     };
+    use jsonschema::Validator;
+    use serde_json::Value;
+
+    fn perplexity_manifest_unchecked() -> ConnectorManifest {
+        ConnectorManifest::parse_str_unchecked(MANIFEST_TOML)
+            .expect("Perplexity Search manifest should parse before hash validation")
+    }
+
+    fn operation_input_schema<'a>(
+        manifest: &'a ConnectorManifest,
+        operation_id: &str,
+    ) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("operation should be declared")
+            .input_schema
+    }
+
+    fn validator_for(schema: &Value) -> Validator {
+        Validator::new(schema).expect("manifest operation schema should compile")
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        let errors: Vec<_> = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {payload}; errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject {payload}"
+        );
+    }
 
     fn valid_config() -> serde_json::Value {
         json!({
@@ -1586,6 +1584,166 @@ mod tests {
             assert!(response.missing_capabilities.is_empty());
         })
         .unwrap();
+    }
+
+    #[test]
+    fn manifest_declares_valid_perplexity_operations_metadata() {
+        let unchecked = perplexity_manifest_unchecked();
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "update connectors/perplexity-search/manifest.toml interface_hash to {expected_hash}"
+        );
+
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        let search = manifest
+            .provides
+            .operations
+            .get(OP_SEARCH)
+            .expect("chat-completions search operation should be declared");
+        assert_eq!(search.capability.as_str(), CAP_SEARCH);
+        assert_eq!(json!(search.risk_level), json!("medium"));
+        assert_eq!(json!(search.safety_tier), json!("safe"));
+        assert_eq!(json!(search.idempotency), json!("none"));
+        assert_eq!(search.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            search.input_schema["properties"]["freshness"]["enum"],
+            json!(["year", "month", "week", "day", "hour"])
+        );
+        let search_network = search
+            .network_constraints
+            .as_ref()
+            .expect("chat-completions operation should declare network constraints");
+        assert_eq!(
+            search_network.host_allow,
+            vec!["api.perplexity.ai".to_string(), "openrouter.ai".to_string()]
+        );
+        assert_eq!(search_network.port_allow, vec![443]);
+        assert!(search_network.require_sni);
+        assert!(search_network.deny_private_ranges);
+
+        let native_search = manifest
+            .provides
+            .operations
+            .get(OP_NATIVE_SEARCH)
+            .expect("native search operation should be declared");
+        assert_eq!(native_search.capability.as_str(), CAP_NATIVE_SEARCH);
+        assert_eq!(
+            native_search.input_schema["properties"]["count"]["maximum"],
+            json!(10)
+        );
+        assert_eq!(
+            native_search.input_schema["properties"]["freshness"]["enum"],
+            json!(["year", "month", "week", "day"])
+        );
+        let native_network = native_search
+            .network_constraints
+            .as_ref()
+            .expect("native operation should declare network constraints");
+        assert_eq!(
+            native_network.host_allow,
+            vec!["api.perplexity.ai".to_string()]
+        );
+        assert!(native_network.deny_ip_literals);
+    }
+
+    #[test]
+    fn introspection_uses_manifest_operation_metadata() {
+        let manifest =
+            ConnectorManifest::parse_str(MANIFEST_TOML).expect("embedded manifest should validate");
+        let connector = PerplexitySearchConnector::new();
+        let intro = connector.introspect();
+        assert_eq!(intro.operations.len(), manifest.provides.operations.len());
+
+        for (operation, expected_id) in intro.operations.iter().zip(OPERATION_ORDER) {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(expected_id)
+                .expect("operation should be declared");
+            assert_eq!(operation.id.as_str(), expected_id);
+            assert_eq!(operation.summary, manifest_operation.description);
+            assert_eq!(
+                operation.description.as_deref(),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(operation.capability, manifest_operation.capability);
+            assert_eq!(operation.input_schema, manifest_operation.input_schema);
+            assert_eq!(operation.output_schema, manifest_operation.output_schema);
+            assert_eq!(
+                operation.ai_hints.when_to_use,
+                manifest_operation.ai_hints.when_to_use
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_input_schemas_validate_representative_payloads() {
+        let manifest = perplexity_manifest_unchecked();
+        let query_schema = operation_input_schema(&manifest, OP_SEARCH);
+        assert_schema_accepts(
+            query_schema,
+            &json!({
+                "query": "latest Rust async runtime guidance",
+                "model": "sonar-pro",
+                "system_prompt": "Answer concisely.",
+                "max_tokens": 512,
+                "temperature": 0.3,
+                "top_p": 0.9,
+                "top_k": 20,
+                "search_domain_filter": ["rust-lang.org", "doc.rust-lang.org"],
+                "return_images": false,
+                "return_related_questions": true,
+                "freshness": "hour",
+                "presence_penalty": -0.25,
+                "frequency_penalty": 0.1,
+                "future_provider_option": {"preserve": "unknown runtime options"}
+            }),
+        );
+        assert_schema_rejects(query_schema, &json!({}));
+        assert_schema_rejects(query_schema, &json!({"query": ""}));
+        assert_schema_rejects(query_schema, &json!({"query": "q", "max_tokens": 0}));
+        assert_schema_rejects(query_schema, &json!({"query": "q", "top_k": 0}));
+        assert_schema_rejects(query_schema, &json!({"query": "q", "freshness": "minute"}));
+        assert_schema_rejects(query_schema, &json!({"query": "q", "return_images": "yes"}));
+
+        let native_schema = operation_input_schema(&manifest, OP_NATIVE_SEARCH);
+        assert_schema_accepts(
+            native_schema,
+            &json!({
+                "query": "Rust async runtimes",
+                "count": 3,
+                "country": "US",
+                "language": "en",
+                "domain_filter": ["rust-lang.org"],
+                "date_after": "2026-05-01",
+                "date_before": "2026-05-31",
+                "max_tokens": 2000,
+                "max_tokens_per_page": 500,
+                "future_native_option": true
+            }),
+        );
+        assert_schema_accepts(native_schema, &json!({"query": "Rust", "max_results": 10}));
+        assert_schema_rejects(native_schema, &json!({}));
+        assert_schema_rejects(native_schema, &json!({"query": ""}));
+        assert_schema_rejects(native_schema, &json!({"query": "q", "count": 0}));
+        assert_schema_rejects(native_schema, &json!({"query": "q", "max_results": 11}));
+        assert_schema_rejects(native_schema, &json!({"query": "q", "country": "USA"}));
+        assert_schema_rejects(native_schema, &json!({"query": "q", "freshness": "hour"}));
+        assert_schema_rejects(
+            native_schema,
+            &json!({"query": "q", "date_after": "2026/05/01"}),
+        );
+        assert_schema_rejects(
+            native_schema,
+            &json!({"query": "q", "max_tokens_per_page": 0}),
+        );
     }
 
     #[test]

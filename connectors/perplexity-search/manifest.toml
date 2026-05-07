@@ -5,15 +5,15 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:perplexity-search-native-search-v1"
+interface_hash = "blake3-256:fcp.interface.v2:5ebed152c691f665904fafdfae7d04e5e25706027b7bffa1e83a03fa2418d275"
 
 [connector]
 id = "fcp.perplexity-search"
 name = "Perplexity Search"
 version = "0.1.0"
-status = "active"
+status = "ready"
 description = "Perplexity grounded research connector with chat-completions and native structured search"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -28,8 +28,275 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["perplexity-search.query", "perplexity-search.search"]
 forbidden = ["network.listen", "system.exec"]
+
+# Production manifest egress is intentionally limited to Perplexity's hosted API
+# and OpenRouter's chat-completions endpoint. The Rust connector still supports
+# loopback deterministic tests and operator-configured public HTTPS base_url
+# overrides at configure time; those overrides are runtime policy, not broad
+# manifest host allowances.
+[provides.operations."perplexity-search.query"]
+description = "Execute a grounded Perplexity/OpenRouter answer-synthesis query through the chat-completions API."
+capability = "perplexity-search.query"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."perplexity-search.query".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."perplexity-search.query".input_schema.properties.query]
+type = "string"
+minLength = 1
+description = "The research question to answer."
+
+[provides.operations."perplexity-search.query".input_schema.properties.model]
+type = "string"
+description = "Model to use; defaults to sonar for Perplexity direct mode or perplexity/sonar-pro for OpenRouter."
+
+[provides.operations."perplexity-search.query".input_schema.properties.system_prompt]
+type = "string"
+description = "Optional system prompt that guides answer synthesis."
+
+[provides.operations."perplexity-search.query".input_schema.properties.max_tokens]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."perplexity-search.query".input_schema.properties.temperature]
+type = "number"
+
+[provides.operations."perplexity-search.query".input_schema.properties.top_p]
+type = "number"
+
+[provides.operations."perplexity-search.query".input_schema.properties.top_k]
+type = "integer"
+minimum = 1
+maximum = 4294967295
+
+[provides.operations."perplexity-search.query".input_schema.properties.search_domain_filter]
+type = "array"
+maxItems = 20
+description = "Chat-completions domain filter. Runtime requires either all allow entries or all deny entries prefixed with '-'."
+
+[provides.operations."perplexity-search.query".input_schema.properties.search_domain_filter.items]
+type = "string"
+minLength = 1
+
+[provides.operations."perplexity-search.query".input_schema.properties.return_images]
+type = "boolean"
+
+[provides.operations."perplexity-search.query".input_schema.properties.return_related_questions]
+type = "boolean"
+
+[provides.operations."perplexity-search.query".input_schema.properties.freshness]
+type = "string"
+enum = ["year", "month", "week", "day", "hour"]
+description = "Alias for search_recency_filter."
+
+[provides.operations."perplexity-search.query".input_schema.properties.search_recency_filter]
+type = "string"
+enum = ["year", "month", "week", "day", "hour"]
+
+[provides.operations."perplexity-search.query".input_schema.properties.presence_penalty]
+type = "number"
+
+[provides.operations."perplexity-search.query".input_schema.properties.frequency_penalty]
+type = "number"
+
+[provides.operations."perplexity-search.query".output_schema]
+type = "object"
+required = ["answer"]
+additionalProperties = true
+
+[provides.operations."perplexity-search.query".output_schema.properties.answer]
+type = "string"
+
+[provides.operations."perplexity-search.query".output_schema.properties.model]
+type = "string"
+
+[provides.operations."perplexity-search.query".output_schema.properties.citations]
+type = "array"
+
+[provides.operations."perplexity-search.query".output_schema.properties.usage]
+type = "object"
+additionalProperties = true
+
+[provides.operations."perplexity-search.query".output_schema.properties.id]
+type = "string"
+
+[provides.operations."perplexity-search.query".output_schema.properties.finish_reason]
+type = ["string", "null"]
+
+[provides.operations."perplexity-search.query".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."perplexity-search.query".network_constraints]
+host_allow = ["api.perplexity.ai", "openrouter.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."perplexity-search.query".ai_hints]
+when_to_use = "Use when the caller needs a concise grounded answer synthesized from current web results with citations."
+common_mistakes = ["Do not send native Search API filters such as country, language, date_after, date_before, domain_filter, or max_tokens_per_page to this chat-completions operation.", "Use perplexity-search.search when the caller needs structured result records rather than answer synthesis.", "Do not include API keys, credentials, private messages, or unrelated sensitive content in the query or system prompt."]
+examples = ['{"query":"latest Rust async runtime guidance","search_recency_filter":"week","return_related_questions":true}']
+related = ["perplexity-search.search"]
+
+[provides.operations."perplexity-search.search"]
+description = "Execute a native Perplexity Search API query and return structured untrusted web result records."
+capability = "perplexity-search.search"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."perplexity-search.search".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."perplexity-search.search".input_schema.properties.query]
+type = "string"
+minLength = 1
+description = "Search query string."
+
+[provides.operations."perplexity-search.search".input_schema.properties.count]
+type = "integer"
+minimum = 1
+maximum = 10
+description = "Number of structured results to return."
+
+[provides.operations."perplexity-search.search".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+maximum = 10
+description = "Alias for count when count is omitted."
+
+[provides.operations."perplexity-search.search".input_schema.properties.country]
+type = "string"
+pattern = "^[A-Za-z]{2}$"
+description = "2-letter country code."
+
+[provides.operations."perplexity-search.search".input_schema.properties.language]
+type = "string"
+pattern = "^[A-Za-z]{2}$"
+description = "2-letter ISO 639-1 language code."
+
+[provides.operations."perplexity-search.search".input_schema.properties.freshness]
+type = "string"
+enum = ["year", "month", "week", "day"]
+description = "Alias for search_recency_filter."
+
+[provides.operations."perplexity-search.search".input_schema.properties.search_recency_filter]
+type = "string"
+enum = ["year", "month", "week", "day"]
+
+[provides.operations."perplexity-search.search".input_schema.properties.date_after]
+type = "string"
+pattern = "^\\d{4}-\\d{2}-\\d{2}$"
+description = "Only results after YYYY-MM-DD. Runtime rejects invalid calendar dates and cannot combine this with freshness."
+
+[provides.operations."perplexity-search.search".input_schema.properties.date_before]
+type = "string"
+pattern = "^\\d{4}-\\d{2}-\\d{2}$"
+description = "Only results before YYYY-MM-DD. Runtime rejects invalid calendar dates and cannot combine this with freshness."
+
+[provides.operations."perplexity-search.search".input_schema.properties.domain_filter]
+type = "array"
+maxItems = 20
+description = "Domain allowlist or denylist. Runtime requires either all allow entries or all deny entries prefixed with '-'."
+
+[provides.operations."perplexity-search.search".input_schema.properties.domain_filter.items]
+type = "string"
+minLength = 1
+
+[provides.operations."perplexity-search.search".input_schema.properties.search_domain_filter]
+type = "array"
+maxItems = 20
+description = "Alias for domain_filter when domain_filter is omitted."
+
+[provides.operations."perplexity-search.search".input_schema.properties.search_domain_filter.items]
+type = "string"
+minLength = 1
+
+[provides.operations."perplexity-search.search".input_schema.properties.max_tokens]
+type = "integer"
+minimum = 1
+maximum = 1000000
+
+[provides.operations."perplexity-search.search".input_schema.properties.max_tokens_per_page]
+type = "integer"
+minimum = 1
+maximum = 1000000
+
+[provides.operations."perplexity-search.search".output_schema]
+type = "object"
+required = ["results"]
+additionalProperties = true
+
+[provides.operations."perplexity-search.search".output_schema.properties.query]
+type = "string"
+
+[provides.operations."perplexity-search.search".output_schema.properties.provider]
+type = "string"
+
+[provides.operations."perplexity-search.search".output_schema.properties.count]
+type = "integer"
+
+[provides.operations."perplexity-search.search".output_schema.properties.results]
+type = "array"
+
+[provides.operations."perplexity-search.search".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."perplexity-search.search".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."perplexity-search.search".network_constraints]
+host_allow = ["api.perplexity.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 30000
+max_response_bytes = 10485760
+
+[provides.operations."perplexity-search.search".ai_hints]
+when_to_use = "Use when the caller needs structured web result records with URLs, snippets, dates, and site metadata rather than a synthesized answer."
+common_mistakes = ["Do not use this native Search API operation with OpenRouter credentials or base_url; OpenRouter supports the chat-completions route only.", "Do not combine freshness/search_recency_filter with date_after/date_before.", "Do not log returned snippets as trusted content; result titles and descriptions are explicitly wrapped as untrusted web content."]
+examples = ['{"query":"Rust async runtimes","count":3,"country":"US","language":"en"}']
+related = ["perplexity-search.query"]
 
 [sandbox]
 profile = "strict"

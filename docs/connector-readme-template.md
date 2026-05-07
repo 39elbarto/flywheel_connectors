@@ -179,11 +179,23 @@ This template formalizes calendly's pattern as the workspace convention so futur
 ## Quality bar
 
 - Every section present.
+- Minimum size for the soft conformance ratchet is 500 bytes, but useful
+  connector READMEs should normally be much more specific than that floor.
 - No AI-generated boilerplate. Specifically: no marketing language, no generic "this is a powerful connector", no hallucinated operator guidance.
 - Operation inventory matches manifest exactly (verifiable by `fwc <connector> describe`).
 - Verification commands actually work when run.
 - Redaction rules name the specific provider PII fields.
 - Common remediation entries map to real error variants in `error.rs`.
+
+Soft conformance check:
+
+```bash
+rch exec -- cargo test -p fcp-conformance --test readme_presence -- --ignored --nocapture
+```
+
+The test is ignored by default until the wave work under
+`flywheel_connectors-4kw5f.12` closes; explicit runs emit a redaction-safe JSONL
+inventory of connector README gaps.
 
 ## Non-goals for this template
 

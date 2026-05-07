@@ -496,6 +496,26 @@ When implementing connectors:
 4. **Log carefully** - Never log tokens, passwords, or PII
 5. **Fail closed on auth errors** - When in doubt, deny access
 
+### Connector README Convention
+
+Every connector should have an operator-facing `connectors/<name>/README.md`
+that follows `docs/connector-readme-template.md`. Treat it as the stable
+contract for the connector's current runtime surface, not as marketing copy.
+
+Required README content:
+- Status, canonical bead ID, verification script or command, and upstream docs
+- Purpose and explicit scope boundary
+- Current operation inventory with capabilities, risk, safety, and idempotency
+- Auth, zone, sandbox, and network invariants
+- Known non-goals, limits, quirks, and remediation guidance
+- Redaction-safe verification commands and evidence expectations
+
+Do not invent unsupported operations or generic provider boilerplate. Source the
+README from `manifest.toml`, connector introspection/operation metadata,
+provider docs, tests, and the actual request paths in the connector code. If a
+connector is incubating or intentionally has no live provider surface, say that
+plainly instead of filling the template with optimistic placeholders.
+
 ---
 
 ## MCP Agent Mail — Multi-Agent Coordination

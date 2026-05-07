@@ -233,6 +233,82 @@ The enforcement types live in `crates/fwc/src/catalog.rs`:
 - `SimulateResult`
 - `DiscoveryDataSource`
 
+### 6. When administering credential pools
+
+Credential pools are a live host administration surface, not an offline `fwc`
+credential-store shortcut. The local `fwc auth` and `fwc credential` commands
+manage stored credential references; they do not prove that a running host has
+accepted or is routing through a provider pool.
+
+Use the host admin API when the operator needs live credential-pool truth:
+
+| Action | Method and path |
+|---|---|
+| List all pools | `GET /rpc/admin/credentials/pools` |
+| Inspect one provider/zone pool | `GET /rpc/admin/credentials/pools/{provider}/{zone_id}` |
+| Add or replace a credential | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/credentials` |
+| Remove a credential | `DELETE /rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}` |
+| Change selection strategy | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/strategy` |
+| Change active lease ceiling | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/max-concurrent` |
+| Change exhausted behavior | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/exhausted-behavior` |
+| Set or clear a cooldown | `POST /rpc/admin/credentials/pools/{provider}/{zone_id}/credentials/{credential_id}/cooldown` |
+
+Credential add requests carry a secret-bearing input shape:
+
+```json
+{
+  "credential": {
+    "credential_id": "openai-key-1",
+    "source": "manual",
+    "priority": 10,
+    "label": "primary",
+    "payload": { "api_key": "..." }
+  },
+  "mode": "reject_existing",
+  "strategy_for_new_pool": "round_robin"
+}
+```
+
+Responses must be treated as redacted operator views. They may expose
+`credential_id`, `source`, `priority`, `label`, cooldown state, last-use
+metadata, active lease counts, strategy, and exhausted behavior. They must not
+echo raw credential payloads, API keys, provider error bodies, or signed secret
+material.
+
+The operator-visible strategy values are:
+
+- `round_robin`: rotate across available credentials
+- `sticky`: keep using the selected credential until it is unavailable
+- `priority`: choose the lowest-priority-number available credential
+
+The exhausted behavior values are:
+
+- `fail_fast`: return an immediate pool-exhausted error
+- `wait`: return deterministic wait advice only when the next credential
+  availability deadline is known
+
+If all credentials are unavailable because of active leases, permanent
+cooldowns, an empty pool, or another no-deadline condition, wait mode is still
+reported as explicit exhaustion. Wait mode must not fabricate a retry timestamp.
+
+Connector-side lease-aware code uses the SDK contract in
+`crates/fcp-sdk/src/credentials.rs`:
+
+1. `Cx::get_credential_lease` or `Cx::get_credential_lease_with` asks the host
+   for a lease on an existing credential reference.
+2. `Cx::release_credential_lease` releases the lease after successful use.
+3. `Cx::report_credential_error` reports rate-limit, quota, auth, or retryable
+   provider failures without leaking provider error bodies.
+
+Existing single-credential references remain valid. Pooling is opt-in through
+host admin configuration, and operators should not assume a connector is using
+a pool until the live host pool view and lease/audit events show that routing.
+
+The current repository has unit/admin-route coverage for the pool primitives,
+admin mutation audit, SDK lease contract, and wait-exhaustion semantics. The
+parent credential-pooling feature still needs broader connector-boundary or e2e
+proof before it can claim full production load-balancing behavior.
+
 ## Production Deployment Runbook
 
 This section is the operator-facing deployment guide for the current

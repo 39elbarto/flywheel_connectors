@@ -530,6 +530,10 @@ pub fn get_mental_model() -> MentalModel {
                 "Secure local storage for connector authentication tokens".into(),
             ),
             (
+                "Credential Pool".into(),
+                "Live host-managed set of provider credentials with strategy, cooldown, lease tracking, and redacted admin views".into(),
+            ),
+            (
                 "Agent Hint".into(),
                 "Metadata attached to requests identifying the calling agent".into(),
             ),
@@ -572,7 +576,7 @@ fn typical_flow_for(cat: CommandCategory) -> String {
             "pipeline validate → pipeline run → template apply for reporting".into()
         }
         CommandCategory::Administration => {
-            "credential set → validate → policy set → supply-chain verify".into()
+            "credential set → live host credential-pool admin → validate → policy set → supply-chain verify".into()
         }
         CommandCategory::Meta => "doctor → version → help <command>".into(),
         CommandCategory::Lifecycle => {
@@ -1363,6 +1367,21 @@ mod tests {
         assert!(terms.contains(&"Operation"));
         assert!(terms.contains(&"Manifest"));
         assert!(terms.contains(&"Host"));
+    }
+
+    #[test]
+    fn mental_model_glossary_covers_credential_pool_boundary() {
+        let model = get_mental_model();
+        let pool_definition = model
+            .glossary
+            .iter()
+            .find_map(|(term, definition)| {
+                (term == "Credential Pool").then_some(definition.as_str())
+            })
+            .expect("credential pool glossary entry");
+
+        assert!(pool_definition.contains("Live host-managed"));
+        assert!(pool_definition.contains("redacted admin views"));
     }
 
     // ── Format tests ─────────────────────────────────────────────────────

@@ -5,6 +5,7 @@ use std::time::Duration;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use fcp_async_core::time;
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use fcp_streaming::{StreamError, WsClient, WsConfig, WsMessage};
 use reqwest::multipart::{Form, Part};
@@ -29,6 +30,14 @@ const DEFAULT_REALTIME_MAX_RECONNECT_ATTEMPTS: u32 = 5;
 const DEFAULT_REALTIME_RECONNECT_DELAY_MS: u64 = 1_000;
 const MAX_REALTIME_AUDIO_CHUNK_BYTES: usize = 256 * 1024;
 const MAX_REALTIME_AUDIO_TOTAL_BYTES: usize = 2 * 1024 * 1024;
+const MISTRAL_MANIFEST_TOML: &str = include_str!("../manifest.toml");
+const OPERATION_ORDER: [&str; 5] = [
+    "mistral.chat.completions",
+    "mistral.embeddings.create",
+    "mistral.audio.transcriptions",
+    "mistral.audio.realtime.transcribe",
+    "mistral.models.list",
+];
 
 #[derive(Clone)]
 enum Auth {
@@ -342,7 +351,7 @@ impl RealtimeTranscriptionOptions {
 }
 
 impl RealtimeTranscriptionState {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             provider_session_id: None,
             ready: false,
@@ -635,7 +644,7 @@ impl MistralConnector {
             "mistral.audio.transcriptions" => self.invoke_transcription(client, &input).await,
             "mistral.audio.realtime.transcribe" => {
                 let config = self.config.as_ref().ok_or(FcpError::NotConfigured)?;
-                self.invoke_realtime_transcription(config, input).await
+                Box::pin(self.invoke_realtime_transcription(config, input)).await
             }
             "mistral.models.list" => client.get_json("/models").await,
             _ => Err(FcpError::InvalidRequest {
@@ -827,9 +836,8 @@ impl MistralConnector {
         input: Value,
     ) -> FcpResult<Value> {
         let options = RealtimeTranscriptionOptions::from_input(input)?;
-        let result = self
-            .run_realtime_transcription_with_reconnect(config, &options)
-            .await?;
+        let result =
+            Box::pin(self.run_realtime_transcription_with_reconnect(config, &options)).await?;
 
         Ok(json!({
             "session_id": options.session_id,
@@ -864,10 +872,7 @@ impl MistralConnector {
     ) -> FcpResult<RealtimeTranscriptionResult> {
         let mut attempt = 0;
         loop {
-            match self
-                .run_realtime_transcription_once(config, options, attempt)
-                .await
-            {
+            match Box::pin(self.run_realtime_transcription_once(config, options, attempt)).await {
                 Ok(result) => return Ok(result),
                 Err(error)
                     if attempt < options.max_reconnect_attempts
@@ -888,13 +893,13 @@ impl MistralConnector {
         reconnect_attempts: u32,
     ) -> FcpResult<RealtimeTranscriptionResult> {
         let timeout = Duration::from_millis(options.timeout_ms);
-        let session = self.run_realtime_transcription_session(config, options, reconnect_attempts);
-        match time::timeout(timeout, session).await {
-            Ok(result) => result,
-            Err(_) => Err(FcpError::UpstreamTimeout {
+        let session =
+            Box::pin(self.run_realtime_transcription_session(config, options, reconnect_attempts));
+        time::timeout(timeout, session).await.unwrap_or_else(|_| {
+            Err(FcpError::UpstreamTimeout {
                 service: "mistral.realtime".into(),
-            }),
-        }
+            })
+        })
     }
 
     async fn run_realtime_transcription_session(
@@ -954,7 +959,7 @@ impl MistralConnector {
                     retry_after: None,
                 });
             };
-            state.apply_event(realtime_event_value(message)?)?;
+            state.apply_event(realtime_event_value(&message)?)?;
         }
 
         connection
@@ -998,7 +1003,7 @@ impl MistralConnector {
                     retry_after: None,
                 });
             };
-            state.apply_event(realtime_event_value(message)?)?;
+            state.apply_event(realtime_event_value(&message)?)?;
         }
 
         Ok(state.into_result(reconnect_attempts))
@@ -1012,117 +1017,67 @@ impl Default for MistralConnector {
 }
 
 fn operations_info() -> Vec<Value> {
-    vec![
-        json!({
-            "id": "mistral.chat.completions",
-            "summary": "Create a Mistral chat completion",
-            "capability": "mistral.chat",
-            "risk_level": "medium",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["messages"],
-                "properties": {
-                    "model": {"type": "string", "default": "mistral-small-latest"},
-                    "messages": {"type": "array", "minItems": 1},
-                    "temperature": {"type": "number"},
-                    "top_p": {"type": "number"},
-                    "max_tokens": {"type": "integer"},
-                    "response_format": {"type": "object"},
-                    "tools": {"type": "array"},
-                    "tool_choice": {}
-                }
-            },
-            "output_schema": {"type": "object"},
-        }),
-        json!({
-            "id": "mistral.embeddings.create",
-            "summary": "Create Mistral embeddings",
-            "capability": "mistral.embeddings",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {
-                "type": "object",
-                "required": ["input"],
-                "properties": {
-                    "model": {"type": "string", "default": "mistral-embed"},
-                    "input": {}
-                }
-            },
-            "output_schema": {"type": "object"},
-        }),
-        json!({
-            "id": "mistral.audio.transcriptions",
-            "summary": "Transcribe an uploaded audio file with Mistral",
-            "capability": "mistral.audio",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["audio_base64"],
-                "properties": {
-                    "audio_base64": {"type": "string"},
-                    "filename": {"type": "string", "default": "audio.wav"},
-                    "content_type": {"type": "string", "default": "audio/wav"},
-                    "model": {"type": "string", "default": "voxtral-mini-transcribe"},
-                    "language": {"type": "string"},
-                    "prompt": {"type": "string"},
-                    "response_format": {"type": "string"},
-                    "temperature": {}
-                }
-            },
-            "output_schema": {"type": "object"},
-        }),
-        json!({
-            "id": "mistral.audio.realtime.transcribe",
-            "summary": "Run a finite Mistral realtime transcription WebSocket session",
-            "capability": "mistral.audio",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "none",
-            "input_schema": {
-                "type": "object",
-                "required": ["audio_base64"],
-                "properties": {
-                    "audio_base64": {"type": "string"},
-                    "audio_b64": {"type": "string"},
-                    "audio_chunks_base64": {"type": "array", "items": {"type": "string"}},
-                    "audio_chunks_b64": {"type": "array", "items": {"type": "string"}},
-                    "session_id": {"type": "string"},
-                    "model": {"type": "string", "default": DEFAULT_REALTIME_MODEL},
-                    "audio_format": {
-                        "type": "object",
-                        "properties": {
-                            "encoding": {"type": "string", "default": DEFAULT_REALTIME_ENCODING},
-                            "sample_rate": {"type": "integer", "default": DEFAULT_REALTIME_SAMPLE_RATE}
-                        }
-                    },
-                    "encoding": {"type": "string", "default": DEFAULT_REALTIME_ENCODING},
-                    "sample_rate": {"type": "integer", "default": DEFAULT_REALTIME_SAMPLE_RATE},
-                    "target_streaming_delay_ms": {"type": "integer", "default": DEFAULT_REALTIME_TARGET_DELAY_MS},
-                    "connect_timeout_ms": {"type": "integer", "default": DEFAULT_REALTIME_CONNECT_TIMEOUT_MS},
-                    "timeout_ms": {"type": "integer", "default": DEFAULT_REALTIME_TIMEOUT_MS},
-                    "max_events": {"type": "integer", "default": DEFAULT_REALTIME_MAX_EVENTS},
-                    "max_reconnect_attempts": {"type": "integer", "default": DEFAULT_REALTIME_MAX_RECONNECT_ATTEMPTS},
-                    "reconnect_delay_ms": {"type": "integer", "default": DEFAULT_REALTIME_RECONNECT_DELAY_MS}
-                }
-            },
-            "output_schema": {"type": "object"},
-        }),
-        json!({
-            "id": "mistral.models.list",
-            "summary": "List Mistral models",
-            "capability": "mistral.models",
-            "risk_level": "low",
-            "safety_tier": "safe",
-            "idempotency": "strict",
-            "input_schema": {"type": "object", "properties": {}},
-            "output_schema": {"type": "object"},
-        }),
-    ]
+    let manifest = match ConnectorManifest::parse_str_unchecked(MISTRAL_MANIFEST_TOML) {
+        Ok(manifest) => manifest,
+        Err(error) => {
+            tracing::error!(%error, "embedded Mistral manifest failed to parse");
+            return Vec::new();
+        }
+    };
+
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+
+    operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect()
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
 }
 
 const fn health_status(
@@ -1274,7 +1229,7 @@ fn mistral_realtime_audio_append(audio: &[u8]) -> Value {
     })
 }
 
-fn realtime_event_value(message: WsMessage) -> FcpResult<Value> {
+fn realtime_event_value(message: &WsMessage) -> FcpResult<Value> {
     message.json::<Value>().map_err(|error| FcpError::External {
         service: "mistral.realtime".into(),
         message: format!("Malformed realtime WebSocket JSON: {error}"),

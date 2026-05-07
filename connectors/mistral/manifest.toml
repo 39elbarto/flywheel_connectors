@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:mistral-realtime-transcription"
+interface_hash = "blake3-256:fcp.interface.v2:399a62d88c5b50a31d2aa1cd98fa404a0a7db16936e87683aeb823fe1096d1b4"
 
 [connector]
 id = "fcp.mistral"
 name = "Mistral"
 version = "0.1.0"
 description = "Mistral connector for chat, embeddings, file transcription, realtime transcription, and model discovery"
-archetypes = ["request-response", "streaming"]
+archetypes = ["operational", "streaming"]
 format = "native"
 
 [connector.state]
@@ -27,8 +27,369 @@ allowed_targets = ["z:work"]
 
 [capabilities]
 required = ["network.dns", "network.egress", "network.tls.sni"]
-optional = []
+optional = ["mistral.chat", "mistral.embeddings", "mistral.audio", "mistral.models"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."mistral.chat.completions"]
+description = "Create a Mistral chat completion"
+capability = "mistral.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mistral.chat.completions".input_schema]
+type = "object"
+required = ["messages"]
+
+[provides.operations."mistral.chat.completions".input_schema.properties.model]
+type = "string"
+default = "mistral-small-latest"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."mistral.chat.completions".input_schema.properties.temperature]
+type = "number"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.top_p]
+type = "number"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.max_tokens]
+type = "integer"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.response_format]
+type = "object"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.tools]
+type = "array"
+
+[provides.operations."mistral.chat.completions".input_schema.properties.tool_choice]
+
+[provides.operations."mistral.chat.completions".output_schema]
+type = "object"
+
+[provides.operations."mistral.chat.completions".network_constraints]
+host_allow = ["mistral.ai", "*.mistral.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."mistral.chat.completions".ai_hints]
+when_to_use = "Use for bounded non-streaming Mistral chat completions with caller-supplied messages."
+common_mistakes = ["Do not pass stream=true; this connector slice rejects streaming chat.", "Do not include API keys or private credentials in prompts or tool payloads."]
+examples = ['{"messages":[{"role":"user","content":"Summarize this release note"}],"model":"mistral-small-latest"}']
+related = ["mistral.models.list"]
+
+[provides.operations."mistral.embeddings.create"]
+description = "Create Mistral embeddings"
+capability = "mistral.embeddings"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."mistral.embeddings.create".input_schema]
+type = "object"
+required = ["input"]
+
+[provides.operations."mistral.embeddings.create".input_schema.properties.model]
+type = "string"
+default = "mistral-embed"
+
+[provides.operations."mistral.embeddings.create".input_schema.properties.input]
+
+[provides.operations."mistral.embeddings.create".output_schema]
+type = "object"
+
+[provides.operations."mistral.embeddings.create".network_constraints]
+host_allow = ["mistral.ai", "*.mistral.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."mistral.embeddings.create".ai_hints]
+when_to_use = "Use to embed text or text batches with Mistral's embedding endpoint."
+common_mistakes = ["Provide the input field; an empty object is rejected.", "Avoid embedding secrets or private credentials."]
+examples = ['{"input":"searchable text","model":"mistral-embed"}']
+related = ["mistral.models.list"]
+
+[provides.operations."mistral.audio.transcriptions"]
+description = "Transcribe an uploaded audio file with Mistral"
+capability = "mistral.audio"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mistral.audio.transcriptions".input_schema]
+type = "object"
+required = ["audio_base64"]
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.audio_base64]
+type = "string"
+minLength = 1
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.filename]
+type = "string"
+default = "audio.wav"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.content_type]
+type = "string"
+default = "audio/wav"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.model]
+type = "string"
+default = "voxtral-mini-transcribe"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.language]
+type = "string"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.prompt]
+type = "string"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.response_format]
+type = "string"
+
+[provides.operations."mistral.audio.transcriptions".input_schema.properties.temperature]
+
+[provides.operations."mistral.audio.transcriptions".output_schema]
+type = "object"
+
+[provides.operations."mistral.audio.transcriptions".network_constraints]
+host_allow = ["mistral.ai", "*.mistral.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 10485760
+
+[provides.operations."mistral.audio.transcriptions".ai_hints]
+when_to_use = "Use for finite offline audio transcription from a base64-encoded audio file."
+common_mistakes = ["Pass audio bytes as base64, not a filesystem path.", "Do not log or persist transcripts that contain private speech content."]
+examples = ['{"audio_base64":"<base64-wav>","filename":"note.wav","content_type":"audio/wav"}']
+related = ["mistral.audio.realtime.transcribe"]
+
+[provides.operations."mistral.audio.realtime.transcribe"]
+description = "Run a finite Mistral realtime transcription WebSocket session"
+capability = "mistral.audio"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+revocation_freshness = "safe"
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema]
+type = "object"
+
+[[provides.operations."mistral.audio.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_base64"]
+
+[[provides.operations."mistral.audio.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_b64"]
+
+[[provides.operations."mistral.audio.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_chunks_base64"]
+
+[[provides.operations."mistral.audio.realtime.transcribe".input_schema.anyOf]]
+required = ["audio_chunks_b64"]
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_base64]
+type = "string"
+minLength = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_b64]
+type = "string"
+minLength = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_chunks_base64]
+type = "array"
+minItems = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_chunks_base64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_chunks_b64]
+type = "array"
+minItems = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_chunks_b64.items]
+type = "string"
+minLength = 1
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.session_id]
+type = "string"
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.model]
+type = "string"
+default = "voxtral-mini-transcribe-realtime-2602"
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_format]
+type = "object"
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_format.properties.encoding]
+type = "string"
+default = "pcm_mulaw"
+enum = ["pcm_mulaw", "pcm_s16le"]
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.audio_format.properties.sample_rate]
+type = "integer"
+default = 8000
+minimum = 8000
+maximum = 48000
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.encoding]
+type = "string"
+default = "pcm_mulaw"
+enum = ["pcm_mulaw", "pcm_s16le"]
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.sample_rate]
+type = "integer"
+default = 8000
+minimum = 8000
+maximum = 48000
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.target_streaming_delay_ms]
+type = "integer"
+default = 800
+minimum = 0
+maximum = 30000
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.connect_timeout_ms]
+type = "integer"
+default = 10000
+minimum = 100
+maximum = 120000
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.timeout_ms]
+type = "integer"
+default = 30000
+minimum = 100
+maximum = 300000
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.max_events]
+type = "integer"
+default = 128
+minimum = 1
+maximum = 1024
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.max_reconnect_attempts]
+type = "integer"
+default = 5
+minimum = 0
+maximum = 5
+
+[provides.operations."mistral.audio.realtime.transcribe".input_schema.properties.reconnect_delay_ms]
+type = "integer"
+default = 1000
+minimum = 100
+maximum = 30000
+
+[provides.operations."mistral.audio.realtime.transcribe".output_schema]
+type = "object"
+
+[provides.operations."mistral.audio.realtime.transcribe".network_constraints]
+host_allow = ["mistral.ai", "*.mistral.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 300000
+max_response_bytes = 10485760
+
+[provides.operations."mistral.audio.realtime.transcribe".ai_hints]
+when_to_use = "Use for a bounded realtime transcription session when the caller already has audio bytes in memory."
+common_mistakes = ["This is a finite WebSocket session, not an unbounded microphone stream.", "Use either audio_base64/audio_b64 or audio_chunks_base64/audio_chunks_b64, not both."]
+examples = ['{"audio_base64":"<base64-mulaw>","encoding":"pcm_mulaw","sample_rate":8000,"timeout_ms":30000}']
+related = ["mistral.audio.transcriptions"]
+
+[provides.operations."mistral.models.list"]
+description = "List Mistral models"
+capability = "mistral.models"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."mistral.models.list".input_schema]
+type = "object"
+properties = {}
+
+[provides.operations."mistral.models.list".output_schema]
+type = "object"
+
+[provides.operations."mistral.models.list".network_constraints]
+host_allow = ["mistral.ai", "*.mistral.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 5
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 2097152
+
+[provides.operations."mistral.models.list".ai_hints]
+when_to_use = "Use to discover model identifiers before chat, embeddings, or transcription calls."
+common_mistakes = ["Do not assume a hard-coded model is available in every account or region."]
+examples = ["{}"]
+related = ["mistral.chat.completions", "mistral.embeddings.create", "mistral.audio.transcriptions"]
 
 [sandbox]
 profile = "strict"

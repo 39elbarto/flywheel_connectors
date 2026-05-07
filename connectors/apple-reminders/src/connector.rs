@@ -543,6 +543,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn manifest_declares_agent_actionable_ai_hints() {
+        for operation in [
+            OP_HEALTH,
+            OP_LIST_LISTS,
+            OP_LIST_REMINDERS,
+            OP_CREATE_REMINDER,
+            OP_COMPLETE_REMINDER,
+        ] {
+            let marker = format!("[provides.operations.\"{operation}\".ai_hints]");
+            let maybe_block = MANIFEST_TOML.split_once(&marker).map(|(_, remainder)| {
+                remainder
+                    .split_once("\n[provides.operations.")
+                    .map_or(remainder, |(block, _)| block)
+            });
+            assert!(
+                maybe_block.is_some(),
+                "{operation} missing manifest ai_hints block"
+            );
+            let block = maybe_block.unwrap_or_default();
+
+            assert!(
+                block.contains("when_to_use = "),
+                "{operation} missing when_to_use"
+            );
+            assert!(
+                block.contains("common_mistakes = ["),
+                "{operation} missing common_mistakes"
+            );
+            assert!(
+                block.contains("examples = ["),
+                "{operation} missing examples"
+            );
+        }
+    }
+
     #[fcp_async_core::runtime::test]
     async fn invoke_health_returns_status() {
         let mut connector = AppleRemindersConnector::new();

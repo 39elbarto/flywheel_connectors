@@ -41,6 +41,15 @@ safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
 
+[provides.operations."apple_reminders.health".ai_hints]
+when_to_use = "Use this before any Apple Reminders read or write operation to confirm the host is macOS and the connector is configured."
+common_mistakes = [
+    "Treating a passing health check as proof that the user has already granted Reminders automation permission; macOS can still prompt on first write.",
+    "Running this on non-macOS hosts and interpreting the unsupported-platform response as a connector outage.",
+]
+examples = ['{"check":"platform_and_configuration"}']
+related = ["apple_reminders.list_lists"]
+
 [provides.operations."apple_reminders.health".input_schema]
 type = "object"
 
@@ -54,6 +63,15 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_reminders.list_lists".ai_hints]
+when_to_use = "Use this when an agent needs the exact reminder-list names before listing or creating reminders."
+common_mistakes = [
+    "Assuming default list names such as Reminders or Work exist on every account.",
+    "Creating a reminder in a guessed list instead of listing available lists first.",
+]
+examples = ['{}']
+related = ["apple_reminders.list_reminders", "apple_reminders.create_reminder"]
 
 [provides.operations."apple_reminders.list_lists".input_schema]
 type = "object"
@@ -71,6 +89,15 @@ risk_level = "low"
 safety_tier = "safe"
 requires_approval = "none"
 idempotency = "strict"
+
+[provides.operations."apple_reminders.list_reminders".ai_hints]
+when_to_use = "Use this to inspect open reminder inventory in a known list or across all lists before deciding what to create or complete."
+common_mistakes = [
+    "Passing a display list name that was not returned by list_lists; macOS list names are user-controlled.",
+    "Treating returned reminder identifiers as portable across devices or accounts.",
+]
+examples = ['{"list_name":"Work"}']
+related = ["apple_reminders.list_lists", "apple_reminders.complete_reminder"]
 
 [provides.operations."apple_reminders.list_reminders".input_schema]
 type = "object"
@@ -91,6 +118,16 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "none"
+
+[provides.operations."apple_reminders.create_reminder".ai_hints]
+when_to_use = "Use this only after the user asks the agent to add a specific reminder to the local macOS Reminders app."
+common_mistakes = [
+    "Creating duplicate reminders after a retry because this operation is not idempotent.",
+    "Putting sensitive task details into the reminder title without confirming they belong in the user-visible Reminders app.",
+    "Assuming macOS automation permission has already been granted; first use may require user approval.",
+]
+examples = ['{"title":"Review deployment notes","list_name":"Work"}']
+related = ["apple_reminders.list_lists", "apple_reminders.list_reminders"]
 
 [provides.operations."apple_reminders.create_reminder".input_schema]
 required = ["title"]
@@ -115,6 +152,16 @@ risk_level = "medium"
 safety_tier = "risky"
 requires_approval = "policy"
 idempotency = "best_effort"
+
+[provides.operations."apple_reminders.complete_reminder".ai_hints]
+when_to_use = "Use this after listing reminders and selecting the exact reminder identifier that the user wants marked complete."
+common_mistakes = [
+    "Completing by title text instead of the stable reminder_id returned from list_reminders.",
+    "Reusing a reminder_id from another account, host, or stale list snapshot.",
+    "Skipping confirmation when multiple reminders have similar titles.",
+]
+examples = ['{"reminder_id":"x-apple-reminder://A1B2C3"}']
+related = ["apple_reminders.list_reminders"]
 
 [provides.operations."apple_reminders.complete_reminder".input_schema]
 required = ["reminder_id"]

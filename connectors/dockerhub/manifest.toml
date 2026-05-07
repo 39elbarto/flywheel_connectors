@@ -28,6 +28,59 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.repos_list.input_schema]
+type = "object"
+required = ["namespace"]
+additionalProperties = false
+
+[provides.operations.repos_list.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization whose repositories should be listed."
+
+[provides.operations.repos_list.output_schema]
+type = "array"
+
+[provides.operations.repos_list.output_schema.items]
+type = "object"
+required = ["name", "namespace"]
+additionalProperties = false
+
+[provides.operations.repos_list.output_schema.items.properties.name]
+type = "string"
+
+[provides.operations.repos_list.output_schema.items.properties.namespace]
+type = "string"
+
+[provides.operations.repos_list.output_schema.items.properties.description]
+type = ["string", "null"]
+
+[provides.operations.repos_list.output_schema.items.properties.is_private]
+type = ["boolean", "null"]
+
+[provides.operations.repos_list.output_schema.items.properties.star_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_list.output_schema.items.properties.pull_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_list.output_schema.items.properties.last_updated]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_list.output_schema.items.properties.date_registered]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_list.output_schema.items.properties.status]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_list.output_schema.items.properties.full_description]
+type = ["string", "null"]
+
 [provides.operations.repos_list.network_constraints]
 host_allow = ["hub.docker.com"]
 port_allow = [443]
@@ -45,6 +98,61 @@ capability = "dockerhub.repos.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.repos_get.input_schema]
+type = "object"
+required = ["namespace", "name"]
+additionalProperties = false
+
+[provides.operations.repos_get.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization that owns the repository."
+
+[provides.operations.repos_get.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name within the namespace."
+
+[provides.operations.repos_get.output_schema]
+type = "object"
+required = ["name", "namespace"]
+additionalProperties = false
+
+[provides.operations.repos_get.output_schema.properties.name]
+type = "string"
+
+[provides.operations.repos_get.output_schema.properties.namespace]
+type = "string"
+
+[provides.operations.repos_get.output_schema.properties.description]
+type = ["string", "null"]
+
+[provides.operations.repos_get.output_schema.properties.is_private]
+type = ["boolean", "null"]
+
+[provides.operations.repos_get.output_schema.properties.star_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_get.output_schema.properties.pull_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_get.output_schema.properties.last_updated]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_get.output_schema.properties.date_registered]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_get.output_schema.properties.status]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_get.output_schema.properties.full_description]
+type = ["string", "null"]
 
 [provides.operations.repos_get.network_constraints]
 host_allow = ["hub.docker.com"]
@@ -64,6 +172,74 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
 
+[provides.operations.repos_create.input_schema]
+type = "object"
+required = ["namespace", "name"]
+additionalProperties = false
+
+[provides.operations.repos_create.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization where the repository will be created."
+
+[provides.operations.repos_create.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name to create."
+
+[provides.operations.repos_create.input_schema.properties.description]
+type = "string"
+description = "Short repository description."
+
+[provides.operations.repos_create.input_schema.properties.is_private]
+type = "boolean"
+default = false
+description = "Whether the repository should be private."
+
+[provides.operations.repos_create.input_schema.properties.full_description]
+type = "string"
+description = "Long-form repository description."
+
+[provides.operations.repos_create.output_schema]
+type = "object"
+required = ["name", "namespace"]
+additionalProperties = false
+
+[provides.operations.repos_create.output_schema.properties.name]
+type = "string"
+
+[provides.operations.repos_create.output_schema.properties.namespace]
+type = "string"
+
+[provides.operations.repos_create.output_schema.properties.description]
+type = ["string", "null"]
+
+[provides.operations.repos_create.output_schema.properties.is_private]
+type = ["boolean", "null"]
+
+[provides.operations.repos_create.output_schema.properties.star_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_create.output_schema.properties.pull_count]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_create.output_schema.properties.last_updated]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_create.output_schema.properties.date_registered]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.repos_create.output_schema.properties.status]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.repos_create.output_schema.properties.full_description]
+type = ["string", "null"]
+
 [provides.operations.repos_create.network_constraints]
 host_allow = ["hub.docker.com"]
 port_allow = [443]
@@ -81,6 +257,36 @@ capability = "dockerhub.repos.write"
 risk = "critical"
 safety_tier = "dangerous"
 idempotency = "strict"
+
+[provides.operations.repos_delete.input_schema]
+type = "object"
+required = ["namespace", "name"]
+additionalProperties = false
+
+[provides.operations.repos_delete.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization that owns the repository."
+
+[provides.operations.repos_delete.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name to delete."
+
+[provides.operations.repos_delete.output_schema]
+type = "object"
+required = ["deleted", "namespace", "name"]
+additionalProperties = false
+
+[provides.operations.repos_delete.output_schema.properties.deleted]
+type = "boolean"
+const = true
+
+[provides.operations.repos_delete.output_schema.properties.namespace]
+type = "string"
+
+[provides.operations.repos_delete.output_schema.properties.name]
+type = "string"
 
 [provides.operations.repos_delete.network_constraints]
 host_allow = ["hub.docker.com"]
@@ -100,6 +306,76 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.tags_list.input_schema]
+type = "object"
+required = ["namespace", "name"]
+additionalProperties = false
+
+[provides.operations.tags_list.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization that owns the repository."
+
+[provides.operations.tags_list.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name whose tags should be listed."
+
+[provides.operations.tags_list.output_schema]
+type = "array"
+
+[provides.operations.tags_list.output_schema.items]
+type = "object"
+required = ["name"]
+additionalProperties = false
+
+[provides.operations.tags_list.output_schema.items.properties.name]
+type = "string"
+
+[provides.operations.tags_list.output_schema.items.properties.full_size]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_list.output_schema.items.properties.images]
+type = ["array", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.images.items]
+type = "object"
+additionalProperties = false
+
+[provides.operations.tags_list.output_schema.items.properties.images.items.properties.architecture]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.images.items.properties.os]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.images.items.properties.size]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_list.output_schema.items.properties.images.items.properties.digest]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.last_updated]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.tags_list.output_schema.items.properties.last_updater]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_list.output_schema.items.properties.last_updater_username]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.tag_status]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.digest]
+type = ["string", "null"]
+
+[provides.operations.tags_list.output_schema.items.properties.content_type]
+type = ["string", "null"]
+
 [provides.operations.tags_list.network_constraints]
 host_allow = ["hub.docker.com"]
 port_allow = [443]
@@ -117,6 +393,78 @@ capability = "dockerhub.repos.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.tags_get.input_schema]
+type = "object"
+required = ["namespace", "name", "tag"]
+additionalProperties = false
+
+[provides.operations.tags_get.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization that owns the repository."
+
+[provides.operations.tags_get.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name that owns the tag."
+
+[provides.operations.tags_get.input_schema.properties.tag]
+type = "string"
+minLength = 1
+description = "Tag name to inspect."
+
+[provides.operations.tags_get.output_schema]
+type = "object"
+required = ["name"]
+additionalProperties = false
+
+[provides.operations.tags_get.output_schema.properties.name]
+type = "string"
+
+[provides.operations.tags_get.output_schema.properties.full_size]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_get.output_schema.properties.images]
+type = ["array", "null"]
+
+[provides.operations.tags_get.output_schema.properties.images.items]
+type = "object"
+additionalProperties = false
+
+[provides.operations.tags_get.output_schema.properties.images.items.properties.architecture]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.images.items.properties.os]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.images.items.properties.size]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_get.output_schema.properties.images.items.properties.digest]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.last_updated]
+type = ["string", "null"]
+format = "date-time"
+
+[provides.operations.tags_get.output_schema.properties.last_updater]
+type = ["integer", "null"]
+minimum = 0
+
+[provides.operations.tags_get.output_schema.properties.last_updater_username]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.tag_status]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.digest]
+type = ["string", "null"]
+
+[provides.operations.tags_get.output_schema.properties.content_type]
+type = ["string", "null"]
 
 [provides.operations.tags_get.network_constraints]
 host_allow = ["hub.docker.com"]
@@ -136,6 +484,44 @@ risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
 
+[provides.operations.tags_delete.input_schema]
+type = "object"
+required = ["namespace", "name", "tag"]
+additionalProperties = false
+
+[provides.operations.tags_delete.input_schema.properties.namespace]
+type = "string"
+minLength = 1
+description = "Docker Hub namespace, username, or organization that owns the repository."
+
+[provides.operations.tags_delete.input_schema.properties.name]
+type = "string"
+minLength = 1
+description = "Repository name that owns the tag."
+
+[provides.operations.tags_delete.input_schema.properties.tag]
+type = "string"
+minLength = 1
+description = "Tag name to delete."
+
+[provides.operations.tags_delete.output_schema]
+type = "object"
+required = ["deleted", "namespace", "name", "tag"]
+additionalProperties = false
+
+[provides.operations.tags_delete.output_schema.properties.deleted]
+type = "boolean"
+const = true
+
+[provides.operations.tags_delete.output_schema.properties.namespace]
+type = "string"
+
+[provides.operations.tags_delete.output_schema.properties.name]
+type = "string"
+
+[provides.operations.tags_delete.output_schema.properties.tag]
+type = "string"
+
 [provides.operations.tags_delete.network_constraints]
 host_allow = ["hub.docker.com"]
 port_allow = [443]
@@ -154,6 +540,37 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.orgs_list.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.orgs_list.output_schema]
+type = "array"
+
+[provides.operations.orgs_list.output_schema.items]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.orgs_list.output_schema.items.properties.id]
+type = "string"
+
+[provides.operations.orgs_list.output_schema.items.properties.orgname]
+type = ["string", "null"]
+
+[provides.operations.orgs_list.output_schema.items.properties.full_name]
+type = ["string", "null"]
+
+[provides.operations.orgs_list.output_schema.items.properties.location]
+type = ["string", "null"]
+
+[provides.operations.orgs_list.output_schema.items.properties.company]
+type = ["string", "null"]
+
+[provides.operations.orgs_list.output_schema.items.properties.date_joined]
+type = ["string", "null"]
+format = "date-time"
+
 [provides.operations.orgs_list.network_constraints]
 host_allow = ["hub.docker.com"]
 port_allow = [443]
@@ -171,6 +588,25 @@ capability = "dockerhub.repos.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.health.output_schema]
+type = "object"
+required = ["healthy", "user_id", "username"]
+additionalProperties = false
+
+[provides.operations.health.output_schema.properties.healthy]
+type = "boolean"
+const = true
+
+[provides.operations.health.output_schema.properties.user_id]
+type = "string"
+
+[provides.operations.health.output_schema.properties.username]
+type = ["string", "null"]
 
 [provides.operations.health.network_constraints]
 host_allow = ["hub.docker.com"]

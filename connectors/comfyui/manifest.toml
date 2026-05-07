@@ -1,0 +1,147 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = []
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:b4b58570bb1c1493f3feca80108c2227ec5c05d8f684e4dcdf3504a1fb67bb3f"
+
+[connector]
+id = "fcp.comfyui"
+name = "ComfyUI"
+version = "0.1.0"
+description = "Self-hosted ComfyUI workflow connector using REST /prompt, /history, /view URL metadata, /queue, /interrupt, and /system_stats"
+archetypes = ["operational"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Stores no durable state. Configuration is base_url, optional authorization header or credential_id, explicit non-loopback allowed_hosts, and private/tailnet opt-in flags."
+
+[zones]
+home = "z:owner"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:default"]
+allowed_targets = ["z:owner", "z:private", "z:work", "z:project:default"]
+forbidden = ["z:public"]
+
+[capabilities]
+required = ["network.egress"]
+optional = ["comfyui.workflow.run", "comfyui.workflow.read", "comfyui.health.read"]
+forbidden = ["system.exec", "network.listen"]
+
+# Deliberate self-hosted exception: ComfyUI usually runs on localhost or a
+# tailnet/private host behind operator-managed auth. The Rust connector still
+# validates base_url at configure time: loopback is allowed by default; every
+# non-loopback host must be listed in allowed_hosts, and private/tailnet ranges
+# require explicit allow_private_ranges/allow_tailnet_ranges configuration.
+[sandbox]
+profile = "strict"
+memory_mb = 128
+cpu_percent = 25
+wall_clock_timeout_ms = 600000
+deny_exec = true
+deny_ptrace = true
+
+[provides.operations."comfyui.workflow.submit"]
+description = "Submit pass-through ComfyUI workflow JSON through POST /prompt and return prompt_id without logging workflow contents."
+capability = "comfyui.workflow.run"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+input_schema = { type = "object", required = ["workflow"], properties = { workflow = { type = "object" }, prompt = { type = "object" }, client_id = { type = "string" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.workflow.submit".ai_hints]
+when_to_use = "Use to queue an operator-authored ComfyUI workflow on a configured self-hosted server."
+common_mistakes = ["Do not log workflow JSON, prompts, seeds, or input URLs.", "Do not expect the connector to validate node graph structure.", "Non-loopback endpoints require explicit allowed_hosts and private/tailnet opt-in where applicable."]
+examples = ['{"workflow":{"3":{"class_type":"KSampler","inputs":{}}}}']
+related = ["comfyui.workflow.status", "comfyui.workflow.result"]
+
+[provides.operations."comfyui.workflow.status"]
+description = "Poll workflow status through GET /history/{prompt_id}; complete is true when history contains the prompt id."
+capability = "comfyui.workflow.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["prompt_id"], properties = { prompt_id = { type = "string" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.workflow.status".ai_hints]
+when_to_use = "Use to poll a queued workflow without fetching output bytes."
+common_mistakes = ["ComfyUI REST history is the source of truth for completed outputs.", "The connector does not proxy generated image bytes."]
+examples = ['{"prompt_id":"prompt-123"}']
+related = ["comfyui.workflow.result", "comfyui.workflow.wait_until_complete"]
+
+[provides.operations."comfyui.workflow.result"]
+description = "Build ComfyUI /view output URLs from GET /history/{prompt_id}; binary image bytes are never proxied through the connector."
+capability = "comfyui.workflow.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["prompt_id"], properties = { prompt_id = { type = "string" } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.workflow.result".ai_hints]
+when_to_use = "Use after status completion to inspect output metadata and /view URLs."
+common_mistakes = ["Do not log full output URLs; log host class and hashes.", "Do not assume signed URL behavior for local ComfyUI; this connector returns ComfyUI /view URLs."]
+examples = ['{"prompt_id":"prompt-123"}']
+related = ["comfyui.workflow.status"]
+
+[provides.operations."comfyui.workflow.cancel"]
+description = "Cancel a queued ComfyUI workflow through POST /queue and optionally interrupt the active run with POST /interrupt."
+capability = "comfyui.workflow.run"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "best_effort"
+input_schema = { type = "object", required = ["prompt_id"], properties = { prompt_id = { type = "string" }, interrupt_running = { type = "boolean", default = false } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.workflow.cancel".ai_hints]
+when_to_use = "Use to remove a queued workflow or explicitly interrupt a running workflow."
+common_mistakes = ["Do not set interrupt_running=true unless the operator intends to stop the active ComfyUI execution."]
+examples = ['{"prompt_id":"prompt-123","interrupt_running":false}']
+related = ["comfyui.workflow.submit"]
+
+[provides.operations."comfyui.workflow.wait_until_complete"]
+description = "Opt-in bounded REST polling loop that waits for /history/{prompt_id} completion and returns output URL metadata."
+capability = "comfyui.workflow.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", required = ["prompt_id"], properties = { prompt_id = { type = "string" }, timeout_ms = { type = "integer", minimum = 1 }, poll_interval_ms = { type = "integer", minimum = 1, maximum = 60000 } } }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 10000, total_timeout_ms = 600000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.workflow.wait_until_complete".ai_hints]
+when_to_use = "Use when the caller explicitly wants connector-side bounded polling."
+common_mistakes = ["Set an explicit timeout for slow workflows.", "Prefer status/result if the agent wants to own polling."]
+examples = ['{"prompt_id":"prompt-123","timeout_ms":60000,"poll_interval_ms":1000}']
+related = ["comfyui.workflow.status", "comfyui.workflow.result"]
+
+[provides.operations."comfyui.health"]
+description = "Probe a ComfyUI server through GET /system_stats."
+capability = "comfyui.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+input_schema = { type = "object", properties = {} }
+output_schema = { type = "object" }
+network_constraints = { host_allow = ["localhost", "127.0.0.1", "::1"], port_allow = [8188, 443, 80], ip_allow = [], cidr_deny = [], require_sni = false, spki_pins = [], deny_localhost = false, deny_private_ranges = false, deny_tailnet_ranges = false, deny_ip_literals = false, require_host_canonicalization = true, dns_max_ips = 16, max_redirects = 0, connect_timeout_ms = 5000, total_timeout_ms = 10000, max_response_bytes = 10485760 }
+
+[provides.operations."comfyui.health".ai_hints]
+when_to_use = "Use for a bounded readiness check before dispatching workflow work."
+common_mistakes = ["Unauthenticated health is normal for default local ComfyUI deployments.", "Do not expose full base_url values in logs."]
+examples = ["{}"]
+related = ["comfyui.workflow.submit"]

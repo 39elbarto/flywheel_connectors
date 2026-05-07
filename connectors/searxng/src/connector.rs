@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::{BaseConnector, ConnectorId, FcpError, FcpResult};
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderName, HeaderValue, USER_AGENT};
 use reqwest::{Client, Method, RequestBuilder, StatusCode};
@@ -13,6 +14,7 @@ use url::Url;
 
 pub const CONNECTOR_ID: &str = "fcp.searxng";
 pub const CONNECTOR_VERSION: &str = "0.1.0";
+const SEARXNG_MANIFEST_TOML: &str = include_str!("../manifest.toml");
 
 const DEFAULT_USER_AGENT: &str = "Mozilla/5.0 (compatible; FCP-SearXNG/0.1; +https://github.com/Dicklesworthstone/flywheel_connectors)";
 const DEFAULT_LANGUAGE: &str = "en";
@@ -24,6 +26,7 @@ const OP_QUERY: &str = "searxng.search.query";
 const OP_IMAGES: &str = "searxng.search.images";
 const OP_NEWS: &str = "searxng.search.news";
 const OP_HEALTH: &str = "searxng.health";
+const OPERATION_ORDER: [&str; 4] = [OP_QUERY, OP_IMAGES, OP_NEWS, OP_HEALTH];
 
 const CAP_SEARCH: &str = "searxng.search.read";
 
@@ -576,21 +579,7 @@ impl SearxngConnector {
         Ok(json!({
             "connector_id": CONNECTOR_ID,
             "version": CONNECTOR_VERSION,
-            "operations": [
-                operation_schema(OP_QUERY, "Run a SearXNG JSON text/meta-search"),
-                operation_schema(OP_IMAGES, "Run a SearXNG image search"),
-                operation_schema(OP_NEWS, "Run a SearXNG news search"),
-                {
-                    "id": OP_HEALTH,
-                    "summary": "Probe SearXNG /stats health",
-                    "capability": CAP_SEARCH,
-                    "risk_level": "low",
-                    "safety_tier": "safe",
-                    "idempotency": "strict",
-                    "input_schema": {"type": "object"},
-                    "output_schema": {"type": "object"}
-                }
-            ],
+            "operations": operations_info()?,
             "events": [],
             "resource_types": []
         }))
@@ -661,30 +650,64 @@ impl Default for SearxngConnector {
     }
 }
 
-fn operation_schema(id: &str, summary: &str) -> Value {
-    json!({
-        "id": id,
-        "summary": summary,
-        "capability": CAP_SEARCH,
-        "risk_level": "low",
-        "safety_tier": "safe",
-        "idempotency": "strict",
-        "input_schema": {
-            "type": "object",
-            "required": ["query"],
-            "properties": {
-                "query": {"type": "string", "maxLength": MAX_QUERY_CHARS},
-                "language": {"type": "string"},
-                "safe_search": {"type": "string", "enum": ["off", "moderate", "strict"]},
-                "time_range": {"type": "string", "enum": ["day", "week", "month", "year"]},
-                "page": {"type": "integer", "minimum": 1},
-                "max_results": {"type": "integer", "minimum": 1, "maximum": MAX_RESULTS},
-                "categories": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]},
-                "engines": {"oneOf": [{"type": "string"}, {"type": "array", "items": {"type": "string"}}]}
-            }
-        },
-        "output_schema": {"type": "object"}
-    })
+fn operations_info() -> FcpResult<Vec<Value>> {
+    let manifest = ConnectorManifest::parse_str(SEARXNG_MANIFEST_TOML).map_err(|error| {
+        FcpError::Internal {
+            message: format!("Embedded SearXNG manifest is invalid: {error}"),
+        }
+    })?;
+    let mut operations: Vec<_> = manifest.provides.operations.into_iter().collect();
+    operations.sort_by(|(left, _), (right, _)| {
+        let left_index = operation_order(left);
+        let right_index = operation_order(right);
+        left_index.cmp(&right_index).then_with(|| left.cmp(right))
+    });
+    Ok(operations
+        .into_iter()
+        .map(|(id, operation)| operation_info_from_manifest(id, operation))
+        .collect())
+}
+
+fn operation_order(operation_id: &str) -> usize {
+    OPERATION_ORDER
+        .iter()
+        .position(|candidate| *candidate == operation_id)
+        .unwrap_or(OPERATION_ORDER.len())
+}
+
+fn operation_info_from_manifest(id: String, operation: fcp_manifest::OperationSection) -> Value {
+    let mut entry = serde_json::Map::new();
+    entry.insert("id".into(), Value::String(id));
+    entry.insert(
+        "summary".into(),
+        Value::String(operation.description.clone()),
+    );
+    entry.insert("description".into(), Value::String(operation.description));
+    entry.insert(
+        "capability".into(),
+        Value::String(operation.capability.as_str().to_string()),
+    );
+    entry.insert("risk_level".into(), json!(operation.risk_level));
+    entry.insert("safety_tier".into(), json!(operation.safety_tier));
+    entry.insert("idempotency".into(), json!(operation.idempotency));
+    entry.insert(
+        "requires_approval".into(),
+        json!(operation.requires_approval),
+    );
+    entry.insert(
+        "revocation_freshness".into(),
+        json!(operation.revocation_freshness),
+    );
+    entry.insert("input_schema".into(), operation.input_schema);
+    entry.insert("output_schema".into(), operation.output_schema);
+    entry.insert("ai_hints".into(), json!(operation.ai_hints));
+    if let Some(rate_limit) = operation.rate_limit {
+        entry.insert("rate_limit".into(), json!(rate_limit));
+    }
+    if let Some(network_constraints) = operation.network_constraints {
+        entry.insert("network_constraints".into(), json!(network_constraints));
+    }
+    Value::Object(entry)
 }
 
 const fn health_status(configured: bool, handshaken: bool) -> &'static str {
@@ -1081,6 +1104,264 @@ fn map_reqwest_error(error: &reqwest::Error) -> FcpError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use jsonschema::Validator;
+
+    fn searxng_manifest_unchecked() -> ConnectorManifest {
+        ConnectorManifest::parse_str_unchecked(SEARXNG_MANIFEST_TOML)
+            .expect("SearXNG manifest should parse before hash validation")
+    }
+
+    fn manifest_input_schema<'a>(manifest: &'a ConnectorManifest, operation_id: &str) -> &'a Value {
+        &manifest
+            .provides
+            .operations
+            .get(operation_id)
+            .expect("manifest operation should be declared")
+            .input_schema
+    }
+
+    fn operation<'a>(introspection: &'a Value, operation_id: &str) -> &'a Value {
+        introspection
+            .get("operations")
+            .and_then(Value::as_array)
+            .and_then(|operations| {
+                operations.iter().find(|operation| {
+                    operation.get("id").and_then(Value::as_str) == Some(operation_id)
+                })
+            })
+            .expect("operation should be present")
+    }
+
+    fn json_string<T: serde::Serialize>(value: T) -> String {
+        serde_json::to_value(value)
+            .expect("value should serialize")
+            .as_str()
+            .expect("serialized value should be a string")
+            .to_string()
+    }
+
+    fn validator_for(schema: &Value) -> Validator {
+        Validator::new(schema).expect("manifest operation schema should compile")
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        let errors: Vec<_> = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "schema should accept {payload}; errors: {errors:?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = validator_for(schema);
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject {payload}"
+        );
+    }
+
+    #[test]
+    fn manifest_declares_valid_operation_metadata() {
+        let unchecked = searxng_manifest_unchecked();
+        let expected_hash = unchecked
+            .compute_interface_hash()
+            .expect("interface hash should compute");
+        assert_eq!(
+            unchecked.manifest.interface_hash.to_string(),
+            expected_hash.to_string(),
+            "update connectors/searxng/manifest.toml interface_hash to {expected_hash}"
+        );
+
+        let manifest = ConnectorManifest::parse_str(SEARXNG_MANIFEST_TOML)
+            .expect("embedded manifest should validate");
+        assert_eq!(manifest.provides.operations.len(), OPERATION_ORDER.len());
+
+        for operation_id in OPERATION_ORDER {
+            let operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("operation should be declared");
+            assert_eq!(operation.capability.as_str(), CAP_SEARCH);
+            assert_eq!(json!(operation.risk_level), json!("low"));
+            assert_eq!(json!(operation.safety_tier), json!("safe"));
+            assert_eq!(json!(operation.idempotency), json!("strict"));
+            assert_eq!(json!(operation.requires_approval), json!("none"));
+            assert!(
+                !operation.ai_hints.when_to_use.trim().is_empty(),
+                "{operation_id} should declare AI guidance"
+            );
+
+            let network_constraints = operation
+                .network_constraints
+                .as_ref()
+                .expect("operation should declare network constraints");
+            assert_eq!(
+                network_constraints.host_allow,
+                vec!["operator-configured".to_string()]
+            );
+            assert_eq!(network_constraints.port_allow, vec![80, 443, 8080, 8888]);
+            assert!(!network_constraints.require_sni);
+            assert!(!network_constraints.deny_localhost);
+            assert!(!network_constraints.deny_private_ranges);
+            assert!(!network_constraints.deny_tailnet_ranges);
+        }
+
+        let query = manifest
+            .provides
+            .operations
+            .get(OP_QUERY)
+            .expect("query operation should be declared");
+        assert_eq!(query.input_schema["required"], json!(["query"]));
+        assert_eq!(
+            query.input_schema["properties"]["query"]["maxLength"],
+            json!(MAX_QUERY_CHARS)
+        );
+        assert!(
+            query.input_schema["properties"]["max_results"]
+                .get("maximum")
+                .is_none(),
+            "schema must not reject runtime-supported clamp-above-bound values"
+        );
+        assert!(
+            query.input_schema["properties"]["categories"]
+                .get("oneOf")
+                .is_some()
+        );
+
+        let health = manifest
+            .provides
+            .operations
+            .get(OP_HEALTH)
+            .expect("health operation should be declared");
+        assert!(
+            health.input_schema.get("required").is_none(),
+            "health input must not require query"
+        );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn introspection_uses_manifest_operation_metadata() {
+        let manifest = ConnectorManifest::parse_str(SEARXNG_MANIFEST_TOML)
+            .expect("embedded manifest should validate");
+        let connector = SearxngConnector::new();
+        let introspection = connector
+            .handle_introspect()
+            .await
+            .expect("introspection should succeed");
+        let runtime_operations = introspection["operations"]
+            .as_array()
+            .expect("operations should be an array");
+        let runtime_ids: Vec<_> = runtime_operations
+            .iter()
+            .map(|operation| {
+                operation
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .expect("operation id should be a string")
+            })
+            .collect();
+        assert_eq!(runtime_ids, OPERATION_ORDER);
+
+        for operation_id in OPERATION_ORDER {
+            let manifest_operation = manifest
+                .provides
+                .operations
+                .get(operation_id)
+                .expect("manifest operation should be declared");
+            let runtime_operation = operation(&introspection, operation_id);
+
+            assert_eq!(
+                runtime_operation.get("summary").and_then(Value::as_str),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                runtime_operation.get("description").and_then(Value::as_str),
+                Some(manifest_operation.description.as_str())
+            );
+            assert_eq!(
+                runtime_operation.get("capability").and_then(Value::as_str),
+                Some(manifest_operation.capability.as_str())
+            );
+            assert_eq!(
+                runtime_operation
+                    .get("risk_level")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                Some(json_string(manifest_operation.risk_level))
+            );
+            assert_eq!(
+                runtime_operation
+                    .get("safety_tier")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                Some(json_string(manifest_operation.safety_tier))
+            );
+            assert_eq!(
+                runtime_operation
+                    .get("idempotency")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                Some(json_string(manifest_operation.idempotency))
+            );
+            assert_eq!(
+                runtime_operation
+                    .get("requires_approval")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned),
+                Some(json_string(manifest_operation.requires_approval))
+            );
+            assert_eq!(
+                runtime_operation.get("input_schema"),
+                Some(&manifest_operation.input_schema)
+            );
+            assert_eq!(
+                runtime_operation.get("output_schema"),
+                Some(&manifest_operation.output_schema)
+            );
+            assert!(
+                runtime_operation.get("network_constraints").is_some(),
+                "{operation_id} should expose network constraints"
+            );
+            assert!(
+                runtime_operation.get("ai_hints").is_some(),
+                "{operation_id} should expose AI guidance"
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_input_schemas_validate_representative_payloads() {
+        let manifest = searxng_manifest_unchecked();
+        let search_payload = json!({
+            "query": "rust privacy",
+            "language": "en-us",
+            "safe_search": "strict",
+            "time_range": "month",
+            "page": 2,
+            "pageno": 2,
+            "max_results": MAX_RESULTS + 10,
+            "categories": ["general", "science"],
+            "engines": "duckduckgo,brave"
+        });
+
+        for operation_id in [OP_QUERY, OP_IMAGES, OP_NEWS] {
+            let schema = manifest_input_schema(&manifest, operation_id);
+            assert_schema_accepts(schema, &search_payload);
+            assert_schema_rejects(schema, &json!({}));
+            assert_schema_rejects(schema, &json!({"query": ""}));
+            assert_schema_rejects(schema, &json!({"query": "rust", "page": 0}));
+        }
+
+        let health_schema = manifest_input_schema(&manifest, OP_HEALTH);
+        assert_schema_accepts(health_schema, &json!({}));
+        assert_schema_accepts(health_schema, &json!({"probe": "stats"}));
+    }
 
     #[test]
     fn base_url_requires_explicit_loopback_private_and_tailnet_opt_in() {

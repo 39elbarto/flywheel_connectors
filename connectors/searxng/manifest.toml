@@ -5,14 +5,14 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:searxng-self-hosted-privacy-search"
+interface_hash = "blake3-256:fcp.interface.v2:c40f06a53d77fb463921d6213e7b31225cefb8829e719a37063864e7cdcfa0e3"
 
 [connector]
 id = "fcp.searxng"
 name = "SearXNG"
 version = "0.1.0"
 description = "Self-hosted SearXNG privacy meta-search connector with operator-configured host policy, no commercial fallback, and redacted query/result evidence"
-archetypes = ["request-response"]
+archetypes = ["operational"]
 format = "native"
 
 [connector.state]
@@ -28,8 +28,461 @@ forbidden = ["z:community"]
 
 [capabilities]
 required = ["network.dns", "network.egress"]
-optional = ["network.tls.sni"]
+optional = ["network.tls.sni", "searxng.search.read"]
 forbidden = ["network.listen", "system.exec"]
+
+[provides.operations."searxng.search.query"]
+description = "Run a read-only SearXNG JSON text/meta-search against the operator-configured instance."
+capability = "searxng.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."searxng.search.query".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."searxng.search.query".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 512
+description = "Search query text. Runtime hashes query text in connector outputs and logs."
+
+[provides.operations."searxng.search.query".input_schema.properties.language]
+type = "string"
+minLength = 1
+maxLength = 64
+pattern = "^[A-Za-z0-9._-]+$"
+description = "Optional SearXNG language token; defaults to connector configuration."
+
+[provides.operations."searxng.search.query".input_schema.properties.safe_search]
+type = "string"
+enum = ["off", "none", "0", "moderate", "medium", "1", "strict", "2"]
+description = "Safe-search setting accepted by the connector and translated to SearXNG safesearch levels."
+
+[provides.operations."searxng.search.query".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year", "d", "w", "m", "y"]
+
+[provides.operations."searxng.search.query".input_schema.properties.page]
+type = "integer"
+minimum = 1
+description = "SearXNG page number; alias pageno is also accepted."
+
+[provides.operations."searxng.search.query".input_schema.properties.pageno]
+type = "integer"
+minimum = 1
+description = "Alias for page."
+
+[provides.operations."searxng.search.query".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+description = "Runtime clamps values above 50 to the connector result bound."
+
+[provides.operations."searxng.search.query".input_schema.properties.categories]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+description = "Optional comma-separated string or array of SearXNG category identifiers."
+
+[provides.operations."searxng.search.query".input_schema.properties.engines]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+description = "Optional comma-separated string or array of SearXNG engine identifiers."
+
+[provides.operations."searxng.search.query".output_schema]
+type = "object"
+required = ["provider", "mode", "base_url_class", "query_hash", "language", "safe_search", "page", "categories", "engines", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."searxng.search.query".output_schema.properties.provider]
+type = "string"
+enum = ["searxng"]
+
+[provides.operations."searxng.search.query".output_schema.properties.mode]
+type = "string"
+enum = ["query"]
+
+[provides.operations."searxng.search.query".output_schema.properties.base_url_class]
+type = "string"
+enum = ["loopback", "private", "tailnet", "operator-http-host", "public-https"]
+
+[provides.operations."searxng.search.query".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."searxng.search.query".output_schema.properties.language]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.safe_search]
+type = "string"
+enum = ["off", "moderate", "strict"]
+
+[provides.operations."searxng.search.query".output_schema.properties.time_range]
+type = ["string", "null"]
+
+[provides.operations."searxng.search.query".output_schema.properties.page]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.query".output_schema.properties.categories]
+type = "array"
+
+[provides.operations."searxng.search.query".output_schema.properties.categories.items]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.engines]
+type = "array"
+
+[provides.operations."searxng.search.query".output_schema.properties.engines.items]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.count]
+type = "integer"
+minimum = 0
+
+[provides.operations."searxng.search.query".output_schema.properties.results]
+type = "array"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.position]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.title]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.url]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.hostname]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.snippet]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.engine]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.category]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.score]
+type = ["number", "null"]
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.published_at]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.results.items.properties.image_url]
+type = "string"
+
+[provides.operations."searxng.search.query".output_schema.properties.suggestions]
+type = "array"
+
+[provides.operations."searxng.search.query".output_schema.properties.answers]
+type = "array"
+
+[provides.operations."searxng.search.query".output_schema.properties.infobox_count]
+type = "integer"
+minimum = 0
+
+[provides.operations."searxng.search.query".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.query".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [80, 443, 8080, 8888]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 20000
+max_response_bytes = 2097152
+
+[provides.operations."searxng.search.query".ai_hints]
+when_to_use = "Use for read-only self-hosted SearXNG text/meta-search when the caller has permission to query the configured instance."
+common_mistakes = ["Do not include private credentials or unrelated sensitive material in query text.", "Do not assume a commercial fallback exists; upstream instance errors are surfaced directly.", "Configure loopback, private, tailnet, or explicit HTTP hosts before using non-public SearXNG instances."]
+examples = ['{"query":"rust privacy search","language":"en-us","safe_search":"strict","max_results":10}']
+related = ["searxng.search.images", "searxng.search.news", "searxng.health"]
+
+[provides.operations."searxng.search.images"]
+description = "Run a read-only SearXNG image search against the operator-configured instance."
+capability = "searxng.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."searxng.search.images".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."searxng.search.images".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 512
+
+[provides.operations."searxng.search.images".input_schema.properties.language]
+type = "string"
+minLength = 1
+maxLength = 64
+pattern = "^[A-Za-z0-9._-]+$"
+
+[provides.operations."searxng.search.images".input_schema.properties.safe_search]
+type = "string"
+enum = ["off", "none", "0", "moderate", "medium", "1", "strict", "2"]
+
+[provides.operations."searxng.search.images".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year", "d", "w", "m", "y"]
+
+[provides.operations."searxng.search.images".input_schema.properties.page]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.images".input_schema.properties.pageno]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.images".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+description = "Runtime clamps values above 50 to the connector result bound."
+
+[provides.operations."searxng.search.images".input_schema.properties.categories]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+description = "Optional category override. If omitted, runtime sends categories=images."
+
+[provides.operations."searxng.search.images".input_schema.properties.engines]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+
+[provides.operations."searxng.search.images".output_schema]
+type = "object"
+required = ["provider", "mode", "base_url_class", "query_hash", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."searxng.search.images".output_schema.properties.provider]
+type = "string"
+enum = ["searxng"]
+
+[provides.operations."searxng.search.images".output_schema.properties.mode]
+type = "string"
+enum = ["images"]
+
+[provides.operations."searxng.search.images".output_schema.properties.base_url_class]
+type = "string"
+enum = ["loopback", "private", "tailnet", "operator-http-host", "public-https"]
+
+[provides.operations."searxng.search.images".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."searxng.search.images".output_schema.properties.count]
+type = "integer"
+minimum = 0
+
+[provides.operations."searxng.search.images".output_schema.properties.results]
+type = "array"
+
+[provides.operations."searxng.search.images".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.images".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.images".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [80, 443, 8080, 8888]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 20000
+max_response_bytes = 2097152
+
+[provides.operations."searxng.search.images".ai_hints]
+when_to_use = "Use for image-result discovery through the configured SearXNG instance."
+common_mistakes = ["Do not fetch image URLs directly through this connector; it only returns SearXNG result metadata.", "Do not log query text, full result URLs, or thumbnails outside redaction-safe evidence."]
+examples = ['{"query":"rust logo","safe_search":"strict","max_results":5}']
+related = ["searxng.search.query", "searxng.search.news"]
+
+[provides.operations."searxng.search.news"]
+description = "Run a read-only SearXNG news search against the operator-configured instance."
+capability = "searxng.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."searxng.search.news".input_schema]
+type = "object"
+required = ["query"]
+additionalProperties = true
+
+[provides.operations."searxng.search.news".input_schema.properties.query]
+type = "string"
+minLength = 1
+maxLength = 512
+
+[provides.operations."searxng.search.news".input_schema.properties.language]
+type = "string"
+minLength = 1
+maxLength = 64
+pattern = "^[A-Za-z0-9._-]+$"
+
+[provides.operations."searxng.search.news".input_schema.properties.safe_search]
+type = "string"
+enum = ["off", "none", "0", "moderate", "medium", "1", "strict", "2"]
+
+[provides.operations."searxng.search.news".input_schema.properties.time_range]
+type = "string"
+enum = ["day", "week", "month", "year", "d", "w", "m", "y"]
+
+[provides.operations."searxng.search.news".input_schema.properties.page]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.news".input_schema.properties.pageno]
+type = "integer"
+minimum = 1
+
+[provides.operations."searxng.search.news".input_schema.properties.max_results]
+type = "integer"
+minimum = 1
+description = "Runtime clamps values above 50 to the connector result bound."
+
+[provides.operations."searxng.search.news".input_schema.properties.categories]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+description = "Optional category override. If omitted, runtime sends categories=news."
+
+[provides.operations."searxng.search.news".input_schema.properties.engines]
+oneOf = [{ type = "string" }, { type = "array", items = { type = "string", minLength = 1, maxLength = 64 } }]
+
+[provides.operations."searxng.search.news".output_schema]
+type = "object"
+required = ["provider", "mode", "base_url_class", "query_hash", "count", "results", "external_content"]
+additionalProperties = true
+
+[provides.operations."searxng.search.news".output_schema.properties.provider]
+type = "string"
+enum = ["searxng"]
+
+[provides.operations."searxng.search.news".output_schema.properties.mode]
+type = "string"
+enum = ["news"]
+
+[provides.operations."searxng.search.news".output_schema.properties.base_url_class]
+type = "string"
+enum = ["loopback", "private", "tailnet", "operator-http-host", "public-https"]
+
+[provides.operations."searxng.search.news".output_schema.properties.query_hash]
+type = "string"
+pattern = "^blake3:[0-9a-f]{64}$"
+
+[provides.operations."searxng.search.news".output_schema.properties.count]
+type = "integer"
+minimum = 0
+
+[provides.operations."searxng.search.news".output_schema.properties.results]
+type = "array"
+
+[provides.operations."searxng.search.news".output_schema.properties.results.items]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.news".output_schema.properties.external_content]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.search.news".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [80, 443, 8080, 8888]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 20000
+max_response_bytes = 2097152
+
+[provides.operations."searxng.search.news".ai_hints]
+when_to_use = "Use for news-result discovery through the configured SearXNG instance."
+common_mistakes = ["Do not treat news timestamps as trusted without caller-side source review.", "Do not assume every SearXNG instance has a news-capable engine enabled."]
+examples = ['{"query":"rust release","time_range":"month","max_results":10}']
+related = ["searxng.search.query", "searxng.search.images"]
+
+[provides.operations."searxng.health"]
+description = "Probe the configured SearXNG /stats endpoint and return the instance response."
+capability = "searxng.search.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+revocation_freshness = "safe"
+
+[provides.operations."searxng.health".input_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.health".output_schema]
+type = "object"
+additionalProperties = true
+
+[provides.operations."searxng.health".network_constraints]
+host_allow = ["operator-configured"]
+port_allow = [80, 443, 8080, 8888]
+ip_allow = []
+cidr_deny = []
+deny_localhost = false
+deny_private_ranges = false
+deny_tailnet_ranges = false
+require_sni = false
+spki_pins = []
+deny_ip_literals = false
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 5000
+total_timeout_ms = 20000
+max_response_bytes = 2097152
+
+[provides.operations."searxng.health".ai_hints]
+when_to_use = "Use for a bounded readiness probe before dispatching user-visible SearXNG searches."
+common_mistakes = ["Do not treat this as proof that every configured search engine is healthy.", "Do not log upstream /stats payloads if an instance exposes operator-specific metadata."]
+examples = ["{}"]
+related = ["searxng.search.query"]
 
 [sandbox]
 profile = "strict"
@@ -38,17 +491,3 @@ cpu_percent = 20
 wall_clock_timeout_ms = 20000
 deny_exec = true
 deny_ptrace = true
-
-[network_constraints]
-host_allow = ["operator-configured"]
-port_allow = [80, 443, 8080, 8888]
-tls_required = false
-deny_localhost = false
-deny_private_ranges = false
-deny_tailnet_ranges = false
-deny_ip_literals = false
-require_host_canonicalization = true
-max_redirects = 0
-connect_timeout_ms = 5000
-total_timeout_ms = 20000
-max_response_bytes = 2097152

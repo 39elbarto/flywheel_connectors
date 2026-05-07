@@ -12,19 +12,22 @@ fn manifest_declares_self_hosted_privacy_boundary() {
             .expect("description should be present")
             .contains("Self-hosted")
     );
-    assert_eq!(
-        manifest["network_constraints"]["host_allow"][0],
-        Value::String("operator-configured".into())
-    );
-    assert_eq!(manifest["network_constraints"]["deny_localhost"], false);
-    assert_eq!(
-        manifest["network_constraints"]["deny_private_ranges"],
-        false
-    );
-    assert_eq!(
-        manifest["network_constraints"]["deny_tailnet_ranges"],
-        false
-    );
+
+    let operations = manifest["provides"]["operations"]
+        .as_object()
+        .expect("operations should be declared");
+    assert_eq!(operations.len(), 4);
+    for (operation_id, operation) in operations {
+        let constraints = &operation["network_constraints"];
+        assert_eq!(
+            constraints["host_allow"][0],
+            Value::String("operator-configured".into()),
+            "{operation_id} should only target the configured SearXNG host"
+        );
+        assert_eq!(constraints["deny_localhost"], false);
+        assert_eq!(constraints["deny_private_ranges"], false);
+        assert_eq!(constraints["deny_tailnet_ranges"], false);
+    }
 }
 
 #[test]

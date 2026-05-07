@@ -45,7 +45,6 @@ const EXPECTED_NETWORK_CONSTRAINT_GAPS: &[&str] = &[
     "apple-reminders",
     "dingtalk",
     "email-generic",
-    "github",
     "google-ai",
     "google-chat",
     "google-workspace-events",

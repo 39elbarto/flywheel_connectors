@@ -681,6 +681,7 @@ pub mod __fuzz {
     use super::parse_error_response;
 
     /// Parse a raw GitHub API error body with a caller-supplied HTTP status.
+    #[must_use]
     pub fn parse_api_error_response(
         status_code: u16,
         body: &[u8],

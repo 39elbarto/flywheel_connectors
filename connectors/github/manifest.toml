@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:d3fd8bed3b63965542562ad8515076b945c7d30dbf8bbedc403c286bffcaba96"
+interface_hash = "blake3-256:fcp.interface.v2:707670b5736a6e474f8e19a4d881775919d0187130b5bd1951d82229aed55fcd"
 
 [connector]
 id = "fcp.github"
@@ -638,6 +638,24 @@ required = ["event"]
 type = "object"
 [provides.operations."github.process_webhook".output_schema.properties.event]
 type = "object"
+
+[provides.operations."github.process_webhook".network_constraints]
+host_allow = ["none.invalid"]
+port_allow = [0]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = false
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 0
+max_redirects = 0
+connect_timeout_ms = 1000
+total_timeout_ms = 15000
+max_response_bytes = 1048576
 
 [provides.operations."github.process_webhook".ai_hints]
 when_to_use = "Process a pre-verified GitHub webhook payload forwarded by fcp-host."

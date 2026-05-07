@@ -217,7 +217,7 @@ async fn connector_suite_happy_path_gets_repo() {
         .and(path(format!("/repos/{OWNER}/{REPO}")))
         .and(header("authorization", "Bearer ghp_test_github"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "id": 1296269,
+            "id": 1_296_269,
             "name": REPO,
             "full_name": format!("{OWNER}/{REPO}"),
             "owner": {

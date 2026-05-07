@@ -996,7 +996,10 @@ fn operations_info() -> Vec<OperationInfo> {
                     "Passing a mutating statement to sqlite.query instead of sqlite.execute.".into(),
                     "Omitting txn_id while a transaction is active.".into(),
                 ],
-                examples: vec![],
+                examples: vec![
+                    r#"{"sql":"SELECT id, name FROM tasks WHERE status = ?1","params":["open"]}"#
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1028,7 +1031,10 @@ fn operations_info() -> Vec<OperationInfo> {
                     "Using sqlite.execute for statements that return rows.".into(),
                     "Trying to run ATTACH, DETACH, PRAGMA writes, or explicit transaction SQL.".into(),
                 ],
-                examples: vec![],
+                examples: vec![
+                    r#"{"sql":"UPDATE tasks SET status = ?1 WHERE id = ?2","params":["done",42]}"#
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static("sqlite.write")],
             },
         ),
@@ -1057,7 +1063,10 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to inspect query plans before executing or tuning read-only SQLite queries.".into(),
                 common_mistakes: vec!["Explaining a mutating statement instead of a read-only query.".into()],
-                examples: vec![],
+                examples: vec![
+                    r#"{"sql":"SELECT * FROM tasks WHERE due_at < ?1","params":["2026-06-01T00:00:00Z"]}"#
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1083,7 +1092,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to discover tables in the configured SQLite database.".into(),
                 common_mistakes: vec!["Expecting attached databases to appear in the first slice.".into()],
-                examples: vec![],
+                examples: vec![r#"{"scope":"main"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1111,7 +1120,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to inspect the declared schema for a specific SQLite table.".into(),
                 common_mistakes: vec!["Requesting columns for a non-existent table.".into()],
-                examples: vec![],
+                examples: vec![r#"{"table":"tasks"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1137,7 +1146,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to start an explicit transaction before multiple related writes.".into(),
                 common_mistakes: vec!["Starting a new transaction while one is already active.".into()],
-                examples: vec![],
+                examples: vec![r#"{"mode":"immediate"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.write")],
             },
         ),
@@ -1164,7 +1173,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to persist all writes performed inside the active transaction.".into(),
                 common_mistakes: vec!["Committing with the wrong txn_id.".into()],
-                examples: vec![],
+                examples: vec![r#"{"txn_id":"txn_01HZY7R5V8E4Q3"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.write")],
             },
         ),
@@ -1191,7 +1200,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to discard writes in the active SQLite transaction.".into(),
                 common_mistakes: vec!["Rolling back a transaction that is no longer active.".into()],
-                examples: vec![],
+                examples: vec![r#"{"txn_id":"txn_01HZY7R5V8E4Q3"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.write")],
             },
         ),
@@ -1219,7 +1228,10 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to run multiple related writes atomically in one SQLite batch.".into(),
                 common_mistakes: vec!["Providing an empty batch.".into()],
-                examples: vec![],
+                examples: vec![
+                    r#"{"statements":[{"sql":"INSERT INTO tasks(name) VALUES (?1)","params":["write release notes"]},{"sql":"UPDATE counters SET value = value + 1 WHERE name = ?1","params":["tasks_created"]}]}"#
+                        .into(),
+                ],
                 related: vec![CapabilityId::from_static("sqlite.write")],
             },
         ),
@@ -1242,8 +1254,10 @@ fn operations_info() -> Vec<OperationInfo> {
             IdempotencyClass::Strict,
             AgentHint {
                 when_to_use: "Use to confirm the configured SQLite database is reachable and responsive.".into(),
-                common_mistakes: vec![],
-                examples: vec![],
+                common_mistakes: vec![
+                    "Treating health success as proof that a specific table or pragma exists.".into(),
+                ],
+                examples: vec![r#"{"check":"local-database"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1267,7 +1281,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to rebuild and compact the SQLite database when no transaction is active.".into(),
                 common_mistakes: vec!["Running VACUUM while a transaction is active.".into()],
-                examples: vec![],
+                examples: vec![r#"{"confirm":"compact-local-database"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.admin")],
             },
         ),
@@ -1295,7 +1309,7 @@ fn operations_info() -> Vec<OperationInfo> {
             AgentHint {
                 when_to_use: "Use to inspect safe SQLite configuration values such as journal_mode or user_version.".into(),
                 common_mistakes: vec!["Trying to write a pragma via sqlite.pragma instead of using a supported admin flow.".into()],
-                examples: vec![],
+                examples: vec![r#"{"name":"journal_mode"}"#.into()],
                 related: vec![CapabilityId::from_static("sqlite.read")],
             },
         ),
@@ -1367,6 +1381,120 @@ mod tests {
             "sqlite.pragma",
         ] {
             assert!(ids.iter().any(|id| id == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn operation_hints_are_agent_actionable_and_synthetic() {
+        let sensitive_markers = ["api_key", "password", "secret", "token", "@example.com"];
+
+        for operation in operations_info() {
+            assert!(
+                !operation.ai_hints.when_to_use.trim().is_empty(),
+                "{} must explain when to use the operation",
+                operation.id
+            );
+            assert!(
+                !operation.ai_hints.common_mistakes.is_empty(),
+                "{} must document a concrete mistake",
+                operation.id
+            );
+            assert!(
+                !operation.ai_hints.examples.is_empty(),
+                "{} must include a synthetic example",
+                operation.id
+            );
+            for example in &operation.ai_hints.examples {
+                let parsed = serde_json::from_str::<serde_json::Value>(example);
+                assert!(
+                    matches!(parsed.as_ref(), Ok(value) if value.is_object()),
+                    "{} example should be a JSON object: {example}",
+                    operation.id
+                );
+                let lower = example.to_ascii_lowercase();
+                for marker in sensitive_markers {
+                    assert!(
+                        !lower.contains(marker),
+                        "{} example should not include sensitive marker {marker}",
+                        operation.id
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn manifest_ai_hints_match_runtime_catalog() {
+        let manifest = toml::from_str::<toml::Table>(include_str!("../manifest.toml"))
+            .expect("SQLite manifest should parse as TOML");
+        let operations = manifest
+            .get("provides")
+            .and_then(toml::Value::as_table)
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .expect("SQLite manifest must declare operations");
+        let runtime_ids = operations_info()
+            .into_iter()
+            .map(|operation| operation.id.to_string())
+            .collect::<Vec<_>>();
+        let sensitive_markers = ["api_key", "password", "secret", "token", "@example.com"];
+
+        assert_eq!(operations.len(), runtime_ids.len());
+        for (operation_id, operation) in operations {
+            let operation = operation
+                .as_table()
+                .expect("manifest operation entry must be a table");
+            let ai_hints = operation
+                .get("ai_hints")
+                .and_then(toml::Value::as_table)
+                .expect("manifest operation must include ai_hints");
+            assert!(
+                runtime_ids.contains(operation_id),
+                "manifest operation {operation_id} missing from runtime catalog"
+            );
+            assert!(
+                ai_hints
+                    .get("when_to_use")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|when_to_use| !when_to_use.trim().is_empty()),
+                "{operation_id} must explain when to use the operation"
+            );
+            let common_mistakes = ai_hints
+                .get("common_mistakes")
+                .and_then(toml::Value::as_array)
+                .expect("manifest ai_hints must declare common_mistakes");
+            assert!(
+                common_mistakes
+                    .iter()
+                    .any(|mistake| mistake.as_str().is_some_and(|text| !text.trim().is_empty())),
+                "{operation_id} must document a concrete mistake"
+            );
+            let examples = ai_hints
+                .get("examples")
+                .and_then(toml::Value::as_array)
+                .expect("manifest ai_hints must declare examples");
+            assert!(
+                examples
+                    .iter()
+                    .any(|example| example.as_str().is_some_and(|text| !text.trim().is_empty())),
+                "{operation_id} must include a synthetic example"
+            );
+            for example in examples {
+                assert!(example.is_str(), "{operation_id} example must be a string");
+                let example = example.as_str().unwrap_or("");
+                let parsed = serde_json::from_str::<serde_json::Value>(example);
+                assert!(
+                    matches!(parsed.as_ref(), Ok(value) if value.is_object()),
+                    "{operation_id} example should be a JSON object: {example}"
+                );
+                let lower = example.to_ascii_lowercase();
+                for marker in sensitive_markers {
+                    assert!(
+                        !lower.contains(marker),
+                        "{operation_id} example should not include sensitive marker {marker}"
+                    );
+                }
+            }
         }
     }
 

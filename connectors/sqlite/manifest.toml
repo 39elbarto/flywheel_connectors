@@ -87,6 +87,16 @@ connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 52428800
 
+[provides.operations."sqlite.query".ai_hints]
+when_to_use = "Use this for parameterized SELECT statements or other read-only SQLite queries against the configured local database."
+common_mistakes = [
+    "Passing INSERT, UPDATE, DELETE, DDL, or pragma writes to sqlite.query instead of sqlite.execute.",
+    "Interpolating user input into SQL text instead of passing positional params.",
+    "Omitting txn_id while a transaction is active, which the connector rejects to prevent accidental cross-transaction reads.",
+]
+examples = ['{"sql":"SELECT id, name FROM tasks WHERE status = ?1","params":["open"]}']
+related = ["sqlite.explain", "sqlite.schema.tables"]
+
 [provides.operations."sqlite.execute"]
 description = "Execute a mutating SQL statement"
 capability = "sqlite.write"
@@ -135,6 +145,16 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 10485760
+
+[provides.operations."sqlite.execute".ai_hints]
+when_to_use = "Use this for approved SQLite writes or DDL statements that do not return result rows."
+common_mistakes = [
+    "Using sqlite.execute for SELECT statements; use sqlite.query when rows should be returned.",
+    "Trying to run ATTACH, DETACH, PRAGMA writes, or explicit BEGIN/COMMIT/ROLLBACK SQL through this operation.",
+    "Skipping interactive approval for user-visible data mutation.",
+]
+examples = ['{"sql":"UPDATE tasks SET status = ?1 WHERE id = ?2","params":["done",42]}']
+related = ["sqlite.query", "sqlite.transaction.begin", "sqlite.batch"]
 
 [provides.operations."sqlite.explain"]
 description = "Explain the query plan for a read-only SQL query"
@@ -185,6 +205,15 @@ connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 10485760
 
+[provides.operations."sqlite.explain".ai_hints]
+when_to_use = "Use this before running or tuning a read-only SQLite query when the agent needs to inspect the query plan."
+common_mistakes = [
+    "Explaining a mutating statement instead of a read-only query.",
+    "Treating the plan as exact runtime timing or row-count evidence; it is planner output, not execution telemetry.",
+]
+examples = ['{"sql":"SELECT * FROM tasks WHERE due_at < ?1","params":["2026-06-01T00:00:00Z"]}']
+related = ["sqlite.query", "sqlite.schema.columns"]
+
 [provides.operations."sqlite.schema.tables"]
 description = "List application tables in the SQLite database"
 capability = "sqlite.read"
@@ -224,6 +253,15 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 10485760
+
+[provides.operations."sqlite.schema.tables".ai_hints]
+when_to_use = "Use this to discover application tables before querying or requesting column metadata."
+common_mistakes = [
+    "Expecting attached databases to appear in this first-slice table inventory.",
+    "Assuming table presence means the caller is authorized to read or mutate every row.",
+]
+examples = ['{"scope":"main"}']
+related = ["sqlite.schema.columns", "sqlite.query"]
 
 [provides.operations."sqlite.schema.columns"]
 description = "Describe the columns for a SQLite table"
@@ -270,6 +308,15 @@ connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 10485760
 
+[provides.operations."sqlite.schema.columns".ai_hints]
+when_to_use = "Use this after choosing a table when the agent needs column names, declared types, nullability, or primary-key metadata."
+common_mistakes = [
+    "Passing a table name that was not confirmed with sqlite.schema.tables.",
+    "Treating column metadata as row data; use sqlite.query when values are needed.",
+]
+examples = ['{"table":"tasks"}']
+related = ["sqlite.schema.tables", "sqlite.query"]
+
 [provides.operations."sqlite.transaction.begin"]
 description = "Begin a SQLite transaction"
 capability = "sqlite.write"
@@ -309,6 +356,15 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 1048576
+
+[provides.operations."sqlite.transaction.begin".ai_hints]
+when_to_use = "Use this before multiple related SQLite writes that should commit or roll back as one unit."
+common_mistakes = [
+    "Starting a new transaction while another transaction is active.",
+    "Choosing exclusive mode without a concrete lock-isolation need.",
+]
+examples = ['{"mode":"immediate"}']
+related = ["sqlite.execute", "sqlite.transaction.commit", "sqlite.transaction.rollback"]
 
 [provides.operations."sqlite.transaction.commit"]
 description = "Commit the active SQLite transaction"
@@ -351,6 +407,15 @@ connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 1048576
 
+[provides.operations."sqlite.transaction.commit".ai_hints]
+when_to_use = "Use this to persist all writes performed inside the active SQLite transaction."
+common_mistakes = [
+    "Committing with the wrong txn_id; use the transaction id returned by sqlite.transaction.begin.",
+    "Committing before checking earlier write results when the workflow needs all-or-nothing confidence.",
+]
+examples = ['{"txn_id":"txn_01HZY7R5V8E4Q3"}']
+related = ["sqlite.transaction.begin", "sqlite.transaction.rollback"]
+
 [provides.operations."sqlite.transaction.rollback"]
 description = "Rollback the active SQLite transaction"
 capability = "sqlite.write"
@@ -391,6 +456,15 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 15000
 max_response_bytes = 1048576
+
+[provides.operations."sqlite.transaction.rollback".ai_hints]
+when_to_use = "Use this to discard writes in the active SQLite transaction after a failed step or canceled workflow."
+common_mistakes = [
+    "Rolling back a transaction that has already been committed or rolled back.",
+    "Passing a stale or unrelated txn_id.",
+]
+examples = ['{"txn_id":"txn_01HZY7R5V8E4Q3"}']
+related = ["sqlite.transaction.begin", "sqlite.transaction.commit"]
 
 [provides.operations."sqlite.batch"]
 description = "Execute multiple SQL statements atomically"
@@ -437,6 +511,16 @@ connect_timeout_ms = 1000
 total_timeout_ms = 30000
 max_response_bytes = 10485760
 
+[provides.operations."sqlite.batch".ai_hints]
+when_to_use = "Use this for an approved set of related SQLite writes that should execute atomically through the connector."
+common_mistakes = [
+    "Providing an empty statement list.",
+    "Including SELECT statements in the write batch; use sqlite.query for reads.",
+    "Sending an unbounded batch instead of chunking large maintenance jobs.",
+]
+examples = ['{"statements":[{"sql":"INSERT INTO tasks(name) VALUES (?1)","params":["write release notes"]},{"sql":"UPDATE counters SET value = value + 1 WHERE name = ?1","params":["tasks_created"]}]}']
+related = ["sqlite.execute", "sqlite.transaction.begin"]
+
 [provides.operations."sqlite.health"]
 description = "Run a local database health probe"
 capability = "sqlite.read"
@@ -473,6 +557,15 @@ connect_timeout_ms = 1000
 total_timeout_ms = 10000
 max_response_bytes = 1048576
 
+[provides.operations."sqlite.health".ai_hints]
+when_to_use = "Use this to confirm the configured SQLite database can be opened and queried before running connector workflows."
+common_mistakes = [
+    "Treating health success as proof that a specific table, column, or pragma exists.",
+    "Using health as an authorization check for a mutating SQL operation.",
+]
+examples = ['{"check":"local-database"}']
+related = ["sqlite.schema.tables", "sqlite.query"]
+
 [provides.operations."sqlite.vacuum"]
 description = "Run VACUUM against the configured database"
 capability = "sqlite.admin"
@@ -508,6 +601,16 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 60000
 max_response_bytes = 1048576
+
+[provides.operations."sqlite.vacuum".ai_hints]
+when_to_use = "Use this for explicit local SQLite maintenance when the user wants the database rebuilt and compacted."
+common_mistakes = [
+    "Running VACUUM while a transaction is active.",
+    "Using VACUUM as a normal delete or cleanup operation instead of a maintenance step.",
+    "Ignoring that VACUUM can require temporary disk space and exclusive database access.",
+]
+examples = ['{"confirm":"compact-local-database"}']
+related = ["sqlite.health", "sqlite.pragma"]
 
 [provides.operations."sqlite.pragma"]
 description = "Read an allowlisted SQLite pragma value"
@@ -553,6 +656,15 @@ max_redirects = 0
 connect_timeout_ms = 1000
 total_timeout_ms = 10000
 max_response_bytes = 1048576
+
+[provides.operations."sqlite.pragma".ai_hints]
+when_to_use = "Use this to read safe allowlisted SQLite settings such as journal_mode or user_version."
+common_mistakes = [
+    "Trying to write a pragma through sqlite.pragma; this operation is read-only.",
+    "Requesting arbitrary pragma names that are not allowlisted by the connector.",
+]
+examples = ['{"name":"journal_mode"}']
+related = ["sqlite.health", "sqlite.schema.tables"]
 
 [sandbox]
 profile = "strict"

@@ -1,6 +1,33 @@
 use fcp_anthropic::{connector::AnthropicConnector, error::AnthropicError};
+use fcp_manifest::ConnectorManifest;
 use fcp_prelude::FcpError;
 use fcp_testkit::{OperationContract, assert_operation_contracts};
+
+#[test]
+fn manifest_ai_hints_cover_all_anthropic_operations() {
+    let manifest = ConnectorManifest::parse_str(include_str!("../manifest.toml"))
+        .expect("anthropic manifest should validate");
+
+    for (operation_id, operation) in &manifest.provides.operations {
+        let hints = &operation.ai_hints;
+        assert!(
+            !hints.when_to_use.trim().is_empty(),
+            "{operation_id} missing ai_hints.when_to_use"
+        );
+        assert!(
+            !hints.common_mistakes.is_empty()
+                && hints
+                    .common_mistakes
+                    .iter()
+                    .all(|mistake| !mistake.trim().is_empty()),
+            "{operation_id} missing ai_hints.common_mistakes"
+        );
+        assert!(
+            !hints.examples.is_empty(),
+            "{operation_id} missing ai_hints.examples"
+        );
+    }
+}
 
 #[fcp_async_core::runtime::test]
 async fn anthropic_schema_operation_and_error_contracts_are_advertised() {

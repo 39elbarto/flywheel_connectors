@@ -13,11 +13,14 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 chrono.workspace = true
 fcp-async-core = { path = "../fcp-async-core" }
 hex.workspace = true
 hmac.workspace = true
 parking_lot.workspace = true
+rand.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+url.workspace = true
 zeroize.workspace = true

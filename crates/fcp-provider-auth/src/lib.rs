@@ -1,9 +1,9 @@
 //! Provider authentication profiles and method selection for FCP connectors.
 //!
 //! This crate owns the provider/profile layer above raw credential leasing and
-//! OAuth primitives. The first slice intentionally keeps host admin routes and
-//! full OAuth polling/exchange flows out of scope while defining the stable
-//! redaction-safe types those later surfaces will use.
+//! OAuth primitives. Host admin routes, CLI helpers, provider-specific imports,
+//! and credential-pool integration are intentionally kept outside this crate's
+//! core primitives.
 
 #![forbid(unsafe_code)]
 #![warn(clippy::all, clippy::pedantic, clippy::nursery)]
@@ -16,11 +16,14 @@ use std::sync::Arc;
 use std::time::Duration as StdDuration;
 
 use async_trait::async_trait;
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
 use hmac::{Hmac, Mac};
 use parking_lot::RwLock;
+use rand::RngCore;
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
 use zeroize::Zeroizing;
 
 type HmacSha256 = Hmac<Sha256>;
@@ -201,11 +204,81 @@ fn validate_oauth_endpoint(value: &str, field: &'static str) -> AuthResult<()> {
     validate_no_crlf(value, field)
 }
 
+fn parse_oauth_url(value: &str, field: &'static str) -> AuthResult<Url> {
+    validate_oauth_endpoint(value, field)?;
+    let parsed = Url::parse(value).map_err(|error| invalid_config(field, error.to_string()))?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(parsed),
+        _ => Err(invalid_config(field, "must use http or https scheme")),
+    }
+}
+
 fn validate_oauth_error(code: &str, reason: &str) -> AuthResult<()> {
     validate_non_empty(code, "oauth_error_code")?;
     validate_no_crlf(code, "oauth_error_code")?;
     validate_non_empty(reason, "oauth_error_reason")?;
     validate_no_crlf(reason, "oauth_error_reason")
+}
+
+fn validate_oauth_state(state: &str) -> AuthResult<()> {
+    validate_non_empty(state, "state")?;
+    validate_no_crlf(state, "state")
+}
+
+fn validate_pkce_verifier(verifier: &str) -> AuthResult<()> {
+    if !(43..=128).contains(&verifier.len()) {
+        return Err(invalid_config("pkce_verifier", "must be 43-128 characters"));
+    }
+    if verifier
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~'))
+    {
+        Ok(())
+    } else {
+        Err(invalid_config(
+            "pkce_verifier",
+            "must contain only RFC 7636 unreserved characters",
+        ))
+    }
+}
+
+fn pkce_s256_challenge(verifier: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(verifier.as_bytes());
+    URL_SAFE_NO_PAD.encode(hasher.finalize())
+}
+
+fn generate_url_safe_secret() -> String {
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
+}
+
+fn build_authorization_request(
+    config: &OAuthAuthCodeConfig,
+    state: RedactedSecret,
+    pkce: Option<OAuthPkce>,
+) -> AuthResult<OAuthAuthCodeRequest> {
+    let mut url = parse_oauth_url(&config.authorize_url, "authorize_url")?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("response_type", "code");
+        query.append_pair("client_id", &config.client_id);
+        query.append_pair("redirect_uri", &config.redirect_uri);
+        if !config.scope.trim().is_empty() {
+            query.append_pair("scope", &config.scope);
+        }
+        query.append_pair("state", state.expose_secret());
+        if let Some(pkce) = pkce.as_ref() {
+            query.append_pair("code_challenge", &pkce.challenge);
+            query.append_pair("code_challenge_method", &pkce.method.to_string());
+        }
+    }
+    Ok(OAuthAuthCodeRequest {
+        authorization_url: url.to_string(),
+        state,
+        pkce,
+    })
 }
 
 fn std_duration_until(expires_at: DateTime<Utc>) -> StdDuration {
@@ -1064,6 +1137,650 @@ pub struct OAuthAuthCodeAuth {
     pub expires_at: Option<DateTime<Utc>>,
 }
 
+impl OAuthAuthCodeAuth {
+    /// Construct public-client OAuth authorization-code auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when OAuth fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = OAuthAuthCodeConfig::public_client(
+            client_id,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct confidential-client OAuth authorization-code auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when OAuth fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = OAuthAuthCodeConfig::confidential_client(
+            client_id,
+            client_secret,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )?;
+        Ok(Self::from_config(config))
+    }
+
+    /// Construct auth state from a validated flow config.
+    #[must_use]
+    pub fn from_config(config: OAuthAuthCodeConfig) -> Self {
+        Self {
+            client_id: config.client_id,
+            client_secret: config.client_secret,
+            authorize_url: config.authorize_url,
+            token_url: config.token_url,
+            redirect_uri: config.redirect_uri,
+            scope: config.scope,
+            use_pkce: config.use_pkce,
+            access_token: None,
+            refresh_token: None,
+            expires_at: None,
+        }
+    }
+
+    /// Replace cached token material after a completed auth-code exchange.
+    pub fn apply_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token,
+            refresh_token,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(access_token);
+        let refresh_slot = &mut self.refresh_token;
+        *refresh_slot = refresh_token;
+        self.expires_at = expires_at;
+    }
+
+    fn validate_config(&self) -> AuthResult<()> {
+        let config = OAuthAuthCodeConfig {
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            authorize_url: self.authorize_url.clone(),
+            token_url: self.token_url.clone(),
+            redirect_uri: self.redirect_uri.clone(),
+            scope: self.scope.clone(),
+            use_pkce: self.use_pkce,
+        };
+        config.validate()
+    }
+}
+
+#[async_trait]
+impl AuthMethod for OAuthAuthCodeAuth {
+    fn id(&self) -> &'static str {
+        "oauth_auth_code"
+    }
+
+    async fn validate(&self, _cx: &fcp_async_core::Cx) -> AuthResult<()> {
+        self.validate_config()
+    }
+
+    async fn build_request_auth(
+        &self,
+        cx: &fcp_async_core::Cx,
+        request: &mut AuthRequest,
+    ) -> AuthResult<()> {
+        self.validate(cx).await?;
+        apply_bearer_token(
+            self.id(),
+            self.access_token.as_ref(),
+            self.expires_at,
+            request,
+        )
+    }
+
+    fn requires_refresh_in(&self) -> Option<StdDuration> {
+        self.expires_at.map(std_duration_until)
+    }
+}
+
+/// OAuth authorization-code flow configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret for confidential clients.
+    pub client_secret: Option<RedactedSecret>,
+    /// Authorization endpoint URL.
+    pub authorize_url: String,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Registered redirect URI.
+    pub redirect_uri: String,
+    /// Requested scope string. Empty scope is allowed for provider defaults.
+    pub scope: String,
+    /// Whether to include S256 PKCE in the authorization request and exchange.
+    pub use_pkce: bool,
+}
+
+impl OAuthAuthCodeConfig {
+    /// Construct public-client authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        Self::new(
+            client_id,
+            Option::<String>::None,
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )
+    }
+
+    /// Construct confidential-client authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        Self::new(
+            client_id,
+            Some(client_secret.into()),
+            authorize_url,
+            token_url,
+            redirect_uri,
+            scope,
+            use_pkce,
+        )
+    }
+
+    /// Construct authorization-code flow configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: Option<impl Into<String>>,
+        authorize_url: impl Into<String>,
+        token_url: impl Into<String>,
+        redirect_uri: impl Into<String>,
+        scope: impl Into<String>,
+        use_pkce: bool,
+    ) -> AuthResult<Self> {
+        let config = Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.map(RedactedSecret::new).transpose()?,
+            authorize_url: authorize_url.into(),
+            token_url: token_url.into(),
+            redirect_uri: redirect_uri.into(),
+            scope: scope.into(),
+            use_pkce,
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        if let Some(secret) = &self.client_secret {
+            validate_no_crlf(secret.expose_secret(), "client_secret")?;
+        }
+        parse_oauth_url(&self.authorize_url, "authorize_url")?;
+        parse_oauth_url(&self.token_url, "token_url")?;
+        parse_oauth_url(&self.redirect_uri, "redirect_uri")?;
+        validate_no_crlf(&self.scope, "scope")
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("authorize_url", &self.authorize_url)
+            .field("token_url", &self.token_url)
+            .field("redirect_uri", &self.redirect_uri)
+            .field("scope", &self.scope)
+            .field("use_pkce", &self.use_pkce)
+            .finish()
+    }
+}
+
+/// PKCE code-challenge method.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthPkceChallengeMethod {
+    /// SHA-256 based `S256` challenge.
+    S256,
+}
+
+impl fmt::Display for OAuthPkceChallengeMethod {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::S256 => f.write_str("S256"),
+        }
+    }
+}
+
+/// Redaction-safe PKCE verifier/challenge pair.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthPkce {
+    /// Secret code verifier used at token exchange.
+    pub verifier: RedactedSecret,
+    /// Public code challenge sent in the authorization URL.
+    pub challenge: String,
+    /// Challenge method.
+    pub method: OAuthPkceChallengeMethod,
+}
+
+impl OAuthPkce {
+    /// Generate a random S256 PKCE verifier and challenge.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] if generated material fails validation.
+    pub fn generate() -> AuthResult<Self> {
+        let mut bytes = [0_u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self::from_verifier(URL_SAFE_NO_PAD.encode(bytes))
+    }
+
+    /// Build S256 PKCE material from an existing verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the verifier violates RFC 7636
+    /// length or character constraints.
+    pub fn from_verifier(verifier: impl Into<String>) -> AuthResult<Self> {
+        let verifier = verifier.into();
+        validate_pkce_verifier(&verifier)?;
+        let challenge = pkce_s256_challenge(&verifier);
+        Ok(Self {
+            verifier: RedactedSecret::new(verifier)?,
+            challenge,
+            method: OAuthPkceChallengeMethod::S256,
+        })
+    }
+}
+
+impl fmt::Debug for OAuthPkce {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthPkce")
+            .field("verifier", &self.verifier)
+            .field("challenge", &self.challenge)
+            .field("method", &self.method)
+            .finish()
+    }
+}
+
+/// Authorization URL plus callback validation state.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeRequest {
+    authorization_url: String,
+    state: RedactedSecret,
+    pkce: Option<OAuthPkce>,
+}
+
+impl OAuthAuthCodeRequest {
+    /// Borrow the user-facing authorization URL.
+    #[must_use]
+    pub fn authorization_url(&self) -> &str {
+        &self.authorization_url
+    }
+
+    /// Borrow the expected callback state.
+    #[must_use]
+    pub const fn state(&self) -> &RedactedSecret {
+        &self.state
+    }
+
+    /// Borrow PKCE material, when enabled.
+    #[must_use]
+    pub const fn pkce(&self) -> Option<&OAuthPkce> {
+        self.pkce.as_ref()
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeRequest")
+            .field("authorization_url", &"[REDACTED]")
+            .field("state", &self.state)
+            .field("pkce", &self.pkce.as_ref().map(|_| "[REDACTED]"))
+            .finish()
+    }
+}
+
+/// OAuth authorization-code callback payload.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OAuthAuthCodeCallback {
+    /// Provider returned an authorization code.
+    Authorized {
+        /// Secret authorization code.
+        code: RedactedSecret,
+        /// Callback state.
+        state: String,
+    },
+    /// Provider returned an OAuth error.
+    Rejected {
+        /// Provider error code.
+        error: String,
+        /// Optional redaction-safe error description.
+        description: Option<String>,
+        /// Optional callback state.
+        state: Option<String>,
+    },
+}
+
+impl OAuthAuthCodeCallback {
+    /// Construct an authorized callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when the code or state is empty or unsafe.
+    pub fn authorized(code: impl Into<String>, state: impl Into<String>) -> AuthResult<Self> {
+        let state = state.into();
+        validate_oauth_state(&state)?;
+        Ok(Self::Authorized {
+            code: RedactedSecret::new(code)?,
+            state,
+        })
+    }
+
+    /// Construct a rejected callback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when provider fields are empty or unsafe.
+    pub fn rejected(
+        error: impl Into<String>,
+        description: Option<impl Into<String>>,
+        state: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let error = error.into();
+        validate_non_empty(&error, "oauth_error_code")?;
+        validate_no_crlf(&error, "oauth_error_code")?;
+        let description = description.map(Into::into);
+        if let Some(description) = description.as_deref() {
+            validate_no_crlf(description, "oauth_error_reason")?;
+        }
+        let state = state.map(Into::into);
+        if let Some(state) = state.as_deref() {
+            validate_oauth_state(state)?;
+        }
+        Ok(Self::Rejected {
+            error,
+            description,
+            state,
+        })
+    }
+}
+
+impl fmt::Debug for OAuthAuthCodeCallback {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Authorized { code, state: _ } => f
+                .debug_struct("OAuthAuthCodeCallback::Authorized")
+                .field("code", code)
+                .field("state", &"[REDACTED]")
+                .finish(),
+            Self::Rejected {
+                error,
+                description,
+                state,
+            } => f
+                .debug_struct("OAuthAuthCodeCallback::Rejected")
+                .field("error", error)
+                .field("description", description)
+                .field("state", &state.as_ref().map(|_| "[REDACTED]"))
+                .finish(),
+        }
+    }
+}
+
+/// Validated authorization code ready for token exchange.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeGrant {
+    /// Secret authorization code.
+    pub code: RedactedSecret,
+    /// Callback state that matched the request state.
+    pub state: RedactedSecret,
+}
+
+impl fmt::Debug for OAuthAuthCodeGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthAuthCodeGrant")
+            .field("code", &self.code)
+            .field("state", &self.state)
+            .finish()
+    }
+}
+
+/// Provider response returned by an authorization-code token endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthAuthCodeProviderResponse {
+    /// Token exchange succeeded.
+    Authorized(OAuthTokens),
+    /// Token exchange failed with a terminal provider error.
+    Rejected {
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
+        reason: String,
+    },
+}
+
+/// Transport boundary for OAuth authorization-code providers.
+#[async_trait]
+pub trait OAuthAuthCodeTransport: Send + Sync {
+    /// Exchange an authorization code for tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn exchange(
+        &self,
+        config: &OAuthAuthCodeConfig,
+        grant: &OAuthAuthCodeGrant,
+        pkce: Option<&OAuthPkce>,
+    ) -> AuthResult<OAuthAuthCodeProviderResponse>;
+}
+
+/// OAuth authorization-code state machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OAuthAuthCodeFlow {
+    config: OAuthAuthCodeConfig,
+    request: OAuthAuthCodeRequest,
+}
+
+impl OAuthAuthCodeFlow {
+    /// Start an authorization-code flow with generated state and optional PKCE.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config or generated PKCE material is invalid.
+    pub fn start(config: OAuthAuthCodeConfig) -> AuthResult<Self> {
+        Self::start_with_state(config, generate_url_safe_secret())
+    }
+
+    /// Start an authorization-code flow with caller-supplied state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config, state, or generated PKCE material is invalid.
+    pub fn start_with_state(
+        config: OAuthAuthCodeConfig,
+        state: impl Into<String>,
+    ) -> AuthResult<Self> {
+        let pkce = if config.use_pkce {
+            Some(OAuthPkce::generate()?)
+        } else {
+            None
+        };
+        Self::start_with_state_and_pkce(config, state, pkce)
+    }
+
+    /// Start an authorization-code flow with caller-supplied state and PKCE material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] when static config, state, or PKCE state is invalid.
+    pub fn start_with_state_and_pkce(
+        config: OAuthAuthCodeConfig,
+        state: impl Into<String>,
+        pkce: Option<OAuthPkce>,
+    ) -> AuthResult<Self> {
+        config.validate()?;
+        if config.use_pkce && pkce.is_none() {
+            return Err(invalid_config("pkce", "PKCE material is required"));
+        }
+        if !config.use_pkce && pkce.is_some() {
+            return Err(invalid_config(
+                "pkce",
+                "PKCE material supplied while PKCE is disabled",
+            ));
+        }
+        let state = state.into();
+        validate_oauth_state(&state)?;
+        let request = build_authorization_request(&config, RedactedSecret::new(state)?, pkce)?;
+        Ok(Self { config, request })
+    }
+
+    /// Borrow the authorization request.
+    #[must_use]
+    pub const fn request(&self) -> &OAuthAuthCodeRequest {
+        &self.request
+    }
+
+    /// Validate a provider callback and extract the authorization grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for provider rejection, state mismatch, or unsafe callback fields.
+    pub fn complete_callback(
+        &self,
+        callback: OAuthAuthCodeCallback,
+    ) -> AuthResult<OAuthAuthCodeGrant> {
+        match callback {
+            OAuthAuthCodeCallback::Authorized { code, state } => {
+                self.ensure_state_matches(Some(&state))?;
+                validate_no_crlf(code.expose_secret(), "authorization_code")?;
+                Ok(OAuthAuthCodeGrant {
+                    code,
+                    state: RedactedSecret::new(state)?,
+                })
+            }
+            OAuthAuthCodeCallback::Rejected {
+                error,
+                description,
+                state,
+            } => {
+                self.ensure_state_matches(state.as_deref())?;
+                let reason = description.unwrap_or_else(|| error.clone());
+                validate_oauth_error(&error, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_auth_code",
+                    code: error,
+                    reason,
+                })
+            }
+        }
+    }
+
+    /// Exchange an authorization grant for tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures, provider rejections, or malformed tokens.
+    pub async fn exchange<T>(
+        &self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+        grant: &OAuthAuthCodeGrant,
+    ) -> AuthResult<OAuthTokens>
+    where
+        T: OAuthAuthCodeTransport + ?Sized,
+    {
+        let _ = cx;
+        match transport
+            .exchange(&self.config, grant, self.request.pkce())
+            .await?
+        {
+            OAuthAuthCodeProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(tokens)
+            }
+            OAuthAuthCodeProviderResponse::Rejected { code, reason } => {
+                validate_oauth_error(&code, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_auth_code",
+                    code,
+                    reason,
+                })
+            }
+        }
+    }
+
+    fn ensure_state_matches(&self, state: Option<&str>) -> AuthResult<()> {
+        let Some(state) = state else {
+            return Err(AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state missing".to_string(),
+            });
+        };
+        validate_oauth_state(state)?;
+        if state != self.request.state.expose_secret() {
+            return Err(AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state mismatch".to_string(),
+            });
+        }
+        Ok(())
+    }
+}
+
 /// Short-lived setup-token auth.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SetupTokenAuth {
@@ -1576,12 +2293,7 @@ impl AuthMethod for AuthMethodKind {
         match self {
             Self::ApiKey(method) => method.validate(cx).await,
             Self::OAuthDeviceCode(method) => method.validate(cx).await,
-            Self::OAuthAuthCode(method) => {
-                validate_non_empty(&method.client_id, "client_id")?;
-                validate_non_empty(&method.authorize_url, "authorize_url")?;
-                validate_non_empty(&method.token_url, "token_url")?;
-                validate_non_empty(&method.redirect_uri, "redirect_uri")
-            }
+            Self::OAuthAuthCode(method) => method.validate(cx).await,
             Self::SetupToken(method) => method.validate(cx).await,
             Self::Jwt(method) => method.validate(cx).await,
             Self::SigV4(method) => method.validate(cx).await,
@@ -1597,12 +2309,7 @@ impl AuthMethod for AuthMethodKind {
         match self {
             Self::ApiKey(method) => method.build_request_auth(cx, request).await,
             Self::OAuthDeviceCode(method) => method.build_request_auth(cx, request).await,
-            Self::OAuthAuthCode(method) => apply_bearer_token(
-                self.id(),
-                method.access_token.as_ref(),
-                method.expires_at,
-                request,
-            ),
+            Self::OAuthAuthCode(method) => method.build_request_auth(cx, request).await,
             Self::SetupToken(method) => method.build_request_auth(cx, request).await,
             Self::Jwt(method) => method.build_request_auth(cx, request).await,
             Self::SigV4(method) => method.build_request_auth(cx, request).await,
@@ -1613,7 +2320,7 @@ impl AuthMethod for AuthMethodKind {
         match self {
             Self::ApiKey(method) => method.requires_refresh_in(),
             Self::OAuthDeviceCode(method) => method.requires_refresh_in(),
-            Self::OAuthAuthCode(method) => method.expires_at.map(std_duration_until),
+            Self::OAuthAuthCode(method) => method.requires_refresh_in(),
             Self::SetupToken(method) => method.requires_refresh_in(),
             Self::Jwt(method) => method.requires_refresh_in(),
             Self::SigV4(method) => method.requires_refresh_in(),
@@ -1624,10 +2331,7 @@ impl AuthMethod for AuthMethodKind {
         match self {
             Self::ApiKey(method) => method.refresh(cx).await,
             Self::OAuthDeviceCode(method) => method.refresh(cx).await,
-            Self::OAuthAuthCode(_) => Err(AuthError::UnsupportedMethod {
-                method: self.id(),
-                operation: "refresh",
-            }),
+            Self::OAuthAuthCode(method) => method.refresh(cx).await,
             Self::SetupToken(method) => method.refresh(cx).await,
             Self::Jwt(method) => method.refresh(cx).await,
             Self::SigV4(method) => method.refresh(cx).await,
@@ -1886,6 +2590,22 @@ mod tests {
         .unwrap()
     }
 
+    fn auth_code_config() -> OAuthAuthCodeConfig {
+        OAuthAuthCodeConfig::public_client(
+            "fixture-client",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap()
+    }
+
+    fn auth_code_pkce() -> OAuthPkce {
+        OAuthPkce::from_verifier("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk").unwrap()
+    }
+
     #[derive(Debug)]
     struct ScriptedDeviceTransport {
         challenge: OAuthDeviceCodeChallenge,
@@ -1925,6 +2645,44 @@ mod tests {
                 .pop_front()
                 .ok_or_else(|| AuthError::InvalidProviderResponse {
                     method: "oauth_device",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
+    }
+
+    #[derive(Debug)]
+    struct ScriptedAuthCodeTransport {
+        responses: Mutex<VecDeque<OAuthAuthCodeProviderResponse>>,
+        seen_pkce_challenges: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ScriptedAuthCodeTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthAuthCodeProviderResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                seen_pkce_challenges: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OAuthAuthCodeTransport for ScriptedAuthCodeTransport {
+        async fn exchange(
+            &self,
+            config: &OAuthAuthCodeConfig,
+            grant: &OAuthAuthCodeGrant,
+            pkce: Option<&OAuthPkce>,
+        ) -> AuthResult<OAuthAuthCodeProviderResponse> {
+            assert_eq!(config.client_id, "fixture-client");
+            assert_eq!(grant.code.expose_secret(), "fixture-auth-code");
+            self.seen_pkce_challenges
+                .lock()
+                .push(pkce.map(|pkce| pkce.challenge.clone()));
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_auth_code",
                     reason: "scripted transport had no response".to_string(),
                 })
         }
@@ -2139,6 +2897,205 @@ mod tests {
         assert!(!challenge_debug.contains("fixture-device-code"));
         assert!(!tokens_debug.contains("fixture-access-token"));
         assert!(!tokens_debug.contains("fixture-refresh-token"));
+    }
+
+    #[test]
+    fn auth_code_flow_builds_authorize_url_with_pkce_vector() {
+        let pkce = auth_code_pkce();
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(pkce),
+        )
+        .unwrap();
+        let url = Url::parse(flow.request().authorization_url()).unwrap();
+        let params = url
+            .query_pairs()
+            .map(|(key, value)| (key.to_string(), value.to_string()))
+            .collect::<BTreeMap<_, _>>();
+
+        assert_eq!(
+            url.as_str().split('?').next(),
+            Some("https://auth.example.test/authorize")
+        );
+        assert_eq!(
+            params.get("response_type").map(String::as_str),
+            Some("code")
+        );
+        assert_eq!(
+            params.get("client_id").map(String::as_str),
+            Some("fixture-client")
+        );
+        assert_eq!(
+            params.get("redirect_uri").map(String::as_str),
+            Some("https://agent.example.test/oauth/callback")
+        );
+        assert_eq!(
+            params.get("scope").map(String::as_str),
+            Some("chat messages")
+        );
+        assert_eq!(params.get("state").map(String::as_str), Some("fixed-state"));
+        assert_eq!(
+            params.get("code_challenge").map(String::as_str),
+            Some("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM")
+        );
+        assert_eq!(
+            params.get("code_challenge_method").map(String::as_str),
+            Some("S256")
+        );
+
+        let debug = format!("{:?}", flow.request());
+        assert!(!debug.contains("fixed-state"));
+        assert!(!debug.contains("dBjftJeZ4"));
+    }
+
+    #[test]
+    fn auth_code_flow_validates_callback_state_and_provider_error() {
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+
+        let mismatch = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "wrong-state").unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            mismatch,
+            AuthError::InvalidProviderResponse {
+                method: "oauth_auth_code",
+                reason: "callback state mismatch".to_string(),
+            }
+        );
+
+        let denied = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::rejected(
+                    "access_denied",
+                    Some("operator denied browser authorization"),
+                    Some("fixed-state"),
+                )
+                .unwrap(),
+            )
+            .unwrap_err();
+        assert_eq!(
+            denied,
+            AuthError::ProviderRejected {
+                method: "oauth_auth_code",
+                code: "access_denied".to_string(),
+                reason: "operator denied browser authorization".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_code_flow_exchanges_grant_for_tokens() {
+        let expected_tokens = oauth_tokens();
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+        let grant = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "fixed-state").unwrap(),
+            )
+            .unwrap();
+        let transport =
+            ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Authorized(
+                expected_tokens.clone(),
+            )]);
+
+        let tokens = run(flow.exchange(&cx(), &transport, &grant)).unwrap();
+
+        assert_eq!(tokens, expected_tokens);
+        assert_eq!(
+            transport.seen_pkce_challenges.lock().as_slice(),
+            &[Some(
+                "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn auth_code_flow_maps_exchange_rejection_and_malformed_token() {
+        let flow = OAuthAuthCodeFlow::start_with_state_and_pkce(
+            auth_code_config(),
+            "fixed-state",
+            Some(auth_code_pkce()),
+        )
+        .unwrap();
+        let grant = flow
+            .complete_callback(
+                OAuthAuthCodeCallback::authorized("fixture-auth-code", "fixed-state").unwrap(),
+            )
+            .unwrap();
+        let rejected = ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Rejected {
+            code: "invalid_grant".to_string(),
+            reason: "authorization code expired".to_string(),
+        }]);
+
+        let error = run(flow.exchange(&cx(), &rejected, &grant)).unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::ProviderRejected {
+                method: "oauth_auth_code",
+                code: "invalid_grant".to_string(),
+                reason: "authorization code expired".to_string(),
+            }
+        );
+
+        let bad_tokens = OAuthTokens {
+            access_token: RedactedSecret::new("fixture-access-token").unwrap(),
+            token_type: "mac".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        let malformed =
+            ScriptedAuthCodeTransport::new([OAuthAuthCodeProviderResponse::Authorized(bad_tokens)]);
+
+        let error = run(flow.exchange(&cx(), &malformed, &grant)).unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "token_type",
+                reason: "only bearer tokens are supported in this slice".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn auth_code_auth_builds_bearer_header_and_redacts_debug() {
+        let mut auth = OAuthAuthCodeAuth::confidential_client(
+            "fixture-client",
+            "fixture-client-secret",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
+        let mut request = AuthRequest::new();
+
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer fixture-access-token")
+        );
+        assert!(auth.requires_refresh_in().is_some());
+        let debug = format!("{auth:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-client-secret"));
+        assert!(!debug.contains("fixture-access-token"));
+        assert!(!debug.contains("fixture-refresh-token"));
     }
 
     #[test]

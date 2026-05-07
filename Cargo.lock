@@ -5929,13 +5929,16 @@ name = "fcp-provider-auth"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "chrono",
  "fcp-async-core",
  "hex",
  "hmac 0.12.1",
  "parking_lot",
+ "rand 0.8.6",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "url",
  "zeroize",
 ]
 

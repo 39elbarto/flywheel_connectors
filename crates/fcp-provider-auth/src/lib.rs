@@ -680,6 +680,76 @@ impl OAuthDeviceCodeAuth {
         self.expires_at = expires_at;
     }
 
+    /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
+    pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
+        let scope = if self.scope.is_empty() {
+            None
+        } else {
+            Some(self.scope.clone())
+        };
+        OAuthRefreshTokenConfig::public_client(
+            self.client_id.clone(),
+            self.token_url.clone(),
+            scope,
+        )
+    }
+
+    /// Build a refresh-token grant from cached refresh-token material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MissingToken`] when the provider has not issued a refresh token.
+    pub fn refresh_grant(&self) -> AuthResult<OAuthRefreshTokenGrant> {
+        let Some(refresh_token) = &self.refresh_token else {
+            return Err(AuthError::MissingToken {
+                method: "oauth_device",
+            });
+        };
+        OAuthRefreshTokenGrant::new(refresh_token.expose_secret().to_string())
+    }
+
+    /// Refresh cached bearer tokens through an injectable refresh-token transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid stored config, missing refresh-token
+    /// material, transport failures, provider rejections, or malformed refreshed tokens.
+    pub async fn refresh_with_transport<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<()>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        self.validate_config()?;
+        let config = self.refresh_config()?;
+        let grant = self.refresh_grant()?;
+        let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
+        self.apply_refreshed_tokens(tokens);
+        Ok(())
+    }
+
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token: fresh_access,
+            refresh_token: fresh_refresh,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(fresh_access);
+        if let Some(material) = fresh_refresh {
+            let refresh_slot = &mut self.refresh_token;
+            *refresh_slot = Some(material);
+        }
+        self.expires_at = expires_at;
+    }
+
     fn validate_config(&self) -> AuthResult<()> {
         validate_non_empty(&self.client_id, "client_id")?;
         validate_no_crlf(&self.client_id, "client_id")?;
@@ -937,6 +1007,200 @@ impl fmt::Debug for OAuthTokens {
             .field("expires_at", &self.expires_at)
             .field("scope", &self.scope)
             .finish()
+    }
+}
+
+/// OAuth refresh-token grant configuration.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRefreshTokenConfig {
+    /// OAuth client id.
+    pub client_id: String,
+    /// Optional client secret for confidential clients.
+    pub client_secret: Option<RedactedSecret>,
+    /// Token endpoint URL.
+    pub token_url: String,
+    /// Optional requested scope for providers that require scope on refresh.
+    pub scope: Option<String>,
+}
+
+impl OAuthRefreshTokenConfig {
+    /// Construct public-client refresh-token configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn public_client(
+        client_id: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        Self::new(client_id, Option::<String>::None, token_url, scope)
+    }
+
+    /// Construct confidential-client refresh-token configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn confidential_client(
+        client_id: impl Into<String>,
+        client_secret: impl Into<String>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        Self::new(client_id, Some(client_secret.into()), token_url, scope)
+    }
+
+    /// Construct refresh-token configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when required fields are empty or unsafe.
+    pub fn new(
+        client_id: impl Into<String>,
+        client_secret: Option<impl Into<String>>,
+        token_url: impl Into<String>,
+        scope: Option<impl Into<String>>,
+    ) -> AuthResult<Self> {
+        let config = Self {
+            client_id: client_id.into(),
+            client_secret: client_secret.map(RedactedSecret::new).transpose()?,
+            token_url: token_url.into(),
+            scope: scope.map(Into::into),
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_non_empty(&self.client_id, "client_id")?;
+        validate_no_crlf(&self.client_id, "client_id")?;
+        if let Some(secret) = &self.client_secret {
+            validate_no_crlf(secret.expose_secret(), "client_secret")?;
+        }
+        parse_oauth_url(&self.token_url, "token_url")?;
+        if let Some(scope) = self.scope.as_deref() {
+            validate_non_empty(scope, "scope")?;
+            validate_no_crlf(scope, "scope")?;
+        }
+        Ok(())
+    }
+}
+
+impl fmt::Debug for OAuthRefreshTokenConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthRefreshTokenConfig")
+            .field("client_id", &self.client_id)
+            .field(
+                "client_secret",
+                &self.client_secret.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("token_url", &self.token_url)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// OAuth refresh-token grant.
+#[derive(Clone, PartialEq, Eq)]
+pub struct OAuthRefreshTokenGrant {
+    /// Refresh token presented to the provider token endpoint.
+    pub refresh_token: RedactedSecret,
+}
+
+impl OAuthRefreshTokenGrant {
+    /// Construct a refresh-token grant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when refresh-token material is empty or unsafe.
+    pub fn new(refresh_token: impl Into<String>) -> AuthResult<Self> {
+        let grant = Self {
+            refresh_token: RedactedSecret::new(refresh_token)?,
+        };
+        grant.validate()?;
+        Ok(grant)
+    }
+
+    fn validate(&self) -> AuthResult<()> {
+        validate_no_crlf(self.refresh_token.expose_secret(), "refresh_token")
+    }
+}
+
+impl fmt::Debug for OAuthRefreshTokenGrant {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OAuthRefreshTokenGrant")
+            .field("refresh_token", &self.refresh_token)
+            .finish()
+    }
+}
+
+/// Provider response returned by a refresh-token request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OAuthRefreshProviderResponse {
+    /// Refresh succeeded and returned a new token set.
+    Authorized(OAuthTokens),
+    /// Refresh failed with a terminal provider error.
+    Rejected {
+        /// Provider error code.
+        code: String,
+        /// Redaction-safe provider reason.
+        reason: String,
+    },
+}
+
+/// Transport boundary for OAuth refresh-token providers.
+#[async_trait]
+pub trait OAuthRefreshTokenTransport: Send + Sync {
+    /// Exchange a refresh token for a fresh provider token set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for transport failures or invalid provider responses.
+    async fn refresh(
+        &self,
+        config: &OAuthRefreshTokenConfig,
+        grant: &OAuthRefreshTokenGrant,
+    ) -> AuthResult<OAuthRefreshProviderResponse>;
+}
+
+/// OAuth refresh-token flow primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OAuthRefreshTokenFlow;
+
+impl OAuthRefreshTokenFlow {
+    /// Exchange a refresh-token grant for fresh bearer tokens.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid config/grant data, transport failures,
+    /// provider rejections, or malformed refreshed tokens.
+    pub async fn refresh<T>(
+        cx: &fcp_async_core::Cx,
+        config: &OAuthRefreshTokenConfig,
+        grant: &OAuthRefreshTokenGrant,
+        transport: &T,
+    ) -> AuthResult<OAuthTokens>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        let _ = cx;
+        config.validate()?;
+        grant.validate()?;
+        match transport.refresh(config, grant).await? {
+            OAuthRefreshProviderResponse::Authorized(tokens) => {
+                tokens.validate()?;
+                Ok(tokens)
+            }
+            OAuthRefreshProviderResponse::Rejected { code, reason } => {
+                validate_oauth_error(&code, &reason)?;
+                Err(AuthError::ProviderRejected {
+                    method: "oauth_refresh",
+                    code,
+                    reason,
+                })
+            }
+        }
     }
 }
 
@@ -1217,6 +1481,81 @@ impl OAuthAuthCodeAuth {
         *access_slot = Some(access_token);
         let refresh_slot = &mut self.refresh_token;
         *refresh_slot = refresh_token;
+        self.expires_at = expires_at;
+    }
+
+    /// Build refresh-token flow configuration from this auth state.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::InvalidConfig`] when stored OAuth fields are invalid.
+    pub fn refresh_config(&self) -> AuthResult<OAuthRefreshTokenConfig> {
+        let scope = if self.scope.is_empty() {
+            None
+        } else {
+            Some(self.scope.clone())
+        };
+        let secret_material = self
+            .client_secret
+            .as_ref()
+            .map(|secret| secret.expose_secret().to_string());
+        OAuthRefreshTokenConfig::new(
+            self.client_id.clone(),
+            secret_material,
+            self.token_url.clone(),
+            scope,
+        )
+    }
+
+    /// Build a refresh-token grant from cached refresh-token material.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError::MissingToken`] when the provider has not issued a refresh token.
+    pub fn refresh_grant(&self) -> AuthResult<OAuthRefreshTokenGrant> {
+        let Some(refresh_token) = &self.refresh_token else {
+            return Err(AuthError::MissingToken {
+                method: "oauth_auth_code",
+            });
+        };
+        OAuthRefreshTokenGrant::new(refresh_token.expose_secret().to_string())
+    }
+
+    /// Refresh cached bearer tokens through an injectable refresh-token transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`AuthError`] for invalid stored config, missing refresh-token
+    /// material, transport failures, provider rejections, or malformed refreshed tokens.
+    pub async fn refresh_with_transport<T>(
+        &mut self,
+        cx: &fcp_async_core::Cx,
+        transport: &T,
+    ) -> AuthResult<()>
+    where
+        T: OAuthRefreshTokenTransport + ?Sized,
+    {
+        self.validate_config()?;
+        let config = self.refresh_config()?;
+        let grant = self.refresh_grant()?;
+        let tokens = OAuthRefreshTokenFlow::refresh(cx, &config, &grant, transport).await?;
+        self.apply_refreshed_tokens(tokens);
+        Ok(())
+    }
+
+    fn apply_refreshed_tokens(&mut self, tokens: OAuthTokens) {
+        let OAuthTokens {
+            access_token: fresh_access,
+            refresh_token: fresh_refresh,
+            expires_at,
+            ..
+        } = tokens;
+        let access_slot = &mut self.access_token;
+        *access_slot = Some(fresh_access);
+        if let Some(material) = fresh_refresh {
+            let refresh_slot = &mut self.refresh_token;
+            *refresh_slot = Some(material);
+        }
         self.expires_at = expires_at;
     }
 
@@ -2953,6 +3292,48 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct ScriptedRefreshTransport {
+        responses: Mutex<VecDeque<OAuthRefreshProviderResponse>>,
+        seen_client_secrets: Mutex<Vec<bool>>,
+        seen_refresh_tokens: Mutex<Vec<String>>,
+    }
+
+    impl ScriptedRefreshTransport {
+        fn new(responses: impl IntoIterator<Item = OAuthRefreshProviderResponse>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().collect()),
+                seen_client_secrets: Mutex::new(Vec::new()),
+                seen_refresh_tokens: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl OAuthRefreshTokenTransport for ScriptedRefreshTransport {
+        async fn refresh(
+            &self,
+            config: &OAuthRefreshTokenConfig,
+            grant: &OAuthRefreshTokenGrant,
+        ) -> AuthResult<OAuthRefreshProviderResponse> {
+            assert_eq!(config.client_id, "fixture-client");
+            assert_eq!(config.token_url, "https://auth.example.test/token");
+            self.seen_client_secrets
+                .lock()
+                .push(config.client_secret.is_some());
+            self.seen_refresh_tokens
+                .lock()
+                .push(grant.refresh_token.expose_secret().to_string());
+            self.responses
+                .lock()
+                .pop_front()
+                .ok_or_else(|| AuthError::InvalidProviderResponse {
+                    method: "oauth_refresh",
+                    reason: "scripted transport had no response".to_string(),
+                })
+        }
+    }
+
     #[test]
     fn api_key_auth_sets_bearer_header_and_redacts_debug() {
         let auth = ApiKeyAuth::bearer("fixture-api-key-value").unwrap();
@@ -3361,6 +3742,157 @@ mod tests {
         assert!(!debug.contains("fixture-client-secret"));
         assert!(!debug.contains("fixture-access-token"));
         assert!(!debug.contains("fixture-refresh-token"));
+    }
+
+    #[test]
+    fn oauth_device_refresh_preserves_existing_refresh_token_without_rotation() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        auth.apply_tokens(oauth_tokens());
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                Some(StdDuration::from_secs(7_200)),
+                Option::<String>::None,
+                Some("chat messages".to_string()),
+            )
+            .unwrap(),
+        )]);
+
+        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
+
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer refreshed-access-token")
+        );
+        assert_eq!(
+            auth.refresh_grant().unwrap().refresh_token.expose_secret(),
+            "fixture-refresh-token"
+        );
+        assert_eq!(transport.seen_client_secrets.lock().as_slice(), &[false]);
+        assert_eq!(
+            transport.seen_refresh_tokens.lock().as_slice(),
+            &["fixture-refresh-token".to_string()]
+        );
+    }
+
+    #[test]
+    fn oauth_auth_code_refresh_rotates_refresh_token_and_redacts_config_debug() {
+        let mut auth = OAuthAuthCodeAuth::confidential_client(
+            "fixture-client",
+            "fixture-client-secret",
+            "https://auth.example.test/authorize",
+            "https://auth.example.test/token",
+            "https://agent.example.test/oauth/callback",
+            "chat messages",
+            true,
+        )
+        .unwrap();
+        auth.apply_tokens(oauth_tokens());
+        let refresh_config = auth.refresh_config().unwrap();
+        let debug = format!("{refresh_config:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("fixture-client-secret"));
+        let transport = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(
+            OAuthTokens::bearer(
+                "refreshed-access-token",
+                Some(StdDuration::from_secs(7_200)),
+                Some("rotated-refresh-token"),
+                Some("chat messages"),
+            )
+            .unwrap(),
+        )]);
+
+        run(auth.refresh_with_transport(&cx(), &transport)).unwrap();
+
+        let mut request = AuthRequest::new();
+        run(auth.build_request_auth(&cx(), &mut request)).unwrap();
+        assert_eq!(
+            request.value_for("Authorization"),
+            Some("Bearer refreshed-access-token")
+        );
+        assert_eq!(
+            auth.refresh_grant().unwrap().refresh_token.expose_secret(),
+            "rotated-refresh-token"
+        );
+        assert_eq!(transport.seen_client_secrets.lock().as_slice(), &[true]);
+        assert_eq!(
+            transport.seen_refresh_tokens.lock().as_slice(),
+            &["fixture-refresh-token".to_string()]
+        );
+    }
+
+    #[test]
+    fn oauth_refresh_flow_maps_provider_rejection_and_malformed_token() {
+        let config = OAuthRefreshTokenConfig::public_client(
+            "fixture-client",
+            "https://auth.example.test/token",
+            Some("chat messages"),
+        )
+        .unwrap();
+        let grant = OAuthRefreshTokenGrant::new("fixture-refresh-token").unwrap();
+        let rejected = ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Rejected {
+            code: "invalid_grant".to_string(),
+            reason: "refresh token expired".to_string(),
+        }]);
+
+        let error = run(OAuthRefreshTokenFlow::refresh(
+            &cx(),
+            &config,
+            &grant,
+            &rejected,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::ProviderRejected {
+                method: "oauth_refresh",
+                code: "invalid_grant".to_string(),
+                reason: "refresh token expired".to_string(),
+            }
+        );
+
+        let bad_tokens = OAuthTokens {
+            access_token: RedactedSecret::new("fixture-access-token").unwrap(),
+            token_type: "mac".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            scope: None,
+        };
+        let malformed =
+            ScriptedRefreshTransport::new([OAuthRefreshProviderResponse::Authorized(bad_tokens)]);
+
+        let error = run(OAuthRefreshTokenFlow::refresh(
+            &cx(),
+            &config,
+            &grant,
+            &malformed,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            error,
+            AuthError::InvalidConfig {
+                field: "token_type",
+                reason: "only bearer tokens are supported in this slice".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn oauth_refresh_requires_cached_refresh_token() {
+        let mut auth = OAuthDeviceCodeAuth::from_config(oauth_config());
+        let transport = ScriptedRefreshTransport::new([]);
+
+        let error = run(auth.refresh_with_transport(&cx(), &transport)).unwrap_err();
+
+        assert_eq!(
+            error,
+            AuthError::MissingToken {
+                method: "oauth_device"
+            }
+        );
+        assert!(transport.seen_refresh_tokens.lock().is_empty());
     }
 
     #[test]

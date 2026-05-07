@@ -3067,30 +3067,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fcp-comfyui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "blake3",
- "chrono",
- "ciborium",
- "fcp-async-core",
- "fcp-core",
- "fcp-crypto",
- "fcp-prelude",
- "pretty_assertions",
- "reqwest 0.13.2",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "toml 1.1.2+spec-1.1.0",
- "tracing",
- "tracing-subscriber",
- "url",
- "wiremock",
-]
-
-[[package]]
 name = "fcp-confluence"
 version = "0.1.0"
 dependencies = [
@@ -3159,6 +3135,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "toml 1.1.2+spec-1.1.0",
  "tower",
  "tracing",
  "tracing-subscriber",
@@ -3316,10 +3293,12 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-e2e",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "fcp-streaming",
  "fcp-testkit",
+ "jsonschema",
  "reqwest 0.13.2",
  "serde",
  "serde_json",
@@ -3506,7 +3485,9 @@ dependencies = [
  "blake3",
  "fcp-async-core",
  "fcp-core",
+ "fcp-manifest",
  "fcp-prelude",
+ "jsonschema",
  "reqwest 0.13.2",
  "scraper",
  "serde",
@@ -5010,6 +4991,7 @@ dependencies = [
  "fcp-async-core",
  "fcp-core",
  "fcp-crypto",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "hex",
@@ -5019,6 +5001,7 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -5259,7 +5242,6 @@ name = "fcp-moonshot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "blake3",
  "chrono",
  "ciborium",
  "fcp-async-core",

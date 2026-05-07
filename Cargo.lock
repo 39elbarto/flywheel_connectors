@@ -2863,6 +2863,7 @@ dependencies = [
  "chrono",
  "fcp-async-core",
  "fcp-core",
+ "fcp-manifest",
  "fcp-prelude",
  "fcp-sdk",
  "reqwest 0.13.2",

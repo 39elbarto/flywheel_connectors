@@ -586,11 +586,20 @@ async fn introspection_and_config_redact_auth_and_advertise_llm_context() {
         .handle_introspect()
         .await
         .expect("introspection should succeed");
-    assert!(
-        introspection["operations"]
-            .as_array()
-            .expect("operations should be an array")
-            .iter()
-            .any(|operation| operation["id"] == "brave-search.llm-context.search")
+    let operations = introspection["operations"]
+        .as_array()
+        .expect("operations should be an array");
+    assert_eq!(operations.len(), 2);
+    let llm_context = operations
+        .iter()
+        .find(|operation| operation["id"] == "brave-search.llm-context.search")
+        .expect("LLM context operation should be declared");
+    assert_eq!(llm_context["capability"], "brave-search.llm-context");
+    assert_eq!(llm_context["risk_level"], "low");
+    assert_eq!(llm_context["safety_tier"], "safe");
+    assert_eq!(
+        llm_context["network_constraints"]["host_allow"],
+        json!(["api.search.brave.com", "search.brave.com"])
     );
+    assert_eq!(llm_context["input_schema"]["required"], json!(["query"]));
 }

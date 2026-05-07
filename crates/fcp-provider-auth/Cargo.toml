@@ -1,0 +1,21 @@
+[package]
+name = "fcp-provider-auth"
+description = "Shared multi-method provider authentication primitives for FCP connectors"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+fcp-async-core.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+url.workspace = true
+zeroize.workspace = true

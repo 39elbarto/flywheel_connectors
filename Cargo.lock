@@ -5924,6 +5924,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-provider-auth"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "fcp-async-core",
+ "serde",
+ "thiserror 2.0.18",
+ "url",
+ "zeroize",
+]
+
+[[package]]
 name = "fcp-pulumi"
 version = "0.1.0"
 dependencies = [

@@ -33,4 +33,6 @@ anyhow.workspace = true
 [dev-dependencies]
 fcp-crypto.workspace = true
 fcp-testkit.workspace = true
+jsonschema.workspace = true
+toml.workspace = true
 wiremock.workspace = true

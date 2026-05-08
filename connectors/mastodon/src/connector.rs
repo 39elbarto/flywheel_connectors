@@ -13,7 +13,7 @@ use fcp_prelude::{
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use fcp_sdk::prelude::*;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::client::MastodonClient;
@@ -37,6 +37,260 @@ const OP_HEALTH: &str = "mastodon.health";
 // Capability IDs
 const CAP_READ: &str = "mastodon.read";
 const CAP_WRITE: &str = "mastodon.write";
+
+fn nonblank_string_schema() -> Value {
+    json!({
+        "type": "string",
+        "minLength": 1,
+        "pattern": "\\S"
+    })
+}
+
+fn optional_string_schema() -> Value {
+    json!({
+        "type": ["string", "null"]
+    })
+}
+
+fn limit_schema() -> Value {
+    json!({
+        "type": "integer",
+        "minimum": 1,
+        "maximum": 40
+    })
+}
+
+fn empty_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "maxProperties": 0
+    })
+}
+
+fn timeline_home_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "limit": limit_schema()
+        }
+    })
+}
+
+fn timeline_public_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "local": {
+                "type": "boolean",
+                "default": false
+            },
+            "limit": limit_schema()
+        }
+    })
+}
+
+fn id_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+            "id": nonblank_string_schema()
+        }
+    })
+}
+
+fn status_post_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["status"],
+        "additionalProperties": false,
+        "properties": {
+            "status": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 500,
+                "pattern": "\\S"
+            },
+            "visibility": {
+                "type": "string",
+                "enum": ["public", "unlisted", "private", "direct"]
+            },
+            "in_reply_to_id": nonblank_string_schema(),
+            "sensitive": {
+                "type": "boolean",
+                "default": false
+            },
+            "spoiler_text": nonblank_string_schema()
+        }
+    })
+}
+
+fn notifications_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "limit": limit_schema()
+        }
+    })
+}
+
+fn search_input_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["q"],
+        "additionalProperties": false,
+        "properties": {
+            "q": nonblank_string_schema(),
+            "type": {
+                "type": "string",
+                "enum": ["accounts", "hashtags", "statuses"]
+            },
+            "limit": limit_schema()
+        }
+    })
+}
+
+fn account_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "username"],
+        "additionalProperties": true,
+        "properties": {
+            "id": { "type": "string" },
+            "username": { "type": "string" }
+        }
+    })
+}
+
+fn status_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "content", "account"],
+        "additionalProperties": true,
+        "properties": {
+            "id": { "type": "string" },
+            "content": { "type": "string" },
+            "account": account_schema()
+        }
+    })
+}
+
+fn tag_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["name", "url"],
+        "additionalProperties": true,
+        "properties": {
+            "name": { "type": "string" },
+            "url": { "type": "string", "format": "uri" }
+        }
+    })
+}
+
+fn notification_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["id", "type", "created_at", "account"],
+        "additionalProperties": true,
+        "properties": {
+            "id": { "type": "string" },
+            "type": { "type": "string" },
+            "created_at": { "type": "string" },
+            "account": account_schema(),
+            "status": {
+                "type": ["object", "null"],
+                "additionalProperties": true
+            }
+        }
+    })
+}
+
+fn timeline_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": status_schema()
+    })
+}
+
+fn notifications_output_schema() -> Value {
+    json!({
+        "type": "array",
+        "items": notification_schema()
+    })
+}
+
+fn search_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["accounts", "statuses", "hashtags"],
+        "additionalProperties": true,
+        "properties": {
+            "accounts": {
+                "type": "array",
+                "items": account_schema()
+            },
+            "statuses": {
+                "type": "array",
+                "items": status_schema()
+            },
+            "hashtags": {
+                "type": "array",
+                "items": tag_schema()
+            }
+        }
+    })
+}
+
+fn instance_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["title", "version"],
+        "additionalProperties": true,
+        "properties": {
+            "uri": optional_string_schema(),
+            "domain": optional_string_schema(),
+            "title": { "type": "string" },
+            "version": { "type": "string" }
+        }
+    })
+}
+
+fn input_schema_for(operation: &str) -> Value {
+    match operation {
+        OP_TIMELINE_HOME => timeline_home_input_schema(),
+        OP_TIMELINE_PUBLIC => timeline_public_input_schema(),
+        OP_STATUSES_GET | OP_STATUSES_DELETE | OP_STATUSES_FAVOURITE | OP_STATUSES_BOOST => {
+            id_input_schema()
+        }
+        OP_STATUSES_POST => status_post_input_schema(),
+        OP_ACCOUNTS_GET => id_input_schema(),
+        OP_NOTIFICATIONS_LIST => notifications_input_schema(),
+        OP_SEARCH => search_input_schema(),
+        OP_ACCOUNTS_VERIFY | OP_HEALTH => empty_input_schema(),
+        _ => empty_input_schema(),
+    }
+}
+
+fn output_schema_for(operation: &str) -> Value {
+    match operation {
+        OP_TIMELINE_HOME | OP_TIMELINE_PUBLIC => timeline_output_schema(),
+        OP_STATUSES_GET
+        | OP_STATUSES_POST
+        | OP_STATUSES_DELETE
+        | OP_STATUSES_FAVOURITE
+        | OP_STATUSES_BOOST => status_schema(),
+        OP_ACCOUNTS_GET | OP_ACCOUNTS_VERIFY => account_schema(),
+        OP_NOTIFICATIONS_LIST => notifications_output_schema(),
+        OP_SEARCH => search_output_schema(),
+        OP_HEALTH => instance_output_schema(),
+        _ => json!({ "type": "object" }),
+    }
+}
 
 /// Mastodon connector configuration.
 #[derive(Clone, Deserialize)]
@@ -192,16 +446,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_TIMELINE_HOME),
             summary: "Get home timeline".into(),
             description: Some("Returns statuses from followed accounts".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Max statuses to return (default 20, max 40)" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "object" }
-            }),
+            input_schema: input_schema_for(OP_TIMELINE_HOME),
+            output_schema: output_schema_for(OP_TIMELINE_HOME),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -222,17 +468,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_TIMELINE_PUBLIC),
             summary: "Get public timeline".into(),
             description: Some("Returns public statuses from the instance or federation".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "local": { "type": "boolean", "description": "Show only local statuses", "default": false },
-                    "limit": { "type": "integer", "description": "Max statuses to return" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "object" }
-            }),
+            input_schema: input_schema_for(OP_TIMELINE_PUBLIC),
+            output_schema: output_schema_for(OP_TIMELINE_PUBLIC),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -250,14 +487,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_STATUSES_GET),
             summary: "Get a single status".into(),
             description: Some("Retrieves a status by its ID".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "string", "description": "Status ID" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_STATUSES_GET),
+            output_schema: output_schema_for(OP_STATUSES_GET),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -275,18 +506,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_STATUSES_POST),
             summary: "Post a new status".into(),
             description: Some("Creates a new status (toot) on Mastodon".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["status"],
-                "properties": {
-                    "status": { "type": "string", "description": "Text content of the status (max 500 chars)" },
-                    "visibility": { "type": "string", "enum": ["public", "unlisted", "private", "direct"] },
-                    "in_reply_to_id": { "type": "string", "description": "ID of the status to reply to" },
-                    "sensitive": { "type": "boolean", "default": false },
-                    "spoiler_text": { "type": "string", "description": "Content warning text" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_STATUSES_POST),
+            output_schema: output_schema_for(OP_STATUSES_POST),
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -307,14 +528,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_STATUSES_DELETE),
             summary: "Delete a status".into(),
             description: Some("Deletes a status owned by the authenticated user".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "string", "description": "Status ID to delete" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_STATUSES_DELETE),
+            output_schema: output_schema_for(OP_STATUSES_DELETE),
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
@@ -335,14 +550,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_STATUSES_FAVOURITE),
             summary: "Favourite a status".into(),
             description: Some("Adds a favourite (like) to a status".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "string", "description": "Status ID to favourite" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_STATUSES_FAVOURITE),
+            output_schema: output_schema_for(OP_STATUSES_FAVOURITE),
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Risky,
@@ -360,14 +569,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_STATUSES_BOOST),
             summary: "Boost (reblog) a status".into(),
             description: Some("Shares a status to the user's followers".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "string", "description": "Status ID to boost" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_STATUSES_BOOST),
+            output_schema: output_schema_for(OP_STATUSES_BOOST),
             capability: CapabilityId::from_static(CAP_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -385,14 +588,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ACCOUNTS_GET),
             summary: "Get an account by ID".into(),
             description: Some("Retrieves public information about a Mastodon account".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "string", "description": "Account ID" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_ACCOUNTS_GET),
+            output_schema: output_schema_for(OP_ACCOUNTS_GET),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -411,8 +608,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ACCOUNTS_VERIFY),
             summary: "Verify current user credentials".into(),
             description: Some("Returns the authenticated user's account information".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: input_schema_for(OP_ACCOUNTS_VERIFY),
+            output_schema: output_schema_for(OP_ACCOUNTS_VERIFY),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -430,16 +627,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_NOTIFICATIONS_LIST),
             summary: "List notifications".into(),
             description: Some("Returns recent notifications for the authenticated user".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Max notifications to return" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "object" }
-            }),
+            input_schema: input_schema_for(OP_NOTIFICATIONS_LIST),
+            output_schema: output_schema_for(OP_NOTIFICATIONS_LIST),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -457,23 +646,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SEARCH),
             summary: "Search Mastodon".into(),
             description: Some("Searches for accounts, statuses, and hashtags".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["q"],
-                "properties": {
-                    "q": { "type": "string", "description": "Search query" },
-                    "type": { "type": "string", "enum": ["accounts", "hashtags", "statuses"], "description": "Search type filter" },
-                    "limit": { "type": "integer", "description": "Max results to return" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "accounts": { "type": "array" },
-                    "statuses": { "type": "array" },
-                    "hashtags": { "type": "array" }
-                }
-            }),
+            input_schema: input_schema_for(OP_SEARCH),
+            output_schema: output_schema_for(OP_SEARCH),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -491,14 +665,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check instance health".into(),
             description: Some("Returns health information about the Mastodon instance".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "title": { "type": "string" },
-                    "version": { "type": "string" }
-                }
-            }),
+            input_schema: input_schema_for(OP_HEALTH),
+            output_schema: output_schema_for(OP_HEALTH),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,

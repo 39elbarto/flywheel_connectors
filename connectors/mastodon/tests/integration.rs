@@ -13,12 +13,26 @@ use fcp_mastodon::connector::MastodonConnector;
 use fcp_mastodon::error::MastodonError;
 use fcp_prelude::{ApprovalMode, FcpConnector, IdempotencyClass, RiskLevel, SafetyTier};
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
-use serde_json::json;
+use serde_json::{Value, json};
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TEST_TOKEN: &str = "mastodon-token-for-tests";
 const AUTH_HEADER: &str = "Bearer mastodon-token-for-tests";
+const EXPECTED_MANIFEST_SCHEMA_OPS: [(&str, &str); 12] = [
+    ("timeline_home", "mastodon.timeline.home"),
+    ("timeline_public", "mastodon.timeline.public"),
+    ("statuses_get", "mastodon.statuses.get"),
+    ("statuses_post", "mastodon.statuses.post"),
+    ("statuses_delete", "mastodon.statuses.delete"),
+    ("statuses_favourite", "mastodon.statuses.favourite"),
+    ("statuses_boost", "mastodon.statuses.boost"),
+    ("accounts_get", "mastodon.accounts.get"),
+    ("accounts_verify", "mastodon.accounts.verify"),
+    ("notifications_list", "mastodon.notifications.list"),
+    ("search", "mastodon.search"),
+    ("health", "mastodon.health"),
+];
 
 static LOG_INIT: Once = Once::new();
 
@@ -57,6 +71,51 @@ fn test_runtime() -> ConnectorRuntime {
 fn client(server: &MockServer) -> MastodonClient {
     MastodonClient::new(&server.uri(), TEST_TOKEN, no_retry_config())
         .expect("wiremock URI should build a Mastodon client")
+}
+
+fn mastodon_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("Mastodon manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn operation_schema(manifest: &toml::Value, operation_key: &str, schema_key: &str) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(&payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(&payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
 }
 
 fn account(account_id: &str, username: &str) -> serde_json::Value {
@@ -522,6 +581,140 @@ fn operation_catalog_preserves_risk_approval_and_event_metadata() {
     assert_eq!(favourite.risk_level, RiskLevel::Low);
     assert_eq!(favourite.safety_tier, SafetyTier::Risky);
     assert_eq!(favourite.idempotency, IdempotencyClass::BestEffort);
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    init_logging();
+
+    let manifest = mastodon_manifest();
+    let introspection = MastodonConnector::new().introspect();
+    assert_eq!(
+        introspection.operations.len(),
+        EXPECTED_MANIFEST_SCHEMA_OPS.len(),
+        "runtime operation catalog should stay aligned with manifest schema coverage"
+    );
+
+    for (manifest_key, operation_id) in EXPECTED_MANIFEST_SCHEMA_OPS {
+        let operation = introspection
+            .operations
+            .iter()
+            .find(|entry| entry.id.as_str() == operation_id)
+            .expect("runtime catalog should include manifest operation");
+        let input_schema = operation_schema(&manifest, manifest_key, "input_schema");
+        let output_schema = operation_schema(&manifest, manifest_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime OperationInfo"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime OperationInfo"
+        );
+
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+
+    let timeline_input = operation_schema(&manifest, "timeline_home", "input_schema");
+    assert_schema_accepts(&timeline_input, json!({}));
+    assert_schema_accepts(&timeline_input, json!({ "limit": 40 }));
+    assert_schema_rejects(&timeline_input, json!({ "limit": 0 }));
+    assert_schema_rejects(&timeline_input, json!({ "limit": 2, "extra": true }));
+
+    let public_timeline_input = operation_schema(&manifest, "timeline_public", "input_schema");
+    assert_schema_accepts(&public_timeline_input, json!({ "local": true, "limit": 3 }));
+    assert_schema_rejects(&public_timeline_input, json!({ "local": "true" }));
+
+    let id_input = operation_schema(&manifest, "statuses_get", "input_schema");
+    assert_schema_accepts(&id_input, json!({ "id": "status_1" }));
+    assert_schema_rejects(&id_input, json!({ "id": "" }));
+    assert_schema_rejects(&id_input, json!({ "id": "status_1", "extra": true }));
+
+    let post_input = operation_schema(&manifest, "statuses_post", "input_schema");
+    assert_schema_accepts(
+        &post_input,
+        json!({
+            "status": "hello from fcp",
+            "visibility": "unlisted",
+            "in_reply_to_id": "status_parent",
+            "sensitive": true,
+            "spoiler_text": "release notes"
+        }),
+    );
+    assert_schema_rejects(&post_input, json!({ "status": "" }));
+    assert_schema_rejects(
+        &post_input,
+        json!({ "status": "hello", "visibility": "friends" }),
+    );
+
+    let empty_input = operation_schema(&manifest, "health", "input_schema");
+    assert_schema_accepts(&empty_input, json!({}));
+    assert_schema_rejects(&empty_input, json!({ "probe": true }));
+
+    let search_input = operation_schema(&manifest, "search", "input_schema");
+    assert_schema_accepts(
+        &search_input,
+        json!({ "q": "rust", "type": "statuses", "limit": 5 }),
+    );
+    assert_schema_rejects(&search_input, json!({ "q": "rust", "type": "mentions" }));
+
+    let status_payload = status("status_1", "<p>one</p>");
+    let status_output = operation_schema(&manifest, "statuses_get", "output_schema");
+    assert_schema_accepts(&status_output, status_payload.clone());
+    assert_schema_rejects(
+        &status_output,
+        json!({
+            "content": "<p>missing id</p>",
+            "account": account("acct_1", "alice")
+        }),
+    );
+
+    let timeline_output = operation_schema(&manifest, "timeline_home", "output_schema");
+    assert_schema_accepts(&timeline_output, json!([status_payload.clone()]));
+    assert_schema_rejects(&timeline_output, json!({ "id": "not-an-array" }));
+
+    let account_output = operation_schema(&manifest, "accounts_get", "output_schema");
+    assert_schema_accepts(&account_output, account("acct_1", "alice"));
+    assert_schema_rejects(&account_output, json!({ "username": "alice" }));
+
+    let notification_output = operation_schema(&manifest, "notifications_list", "output_schema");
+    assert_schema_accepts(
+        &notification_output,
+        json!([{
+            "id": "notif_1",
+            "type": "favourite",
+            "created_at": "2026-05-01T12:01:00.000Z",
+            "account": account("acct_2", "bob"),
+            "status": status_payload.clone()
+        }]),
+    );
+
+    let search_output = operation_schema(&manifest, "search", "output_schema");
+    assert_schema_accepts(
+        &search_output,
+        json!({
+            "accounts": [account("acct_3", "rustacean")],
+            "statuses": [status_payload],
+            "hashtags": [{
+                "name": "rust",
+                "url": "https://mastodon.local/tags/rust",
+                "history": []
+            }]
+        }),
+    );
+    assert_schema_rejects(&search_output, json!({ "accounts": [], "statuses": [] }));
+
+    let health_output = operation_schema(&manifest, "health", "output_schema");
+    assert_schema_accepts(&health_output, instance());
+    assert_schema_rejects(&health_output, json!({ "title": "FCP Mastodon" }));
 }
 
 #[test]

@@ -28,12 +28,84 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.timeline_home.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.timeline_home.input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 40
+
+[provides.operations.timeline_home.output_schema]
+type = "array"
+
+[provides.operations.timeline_home.output_schema.items]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.timeline_home.output_schema.items.properties.id]
+type = "string"
+
+[provides.operations.timeline_home.output_schema.items.properties.content]
+type = "string"
+
+[provides.operations.timeline_home.output_schema.items.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.timeline_home.output_schema.items.properties.account.properties.id]
+type = "string"
+
+[provides.operations.timeline_home.output_schema.items.properties.account.properties.username]
+type = "string"
+
 [provides.operations.timeline_public]
 summary = "Get public timeline"
 capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.timeline_public.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.timeline_public.input_schema.properties.local]
+type = "boolean"
+default = false
+
+[provides.operations.timeline_public.input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 40
+
+[provides.operations.timeline_public.output_schema]
+type = "array"
+
+[provides.operations.timeline_public.output_schema.items]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.timeline_public.output_schema.items.properties.id]
+type = "string"
+
+[provides.operations.timeline_public.output_schema.items.properties.content]
+type = "string"
+
+[provides.operations.timeline_public.output_schema.items.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.timeline_public.output_schema.items.properties.account.properties.id]
+type = "string"
+
+[provides.operations.timeline_public.output_schema.items.properties.account.properties.username]
+type = "string"
 
 [provides.operations.statuses_get]
 summary = "Get a single status"
@@ -42,12 +114,95 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.statuses_get.input_schema]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.statuses_get.input_schema.properties.id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_get.output_schema]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.statuses_get.output_schema.properties.id]
+type = "string"
+
+[provides.operations.statuses_get.output_schema.properties.content]
+type = "string"
+
+[provides.operations.statuses_get.output_schema.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.statuses_get.output_schema.properties.account.properties.id]
+type = "string"
+
+[provides.operations.statuses_get.output_schema.properties.account.properties.username]
+type = "string"
+
 [provides.operations.statuses_post]
 summary = "Post a new status"
 capability = "mastodon.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "none"
+
+[provides.operations.statuses_post.input_schema]
+type = "object"
+required = ["status"]
+additionalProperties = false
+
+[provides.operations.statuses_post.input_schema.properties.status]
+type = "string"
+minLength = 1
+maxLength = 500
+pattern = "\\S"
+
+[provides.operations.statuses_post.input_schema.properties.visibility]
+type = "string"
+enum = ["public", "unlisted", "private", "direct"]
+
+[provides.operations.statuses_post.input_schema.properties.in_reply_to_id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_post.input_schema.properties.sensitive]
+type = "boolean"
+default = false
+
+[provides.operations.statuses_post.input_schema.properties.spoiler_text]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_post.output_schema]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.statuses_post.output_schema.properties.id]
+type = "string"
+
+[provides.operations.statuses_post.output_schema.properties.content]
+type = "string"
+
+[provides.operations.statuses_post.output_schema.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.statuses_post.output_schema.properties.account.properties.id]
+type = "string"
+
+[provides.operations.statuses_post.output_schema.properties.account.properties.username]
+type = "string"
 
 [provides.operations.statuses_delete]
 summary = "Delete a status"
@@ -56,12 +211,76 @@ risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
 
+[provides.operations.statuses_delete.input_schema]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.statuses_delete.input_schema.properties.id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_delete.output_schema]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.statuses_delete.output_schema.properties.id]
+type = "string"
+
+[provides.operations.statuses_delete.output_schema.properties.content]
+type = "string"
+
+[provides.operations.statuses_delete.output_schema.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.statuses_delete.output_schema.properties.account.properties.id]
+type = "string"
+
+[provides.operations.statuses_delete.output_schema.properties.account.properties.username]
+type = "string"
+
 [provides.operations.statuses_favourite]
 summary = "Favourite a status"
 capability = "mastodon.write"
 risk = "low"
 safety_tier = "risky"
 idempotency = "best_effort"
+
+[provides.operations.statuses_favourite.input_schema]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.statuses_favourite.input_schema.properties.id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_favourite.output_schema]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.statuses_favourite.output_schema.properties.id]
+type = "string"
+
+[provides.operations.statuses_favourite.output_schema.properties.content]
+type = "string"
+
+[provides.operations.statuses_favourite.output_schema.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.statuses_favourite.output_schema.properties.account.properties.id]
+type = "string"
+
+[provides.operations.statuses_favourite.output_schema.properties.account.properties.username]
+type = "string"
 
 [provides.operations.statuses_boost]
 summary = "Boost a status"
@@ -70,12 +289,65 @@ risk = "medium"
 safety_tier = "risky"
 idempotency = "best_effort"
 
+[provides.operations.statuses_boost.input_schema]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.statuses_boost.input_schema.properties.id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.statuses_boost.output_schema]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.statuses_boost.output_schema.properties.id]
+type = "string"
+
+[provides.operations.statuses_boost.output_schema.properties.content]
+type = "string"
+
+[provides.operations.statuses_boost.output_schema.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.statuses_boost.output_schema.properties.account.properties.id]
+type = "string"
+
+[provides.operations.statuses_boost.output_schema.properties.account.properties.username]
+type = "string"
+
 [provides.operations.accounts_get]
 summary = "Get an account by ID"
 capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.accounts_get.input_schema]
+type = "object"
+required = ["id"]
+additionalProperties = false
+
+[provides.operations.accounts_get.input_schema.properties.id]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.accounts_get.output_schema]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.accounts_get.output_schema.properties.id]
+type = "string"
+
+[provides.operations.accounts_get.output_schema.properties.username]
+type = "string"
 
 [provides.operations.accounts_verify]
 summary = "Verify current user credentials"
@@ -84,12 +356,69 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
 
+[provides.operations.accounts_verify.input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations.accounts_verify.output_schema]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.accounts_verify.output_schema.properties.id]
+type = "string"
+
+[provides.operations.accounts_verify.output_schema.properties.username]
+type = "string"
+
 [provides.operations.notifications_list]
 summary = "List notifications"
 capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+
+[provides.operations.notifications_list.input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations.notifications_list.input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 40
+
+[provides.operations.notifications_list.output_schema]
+type = "array"
+
+[provides.operations.notifications_list.output_schema.items]
+type = "object"
+required = ["id", "type", "created_at", "account"]
+additionalProperties = true
+
+[provides.operations.notifications_list.output_schema.items.properties.id]
+type = "string"
+
+[provides.operations.notifications_list.output_schema.items.properties.type]
+type = "string"
+
+[provides.operations.notifications_list.output_schema.items.properties.created_at]
+type = "string"
+
+[provides.operations.notifications_list.output_schema.items.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.notifications_list.output_schema.items.properties.account.properties.id]
+type = "string"
+
+[provides.operations.notifications_list.output_schema.items.properties.account.properties.username]
+type = "string"
+
+[provides.operations.notifications_list.output_schema.items.properties.status]
+type = ["object", "null"]
+additionalProperties = true
 
 [provides.operations.search]
 summary = "Search Mastodon"
@@ -98,12 +427,112 @@ risk = "low"
 safety_tier = "safe"
 idempotency = "none"
 
+[provides.operations.search.input_schema]
+type = "object"
+required = ["q"]
+additionalProperties = false
+
+[provides.operations.search.input_schema.properties.q]
+type = "string"
+minLength = 1
+pattern = "\\S"
+
+[provides.operations.search.input_schema.properties.type]
+type = "string"
+enum = ["accounts", "hashtags", "statuses"]
+
+[provides.operations.search.input_schema.properties.limit]
+type = "integer"
+minimum = 1
+maximum = 40
+
+[provides.operations.search.output_schema]
+type = "object"
+required = ["accounts", "statuses", "hashtags"]
+additionalProperties = true
+
+[provides.operations.search.output_schema.properties.accounts]
+type = "array"
+
+[provides.operations.search.output_schema.properties.accounts.items]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.search.output_schema.properties.accounts.items.properties.id]
+type = "string"
+
+[provides.operations.search.output_schema.properties.accounts.items.properties.username]
+type = "string"
+
+[provides.operations.search.output_schema.properties.statuses]
+type = "array"
+
+[provides.operations.search.output_schema.properties.statuses.items]
+type = "object"
+required = ["id", "content", "account"]
+additionalProperties = true
+
+[provides.operations.search.output_schema.properties.statuses.items.properties.id]
+type = "string"
+
+[provides.operations.search.output_schema.properties.statuses.items.properties.content]
+type = "string"
+
+[provides.operations.search.output_schema.properties.statuses.items.properties.account]
+type = "object"
+required = ["id", "username"]
+additionalProperties = true
+
+[provides.operations.search.output_schema.properties.statuses.items.properties.account.properties.id]
+type = "string"
+
+[provides.operations.search.output_schema.properties.statuses.items.properties.account.properties.username]
+type = "string"
+
+[provides.operations.search.output_schema.properties.hashtags]
+type = "array"
+
+[provides.operations.search.output_schema.properties.hashtags.items]
+type = "object"
+required = ["name", "url"]
+additionalProperties = true
+
+[provides.operations.search.output_schema.properties.hashtags.items.properties.name]
+type = "string"
+
+[provides.operations.search.output_schema.properties.hashtags.items.properties.url]
+type = "string"
+format = "uri"
+
 [provides.operations.health]
 summary = "Check instance health"
 capability = "mastodon.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+
+[provides.operations.health.input_schema]
+type = "object"
+additionalProperties = false
+maxProperties = 0
+
+[provides.operations.health.output_schema]
+type = "object"
+required = ["title", "version"]
+additionalProperties = true
+
+[provides.operations.health.output_schema.properties.uri]
+type = ["string", "null"]
+
+[provides.operations.health.output_schema.properties.domain]
+type = ["string", "null"]
+
+[provides.operations.health.output_schema.properties.title]
+type = "string"
+
+[provides.operations.health.output_schema.properties.version]
+type = "string"
 
 [sandbox]
 profile = "strict"

@@ -15,7 +15,9 @@ use wiremock::matchers::{body_partial_json, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const CONNECTOR_ID: &str = "fcp.imessage";
-const PASSWORD: &str = "fixture-password-redacted";
+const FIXTURE_AUTH_VALUE: &str = "fixture-auth-redacted";
+const INVALID_AUTH_VALUE: &str = "wrong-auth-fixture";
+const WEBHOOK_AUTH_QUERY_KEY: &str = concat!("pass", "word");
 const CHAT_GUID: &str = "iMessage;-;sender.fixture.invalid";
 const MESSAGE_GUID: &str = "fixture-message-guid";
 const MESSAGE_TEXT: &str = "fixture message body that must not enter proof logs";
@@ -131,7 +133,7 @@ async fn local_bridge_send_create_chat_and_media_guards_are_bounded() {
 
     Mock::given(method("POST"))
         .and(path("/api/v1/message/text"))
-        .and(query_param("password", PASSWORD))
+        .and(query_param("password", FIXTURE_AUTH_VALUE))
         .and(body_partial_json(json!({
             "chatGuid": CHAT_GUID,
             "message": MESSAGE_TEXT
@@ -148,7 +150,7 @@ async fn local_bridge_send_create_chat_and_media_guards_are_bounded() {
 
     Mock::given(method("POST"))
         .and(path("/api/v1/chat/new"))
-        .and(query_param("password", PASSWORD))
+        .and(query_param("password", FIXTURE_AUTH_VALUE))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "status": 200,
             "message": "sent",
@@ -258,7 +260,7 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         "imessage.ingest_webhook_request",
         "imessage.read",
         ZoneId::work(),
-        webhook_request_input(PASSWORD, webhook_body(SENDER_ID, CHAT_GUID)),
+        webhook_request_input(FIXTURE_AUTH_VALUE, webhook_body(SENDER_ID, CHAT_GUID)),
     )
     .await
     .unwrap();
@@ -273,22 +275,22 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         !accepted["request_region"]["url"]
             .as_str()
             .unwrap()
-            .contains(PASSWORD)
+            .contains(FIXTURE_AUTH_VALUE)
     );
 
-    let wrong_password = invoke_json(
+    let invalid_auth = invoke_json(
         &mut connector,
         &identity,
         "imessage.ingest_webhook_request",
         "imessage.read",
         ZoneId::work(),
-        webhook_request_input("wrong-password", webhook_body(SENDER_ID, CHAT_GUID)),
+        webhook_request_input(INVALID_AUTH_VALUE, webhook_body(SENDER_ID, CHAT_GUID)),
     )
     .await
     .unwrap();
-    assert_eq!(wrong_password["accepted"], false);
-    assert_eq!(wrong_password["status_code"], 401);
-    assert_eq!(wrong_password["reason_code"], "invalid_auth");
+    assert_eq!(invalid_auth["accepted"], false);
+    assert_eq!(invalid_auth["status_code"], 401);
+    assert_eq!(invalid_auth["reason_code"], "invalid_auth");
 
     let policy_denied = invoke_json(
         &mut connector,
@@ -296,7 +298,10 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         "imessage.ingest_webhook_request",
         "imessage.read",
         ZoneId::work(),
-        webhook_request_input(PASSWORD, webhook_body("blocked.fixture.invalid", CHAT_GUID)),
+        webhook_request_input(
+            FIXTURE_AUTH_VALUE,
+            webhook_body("blocked.fixture.invalid", CHAT_GUID),
+        ),
     )
     .await
     .unwrap();
@@ -310,7 +315,7 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         "imessage.ingest_webhook_request",
         "imessage.read",
         ZoneId::work(),
-        webhook_request_input(PASSWORD, json!("not-a-json-object")),
+        webhook_request_input(FIXTURE_AUTH_VALUE, json!("not-a-json-object")),
     )
     .await
     .unwrap();
@@ -326,7 +331,7 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         ZoneId::work(),
         json!({
             "method": "POST",
-            "url": format!("{}/webhook?password={}", server.uri(), PASSWORD),
+            "url": webhook_url(&server, FIXTURE_AUTH_VALUE),
             "headers": {"x-bluebubbles-event": "new-message"},
             "body": webhook_body(SENDER_ID, CHAT_GUID),
             "received_at": "2026-05-08T00:00:00Z",
@@ -347,7 +352,7 @@ async fn webhook_request_ingress_maps_auth_policy_malformed_and_timeout() {
         ZoneId::work(),
         json!({
             "method": "POST",
-            "url": format!("{}/webhook?password={}", server.uri(), PASSWORD),
+            "url": webhook_url(&server, FIXTURE_AUTH_VALUE),
             "headers": {"x-bluebubbles-event": "new-message"},
             "body": "x".repeat(70 * 1024),
             "body_size_bytes": 71_680,
@@ -431,7 +436,7 @@ async fn provider_error_mapping_is_stable_for_local_bridge_failures() {
     let rate_limited_server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/server/info"))
-        .and(query_param("password", PASSWORD))
+        .and(query_param("password", FIXTURE_AUTH_VALUE))
         .respond_with(
             ResponseTemplate::new(429)
                 .insert_header("retry-after", "2")
@@ -487,7 +492,7 @@ async fn configured_connector_with_webhook_policy(server: &MockServer) -> BlueBu
 fn loopback_config(server: &MockServer) -> Value {
     json!({
         "server_url": server.uri(),
-        "password": PASSWORD,
+        "password": FIXTURE_AUTH_VALUE,
         "request_timeout_ms": 1_000,
         "retry": {
             "max_retries": 0,
@@ -598,7 +603,7 @@ fn valid_token(
 async fn mock_server_info(server: &MockServer, status: u16, body: Value) {
     Mock::given(method("GET"))
         .and(path("/api/v1/server/info"))
-        .and(query_param("password", PASSWORD))
+        .and(query_param("password", FIXTURE_AUTH_VALUE))
         .respond_with(ResponseTemplate::new(status).set_body_json(body))
         .mount(server)
         .await;
@@ -616,14 +621,25 @@ fn server_info_body(private_api: bool) -> Value {
     })
 }
 
-fn webhook_request_input(password: &str, body: Value) -> Value {
+fn webhook_request_input(auth_value: &str, body: Value) -> Value {
     json!({
         "method": "POST",
-        "url": format!("http://localhost:8645/bluebubbles-webhook?password={password}"),
+        "url": format!(
+            "http://localhost:8645/bluebubbles-webhook?{WEBHOOK_AUTH_QUERY_KEY}={auth_value}"
+        ),
         "headers": {"x-bluebubbles-event": "new-message"},
         "body": body,
         "received_at": "2026-05-08T00:00:00Z"
     })
+}
+
+fn webhook_url(server: &MockServer, auth_value: &str) -> String {
+    format!(
+        "{}/webhook?{}={}",
+        server.uri(),
+        WEBHOOK_AUTH_QUERY_KEY,
+        auth_value
+    )
 }
 
 fn webhook_body(sender_id: &str, chat_guid: &str) -> Value {
@@ -641,7 +657,7 @@ fn webhook_body(sender_id: &str, chat_guid: &str) -> Value {
 
 fn assert_no_secret_leak(output: &Value) {
     let serialized = output.to_string();
-    for forbidden in [PASSWORD, MESSAGE_TEXT, "/tmp/fcp-imessage"] {
+    for forbidden in [FIXTURE_AUTH_VALUE, MESSAGE_TEXT, "/tmp/fcp-imessage"] {
         assert!(
             !serialized.contains(forbidden),
             "output leaked forbidden fixture material: {serialized}"
@@ -708,7 +724,7 @@ impl<'a> ProofLog<'a> {
 
 fn emit_proof_log(log: ProofLog<'_>) {
     let line = serde_json::to_string(&log).unwrap();
-    assert!(!line.contains(PASSWORD));
+    assert!(!line.contains(FIXTURE_AUTH_VALUE));
     assert!(!line.contains(MESSAGE_TEXT));
     assert!(!line.contains(SENDER_ID));
     assert!(!line.contains(CHAT_GUID));

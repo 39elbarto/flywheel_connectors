@@ -26,9 +26,14 @@ fn operation_manifest_and_introspection_contracts_stay_aligned() {
         .collect::<BTreeMap<_, _>>();
 
     for expected_operation in expected {
+        assert!(
+            operations.contains_key(expected_operation.id),
+            "missing operation {}",
+            expected_operation.id
+        );
         let operation = operations
             .get(expected_operation.id)
-            .unwrap_or_else(|| panic!("missing operation {}", expected_operation.id));
+            .expect("operation presence is asserted above");
 
         assert_eq!(
             operation.capability.as_str(),
@@ -56,10 +61,7 @@ fn operation_manifest_and_introspection_contracts_stay_aligned() {
             "{} must carry an operator-facing summary",
             expected_operation.id
         );
-        let description = operation
-            .description
-            .as_deref()
-            .unwrap_or_else(|| panic!("{} must carry a description", expected_operation.id));
+        let description = operation.description.as_deref().unwrap_or("");
         assert!(
             !description.trim().is_empty(),
             "{} must carry an operator-facing description",
@@ -179,7 +181,9 @@ fn assert_required_fields(schema: &Value, required_fields: &[&str]) {
     let required = schema
         .get("required")
         .and_then(Value::as_array)
-        .unwrap_or_else(|| panic!("schema must declare required fields"));
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    assert!(!required.is_empty(), "schema must declare required fields");
     for field in required_fields {
         assert!(
             required.iter().any(|value| value.as_str() == Some(*field)),

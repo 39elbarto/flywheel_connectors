@@ -34,7 +34,6 @@ const EXPECTED_SCHEMA_GAPS: &[&str] = &[
     "nostr",
     "qq",
     "sonos",
-    "twitch",
     "vercel",
     "wecom",
     "whatsapp",

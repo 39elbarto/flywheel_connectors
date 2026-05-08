@@ -3462,6 +3462,9 @@ impl FcpConnector for BlueBubblesConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        if let Some(requested_instance_id) = req.requested_instance_id {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
             req.host_public_key,
@@ -4729,13 +4732,100 @@ mod tests {
     use fcp_crypto::cose::CapabilityTokenBuilder;
     use fcp_crypto::ed25519::Ed25519SigningKey;
     use fcp_prelude::{CapabilityConstraints, CorrelationId};
-    use std::collections::HashMap;
+    use std::collections::{BTreeSet, HashMap};
     use std::io::{Read, Write};
     use std::net::{Shutdown, SocketAddr, TcpListener as StdTcpListener, TcpStream};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const MANIFEST_SCHEMA_OPERATIONS: [(&str, &str); 21] = [
+        ("send_message", OP_SEND_MESSAGE),
+        ("send_media", OP_SEND_MEDIA),
+        ("resolve_send_target", OP_RESOLVE_SEND_TARGET),
+        ("create_chat", OP_CREATE_CHAT),
+        ("get_action_availability", OP_GET_ACTION_AVAILABILITY),
+        ("edit_message", OP_EDIT_MESSAGE),
+        ("unsend_message", OP_UNSEND_MESSAGE),
+        ("send_reaction", OP_SEND_REACTION),
+        ("set_typing", OP_SET_TYPING),
+        ("get_chats", OP_GET_CHATS),
+        ("get_chat", OP_GET_CHAT),
+        ("get_messages", OP_GET_MESSAGES),
+        ("sync_events", OP_SYNC_EVENTS),
+        ("download_attachment", OP_DOWNLOAD_ATTACHMENT),
+        ("mark_read", OP_MARK_READ),
+        ("register_webhook", OP_REGISTER_WEBHOOK),
+        ("list_webhooks", OP_LIST_WEBHOOKS),
+        ("unregister_webhook", OP_UNREGISTER_WEBHOOK),
+        ("ingest_webhook_event", OP_INGEST_WEBHOOK_EVENT),
+        ("ingest_webhook_request", OP_INGEST_WEBHOOK_REQUEST),
+        ("get_server_info", OP_GET_SERVER_INFO),
+    ];
+
+    fn imessage_manifest() -> toml::Value {
+        toml::from_str(MANIFEST_TOML).expect("iMessage manifest TOML should parse")
+    }
+
+    fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .expect("manifest should contain provides.operations")
+    }
+
+    fn manifest_operation_schema(
+        manifest: &toml::Value,
+        operation_key: &str,
+        schema_key: &str,
+    ) -> Value {
+        let schema = manifest_operations(manifest)
+            .get(operation_key)
+            .and_then(|operation| operation.get(schema_key))
+            .expect("operation should define requested schema");
+
+        serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+    }
+
+    fn runtime_operation<'a>(
+        operations: &'a [OperationInfo],
+        operation_id: &str,
+    ) -> &'a OperationInfo {
+        operations
+            .iter()
+            .find(|operation| operation.id.as_str() == operation_id)
+            .expect("runtime introspection should include operation")
+    }
+
+    fn schema_property_names(schema: &Value) -> BTreeSet<String> {
+        schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .map(|properties| properties.keys().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    fn assert_schema_accepts(schema: &Value, payload: &Value) {
+        let validator = jsonschema::validator_for(schema).expect("schema should compile");
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            errors.is_empty(),
+            "schema should accept payload {payload:#}: {errors:#?}"
+        );
+    }
+
+    fn assert_schema_rejects(schema: &Value, payload: &Value) {
+        let validator = jsonschema::validator_for(schema).expect("schema should compile");
+        assert!(
+            validator.iter_errors(payload).next().is_some(),
+            "schema should reject payload {payload:#}"
+        );
+    }
 
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
@@ -6681,6 +6771,234 @@ mod tests {
                 );
             }
         }
+    }
+
+    fn assert_manifest_runtime_schema_parity(manifest: &toml::Value, operations: &[OperationInfo]) {
+        let manifest_ops = manifest_operations(manifest);
+        assert_eq!(
+            manifest_ops.len(),
+            MANIFEST_SCHEMA_OPERATIONS.len(),
+            "manifest operation count should match schema coverage set"
+        );
+
+        for (operation_key, operation_id) in MANIFEST_SCHEMA_OPERATIONS {
+            let operation = runtime_operation(operations, operation_id);
+            for (schema_key, runtime_schema) in [
+                ("input_schema", &operation.input_schema),
+                ("output_schema", &operation.output_schema),
+            ] {
+                let manifest_schema =
+                    manifest_operation_schema(manifest, operation_key, schema_key);
+                assert_eq!(
+                    manifest_schema.get("type"),
+                    runtime_schema.get("type"),
+                    "{operation_id} manifest {schema_key}.type drifted"
+                );
+                for keyword in ["required", "oneOf", "anyOf"] {
+                    assert_eq!(
+                        manifest_schema.get(keyword),
+                        runtime_schema.get(keyword),
+                        "{operation_id} manifest {schema_key}.{keyword} drifted"
+                    );
+                }
+                assert_eq!(
+                    schema_property_names(&manifest_schema),
+                    schema_property_names(runtime_schema),
+                    "{operation_id} manifest {schema_key}.properties drifted"
+                );
+                assert!(
+                    jsonschema::validator_for(&manifest_schema).is_ok(),
+                    "{operation_id} manifest {schema_key} should compile"
+                );
+                assert!(
+                    jsonschema::validator_for(runtime_schema).is_ok(),
+                    "{operation_id} runtime {schema_key} should compile"
+                );
+            }
+        }
+    }
+
+    fn assert_manifest_input_schema_examples(manifest: &toml::Value) {
+        let send_message = manifest_operation_schema(manifest, "send_message", "input_schema");
+        assert_schema_accepts(
+            &send_message,
+            &json!({ "chat_guid": "chat-1", "message": "hi" }),
+        );
+        assert_schema_rejects(&send_message, &json!({ "chat_guid": "chat-1" }));
+
+        let send_media = manifest_operation_schema(manifest, "send_media", "input_schema");
+        assert_schema_accepts(
+            &send_media,
+            &json!({ "local_path": "/tmp/photo.jpg", "chat_guid": "chat-1" }),
+        );
+        assert_schema_rejects(&send_media, &json!({ "local_path": "/tmp/photo.jpg" }));
+
+        let resolve_target =
+            manifest_operation_schema(manifest, "resolve_send_target", "input_schema");
+        assert_schema_accepts(&resolve_target, &json!({ "handle": "+15551234567" }));
+        assert_schema_rejects(&resolve_target, &json!({}));
+
+        let create_chat = manifest_operation_schema(manifest, "create_chat", "input_schema");
+        assert_schema_accepts(
+            &create_chat,
+            &json!({ "address": "+15551234567", "message": "hello" }),
+        );
+        assert_schema_rejects(&create_chat, &json!({ "address": "+15551234567" }));
+
+        for (operation_key, payload) in [
+            (
+                "edit_message",
+                json!({ "message_guid": "msg-1", "new_text": "fixed" }),
+            ),
+            ("unsend_message", json!({ "message_guid": "msg-1" })),
+            (
+                "send_reaction",
+                json!({ "chat_guid": "chat-1", "message_guid": "msg-1", "reaction": "like" }),
+            ),
+            (
+                "set_typing",
+                json!({ "chat_guid": "chat-1", "typing": true }),
+            ),
+            ("get_chat", json!({ "chat_guid": "chat-1" })),
+            (
+                "get_messages",
+                json!({ "chat_guid": "chat-1", "limit": 25 }),
+            ),
+            ("download_attachment", json!({ "attachment_guid": "att-1" })),
+            ("mark_read", json!({ "chat_guid": "chat-1" })),
+            (
+                "unregister_webhook",
+                json!({ "url": "http://localhost:8645/bluebubbles-webhook" }),
+            ),
+            (
+                "ingest_webhook_request",
+                json!({
+                    "method": "POST",
+                    "url": "http://localhost:8645/bluebubbles-webhook",
+                    "body": {}
+                }),
+            ),
+        ] {
+            let schema = manifest_operation_schema(manifest, operation_key, "input_schema");
+            assert_schema_accepts(&schema, &payload);
+            assert_schema_rejects(&schema, &json!({}));
+        }
+
+        let ingest_event =
+            manifest_operation_schema(manifest, "ingest_webhook_event", "input_schema");
+        assert_schema_accepts(&ingest_event, &json!({ "payload": {} }));
+        assert_schema_accepts(&ingest_event, &json!({ "flush_coalescing": true }));
+        assert_schema_rejects(&ingest_event, &json!({}));
+
+        for operation_key in [
+            "get_action_availability",
+            "get_chats",
+            "sync_events",
+            "register_webhook",
+            "list_webhooks",
+            "get_server_info",
+        ] {
+            let schema = manifest_operation_schema(manifest, operation_key, "input_schema");
+            assert_schema_accepts(&schema, &json!({}));
+            assert_schema_rejects(&schema, &json!([]));
+        }
+    }
+
+    fn assert_manifest_output_schema_examples(manifest: &toml::Value) {
+        let send_message = manifest_operation_schema(manifest, "send_message", "output_schema");
+        assert_schema_accepts(
+            &send_message,
+            &json!({
+                "status": 200,
+                "message": "OK",
+                "data": {},
+                "send_method": "private-api",
+                "send_method_decision": {}
+            }),
+        );
+        assert_schema_rejects(&send_message, &json!({ "send_method": "unknown" }));
+
+        for (operation_key, payload) in [
+            ("send_media", json!({ "status": "ok", "message_id": null })),
+            (
+                "resolve_send_target",
+                json!({ "chat_guid": null, "exhausted": false }),
+            ),
+            (
+                "create_chat",
+                json!({ "chat_guid": null, "send_method": "private-api" }),
+            ),
+            (
+                "get_action_availability",
+                json!({ "server_info_available": true, "edit": {}, "mark_read": {} }),
+            ),
+            (
+                "edit_message",
+                json!({ "status": "ok", "action": "edit", "response": {} }),
+            ),
+            (
+                "unsend_message",
+                json!({ "status": "ok", "action": "unsend" }),
+            ),
+            (
+                "send_reaction",
+                json!({ "status": "ok", "reaction": "like" }),
+            ),
+            ("set_typing", json!({ "status": "ok", "typing": true })),
+            (
+                "get_chats",
+                json!({ "total": 1, "offset": 0, "limit": 1, "data": [{}] }),
+            ),
+            (
+                "get_chat",
+                json!({ "guid": "chat-1", "display_name": "Demo", "participants": [{}] }),
+            ),
+            (
+                "get_messages",
+                json!({ "total": 1, "offset": 0, "limit": 1, "data": [{}] }),
+            ),
+            ("sync_events", json!({ "events": [{}], "next_after": 42 })),
+            (
+                "download_attachment",
+                json!({ "attachment_guid": "att-1", "encoding": "base64", "data_base64": "" }),
+            ),
+            ("mark_read", json!({ "status": "ok" })),
+            (
+                "register_webhook",
+                json!({ "registration_status": "registered" }),
+            ),
+            ("list_webhooks", json!({ "webhooks": [{}] })),
+            (
+                "unregister_webhook",
+                json!({ "deleted_count": 1, "deleted": [{}] }),
+            ),
+            (
+                "ingest_webhook_event",
+                json!({ "status": "accepted", "event": {} }),
+            ),
+            (
+                "ingest_webhook_request",
+                json!({ "accepted": true, "status_code": 202, "logs": [{}] }),
+            ),
+            (
+                "get_server_info",
+                json!({ "private_api": true, "os_version": "14.0" }),
+            ),
+        ] {
+            let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+            assert_schema_accepts(&schema, &payload);
+            assert_schema_rejects(&schema, &json!([]));
+        }
+    }
+
+    #[test]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+        let manifest = imessage_manifest();
+        let operations = operations_info();
+
+        assert_manifest_runtime_schema_parity(&manifest, &operations);
+        assert_manifest_input_schema_examples(&manifest);
+        assert_manifest_output_schema_examples(&manifest);
     }
 
     #[test]

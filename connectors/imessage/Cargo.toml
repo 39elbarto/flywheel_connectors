@@ -45,4 +45,6 @@ subtle.workspace = true
 [dev-dependencies]
 ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+jsonschema.workspace = true
+toml.workspace = true
 wiremock.workspace = true

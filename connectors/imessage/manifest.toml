@@ -411,6 +411,826 @@ max_redirects = 0
 [provides.operations.get_server_info.ai_hints]
 when_to_use = "When you need to check the BlueBubbles server status or capabilities"
 
+[provides.operations.send_message.input_schema]
+type = "object"
+required = ["chat_guid", "message"]
+
+[provides.operations.send_message.input_schema.properties.chat_guid]
+type = "string"
+description = "Target chat GUID"
+
+[provides.operations.send_message.input_schema.properties.message]
+type = "string"
+description = "Message text to send"
+
+[provides.operations.send_message.input_schema.properties.reply_to_message_guid]
+type = "string"
+description = "Optional message GUID for Private API reply threading"
+
+[provides.operations.send_message.input_schema.properties.reply_to_part_index]
+type = "integer"
+minimum = 0
+description = "Optional message part index for reply threading"
+
+[provides.operations.send_message.input_schema.properties.effect_id]
+type = "string"
+description = "Optional Apple effect ID or supported effect alias"
+
+[provides.operations.send_message.output_schema]
+type = "object"
+
+[provides.operations.send_message.output_schema.properties.status]
+type = "integer"
+
+[provides.operations.send_message.output_schema.properties.message]
+type = "string"
+
+[provides.operations.send_message.output_schema.properties.data]
+type = "object"
+
+[provides.operations.send_message.output_schema.properties.send_method]
+type = "string"
+enum = ["apple-script", "private-api"]
+
+[provides.operations.send_message.output_schema.properties.send_method_decision]
+type = "object"
+
+[provides.operations.send_media.input_schema]
+type = "object"
+required = ["local_path"]
+
+[[provides.operations.send_media.input_schema.oneOf]]
+required = ["chat_guid"]
+
+[[provides.operations.send_media.input_schema.oneOf]]
+required = ["chat_id"]
+
+[[provides.operations.send_media.input_schema.oneOf]]
+required = ["chat_identifier"]
+
+[[provides.operations.send_media.input_schema.oneOf]]
+required = ["handle"]
+
+[provides.operations.send_media.input_schema.properties.chat_guid]
+type = "string"
+description = "Target chat GUID"
+
+[provides.operations.send_media.input_schema.properties.chat_id]
+type = "integer"
+minimum = 0
+
+[provides.operations.send_media.input_schema.properties.chat_identifier]
+type = "string"
+
+[provides.operations.send_media.input_schema.properties.handle]
+type = "string"
+description = "Phone number or email handle to resolve before upload"
+
+[provides.operations.send_media.input_schema.properties.service]
+type = "string"
+enum = ["imessage", "sms", "auto"]
+description = "Handle service preference"
+
+[provides.operations.send_media.input_schema.properties.scan_limit]
+type = "integer"
+minimum = 1
+maximum = 5000
+description = "Maximum chat records to inspect when resolving non-chat_guid targets"
+
+[provides.operations.send_media.input_schema.properties.local_path]
+type = "string"
+description = "Local filesystem path or file URL under a configured media root"
+
+[provides.operations.send_media.input_schema.properties.filename]
+type = "string"
+description = "Optional multipart filename override"
+
+[provides.operations.send_media.input_schema.properties.content_type]
+type = "string"
+description = "Optional MIME type override"
+
+[provides.operations.send_media.input_schema.properties.caption]
+type = "string"
+description = "Optional caption included in multipart text fields"
+
+[provides.operations.send_media.input_schema.properties.reply_to_message_guid]
+type = "string"
+description = "Optional message GUID for Private API reply threading"
+
+[provides.operations.send_media.input_schema.properties.reply_to_part_index]
+type = "integer"
+minimum = 0
+description = "Optional message part index for reply threading"
+
+[provides.operations.send_media.input_schema.properties.as_voice]
+type = "boolean"
+description = "Send as a BlueBubbles audio message"
+
+[provides.operations.send_media.output_schema]
+type = "object"
+
+[provides.operations.send_media.output_schema.properties.status]
+type = "string"
+
+[provides.operations.send_media.output_schema.properties.action]
+type = "string"
+
+[provides.operations.send_media.output_schema.properties.chat_guid]
+type = "string"
+
+[provides.operations.send_media.output_schema.properties.message_id]
+type = ["string", "null"]
+
+[provides.operations.send_media.output_schema.properties.filename]
+type = "string"
+
+[provides.operations.send_media.output_schema.properties.content_type]
+type = "string"
+
+[provides.operations.send_media.output_schema.properties.byte_len]
+type = "integer"
+
+[provides.operations.send_media.output_schema.properties.media_send_decision]
+type = "object"
+
+[provides.operations.send_media.output_schema.properties.target_resolution]
+type = "object"
+
+[provides.operations.send_media.output_schema.properties.response]
+type = "object"
+
+[provides.operations.resolve_send_target.input_schema]
+type = "object"
+
+[[provides.operations.resolve_send_target.input_schema.oneOf]]
+required = ["chat_guid"]
+
+[[provides.operations.resolve_send_target.input_schema.oneOf]]
+required = ["chat_id"]
+
+[[provides.operations.resolve_send_target.input_schema.oneOf]]
+required = ["chat_identifier"]
+
+[[provides.operations.resolve_send_target.input_schema.oneOf]]
+required = ["handle"]
+
+[provides.operations.resolve_send_target.input_schema.properties.chat_guid]
+type = "string"
+
+[provides.operations.resolve_send_target.input_schema.properties.chat_id]
+type = "integer"
+minimum = 0
+
+[provides.operations.resolve_send_target.input_schema.properties.chat_identifier]
+type = "string"
+
+[provides.operations.resolve_send_target.input_schema.properties.handle]
+type = "string"
+description = "Phone number or email handle to resolve"
+
+[provides.operations.resolve_send_target.input_schema.properties.service]
+type = "string"
+enum = ["imessage", "sms", "auto"]
+description = "Handle service preference"
+
+[provides.operations.resolve_send_target.input_schema.properties.scan_limit]
+type = "integer"
+minimum = 1
+maximum = 5000
+description = "Maximum chat records to inspect"
+
+[provides.operations.resolve_send_target.output_schema]
+type = "object"
+
+[provides.operations.resolve_send_target.output_schema.properties.chat_guid]
+type = ["string", "null"]
+
+[provides.operations.resolve_send_target.output_schema.properties.target_kind]
+type = "string"
+
+[provides.operations.resolve_send_target.output_schema.properties.match_kind]
+type = "string"
+
+[provides.operations.resolve_send_target.output_schema.properties.service_preference]
+type = "string"
+
+[provides.operations.resolve_send_target.output_schema.properties.scanned_chats]
+type = "integer"
+
+[provides.operations.resolve_send_target.output_schema.properties.scanned_pages]
+type = "integer"
+
+[provides.operations.resolve_send_target.output_schema.properties.exhausted]
+type = "boolean"
+
+[provides.operations.create_chat.input_schema]
+type = "object"
+required = ["address", "message"]
+
+[provides.operations.create_chat.input_schema.properties.address]
+type = "string"
+description = "Phone number or email address for the new DM"
+
+[provides.operations.create_chat.input_schema.properties.message]
+type = "string"
+description = "Initial message body"
+
+[provides.operations.create_chat.output_schema]
+type = "object"
+
+[provides.operations.create_chat.output_schema.properties.chat_guid]
+type = ["string", "null"]
+
+[provides.operations.create_chat.output_schema.properties.message_id]
+type = ["string", "null"]
+
+[provides.operations.create_chat.output_schema.properties.send_method]
+type = "string"
+enum = ["private-api"]
+
+[provides.operations.create_chat.output_schema.properties.send_method_decision]
+type = "object"
+
+[provides.operations.create_chat.output_schema.properties.response]
+type = "object"
+
+[provides.operations.get_action_availability.input_schema]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema.properties.server_info_available]
+type = "boolean"
+
+[provides.operations.get_action_availability.output_schema.properties.server_info_error]
+type = ["string", "null"]
+
+[provides.operations.get_action_availability.output_schema.properties.private_api]
+type = ["boolean", "null"]
+
+[provides.operations.get_action_availability.output_schema.properties.helper_connected]
+type = ["boolean", "null"]
+
+[provides.operations.get_action_availability.output_schema.properties.os_version]
+type = ["string", "null"]
+
+[provides.operations.get_action_availability.output_schema.properties.server_version]
+type = ["string", "null"]
+
+[provides.operations.get_action_availability.output_schema.properties.edit]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema.properties.unsend]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema.properties.reaction]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema.properties.typing]
+type = "object"
+
+[provides.operations.get_action_availability.output_schema.properties.mark_read]
+type = "object"
+
+[provides.operations.edit_message.input_schema]
+type = "object"
+required = ["message_guid", "new_text"]
+
+[provides.operations.edit_message.input_schema.properties.message_guid]
+type = "string"
+
+[provides.operations.edit_message.input_schema.properties.new_text]
+type = "string"
+
+[provides.operations.edit_message.input_schema.properties.part_index]
+type = "integer"
+minimum = 0
+default = 0
+
+[provides.operations.edit_message.input_schema.properties.backwards_compatibility_message]
+type = "string"
+
+[provides.operations.edit_message.output_schema]
+type = "object"
+
+[provides.operations.edit_message.output_schema.properties.status]
+type = "string"
+
+[provides.operations.edit_message.output_schema.properties.action]
+type = "string"
+
+[provides.operations.edit_message.output_schema.properties.response]
+type = "object"
+
+[provides.operations.unsend_message.input_schema]
+type = "object"
+required = ["message_guid"]
+
+[provides.operations.unsend_message.input_schema.properties.message_guid]
+type = "string"
+
+[provides.operations.unsend_message.input_schema.properties.part_index]
+type = "integer"
+minimum = 0
+default = 0
+
+[provides.operations.unsend_message.output_schema]
+type = "object"
+
+[provides.operations.unsend_message.output_schema.properties.status]
+type = "string"
+
+[provides.operations.unsend_message.output_schema.properties.action]
+type = "string"
+
+[provides.operations.unsend_message.output_schema.properties.response]
+type = "object"
+
+[provides.operations.send_reaction.input_schema]
+type = "object"
+required = ["chat_guid", "message_guid", "reaction"]
+
+[provides.operations.send_reaction.input_schema.properties.chat_guid]
+type = "string"
+
+[provides.operations.send_reaction.input_schema.properties.message_guid]
+type = "string"
+
+[provides.operations.send_reaction.input_schema.properties.reaction]
+type = "string"
+
+[provides.operations.send_reaction.input_schema.properties.remove]
+type = "boolean"
+default = false
+
+[provides.operations.send_reaction.input_schema.properties.part_index]
+type = "integer"
+minimum = 0
+default = 0
+
+[provides.operations.send_reaction.output_schema]
+type = "object"
+
+[provides.operations.send_reaction.output_schema.properties.status]
+type = "string"
+
+[provides.operations.send_reaction.output_schema.properties.reaction]
+type = "string"
+
+[provides.operations.send_reaction.output_schema.properties.response]
+type = "object"
+
+[provides.operations.set_typing.input_schema]
+type = "object"
+required = ["chat_guid"]
+
+[provides.operations.set_typing.input_schema.properties.chat_guid]
+type = "string"
+
+[provides.operations.set_typing.input_schema.properties.typing]
+type = "boolean"
+default = true
+
+[provides.operations.set_typing.output_schema]
+type = "object"
+
+[provides.operations.set_typing.output_schema.properties.status]
+type = "string"
+
+[provides.operations.set_typing.output_schema.properties.typing]
+type = "boolean"
+
+[provides.operations.set_typing.output_schema.properties.response]
+type = "object"
+
+[provides.operations.get_chats.input_schema]
+type = "object"
+
+[provides.operations.get_chats.input_schema.properties.offset]
+type = "integer"
+description = "Pagination offset"
+
+[provides.operations.get_chats.input_schema.properties.limit]
+type = "integer"
+description = "Max results to return"
+
+[provides.operations.get_chats.output_schema]
+type = "object"
+
+[provides.operations.get_chats.output_schema.properties.total]
+type = "integer"
+
+[provides.operations.get_chats.output_schema.properties.offset]
+type = "integer"
+
+[provides.operations.get_chats.output_schema.properties.limit]
+type = "integer"
+
+[provides.operations.get_chats.output_schema.properties.data]
+type = "array"
+
+[provides.operations.get_chats.output_schema.properties.data.items]
+type = "object"
+
+[provides.operations.get_chat.input_schema]
+type = "object"
+required = ["chat_guid"]
+
+[provides.operations.get_chat.input_schema.properties.chat_guid]
+type = "string"
+description = "Chat GUID to fetch"
+
+[provides.operations.get_chat.output_schema]
+type = "object"
+
+[provides.operations.get_chat.output_schema.properties.guid]
+type = "string"
+
+[provides.operations.get_chat.output_schema.properties.display_name]
+type = "string"
+
+[provides.operations.get_chat.output_schema.properties.participants]
+type = "array"
+
+[provides.operations.get_chat.output_schema.properties.participants.items]
+type = "object"
+
+[provides.operations.get_chat.output_schema.properties.is_group]
+type = "boolean"
+
+[provides.operations.get_messages.input_schema]
+type = "object"
+required = ["chat_guid"]
+
+[provides.operations.get_messages.input_schema.properties.chat_guid]
+type = "string"
+description = "Chat GUID to fetch messages from"
+
+[provides.operations.get_messages.input_schema.properties.offset]
+type = "integer"
+description = "Pagination offset"
+
+[provides.operations.get_messages.input_schema.properties.limit]
+type = "integer"
+description = "Max results"
+
+[provides.operations.get_messages.input_schema.properties.after]
+type = "integer"
+description = "Only messages after this timestamp"
+
+[provides.operations.get_messages.input_schema.properties.before]
+type = "integer"
+description = "Only messages before this timestamp"
+
+[provides.operations.get_messages.output_schema]
+type = "object"
+
+[provides.operations.get_messages.output_schema.properties.total]
+type = "integer"
+
+[provides.operations.get_messages.output_schema.properties.offset]
+type = "integer"
+
+[provides.operations.get_messages.output_schema.properties.limit]
+type = "integer"
+
+[provides.operations.get_messages.output_schema.properties.data]
+type = "array"
+
+[provides.operations.get_messages.output_schema.properties.data.items]
+type = "object"
+
+[provides.operations.sync_events.input_schema]
+type = "object"
+
+[provides.operations.sync_events.input_schema.properties.chat_guid]
+type = "string"
+description = "Optional chat GUID to scope the sync"
+
+[provides.operations.sync_events.input_schema.properties.after]
+type = "integer"
+description = "Only include messages after this epoch-ms timestamp"
+
+[provides.operations.sync_events.input_schema.properties.before]
+type = "integer"
+description = "Only include messages before this epoch-ms timestamp"
+
+[provides.operations.sync_events.input_schema.properties.chat_limit]
+type = "integer"
+description = "Maximum chats to scan when chat_guid is omitted"
+
+[provides.operations.sync_events.input_schema.properties.message_limit]
+type = "integer"
+description = "Maximum messages to fetch per scanned chat"
+
+[provides.operations.sync_events.output_schema]
+type = "object"
+
+[provides.operations.sync_events.output_schema.properties.events]
+type = "array"
+
+[provides.operations.sync_events.output_schema.properties.events.items]
+type = "object"
+
+[provides.operations.sync_events.output_schema.properties.next_after]
+type = "integer"
+
+[provides.operations.sync_events.output_schema.properties.synced_chats]
+type = "integer"
+
+[provides.operations.sync_events.output_schema.properties.chat_guid]
+type = "string"
+
+[provides.operations.download_attachment.input_schema]
+type = "object"
+required = ["attachment_guid"]
+
+[provides.operations.download_attachment.input_schema.properties.attachment_guid]
+type = "string"
+description = "Attachment GUID from a message attachment entry"
+
+[provides.operations.download_attachment.output_schema]
+type = "object"
+
+[provides.operations.download_attachment.output_schema.properties.attachment_guid]
+type = "string"
+
+[provides.operations.download_attachment.output_schema.properties.encoding]
+type = "string"
+
+[provides.operations.download_attachment.output_schema.properties.data_base64]
+type = "string"
+
+[provides.operations.download_attachment.output_schema.properties.byte_len]
+type = "integer"
+
+[provides.operations.mark_read.input_schema]
+type = "object"
+required = ["chat_guid"]
+
+[provides.operations.mark_read.input_schema.properties.chat_guid]
+type = "string"
+description = "Chat GUID to mark as read"
+
+[provides.operations.mark_read.output_schema]
+type = "object"
+
+[provides.operations.mark_read.output_schema.properties.status]
+type = "string"
+
+[provides.operations.register_webhook.input_schema]
+type = "object"
+
+[provides.operations.register_webhook.input_schema.properties.url]
+type = "string"
+description = "Absolute callback URL"
+
+[provides.operations.register_webhook.input_schema.properties.events]
+type = "array"
+description = "BlueBubbles event names to register"
+
+[provides.operations.register_webhook.input_schema.properties.events.items]
+type = "string"
+
+[provides.operations.register_webhook.input_schema.properties.skip_if_existing]
+type = "boolean"
+description = "Avoid duplicate registration for the same URL"
+default = true
+
+[provides.operations.register_webhook.output_schema]
+type = "object"
+
+[provides.operations.register_webhook.output_schema.properties.registration_status]
+type = "string"
+enum = ["existing", "registered"]
+
+[provides.operations.register_webhook.output_schema.properties.webhook]
+type = "object"
+
+[provides.operations.register_webhook.output_schema.properties.response]
+type = "object"
+
+[provides.operations.list_webhooks.input_schema]
+type = "object"
+
+[provides.operations.list_webhooks.output_schema]
+type = "object"
+
+[provides.operations.list_webhooks.output_schema.properties.webhooks]
+type = "array"
+
+[provides.operations.list_webhooks.output_schema.properties.webhooks.items]
+type = "object"
+
+[provides.operations.unregister_webhook.input_schema]
+type = "object"
+
+[[provides.operations.unregister_webhook.input_schema.anyOf]]
+required = ["webhook_id"]
+
+[[provides.operations.unregister_webhook.input_schema.anyOf]]
+required = ["url"]
+
+[provides.operations.unregister_webhook.input_schema.properties.webhook_id]
+type = "string"
+description = "Specific BlueBubbles webhook ID to delete"
+
+[provides.operations.unregister_webhook.input_schema.properties.url]
+type = "string"
+description = "Callback URL whose matching webhooks should be deleted"
+
+[provides.operations.unregister_webhook.output_schema]
+type = "object"
+
+[provides.operations.unregister_webhook.output_schema.properties.deleted_count]
+type = "integer"
+
+[provides.operations.unregister_webhook.output_schema.properties.deleted]
+type = "array"
+
+[provides.operations.unregister_webhook.output_schema.properties.deleted.items]
+type = "object"
+
+[provides.operations.ingest_webhook_event.input_schema]
+type = "object"
+
+[[provides.operations.ingest_webhook_event.input_schema.anyOf]]
+required = ["payload"]
+
+[[provides.operations.ingest_webhook_event.input_schema.anyOf]]
+required = ["flush_coalescing"]
+
+[provides.operations.ingest_webhook_event.input_schema.properties.payload]
+type = "object"
+description = "Raw BlueBubbles webhook JSON body"
+
+[provides.operations.ingest_webhook_event.input_schema.properties.event_type]
+type = "string"
+description = "Optional event type override"
+
+[provides.operations.ingest_webhook_event.input_schema.properties.account_id]
+type = "string"
+description = "Optional account namespace for dedupe"
+
+[provides.operations.ingest_webhook_event.input_schema.properties.observed_at_ms]
+type = "integer"
+description = "Optional host-observed epoch-ms timestamp"
+
+[provides.operations.ingest_webhook_event.input_schema.properties.flush_coalescing]
+type = "boolean"
+description = "Drain pending coalesced DM events"
+
+[provides.operations.ingest_webhook_event.output_schema]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.status]
+type = "string"
+enum = ["accepted", "duplicate", "rejected", "buffered", "flushed"]
+
+[provides.operations.ingest_webhook_event.output_schema.properties.dedupe_id]
+type = "string"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.dedupe_ids]
+type = "array"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.dedupe_ids.items]
+type = "string"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.duplicate_id]
+type = "string"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.acceptance]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.policy]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.coalescing]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.reply_context_lookup]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.contacts_enrichment]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.event]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.events]
+type = "array"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.events.items]
+type = "object"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.event_envelopes]
+type = "array"
+
+[provides.operations.ingest_webhook_event.output_schema.properties.event_envelopes.items]
+type = "object"
+
+[provides.operations.ingest_webhook_request.input_schema]
+type = "object"
+required = ["method", "url", "body"]
+
+[provides.operations.ingest_webhook_request.input_schema.properties.method]
+type = "string"
+description = "HTTP method observed by the host request region"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.url]
+type = "string"
+description = "Full callback URL observed by the host"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.headers]
+type = "object"
+description = "Optional host-forwarded headers"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.body]
+type = "object"
+description = "Raw BlueBubbles webhook JSON body"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.body_size_bytes]
+type = "integer"
+description = "Host-measured request body byte size"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.max_body_bytes]
+type = "integer"
+description = "Ingress body limit override"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.request_region]
+type = "object"
+description = "FCP host request-region metadata"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.event_type]
+type = "string"
+description = "Optional event type override"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.account_id]
+type = "string"
+description = "Optional account namespace for dedupe"
+
+[provides.operations.ingest_webhook_request.input_schema.properties.observed_at_ms]
+type = "integer"
+description = "Optional host-observed epoch-ms timestamp"
+
+[provides.operations.ingest_webhook_request.output_schema]
+type = "object"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.accepted]
+type = "boolean"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.status_code]
+type = "integer"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.reason_code]
+type = "string"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.reason]
+type = "string"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.ingest]
+type = "object"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.request_region]
+type = "object"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.service_layers]
+type = "object"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.logs]
+type = "array"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.logs.items]
+type = "object"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.body_bytes]
+type = "integer"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.tainted]
+type = "boolean"
+
+[provides.operations.ingest_webhook_request.output_schema.properties.clean_shutdown]
+type = "boolean"
+
+[provides.operations.get_server_info.input_schema]
+type = "object"
+
+[provides.operations.get_server_info.output_schema]
+type = "object"
+
+[provides.operations.get_server_info.output_schema.properties.os_version]
+type = "string"
+
+[provides.operations.get_server_info.output_schema.properties.server_version]
+type = "string"
+
+[provides.operations.get_server_info.output_schema.properties.private_api]
+type = "boolean"
+
+[provides.operations.get_server_info.output_schema.properties.proxy_service]
+type = "string"
+
 [sandbox]
 profile = "strict"
 memory_mb = 64

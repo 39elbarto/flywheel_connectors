@@ -12,8 +12,7 @@ use quick_xml::events::Event;
 use reqwest::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, USER_AGENT,
 };
-use reqwest::{Client, Method, RequestBuilder, Response, StatusCode, multipart};
-use serde::Deserialize;
+use reqwest::{Client, RequestBuilder, Response, StatusCode, multipart};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use url::Url;
@@ -27,7 +26,7 @@ const OPERATION_ORDER: [&str; 3] = [
     "azure.speech.stt.transcribe_fast",
 ];
 const BOUNDARY: &str = "This connector exposes Azure Speech REST token exchange, regional voice discovery, REST text-to-speech synthesis, and Speech-to-text 2025-10-15 fast transcription. Realtime WebSocket and batch transcription are separate follow-up surfaces.";
-const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 60_000;
+const DEFAULT_REQUEST_TIMEOUT_MS: usize = 60_000;
 const DEFAULT_INLINE_AUDIO_MAX_BYTES: usize = 1_048_576;
 const DEFAULT_TTS_MAX_AUDIO_BYTES: usize = 16 * 1_024 * 1_024;
 const DEFAULT_STT_MAX_AUDIO_BYTES: usize = 250 * 1_024 * 1_024;
@@ -37,7 +36,7 @@ const USER_AGENT_VALUE: &str = "fcp-azure-speech/0.1.0";
 const STT_API_VERSION: &str = "2025-10-15";
 const DEFAULT_TTS_OUTPUT_FORMAT: &str = "riff-24khz-16bit-mono-pcm";
 const DEFAULT_STT_LOCALE: &str = "en-US";
-const MAX_RETRIES: usize = 2;
+const MAX_RETRIES: u64 = 2;
 const RETRY_BASE_DELAY_MS: u64 = 100;
 
 const TTS_OUTPUT_FORMATS: &[&str] = &[
@@ -204,42 +203,16 @@ impl AzureSpeechConfig {
         validate_region(region)?;
         let region = region.to_ascii_lowercase();
         let cloud = SpeechCloud::from_params(params)?;
-        let endpoints = SpeechEndpoints::for_region(&region, cloud);
-
-        let token_url = normalize_absolute_url(
-            params.get("token_url").and_then(Value::as_str),
-            &endpoints.token_url,
-            "token_url",
-            |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
-            true,
-        )?;
-        let tts_base_url = normalize_base_url(
-            params.get("tts_base_url").and_then(Value::as_str),
-            &endpoints.tts_base_url,
-            "tts_base_url",
-            |url| is_loopback_url(url) || cloud.allows_tts_host(host(url)),
-        )?;
-        let stt_base_url = normalize_base_url(
-            params.get("stt_base_url").and_then(Value::as_str),
-            &endpoints.stt_base_url,
-            "stt_base_url",
-            |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
-        )?;
+        let endpoints = SpeechEndpoints::from_params(params, &region, cloud)?;
 
         Ok(Self {
             auth,
             region,
             cloud,
-            token_url,
-            tts_base_url,
-            stt_base_url,
-            request_timeout_ms: bounded_usize(
-                params.get("request_timeout_ms"),
-                "request_timeout_ms",
-                DEFAULT_REQUEST_TIMEOUT_MS as usize,
-                100,
-                300_000,
-            )? as u64,
+            token_url: endpoints.token,
+            tts_base_url: endpoints.tts_base,
+            stt_base_url: endpoints.stt_base,
+            request_timeout_ms: request_timeout_ms(params)?,
             inline_audio_max_bytes: bounded_usize(
                 params.get("inline_audio_max_bytes"),
                 "inline_audio_max_bytes",
@@ -322,21 +295,46 @@ impl SpeechCloud {
 }
 
 struct SpeechEndpoints {
-    token_url: String,
-    tts_base_url: String,
-    stt_base_url: String,
+    token: String,
+    tts_base: String,
+    stt_base: String,
 }
 
 impl SpeechEndpoints {
     fn for_region(region: &str, cloud: SpeechCloud) -> Self {
         Self {
-            token_url: format!(
+            token: format!(
                 "https://{region}{}/sts/v1.0/issueToken",
                 cloud.token_suffix()
             ),
-            tts_base_url: format!("https://{region}{}", cloud.tts_suffix()),
-            stt_base_url: format!("https://{region}{}", cloud.token_suffix()),
+            tts_base: format!("https://{region}{}", cloud.tts_suffix()),
+            stt_base: format!("https://{region}{}", cloud.token_suffix()),
         }
+    }
+
+    fn from_params(params: &Value, region: &str, cloud: SpeechCloud) -> FcpResult<Self> {
+        let defaults = Self::for_region(region, cloud);
+        Ok(Self {
+            token: normalize_absolute_url(
+                params.get("token_url").and_then(Value::as_str),
+                &defaults.token,
+                "token_url",
+                |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
+                true,
+            )?,
+            tts_base: normalize_base_url(
+                params.get("tts_base_url").and_then(Value::as_str),
+                &defaults.tts_base,
+                "tts_base_url",
+                |url| is_loopback_url(url) || cloud.allows_tts_host(host(url)),
+            )?,
+            stt_base: normalize_base_url(
+                params.get("stt_base_url").and_then(Value::as_str),
+                &defaults.stt_base,
+                "stt_base_url",
+                |url| is_loopback_url(url) || cloud.allows_token_host(host(url)),
+            )?,
+        })
     }
 }
 
@@ -420,7 +418,7 @@ impl AzureSpeechClient {
         if !status.is_success() {
             return Err(provider_error("issueToken", status, response).await);
         }
-        let token_text = response.text().await.map_err(map_reqwest)?;
+        let token_text = response.text().await.map_err(|error| map_reqwest(&error))?;
         let token = token_text.trim();
         if token.is_empty() {
             return Err(FcpError::External {
@@ -452,7 +450,7 @@ impl AzureSpeechClient {
         if !status.is_success() {
             return Err(provider_error("voices.list", status, response).await);
         }
-        let voices: Value = response.json().await.map_err(map_reqwest)?;
+        let voices: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
         Ok(json!({
             "voices": voices,
             "region": self.config.region,
@@ -488,7 +486,10 @@ impl AzureSpeechClient {
             .get(CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(ToOwned::to_owned);
-        let bytes = response.bytes().await.map_err(map_reqwest)?;
+        let bytes = response
+            .bytes()
+            .await
+            .map_err(|error| map_reqwest(&error))?;
         if bytes.len() > self.config.tts_max_audio_bytes {
             return Err(FcpError::InvalidRequest {
                 code: 1003,
@@ -559,8 +560,8 @@ impl AzureSpeechClient {
         if !status.is_success() {
             return Err(provider_error("stt.transcribe_fast", status, response).await);
         }
-        let value: Value = response.json().await.map_err(map_reqwest)?;
-        Ok(normalize_transcription_result(value, &request))
+        let value: Value = response.json().await.map_err(|error| map_reqwest(&error))?;
+        Ok(normalize_transcription_result(&value, &request))
     }
 
     async fn send_with_retry<F>(&self, mut build: F) -> FcpResult<Response>
@@ -569,13 +570,13 @@ impl AzureSpeechClient {
     {
         let mut attempt = 0;
         loop {
-            let response = build().send().await.map_err(map_reqwest)?;
+            let response = build().send().await.map_err(|error| map_reqwest(&error))?;
             if !is_retryable_status(response.status()) || attempt >= MAX_RETRIES {
                 return Ok(response);
             }
             attempt += 1;
             let delay_ms = retry_after_ms(&response)
-                .unwrap_or(RETRY_BASE_DELAY_MS.saturating_mul(attempt as u64));
+                .unwrap_or_else(|| RETRY_BASE_DELAY_MS.saturating_mul(attempt));
             time::sleep(Duration::from_millis(delay_ms.min(1_000))).await;
         }
     }
@@ -1027,7 +1028,7 @@ fn deferred_operations_info() -> Vec<Value> {
     ]
 }
 
-fn normalize_transcription_result(provider_result: Value, request: &SttRequest) -> Value {
+fn normalize_transcription_result(provider_result: &Value, request: &SttRequest) -> Value {
     let combined_text = provider_result
         .get("combinedPhrases")
         .and_then(Value::as_array)
@@ -1225,7 +1226,7 @@ fn copy_definition_field(
     }
 }
 
-fn required_string(input: &Value, field: &str) -> FcpResult<&str> {
+fn required_string<'a>(input: &'a Value, field: &str) -> FcpResult<&'a str> {
     input
         .get(field)
         .and_then(Value::as_str)
@@ -1262,6 +1263,17 @@ fn bounded_usize(
         });
     }
     Ok(value)
+}
+
+fn request_timeout_ms(params: &Value) -> FcpResult<u64> {
+    let value = bounded_usize(
+        params.get("request_timeout_ms"),
+        "request_timeout_ms",
+        DEFAULT_REQUEST_TIMEOUT_MS,
+        100,
+        300_000,
+    )?;
+    Ok(u64::try_from(value).expect("bounded request timeout fits in u64"))
 }
 
 fn normalize_base_url<F>(
@@ -1371,7 +1383,7 @@ fn with_header(request: RequestBuilder, name: HeaderName, value: &HeaderValue) -
     request.headers(headers)
 }
 
-fn map_reqwest(error: reqwest::Error) -> FcpError {
+fn map_reqwest(error: &reqwest::Error) -> FcpError {
     if error.is_timeout() {
         FcpError::UpstreamTimeout {
             service: "azure-speech".into(),
@@ -1396,9 +1408,9 @@ async fn provider_error(operation: &str, status: StatusCode, response: Response)
         .unwrap_or_else(|error| format!("failed to read Azure Speech error body: {error}"));
     if status == StatusCode::TOO_MANY_REQUESTS {
         FcpError::RateLimited {
-            retry_after_ms: retry_after
-                .map(|duration| duration.as_millis().try_into().unwrap_or(30_000))
-                .unwrap_or(30_000),
+            retry_after_ms: retry_after.map_or(30_000, |duration| {
+                duration.as_millis().try_into().unwrap_or(30_000)
+            }),
             violation: None,
         }
     } else {
@@ -1565,7 +1577,7 @@ mod tests {
         )
         .expect("request should parse");
         let value = normalize_transcription_result(
-            json!({
+            &json!({
                 "durationMilliseconds": 2000,
                 "combinedPhrases": [{"channel": 0, "text": "Weather"}],
                 "phrases": [{

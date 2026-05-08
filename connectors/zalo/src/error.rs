@@ -179,47 +179,45 @@ mod tests {
     }
 
     #[test]
-    fn rate_limited_maps_to_fcp_rate_limited() {
+    fn rate_limited_maps_to_fcp_rate_limited() -> Result<(), String> {
         let err = ZaloError::RateLimited {
             retry_after_ms: 3_000,
         };
         let fcp = ConnectorErrorMapping::to_fcp_error(&err);
-        match fcp {
-            FcpError::RateLimited {
-                retry_after_ms,
-                violation,
-            } => {
-                assert_eq!(retry_after_ms, 3_000);
-                assert!(violation.is_none());
-            }
-            other => panic!("Expected RateLimited, got {other:?}"),
-        }
+        let FcpError::RateLimited {
+            retry_after_ms,
+            violation,
+        } = fcp
+        else {
+            return Err(format!("Expected RateLimited, got {fcp:?}"));
+        };
+        assert_eq!(retry_after_ms, 3_000);
+        assert!(violation.is_none());
+        Ok(())
     }
 
     #[test]
-    fn webhook_error_maps_to_invalid_request() {
+    fn webhook_error_maps_to_invalid_request() -> Result<(), String> {
         let err = ZaloError::Webhook("invalid signature".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1007);
-                assert!(message.contains("invalid signature"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        let FcpError::InvalidRequest { code, message } = fcp else {
+            return Err(format!("Expected InvalidRequest, got {fcp:?}"));
+        };
+        assert_eq!(code, 1007);
+        assert!(message.contains("invalid signature"));
+        Ok(())
     }
 
     #[test]
-    fn not_configured_maps_to_invalid_request() {
+    fn not_configured_maps_to_invalid_request() -> Result<(), String> {
         let err = ZaloError::NotConfigured("missing access token".into());
         let fcp = err.to_fcp_error();
-        match fcp {
-            FcpError::InvalidRequest { code, message } => {
-                assert_eq!(code, 1001);
-                assert!(message.contains("missing access token"));
-            }
-            other => panic!("Expected InvalidRequest, got {other:?}"),
-        }
+        let FcpError::InvalidRequest { code, message } = fcp else {
+            return Err(format!("Expected InvalidRequest, got {fcp:?}"));
+        };
+        assert_eq!(code, 1001);
+        assert!(message.contains("missing access token"));
+        Ok(())
     }
 
     #[test]

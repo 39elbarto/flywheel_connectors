@@ -20,8 +20,8 @@ use fcp_email_generic::EmailGenericConnector;
 use fcp_email_generic::client::EmailGenericClient;
 use fcp_email_generic::types::EmailGenericConfig;
 use fcp_prelude::{
-    CapabilityConstraints, CapabilityId, CapabilityToken, ConnectorId, FcpConnector, HealthState,
-    InstanceId, OperationId, RequestId, ShutdownRequest, SimulateRequest, ZoneId,
+    CapabilityConstraints, CapabilityId, CapabilityToken, FcpConnector, HealthState, InstanceId,
+    OperationId, SelfCheckStatus, ShutdownRequest, SimulateRequest, ZoneId,
 };
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -182,7 +182,7 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
     assert_eq!(connector.id().as_str(), CONNECTOR_ID);
     assert!(matches!(
         connector.health().await.status,
-        HealthState::Degraded
+        HealthState::Degraded { .. }
     ));
 
     connector
@@ -203,7 +203,7 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
         .self_check()
         .await
         .expect("self-check should use loopback IMAP fixture");
-    assert!(self_check.ok);
+    assert_eq!(self_check.status, SelfCheckStatus::Ok);
     assert_eq!(
         self_check.details.expect("self-check details")["mailbox_count"],
         2
@@ -234,7 +234,7 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
     assert!(!denied.would_succeed);
     assert!(
         denied
-            .reason
+            .failure_reason
             .as_ref()
             .is_some_and(|reason| reason.contains("instance") || reason.contains("target")),
         "denial should describe instance binding"
@@ -251,7 +251,7 @@ async fn connector_lifecycle_self_check_and_capability_denial() {
         .expect("shutdown should clear state");
     assert!(matches!(
         connector.health().await.status,
-        HealthState::Degraded
+        HealthState::Degraded { .. }
     ));
 
     let _ = smtp_fixture.join();

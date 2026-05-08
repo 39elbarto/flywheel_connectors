@@ -1,0 +1,273 @@
+[manifest]
+format = "fcp-connector-manifest"
+schema_version = "2.1"
+min_mesh_version = "2.0.0"
+min_protocol = "fcp2-sym/2.0"
+protocol_features = ["websocket", "http-json"]
+max_datagram_bytes = 65000
+interface_hash = "blake3-256:fcp.interface.v2:9b5da4d55eb471473c3f62df1bb694601e64af4ac7fc871341c2d2a5a5c72c75"
+
+[connector]
+id = "fcp.inworld"
+name = "Inworld"
+version = "0.1.0"
+description = "Inworld Realtime character and voice-agent connector with TTS WebSocket and Router chat support"
+archetypes = ["request-response", "streaming", "bidirectional"]
+format = "native"
+
+[connector.state]
+model = "stateless"
+state_schema_version = "1"
+migration_hint = "Initial native connector for the current Realtime WebSocket, TTS WebSocket, and Router chat surfaces. Legacy openSession/sendText/characters.list/scenes.list REST surfaces are intentionally not implemented."
+
+[zones]
+home = "z:work"
+allowed_sources = ["z:owner", "z:private", "z:work", "z:project:*"]
+allowed_targets = ["z:work"]
+forbidden = []
+
+[capabilities]
+required = ["network.dns", "network.egress", "network.tls.sni"]
+optional = [
+    "inworld.realtime.invoke",
+    "inworld.tts",
+    "inworld.router.chat",
+    "inworld.health.read",
+]
+forbidden = ["network.listen", "system.exec", "filesystem.write"]
+
+[provides.operations."inworld.realtime.text_turn"]
+description = "Run an Inworld Realtime text turn over the current WebSocket event protocol"
+capability = "inworld.realtime.invoke"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."inworld.realtime.text_turn".input_schema]
+type = "object"
+required = ["session_id", "text"]
+
+[provides.operations."inworld.realtime.text_turn".input_schema.properties.session_id]
+type = "string"
+minLength = 1
+
+[provides.operations."inworld.realtime.text_turn".input_schema.properties.text]
+type = "string"
+minLength = 1
+maxLength = 4000
+
+[provides.operations."inworld.realtime.text_turn".input_schema.properties.output_modalities]
+type = "array"
+items = { enum = ["audio", "text"] }
+
+[provides.operations."inworld.realtime.text_turn".input_schema.properties.max_events]
+type = "integer"
+minimum = 1
+maximum = 32
+
+[provides.operations."inworld.realtime.text_turn".output_schema]
+type = "object"
+
+[provides.operations."inworld.realtime.text_turn".network_constraints]
+host_allow = ["api.inworld.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."inworld.realtime.text_turn".ai_hints]
+when_to_use = "Use for bounded text-driven character or voice-agent turns against an Inworld Realtime session."
+common_mistakes = [
+    "Do not use older openSession/sendText/list-scenes REST operation names.",
+    "Do not log user text, transcripts, raw audio, API keys, JWTs, or provider bodies.",
+]
+examples = ['{"session_id":"session-from-app","text":"Hello","output_modalities":["text"]}']
+related = ["inworld.realtime.audio_turn", "inworld.tts.context_roundtrip"]
+
+[provides.operations."inworld.realtime.audio_turn"]
+description = "Append and optionally commit bounded base64 audio chunks to an Inworld Realtime session"
+capability = "inworld.realtime.invoke"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."inworld.realtime.audio_turn".input_schema]
+type = "object"
+required = ["session_id", "audio_chunks_base64"]
+
+[provides.operations."inworld.realtime.audio_turn".input_schema.properties.session_id]
+type = "string"
+minLength = 1
+
+[provides.operations."inworld.realtime.audio_turn".input_schema.properties.audio_chunks_base64]
+type = "array"
+minItems = 1
+maxItems = 64
+items = { type = "string", contentEncoding = "base64" }
+
+[provides.operations."inworld.realtime.audio_turn".output_schema]
+type = "object"
+
+[provides.operations."inworld.realtime.audio_turn".network_constraints]
+host_allow = ["api.inworld.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."inworld.realtime.audio_turn".ai_hints]
+when_to_use = "Use when the caller already has bounded base64 audio chunks for a Realtime voice-agent turn."
+common_mistakes = [
+    "Do not send unbounded audio; the connector validates chunk count and decoded byte totals before egress.",
+    "Do not log raw audio bytes or generated transcripts.",
+]
+examples = ['{"session_id":"session-from-app","audio_chunks_base64":["AAECAw=="]}']
+related = ["inworld.realtime.text_turn"]
+
+[provides.operations."inworld.tts.context_roundtrip"]
+description = "Create an Inworld TTS WebSocket context, send text, and optionally close the context"
+capability = "inworld.tts"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."inworld.tts.context_roundtrip".input_schema]
+type = "object"
+required = ["text"]
+
+[provides.operations."inworld.tts.context_roundtrip".input_schema.properties.text]
+type = "string"
+minLength = 1
+maxLength = 1000
+
+[provides.operations."inworld.tts.context_roundtrip".input_schema.properties.context_id]
+type = "string"
+
+[provides.operations."inworld.tts.context_roundtrip".output_schema]
+type = "object"
+
+[provides.operations."inworld.tts.context_roundtrip".network_constraints]
+host_allow = ["api.inworld.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 120000
+max_response_bytes = 16777216
+
+[provides.operations."inworld.tts.context_roundtrip".ai_hints]
+when_to_use = "Use when a voice workflow needs Inworld TTS context behavior and redaction-safe audio metadata."
+common_mistakes = [
+    "Do not send more than 1000 characters in one send_text request.",
+    "Do not log synthesized audio or source text.",
+]
+examples = ['{"context_id":"ctx-1","voice_id":"Dennis","text":"Hello"}']
+related = ["inworld.realtime.text_turn"]
+
+[provides.operations."inworld.router.chat_completion"]
+description = "Call Inworld Router chat completions through the OpenAI-compatible endpoint"
+capability = "inworld.router.chat"
+risk_level = "medium"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "none"
+
+[provides.operations."inworld.router.chat_completion".input_schema]
+type = "object"
+required = ["model", "messages"]
+
+[provides.operations."inworld.router.chat_completion".input_schema.properties.model]
+type = "string"
+minLength = 1
+
+[provides.operations."inworld.router.chat_completion".input_schema.properties.messages]
+type = "array"
+minItems = 1
+
+[provides.operations."inworld.router.chat_completion".input_schema.properties.stream]
+const = false
+
+[provides.operations."inworld.router.chat_completion".output_schema]
+type = "object"
+
+[provides.operations."inworld.router.chat_completion".network_constraints]
+host_allow = ["api.inworld.ai"]
+port_allow = [443]
+ip_allow = []
+cidr_deny = []
+deny_localhost = true
+deny_private_ranges = true
+deny_tailnet_ranges = true
+require_sni = true
+spki_pins = []
+deny_ip_literals = true
+require_host_canonicalization = true
+dns_max_ips = 16
+max_redirects = 0
+connect_timeout_ms = 10000
+total_timeout_ms = 60000
+max_response_bytes = 1048576
+
+[provides.operations."inworld.router.chat_completion".ai_hints]
+when_to_use = "Use for explicit Inworld Router fallback decisions that belong near the character workflow."
+common_mistakes = [
+    "Do not treat this connector as a generic OpenAI-compatible chat connector.",
+    "Do not log prompts, completions, provider reasoning, or router metadata bodies.",
+]
+examples = ['{"model":"auto","messages":[{"role":"user","content":"Hello"}],"stream":false}']
+related = ["inworld.realtime.text_turn"]
+
+[provides.operations."inworld.health"]
+description = "Return local Inworld connector configuration status without contacting the provider"
+capability = "inworld.health.read"
+risk_level = "low"
+safety_tier = "safe"
+requires_approval = "none"
+idempotency = "strict"
+
+[provides.operations."inworld.health".input_schema]
+type = "object"
+additionalProperties = false
+
+[provides.operations."inworld.health".output_schema]
+type = "object"
+
+[provides.operations."inworld.health".ai_hints]
+when_to_use = "Use before live operations to confirm auth mode, URL policy, and current API surface scope."
+common_mistakes = []
+examples = ["{}"]
+related = ["inworld.realtime.text_turn"]

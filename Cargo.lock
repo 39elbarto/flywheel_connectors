@@ -4740,6 +4740,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-inworld"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "asupersync",
+ "base64 0.22.1",
+ "blake3",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-streaming",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-irc"
 version = "0.1.0"
 dependencies = [

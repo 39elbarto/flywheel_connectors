@@ -1,7 +1,8 @@
 # V4 Throughput Benchmark: Lattice Delegation vs Ed25519 and ML-DSA-65
 
-**Beads:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e])
-and `flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]).
+**Beads:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e]),
+`flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]), and
+`flywheel_connectors-kyopb.1.3.1.1.13` ([J.5.3.1.1.h]).
 **Bench file:** `crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs`.
 **E2E harness:** `crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs`.
 **Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` and
@@ -20,19 +21,21 @@ real lattice sub-token through policy enforcement.
 | --- | ---: | ---: | ---: | ---: |
 | Ed25519 | 36.523 us | 38.531 us | 82.795 us | 104.99 us |
 | ML-DSA-65 | 771.99 us | 1.2600 ms | 130.22 us | 1.5139 ms |
+| V4 lattice real route, `.13` optimized | 68.724 ms | 143.84 ms delegate / 69.130 ms sample_pre | 64.649 ms | 337.18 ms |
 | V4 lattice real route, `.12` optimized | 90.730 ms | 182.59 ms delegate / 91.276 ms sample_pre | 96.026 ms | 460.30 ms |
 | V4 lattice real route, `.5` baseline | 480.29 ms | 1.6327 s delegate / 536.96 ms sample_pre | 498.33 ms | 2.1870 s |
 
 Read this as a correctness closeout, not a production performance closeout. The
 new route is real and no longer hides behind `NotImplemented`. The `.12`
-sparse-support materialization pass cuts setup/delegation by about 5x-9x, but
-the V4 route is still above hot-path latency targets and still needs dedicated
-`sample_pre`, verifier, and host-dispatch optimization.
+sparse-support materialization pass cuts setup/delegation by about 5x-9x, and
+the `.13` buffered selected-row verifier pass cuts another 28%-34% from the V4
+lattice timings. The route is still above hot-path latency targets and still
+needs deeper `sample_pre`, verifier, and host-dispatch optimization.
 
 The `.5` closeout filed follow-up beads for the three measured bottlenecks:
 
 - `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency. The first closeout pass now streams only sparse `R` support columns while materializing V4 public tail coefficients.
-- `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency.
+- `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency. The first closeout pass now buffers selected-row XOF reads and verifies V4 route preimages from nonzero `A_bar` support columns instead of scanning every `A_bar` coefficient.
 - `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency.
 
 ## 2026-05-08 `.12` Optimization Update
@@ -70,6 +73,36 @@ revision, primitive route id/revision, representation version, parameter
 profile, hashed fixture/zone/period identifiers, matrix dimensions, allocation
 summary, separate `trap_gen`/`delegate`/relation-check timings, cleanup, result,
 and skip reason fields.
+
+## 2026-05-08 `.13` Optimization Update
+
+The `.13` pass keeps the `.12` selected-column semantics but removes a lower
+level bottleneck: selected V4 `A_bar` rows now read SHAKE output in fixed-size
+coefficient chunks instead of calling the XOF reader once per skipped public
+coefficient. The verifier also indexes nonzero `A_bar` coefficients from the
+route preimage and feeds those columns to the selected-row stream, while the
+tail half and norm bound remain unchanged. The test proof compares the sparse
+verifier product against full-row products for representative V4 rows and still
+checks the full lattice equation against the operation RHS.
+
+The after benchmark command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-opt13-bench \
+  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa lattice -- --noplot
+```
+
+| Benchmark | `.12` before mean | `.13` after interval | `.13` after mean | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `keygen/lattice_trapdoor_master_setup` | 90.730 ms | 68.494 ms - 68.975 ms | 68.724 ms | about 1.3x faster |
+| `sign_or_issue/lattice_delegate_one_hop` | 182.59 ms | 139.06 ms - 153.66 ms | 143.84 ms | about 1.3x faster |
+| `sign_or_issue/lattice_sample_pre_real_route` | 91.276 ms | 68.974 ms - 69.251 ms | 69.130 ms | about 1.3x faster |
+| `verify/lattice_verify_real_route` | 96.026 ms | 64.373 ms - 64.795 ms | 64.649 ms | about 1.5x faster |
+| `end_to_end/lattice_full_crypto_route` | 460.30 ms | 335.61 ms - 338.52 ms | 337.18 ms | about 1.4x faster |
+
+This pass does not change the public matrix material version, primitive route
+revision, operation-hash RHS expansion, norm cap, period check, parameter
+agreement, or malformed/forged preimage rejection behavior.
 
 ## Methodology
 

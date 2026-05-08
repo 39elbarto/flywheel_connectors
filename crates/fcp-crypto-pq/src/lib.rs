@@ -93,6 +93,7 @@ const MAX_PUBLIC_MATRIX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREIMAGE_ENCODED_BYTES: usize = 1024 * 1024;
 const MAX_TRAPDOOR_SECRET_BYTES: usize = 1024 * 1024;
 const V4_SPARSE_R_WEIGHT: u32 = 8;
+const V4_ROW_XOF_CHUNK_COEFFS: usize = 256;
 
 /// Lattice security parameters (§3.2 of the design doc).
 ///
@@ -977,6 +978,7 @@ fn tail_product(
     product
 }
 
+#[cfg(test)]
 fn v4_public_abar_row(
     params: LatticeParams,
     public_seed: &[u8; 32],
@@ -1027,16 +1029,32 @@ fn v4_public_abar_selected_row(
     let max_col = *selected_cols
         .last()
         .expect("selected_cols is known non-empty");
-    for col in 0..=max_col {
-        let mut out = [0_u8; 8];
-        reader.read(&mut out);
-        if selected_cols[next_selected] == col {
+    let mut chunk = [0_u8; V4_ROW_XOF_CHUNK_COEFFS * 8];
+    let mut chunk_start = 0_u32;
+    while chunk_start <= max_col {
+        let remaining_coeffs =
+            usize::try_from(max_col - chunk_start + 1).expect("selected column range fits usize");
+        let chunk_coeffs = remaining_coeffs.min(V4_ROW_XOF_CHUNK_COEFFS);
+        let chunk_bytes = chunk_coeffs * 8;
+        reader.read(&mut chunk[..chunk_bytes]);
+        let chunk_end =
+            chunk_start + u32::try_from(chunk_coeffs).expect("chunk coefficient count fits in u32");
+        while next_selected < selected_cols.len() && selected_cols[next_selected] < chunk_end {
+            let byte_offset = usize::try_from(selected_cols[next_selected] - chunk_start)
+                .expect("selected column offset fits usize")
+                * 8;
+            let mut out = [0_u8; 8];
+            out.copy_from_slice(&chunk[byte_offset..byte_offset + 8]);
             coeffs.push(u64::from_le_bytes(out) % params.q);
             next_selected += 1;
             if next_selected == selected_cols.len() {
                 break;
             }
         }
+        if next_selected == selected_cols.len() {
+            break;
+        }
+        chunk_start = chunk_end;
     }
     coeffs
 }
@@ -1083,6 +1101,17 @@ fn tail_product_from_selected_row(row_coefficients: &[u64], support: &[(usize, i
         product += i128::from(a) * i128::from(*r);
     }
     product
+}
+
+fn route_preimage_abar_terms(dims: RouteDimensions, coeffs: &[u64]) -> Vec<(u32, u64)> {
+    coeffs
+        .iter()
+        .take(usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize"))
+        .enumerate()
+        .filter_map(|(col, coeff)| {
+            (*coeff != 0).then_some((u32::try_from(col).expect("A_bar col fits in u32"), *coeff))
+        })
+        .collect()
 }
 
 fn route_public_matrix_material(
@@ -2564,6 +2593,48 @@ fn encode_preimage_coefficients(
     LatticePreimage::from_encoded_bytes(params, bytes)
 }
 
+fn public_matrix_vector_product_v4(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    coeffs: &[u64],
+    dims: RouteDimensions,
+) -> LatticePqResult<Vec<u64>> {
+    debug_assert_eq!(params, LatticeParams::V4_REFERENCE);
+    let abar_terms = route_preimage_abar_terms(dims, coeffs);
+    let selected_cols: Vec<u32> = abar_terms.iter().map(|(col, _)| *col).collect();
+    let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
+    let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
+    let mut out = Vec::with_capacity(usize::try_from(params.n).expect("u32 n fits in usize"));
+    for row in 0..params.n {
+        let row_coefficients =
+            v4_public_abar_selected_row(params, &material.public_seed, row, &selected_cols);
+        let mut sum = 0_i128;
+        for (selected_index, (_, preimage_coeff)) in abar_terms.iter().enumerate() {
+            let matrix_coeff = row_coefficients[selected_index];
+            sum += i128::from(matrix_coeff) * i128::from(*preimage_coeff);
+        }
+        for tail_col in 0..gadget_cols {
+            let preimage_coeff = coeffs[abar_cols + tail_col];
+            if preimage_coeff == 0 {
+                continue;
+            }
+            let tail_index = usize::try_from(row)
+                .expect("u32 row fits in usize")
+                .checked_mul(gadget_cols)
+                .and_then(|base| base.checked_add(tail_col))
+                .ok_or(LatticePqError::RepresentationTooLarge {
+                    material: "public_matrix_tail_index",
+                    requested: usize::MAX,
+                    max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+                })?;
+            let matrix_coeff = decode_coeff(params, &material.tail_coefficients, tail_index)?;
+            sum += i128::from(matrix_coeff) * i128::from(preimage_coeff);
+        }
+        out.push(reduce_i128_mod_q(sum, params.q));
+    }
+    Ok(out)
+}
+
 fn public_matrix_vector_product(
     params: LatticeParams,
     material: &PublicMatrixMaterial,
@@ -2578,27 +2649,23 @@ fn public_matrix_vector_product(
             got: coeffs.len(),
         });
     }
+    if params == LatticeParams::V4_REFERENCE {
+        return public_matrix_vector_product_v4(params, material, coeffs, dims);
+    }
     let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
     let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
     let mut out = Vec::with_capacity(usize::try_from(params.n).expect("u32 n fits in usize"));
     for row in 0..params.n {
-        let row_coefficients = (params == LatticeParams::V4_REFERENCE)
-            .then(|| v4_public_abar_row(params, &material.public_seed, row, dims));
         let mut sum = 0_i128;
         for (col, preimage_coeff) in coeffs.iter().take(abar_cols).enumerate() {
             if *preimage_coeff == 0 {
                 continue;
             }
-            let matrix_coeff = row_coefficients.as_ref().map_or_else(
-                || {
-                    public_coeff(
-                        params,
-                        &material.public_seed,
-                        row,
-                        u32::try_from(col).expect("A_bar col fits in u32"),
-                    )
-                },
-                |coefficients| coefficients[col],
+            let matrix_coeff = public_coeff(
+                params,
+                &material.public_seed,
+                row,
+                u32::try_from(col).expect("A_bar col fits in u32"),
             );
             sum += i128::from(matrix_coeff) * i128::from(*preimage_coeff);
         }
@@ -4078,6 +4145,35 @@ mod tests {
         LatticePreimage::from_encoded_bytes(params, bytes).unwrap()
     }
 
+    fn v4_full_row_product(material: &PublicMatrixMaterial, coeffs: &[u64], row: u32) -> u64 {
+        let p = LatticeParams::V4_REFERENCE;
+        let dims = route_dimensions(p, "v4-full-row-product-test").unwrap();
+        let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
+        let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
+        let row_coefficients = v4_public_abar_row(p, &material.public_seed, row, dims);
+        let mut sum = 0_i128;
+        for (col, preimage_coeff) in coeffs.iter().take(abar_cols).enumerate() {
+            if *preimage_coeff == 0 {
+                continue;
+            }
+            sum += i128::from(row_coefficients[col]) * i128::from(*preimage_coeff);
+        }
+        for tail_col in 0..gadget_cols {
+            let preimage_coeff = coeffs[abar_cols + tail_col];
+            if preimage_coeff == 0 {
+                continue;
+            }
+            let tail_index = usize::try_from(row)
+                .expect("u32 row fits in usize")
+                .checked_mul(gadget_cols)
+                .and_then(|base| base.checked_add(tail_col))
+                .unwrap();
+            let matrix_coeff = decode_coeff(p, &material.tail_coefficients, tail_index).unwrap();
+            sum += i128::from(matrix_coeff) * i128::from(preimage_coeff);
+        }
+        reduce_i128_mod_q(sum, p.q)
+    }
+
     #[test]
     fn full_pipeline_round_trip_samples_and_verifies_small_test() {
         // TrapGen -> Delegate -> operation_hash -> SamplePre -> Verify
@@ -4128,6 +4224,23 @@ mod tests {
             norm_squared <= max_squared,
             "V4 sampled norm {norm_squared} must fit bound {max_squared}"
         );
+        let coeffs = preimage_coefficients(p, &preimage).unwrap();
+        let lhs = public_matrix_vector_product(p, &zp_pub.public_matrix, &coeffs).unwrap();
+        assert_eq!(lhs, expand_operation_hash_rhs(h, p));
+        let dims = route_dimensions(p, "v4-product-support-test").unwrap();
+        let abar_terms = route_preimage_abar_terms(dims, &coeffs);
+        assert!(
+            abar_terms.len()
+                <= usize::try_from(p.n * V4_SPARSE_R_WEIGHT).expect("support count fits usize"),
+            "sampled V4 preimage should stay within the sparse R support budget"
+        );
+        for row in [0, 1, p.n - 1] {
+            assert_eq!(
+                lhs[usize::try_from(row).expect("u32 row fits usize")],
+                v4_full_row_product(&zp_pub.public_matrix, &coeffs, row),
+                "sparse verifier product must match full-row product"
+            );
+        }
         verify(&zp_pub, h, &preimage, period.start_secs, p).unwrap();
     }
 

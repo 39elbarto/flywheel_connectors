@@ -37,6 +37,10 @@ Important runtime truths the contract preserves:
 - Default API version is `2023-06-01`, overridable by config `api_version` or `FCP_ANTHROPIC_API_VERSION`.
 - Default model is `claude-sonnet-4-6`.
 - Supported models are limited to the crate-local canonical list and aliases normalized by `Model::normalize`.
+- Prompt-cache accounting preserves Anthropic's detailed `cache_creation.ephemeral_5m_input_tokens` and `cache_creation.ephemeral_1h_input_tokens` counters; local cost estimates charge 1-hour cache writes at the higher TTL rate.
+- Image requests are accepted only as Anthropic image blocks with supported media types (`image/jpeg`, `image/png`, `image/gif`, `image/webp`) or `http`/`https` image URLs, capped at 600 images per request.
+- `claude-opus-4-7` accepts adaptive thinking only; the connector rejects manual `thinking: {"type":"enabled"}` for that model before provider I/O.
+- Thinking is rejected with non-default temperature and forced tool choice before provider I/O.
 - Thinking content is never returned verbatim in `content_blocks`; it is represented as `{"type":"thinking","redacted":true}`.
 - FCP subscribe is not implemented; streaming is exposed through `anthropic.message.stream`.
 
@@ -50,6 +54,9 @@ The first Anthropic README slice documents the existing runtime surface:
 - local token and cost counters through `anthropic.get_usage`
 - auth method listing and OAuth refreshability reporting
 - model alias normalization and 1M-context guardrails
+- prompt-cache TTL accounting and 1-hour cache cost handling
+- local image/media request validation
+- unsupported thinking-mode denial before provider I/O
 - bound capability-token verification before dispatch
 - redaction-safe diagnostics and live skip/pass test behavior
 
@@ -69,6 +76,7 @@ The first Anthropic README slice documents the existing runtime surface:
   - `anthropic.auth` gates auth method and OAuth refresh status operations.
   - `anthropic.models` gates model normalization.
 - The connector does not persist prompts, completions, thinking content, streamed chunks, tool inputs, usage snapshots, provider payloads, or provider responses.
+- The connector exposes local usage counters only; remote organization usage snapshots remain host/provider-router scope because they require host-owned OAuth/API account authority outside the direct Messages capability.
 - Credential-id mode is a host-egress contract, not direct proof that live Anthropic will accept the request without an injection layer.
 
 ## Network And Runtime Invariants
@@ -120,12 +128,15 @@ The current implementation does not include:
 - public-zone invocation
 - connector-local storage of prompts, thinking traces, streamed deltas, or tool inputs
 - automatic 1M-context beta header injection for retired beta paths
+- replay or duplicate-request rehydration; direct Messages calls remain non-idempotent and `event_caps.replay=false`
+- remote organization/workspace usage snapshots; `anthropic.get_usage` is connector-local accounting
 
 These are excluded on purpose:
 
 - The useful first slice is Claude Messages with clear FCP capability boundaries.
 - Host credential flows own OAuth and credential refresh behavior.
 - Thinking output can expose sensitive intermediate work, so the connector redacts it from structured content blocks.
+- Replay and provider-wide usage snapshots belong in a host/router surface that can own idempotency receipts, account authority, and credential refresh.
 
 ## Readiness And Verification Surface
 
@@ -201,7 +212,9 @@ The verification surface captures:
 - If base URL validation fails, use `https://api.anthropic.com` or a localhost origin for tests.
 - If a model is rejected, run `anthropic.models.normalize` or choose one of the supported canonical IDs.
 - If `enable_1m_context` fails, switch to `claude-opus-4-7`, `claude-opus-4-6`, or `claude-sonnet-4-6`.
-- If thinking and forced tool choice conflict, remove forced `tool_choice` or disable thinking for that request.
+- If `claude-opus-4-7` rejects manual thinking, use `thinking: {"type":"adaptive"}` with `output_config.effort`.
+- If thinking conflicts with `temperature` or forced tool choice, remove those controls or disable thinking for that request.
+- If an image request is rejected, use one of the supported image media types, an `http`/`https` image URL, and no more than 600 images.
 - If a streamed response looks incomplete, inspect SSE event ordering and `stop_reason` before changing aggregation logic.
 
 **Rerun commands**:

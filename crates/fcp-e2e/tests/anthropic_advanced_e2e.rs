@@ -159,10 +159,12 @@ async fn run_fixture_script(records: &mut Vec<Value>) {
             "finish_reason": message["stop_reason"],
             "cache_creation_input_tokens": message["usage"]["cache_creation_input_tokens"],
             "cache_read_input_tokens": message["usage"]["cache_read_input_tokens"],
+            "cache_creation_1h_input_tokens": message["usage"]["cache_creation"]["ephemeral_1h_input_tokens"],
             "output_tokens": message["usage"]["output_tokens"],
             "service_tier": message["usage"]["service_tier"],
             "has_thinking": message["provenance"]["has_thinking"],
             "thinking_redacted": message["content_blocks"][0]["redacted"],
+            "media_image_count": message["provenance"]["media_image_count"],
             "content_block_count": message["content_blocks"].as_array().map(Vec::len)
         }),
     ));
@@ -230,6 +232,10 @@ async fn run_fixture_script(records: &mut Vec<Value>) {
     assert!(!message.to_string().contains("private thinking"));
     assert_eq!(message["usage"]["cache_creation_input_tokens"], 4);
     assert_eq!(message["usage"]["cache_read_input_tokens"], 6);
+    assert_eq!(
+        message["usage"]["cache_creation"]["ephemeral_1h_input_tokens"],
+        1
+    );
     assert_eq!(message["usage"]["service_tier"], "standard");
 
     let requests = server.received_requests().await.unwrap_or_default();
@@ -442,6 +448,10 @@ async fn mount_fixture_message(server: &MockServer) {
                 "output_tokens": 10,
                 "cache_creation_input_tokens": 4,
                 "cache_read_input_tokens": 6,
+                "cache_creation": {
+                    "ephemeral_5m_input_tokens": 3,
+                    "ephemeral_1h_input_tokens": 1
+                },
                 "service_tier": "standard"
             }
         })))

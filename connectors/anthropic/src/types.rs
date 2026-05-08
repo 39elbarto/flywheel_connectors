@@ -448,6 +448,26 @@ pub enum StopReason {
     ToolUse,
 }
 
+/// Detailed prompt-cache creation accounting by cache TTL.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CacheCreation {
+    /// Input tokens written to the default 5-minute ephemeral cache.
+    #[serde(default)]
+    pub ephemeral_5m_input_tokens: u32,
+    /// Input tokens written to the 1-hour ephemeral cache.
+    #[serde(default)]
+    pub ephemeral_1h_input_tokens: u32,
+}
+
+impl CacheCreation {
+    /// Total detailed cache-creation tokens.
+    #[must_use]
+    pub const fn total_tokens(&self) -> u32 {
+        self.ephemeral_5m_input_tokens
+            .saturating_add(self.ephemeral_1h_input_tokens)
+    }
+}
+
 /// Token usage statistics.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
@@ -461,6 +481,9 @@ pub struct Usage {
     /// Cache read tokens (if using caching)
     #[serde(default)]
     pub cache_read_input_tokens: u32,
+    /// Detailed prompt-cache creation accounting when returned by the API.
+    #[serde(default)]
+    pub cache_creation: CacheCreation,
     /// Service tier assigned by Anthropic, when returned.
     #[serde(default)]
     pub service_tier: Option<String>,
@@ -480,9 +503,11 @@ impl Usage {
         let output_price = model.output_price_per_million();
 
         // Anthropic pricing for caching:
-        // Cache writes are 25% more expensive than base input
-        // Cache reads are 90% cheaper than base input (0.1x multiplier)
-        let creation_price = base_input_price * 1.25;
+        // 5-minute cache writes are 25% more expensive than base input.
+        // 1-hour cache writes are 2x base input.
+        // Cache reads are 90% cheaper than base input (0.1x multiplier).
+        let short_cache_write_rate = base_input_price * 1.25;
+        let long_cache_write_rate = base_input_price * 2.0;
         let read_price = base_input_price * 0.10;
 
         // input_tokens includes creation and read tokens, so we must subtract them
@@ -491,9 +516,25 @@ impl Usage {
             .input_tokens
             .saturating_sub(self.cache_creation_input_tokens)
             .saturating_sub(self.cache_read_input_tokens);
+        let long_cache_writes = self
+            .cache_creation
+            .ephemeral_1h_input_tokens
+            .min(self.cache_creation_input_tokens);
+        let remaining_creation_tokens = self
+            .cache_creation_input_tokens
+            .saturating_sub(long_cache_writes);
+        let reported_short_cache_writes = self
+            .cache_creation
+            .ephemeral_5m_input_tokens
+            .min(remaining_creation_tokens);
+        let unspecified_creation_tokens =
+            remaining_creation_tokens.saturating_sub(reported_short_cache_writes);
+        let short_cache_writes =
+            reported_short_cache_writes.saturating_add(unspecified_creation_tokens);
 
         let input_cost = (f64::from(uncached_input) / 1_000_000.0) * base_input_price
-            + (f64::from(self.cache_creation_input_tokens) / 1_000_000.0) * creation_price
+            + (f64::from(short_cache_writes) / 1_000_000.0) * short_cache_write_rate
+            + (f64::from(long_cache_writes) / 1_000_000.0) * long_cache_write_rate
             + (f64::from(self.cache_read_input_tokens) / 1_000_000.0) * read_price;
 
         let output_cost = (f64::from(self.output_tokens) / 1_000_000.0) * output_price;
@@ -813,6 +854,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         assert_eq!(usage.total_tokens(), 150);
@@ -825,6 +867,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         let cost = usage.calculate_cost(Model::ClaudeSonnet4);
@@ -839,6 +882,7 @@ mod tests {
             output_tokens: 500,
             cache_creation_input_tokens: 200,
             cache_read_input_tokens: 300,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         let cost = usage.calculate_cost(Model::ClaudeSonnet4);
@@ -853,6 +897,7 @@ mod tests {
         assert_eq!(usage.output_tokens, 5);
         assert_eq!(usage.cache_creation_input_tokens, 0);
         assert_eq!(usage.cache_read_input_tokens, 0);
+        assert_eq!(usage.cache_creation.total_tokens(), 0);
     }
 
     // ---- ImageSource ----
@@ -1205,6 +1250,7 @@ mod tests {
             output_tokens: 50_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         assert_eq!(usage.total_tokens(), 150_000);
@@ -1217,6 +1263,10 @@ mod tests {
             output_tokens: 5,
             cache_creation_input_tokens: 2,
             cache_read_input_tokens: 3,
+            cache_creation: CacheCreation {
+                ephemeral_5m_input_tokens: 2,
+                ephemeral_1h_input_tokens: 0,
+            },
             service_tier: Some("priority".into()),
         };
         let cloned = original.clone();
@@ -1224,6 +1274,7 @@ mod tests {
         assert_eq!(cloned.input_tokens, 10);
         assert_eq!(cloned.cache_creation_input_tokens, 2);
         assert_eq!(cloned.cache_read_input_tokens, 3);
+        assert_eq!(cloned.cache_creation.total_tokens(), 2);
     }
 
     #[test]
@@ -1233,6 +1284,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         let cost = usage.calculate_cost(Model::ClaudeOpus4_5);
@@ -1247,6 +1299,7 @@ mod tests {
             output_tokens: 1_000_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         let cost = usage.calculate_cost(Model::Claude3_5Haiku);
@@ -1633,21 +1686,26 @@ mod tests {
             output_tokens: 5_000,
             cache_creation_input_tokens: 3_000,
             cache_read_input_tokens: 2_000,
+            cache_creation: CacheCreation {
+                ephemeral_5m_input_tokens: 2_000,
+                ephemeral_1h_input_tokens: 1_000,
+            },
             service_tier: None,
         };
         let cost = usage.calculate_cost(Model::ClaudeSonnet4);
         // uncached input: 10000 - 3000 - 2000 = 5000
-        // input cost: (5000/1M)*3 + (3000/1M)*3.75 + (2000/1M)*0.3 = 0.015 + 0.01125 + 0.0006
+        // input cost: (5000/1M)*3 + (2000/1M)*3.75 + (1000/1M)*6 + (2000/1M)*0.3
+        // = 0.015 + 0.0075 + 0.006 + 0.0006
         // output cost: (5000/1M)*15 = 0.075
-        // total ~ 0.10185
-        assert!(cost > 0.0);
-        assert!(cost < 1.0);
+        // total ~ 0.1041
+        assert!((cost - 0.1041).abs() < 0.0001);
         // verify cache read is cheaper than base input
         let no_cache_usage = Usage {
             input_tokens: 10_000,
             output_tokens: 5_000,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         let no_cache_cost = no_cache_usage.calculate_cost(Model::ClaudeSonnet4);

@@ -18,8 +18,9 @@ use crate::{
     client::{AnthropicAuth, AnthropicClient, DEFAULT_API_VERSION, DEFAULT_BASE_URL},
     error::AnthropicError,
     types::{
-        BETA_INTERLEAVED_THINKING, DEFAULT_MODEL, Message, MessageContent, MessageRequestOptions,
-        Model, Role, SUPPORTED_MODEL_IDS, ServiceTier, Tool, ToolChoice, Usage,
+        BETA_INTERLEAVED_THINKING, CacheCreation, ContentBlock, DEFAULT_MODEL, ImageSource,
+        Message, MessageContent, MessageRequestOptions, Model, Role, SUPPORTED_MODEL_IDS,
+        ServiceTier, Tool, ToolChoice, Usage,
     },
 };
 
@@ -412,6 +413,92 @@ fn should_add_interleaved_thinking_beta(
     }
 }
 
+fn validate_thinking_policy(
+    model: Model,
+    thinking: Option<&serde_json::Value>,
+    temperature: Option<f64>,
+) -> FcpResult<()> {
+    if thinking.is_none() {
+        return Ok(());
+    }
+    if temperature.is_some() {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message:
+                "thinking is incompatible with temperature; remove temperature or disable thinking"
+                    .into(),
+        });
+    }
+    if model == Model::ClaudeOpus4_7 && thinking_type(thinking) == Some("enabled") {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: "claude-opus-4-7 no longer accepts manual thinking type enabled; use thinking type adaptive with output_config effort"
+                .into(),
+        });
+    }
+    Ok(())
+}
+
+const MAX_IMAGES_PER_REQUEST: usize = 600;
+const SUPPORTED_IMAGE_MEDIA_TYPES: [&str; 4] =
+    ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+fn validate_message_media_policy(messages: &[Message]) -> FcpResult<usize> {
+    let mut image_count = 0_usize;
+    for message in messages {
+        let MessageContent::Blocks(blocks) = &message.content else {
+            continue;
+        };
+        for block in blocks {
+            let ContentBlock::Image { source } = block else {
+                continue;
+            };
+            image_count = image_count.saturating_add(1);
+            if image_count > MAX_IMAGES_PER_REQUEST {
+                return Err(FcpError::InvalidRequest {
+                    code: 1003,
+                    message: format!(
+                        "Anthropic vision requests may include at most {MAX_IMAGES_PER_REQUEST} images"
+                    ),
+                });
+            }
+            match source {
+                ImageSource::Base64 { media_type, data } => {
+                    let normalized = media_type.trim().to_ascii_lowercase();
+                    if !SUPPORTED_IMAGE_MEDIA_TYPES.contains(&normalized.as_str()) {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: format!(
+                                "Unsupported Anthropic image media type {media_type}; use image/jpeg, image/png, image/gif, or image/webp"
+                            ),
+                        });
+                    }
+                    if data.trim().is_empty() {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "Anthropic base64 image blocks must include non-empty data"
+                                .into(),
+                        });
+                    }
+                }
+                ImageSource::Url { url } => {
+                    let parsed = Url::parse(url).map_err(|error| FcpError::InvalidRequest {
+                        code: 1003,
+                        message: format!("Invalid Anthropic image URL: {error}"),
+                    })?;
+                    if !matches!(parsed.scheme(), "http" | "https") {
+                        return Err(FcpError::InvalidRequest {
+                            code: 1003,
+                            message: "Anthropic image URLs must use http or https".into(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    Ok(image_count)
+}
+
 fn build_message_options(
     input: &serde_json::Value,
     model: Model,
@@ -446,6 +533,12 @@ fn build_message_options(
             message: "thinking is incompatible with forced tool_choice".into(),
         });
     }
+
+    validate_thinking_policy(
+        model,
+        thinking.as_ref(),
+        input.get("temperature").and_then(|v| v.as_f64()),
+    )?;
 
     let mut anthropic_betas = config.default_betas.clone();
     for beta in parse_request_betas(input)? {
@@ -1312,6 +1405,7 @@ impl AnthropicConnector {
                 message: "Messages array cannot be empty".into(),
             });
         }
+        let media_image_count = validate_message_media_policy(&messages)?;
 
         let system = parse_optional_value(&input, "system");
         let max_tokens = parse_max_tokens(&input)?;
@@ -1372,6 +1466,7 @@ impl AnthropicConnector {
                 "output_tokens": response.usage.output_tokens,
                 "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
                 "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                "cache_creation": response.usage.cache_creation,
                 "service_tier": response.usage.service_tier
             },
             "cost_usd": cost,
@@ -1381,6 +1476,7 @@ impl AnthropicConnector {
                 "integrity": "untrusted",
                 "has_tool_calls": has_tool_calls,
                 "has_thinking": response.content.iter().any(|b| matches!(b, crate::types::ResponseContentBlock::Thinking { .. })),
+                "media_image_count": media_image_count,
                 "chunk_count": 1,
                 "taint": ["AI_GENERATED"]
             }
@@ -1417,6 +1513,7 @@ impl AnthropicConnector {
                 message: "Messages array cannot be empty".into(),
             });
         }
+        let media_image_count = validate_message_media_policy(&messages)?;
 
         let system = parse_optional_value(&input, "system");
         let max_tokens = parse_max_tokens(&input)?;
@@ -1440,6 +1537,7 @@ impl AnthropicConnector {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
 
@@ -1693,6 +1791,7 @@ impl AnthropicConnector {
                 "output_tokens": usage.output_tokens,
                 "cache_creation_input_tokens": usage.cache_creation_input_tokens,
                 "cache_read_input_tokens": usage.cache_read_input_tokens,
+                "cache_creation": usage.cache_creation.clone(),
                 "service_tier": usage.service_tier
             },
             "cost_usd": cost,
@@ -1703,6 +1802,7 @@ impl AnthropicConnector {
                 "integrity": "untrusted",
                 "has_tool_calls": has_tool_calls,
                 "has_thinking": has_thinking,
+                "media_image_count": media_image_count,
                 "chunk_count": chunk_count,
                 "taint": ["AI_GENERATED"]
             }
@@ -1759,6 +1859,7 @@ impl AnthropicConnector {
                 "output_tokens": response.usage.output_tokens,
                 "cache_creation_input_tokens": response.usage.cache_creation_input_tokens,
                 "cache_read_input_tokens": response.usage.cache_read_input_tokens,
+                "cache_creation": response.usage.cache_creation,
                 "service_tier": response.usage.service_tier
             },
             "cost_usd": cost,
@@ -2242,7 +2343,7 @@ mod tests {
             default_betas: Vec::new(),
         };
         let input = json!({
-            "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "thinking": { "type": "adaptive" },
             "output_config": { "effort": "medium" },
             "tools": [{
                 "name": "lookup",
@@ -2267,6 +2368,60 @@ mod tests {
     }
 
     #[test]
+    fn test_message_options_reject_opus47_manual_thinking() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "thinking": { "type": "enabled", "budget_tokens": 2048 },
+            "output_config": { "effort": "medium" }
+        });
+
+        let error = build_message_options(&input, Model::ClaudeOpus4_7, &config)
+            .expect_err("Opus 4.7 should reject manual thinking mode");
+
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("adaptive"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_message_options_reject_temperature_with_thinking() {
+        let config = AnthropicConfig {
+            auth: AnthropicAuth::ApiKey("sk-test".into()),
+            base_url: DEFAULT_BASE_URL.into(),
+            api_version: None,
+            default_betas: Vec::new(),
+        };
+        let input = json!({
+            "temperature": 0.2,
+            "thinking": { "type": "enabled", "budget_tokens": 1024 }
+        });
+
+        let error = build_message_options(&input, Model::ClaudeSonnet4_6, &config)
+            .expect_err("thinking should reject temperature");
+
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("temperature"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
     fn test_message_options_reject_invalid_cache_control() {
         let config = AnthropicConfig {
             auth: AnthropicAuth::ApiKey("sk-test".into()),
@@ -2284,6 +2439,77 @@ mod tests {
         match error {
             FcpError::InvalidRequest { message, .. } => {
                 assert!(message.contains("Invalid cache_control format"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_message_media_policy_accepts_supported_images() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![
+                ContentBlock::Image {
+                    source: ImageSource::Base64 {
+                        media_type: "image/png".into(),
+                        data: "iVBORw0KGgo=".into(),
+                    },
+                },
+                ContentBlock::Image {
+                    source: ImageSource::Url {
+                        url: "https://example.com/image.webp".into(),
+                    },
+                },
+            ]),
+        }];
+
+        assert_eq!(validate_message_media_policy(&messages).unwrap(), 2);
+    }
+
+    #[test]
+    fn test_message_media_policy_rejects_unsupported_media_type() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::Image {
+                source: ImageSource::Base64 {
+                    media_type: "application/pdf".into(),
+                    data: "JVBERi0x".into(),
+                },
+            }]),
+        }];
+
+        let error = validate_message_media_policy(&messages)
+            .expect_err("unsupported image media type should be rejected");
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("Unsupported Anthropic image media type"));
+            }
+            other => assert!(
+                matches!(other, FcpError::InvalidRequest { .. }),
+                "Expected InvalidRequest, got: {other:?}"
+            ),
+        }
+    }
+
+    #[test]
+    fn test_message_media_policy_rejects_non_http_image_url() {
+        let messages = vec![Message {
+            role: Role::User,
+            content: MessageContent::Blocks(vec![ContentBlock::Image {
+                source: ImageSource::Url {
+                    url: "file:///tmp/private.png".into(),
+                },
+            }]),
+        }];
+
+        let error = validate_message_media_policy(&messages)
+            .expect_err("non-http image URL should be rejected");
+        match error {
+            FcpError::InvalidRequest { message, .. } => {
+                assert!(message.contains("http or https"));
             }
             other => assert!(
                 matches!(other, FcpError::InvalidRequest { .. }),
@@ -3131,6 +3357,7 @@ mod tests {
             output_tokens: 0,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: CacheCreation::default(),
             service_tier: None,
         };
         // ClaudeSonnet4 input: 1M * $3/M = $3.00

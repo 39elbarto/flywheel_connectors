@@ -1267,6 +1267,7 @@ mod tests {
             output_tokens: 500,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: crate::types::CacheCreation::default(),
             service_tier: None,
         };
 
@@ -1417,6 +1418,7 @@ mod tests {
             output_tokens: 50,
             cache_creation_input_tokens: 0,
             cache_read_input_tokens: 0,
+            cache_creation: crate::types::CacheCreation::default(),
             service_tier: None,
         };
         client.track_usage(&usage);

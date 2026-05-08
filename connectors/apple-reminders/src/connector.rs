@@ -103,16 +103,27 @@ impl AppleRemindersConnector {
                 id: OperationId::from_static(OP_HEALTH),
                 summary: "Report Apple Reminders health".into(),
                 description: Some("Report platform support and connector configuration.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: json!({ "type": "object", "properties": {} }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "status": { "type": "string" },
+                        "platform": { "type": "string" },
+                        "manifest_hash": { "type": "string" }
+                    },
+                    "required": ["status", "platform", "manifest_hash"]
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this before reminder operations on a new host.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this before Apple Reminders operations on a new macOS host or when diagnosing a failed reminder automation request.".into(),
+                    common_mistakes: vec![
+                        "Treating health success as proof that the Reminders app has already granted Automation permission.".into(),
+                        "Running this on a non-macOS host and interpreting the platform failure as missing reminder data.".into(),
+                    ],
+                    examples: vec!["{\"check\":\"platform-and-configuration\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_LISTS)],
                 },
                 rate_limit: None,
@@ -122,16 +133,35 @@ impl AppleRemindersConnector {
                 id: OperationId::from_static(OP_LIST_LISTS),
                 summary: "List reminder lists".into(),
                 description: Some("List reminder lists.".into()),
-                input_schema: json!({ "type": "object" }),
-                output_schema: json!({ "type": "object" }),
+                input_schema: json!({ "type": "object", "properties": {} }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "lists": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "name": { "type": "string" }
+                                },
+                                "required": ["id", "name"]
+                            }
+                        }
+                    },
+                    "required": ["lists"]
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to inspect available reminder lists.".into(),
-                    common_mistakes: vec![],
-                    examples: vec!["{}".into()],
+                    when_to_use: "Use this when the agent needs the available Reminders lists before listing or creating reminders in a specific list.".into(),
+                    common_mistakes: vec![
+                        "Guessing a list name before inspecting the user's local Reminders lists.".into(),
+                        "Assuming list names are globally stable across machines or Apple IDs.".into(),
+                    ],
+                    examples: vec!["{\"scope\":\"all-lists\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_REMINDERS)],
                 },
                 rate_limit: None,
@@ -147,14 +177,36 @@ impl AppleRemindersConnector {
                         "list_name": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "reminders": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "id": { "type": "string" },
+                                    "title": { "type": "string" },
+                                    "list": { "type": "string" },
+                                    "completed": { "type": "boolean" },
+                                    "due": { "type": "string" }
+                                },
+                                "required": ["id", "title", "list", "completed", "due"]
+                            }
+                        }
+                    },
+                    "required": ["reminders"]
+                }),
                 capability: CapabilityId::from_static(CAP_READ),
                 risk_level: RiskLevel::Low,
                 safety_tier: SafetyTier::Safe,
                 idempotency: IdempotencyClass::Strict,
                 ai_hints: AgentHint {
-                    when_to_use: "Use this to inspect reminder inventory.".into(),
-                    common_mistakes: vec![],
+                    when_to_use: "Use this when the agent needs reminder inventory, optionally scoped to a known Reminders list.".into(),
+                    common_mistakes: vec![
+                        "Passing a display list name that has not been confirmed with list_lists.".into(),
+                        "Treating completed and active reminder filtering as implicit; inspect the returned reminder fields before deciding what is pending.".into(),
+                    ],
                     examples: vec!["{\"list_name\":\"Personal\"}".into()],
                     related: vec![CapabilityId::from_static(OP_CREATE_REMINDER)],
                 },
@@ -173,7 +225,15 @@ impl AppleRemindersConnector {
                         "list_name": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "list": { "type": "string" }
+                    },
+                    "required": ["id", "title", "list"]
+                }),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
@@ -187,7 +247,7 @@ impl AppleRemindersConnector {
                     related: vec![CapabilityId::from_static(OP_LIST_REMINDERS)],
                 },
                 rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
+                requires_approval: Some(ApprovalMode::Policy),
             },
             OperationInfo {
                 id: OperationId::from_static(OP_COMPLETE_REMINDER),
@@ -200,19 +260,30 @@ impl AppleRemindersConnector {
                         "reminder_id": { "type": "string" }
                     }
                 }),
-                output_schema: json!({ "type": "object" }),
+                output_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string" },
+                        "title": { "type": "string" },
+                        "completed": { "type": "boolean" }
+                    },
+                    "required": ["id", "title", "completed"]
+                }),
                 capability: CapabilityId::from_static(CAP_WRITE),
                 risk_level: RiskLevel::Medium,
                 safety_tier: SafetyTier::Risky,
                 idempotency: IdempotencyClass::BestEffort,
                 ai_hints: AgentHint {
                     when_to_use: "Use this to mark a reminder done.".into(),
-                    common_mistakes: vec![],
+                    common_mistakes: vec![
+                        "Passing the reminder title instead of the stable reminder identifier returned by list_reminders.".into(),
+                        "Treating best-effort idempotency as strict exactly-once behavior; confirm the returned completed flag when the caller needs certainty.".into(),
+                    ],
                     examples: vec!["{\"reminder_id\":\"x-apple-reminder://...\"}".into()],
                     related: vec![CapabilityId::from_static(OP_LIST_REMINDERS)],
                 },
                 rate_limit: None,
-                requires_approval: Some(ApprovalMode::None),
+                requires_approval: Some(ApprovalMode::Policy),
             },
         ]
     }
@@ -310,18 +381,29 @@ impl FcpConnector for AppleRemindersConnector {
     }
 
     async fn handshake(&mut self, req: HandshakeRequest) -> FcpResult<HandshakeResponse> {
+        let HandshakeRequest {
+            host_public_key,
+            zone,
+            capabilities_requested,
+            nonce,
+            requested_instance_id,
+            ..
+        } = req;
+        if let Some(requested_instance_id) = requested_instance_id {
+            self.base.instance_id = requested_instance_id;
+        }
         self.base.set_handshaken(true);
         self.verifier = Some(CapabilityVerifier::new(
-            req.host_public_key,
-            req.zone.clone(),
+            host_public_key,
+            zone,
             self.base.instance_id.clone(),
         ));
         Ok(HandshakeResponse {
             status: "accepted".into(),
-            capabilities_granted: granted_capabilities(req.capabilities_requested),
+            capabilities_granted: granted_capabilities(capabilities_requested),
             session_id: SessionId::new(),
             manifest_hash: Self::manifest_hash(),
-            nonce: req.nonce,
+            nonce,
             event_caps: Some(EventCaps {
                 streaming: false,
                 replay: false,

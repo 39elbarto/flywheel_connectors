@@ -5,7 +5,7 @@ min_mesh_version = "2.0.0"
 min_protocol = "fcp2-sym/2.0"
 protocol_features = []
 max_datagram_bytes = 65000
-interface_hash = "blake3-256:fcp.interface.v2:c941db7b0bcc0b329546507851846f43d39610144894cf16997abc595dad0e2f"
+interface_hash = "blake3-256:fcp.interface.v2:bf005d141a95614f8cdffad3ea7a846f64211b31cfec8918d87eaab621a9714c"
 
 [connector]
 id = "fcp.apple-reminders"
@@ -47,6 +47,15 @@ type = "object"
 [provides.operations."apple_reminders.health".output_schema]
 type = "object"
 
+[provides.operations."apple_reminders.health".output_schema.properties.status]
+type = "string"
+
+[provides.operations."apple_reminders.health".output_schema.properties.platform]
+type = "string"
+
+[provides.operations."apple_reminders.health".output_schema.properties.manifest_hash]
+type = "string"
+
 [provides.operations."apple_reminders.health".ai_hints]
 when_to_use = "Use this before Apple Reminders operations on a new macOS host or when diagnosing a failed reminder automation request."
 common_mistakes = [
@@ -72,6 +81,15 @@ type = "object"
 
 [provides.operations."apple_reminders.list_lists".output_schema.properties.lists]
 type = "array"
+
+[provides.operations."apple_reminders.list_lists".output_schema.properties.lists.items]
+type = "object"
+
+[provides.operations."apple_reminders.list_lists".output_schema.properties.lists.items.properties.id]
+type = "string"
+
+[provides.operations."apple_reminders.list_lists".output_schema.properties.lists.items.properties.name]
+type = "string"
 
 [provides.operations."apple_reminders.list_lists".ai_hints]
 when_to_use = "Use this when the agent needs the available Reminders lists before listing or creating reminders in a specific list."
@@ -101,6 +119,24 @@ type = "object"
 
 [provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders]
 type = "array"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items]
+type = "object"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.id]
+type = "string"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.title]
+type = "string"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.list]
+type = "string"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.completed]
+type = "boolean"
+
+[provides.operations."apple_reminders.list_reminders".output_schema.properties.reminders.items.properties.due]
+type = "string"
 
 [provides.operations."apple_reminders.list_reminders".ai_hints]
 when_to_use = "Use this when the agent needs reminder inventory, optionally scoped to a known Reminders list."
@@ -132,8 +168,14 @@ type = "string"
 [provides.operations."apple_reminders.create_reminder".output_schema]
 type = "object"
 
-[provides.operations."apple_reminders.create_reminder".output_schema.properties.reminder]
-type = "object"
+[provides.operations."apple_reminders.create_reminder".output_schema.properties.id]
+type = "string"
+
+[provides.operations."apple_reminders.create_reminder".output_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_reminders.create_reminder".output_schema.properties.list]
+type = "string"
 
 [provides.operations."apple_reminders.create_reminder".ai_hints]
 when_to_use = "Use this when the user explicitly asks the agent to add a new reminder to Apple Reminders."
@@ -163,8 +205,14 @@ type = "string"
 [provides.operations."apple_reminders.complete_reminder".output_schema]
 type = "object"
 
-[provides.operations."apple_reminders.complete_reminder".output_schema.properties.reminder]
-type = "object"
+[provides.operations."apple_reminders.complete_reminder".output_schema.properties.id]
+type = "string"
+
+[provides.operations."apple_reminders.complete_reminder".output_schema.properties.title]
+type = "string"
+
+[provides.operations."apple_reminders.complete_reminder".output_schema.properties.completed]
+type = "boolean"
 
 [provides.operations."apple_reminders.complete_reminder".ai_hints]
 when_to_use = "Use this when the user has identified a specific reminder and wants it marked complete."

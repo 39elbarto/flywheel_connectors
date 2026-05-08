@@ -381,8 +381,30 @@ mod tests {
                 "command": "rch exec -- cargo test -p fcp-apple-reminders osascript_e2e -- --nocapture"
             }
         });
+        assert_redacted(&payload.to_string());
         println!("{payload}");
         payload
+    }
+
+    fn assert_redacted(line: &str) {
+        for forbidden in [
+            "/Users/",
+            "/tmp/",
+            TEST_FAKE_SUCCESS_OSASCRIPT_PATH,
+            TEST_FAKE_ERRORS_OSASCRIPT_PATH,
+            "Buy milk",
+            "Fake Reminder",
+            "Personal",
+            "Shopping",
+            "password",
+            "secret",
+            "token",
+        ] {
+            assert!(
+                !line.contains(forbidden),
+                "E2E proof log leaked forbidden value: {forbidden}"
+            );
+        }
     }
 
     #[cfg(unix)]
@@ -589,7 +611,10 @@ esac
             &correlation_id,
             "configure",
             "pass",
-            &json!({ "osascript_path": config.osascript_path }),
+            &json!({
+                "osascript_path_policy": "canonical-path-only",
+                "timeout_secs": config.subprocess_timeout_secs
+            }),
         );
 
         let title = "Buy milk; exec -a alias python3 -c 'oops'";
@@ -612,8 +637,8 @@ esac
             "invoke",
             "pass",
             &json!({
-                "argv_log": argv_log.display().to_string(),
-                "stdout": stdout,
+                "argv_record_count": argv.lines().count(),
+                "stdout_shape": "id-title-list-tab-separated",
                 "malicious_payload_inert": true,
             }),
         );
@@ -629,7 +654,7 @@ esac
             &correlation_id,
             "shutdown",
             "pass",
-            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "cleanup": "fake executable overwritten by deterministic harness" }),
         );
     }
 
@@ -707,7 +732,7 @@ esac
             &correlation_id,
             "shutdown",
             "pass",
-            &json!({ "fake_osascript": fake_osascript.display().to_string() }),
+            &json!({ "cleanup": "fake executable overwritten by deterministic harness" }),
         );
     }
 

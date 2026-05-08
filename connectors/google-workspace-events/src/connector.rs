@@ -414,9 +414,11 @@ impl WorkspaceEventsConnector {
                     "Describe the embedded provisioning recipe and effective scope set",
                     json!({
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
                             "scope_triggers": {
                                 "type": "array",
+                                "minItems": 1,
                                 "items": { "type": "string" },
                                 "description": "Optional provisioning escalation triggers to resolve into an effective scope set"
                             }
@@ -424,6 +426,8 @@ impl WorkspaceEventsConnector {
                     }),
                     json!({
                         "type": "object",
+                        "required": ["bundle", "effective_scopes"],
+                        "additionalProperties": false,
                         "properties": {
                             "bundle": { "type": "object" },
                             "effective_scopes": { "type": "array", "items": { "type": "string" } }
@@ -447,13 +451,16 @@ impl WorkspaceEventsConnector {
                     "List Workspace Events subscriptions",
                     json!({
                         "type": "object",
+                        "additionalProperties": false,
                         "properties": {
-                            "page_size": { "type": "integer", "description": "Maximum subscriptions to return" },
+                            "page_size": { "type": "integer", "minimum": 0, "description": "Maximum subscriptions to return" },
                             "page_token": { "type": "string", "description": "Pagination token from a prior response" }
                         }
                     }),
                     json!({
                         "type": "object",
+                        "required": ["subscriptions", "next_page_token"],
+                        "additionalProperties": false,
                         "properties": {
                             "subscriptions": { "type": "array", "items": { "type": "object" } },
                             "next_page_token": { "type": "string" }
@@ -478,12 +485,15 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["subscription_name"],
+                        "additionalProperties": false,
                         "properties": {
                             "subscription_name": { "type": "string", "description": "Resource name like subscriptions/AAAA" }
                         }
                     }),
                     json!({
                         "type": "object",
+                        "required": ["subscription"],
+                        "additionalProperties": false,
                         "properties": {
                             "subscription": { "type": "object" }
                         }
@@ -507,9 +517,10 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["target_resource", "event_types", "pubsub_topic"],
+                        "additionalProperties": false,
                         "properties": {
                             "target_resource": { "type": "string", "description": "Resource to watch, for example a Chat space resource URI" },
-                            "event_types": { "type": "array", "items": { "type": "string" }, "description": "Explicit event type identifiers to subscribe to" },
+                            "event_types": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Explicit event type identifiers to subscribe to" },
                             "pubsub_topic": { "type": "string", "description": "Fully-qualified Pub/Sub topic used for delivery" },
                             "ttl": { "type": "string", "description": "Optional TTL duration string accepted by Workspace Events" },
                             "include_resource": { "type": "boolean", "description": "Whether payloads should embed the changed resource when supported" },
@@ -518,6 +529,8 @@ impl WorkspaceEventsConnector {
                     }),
                     json!({
                         "type": "object",
+                        "required": ["operation"],
+                        "additionalProperties": false,
                         "properties": {
                             "operation": { "type": "object" }
                         }
@@ -545,6 +558,7 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["subscription_name"],
+                        "additionalProperties": false,
                         "properties": {
                             "subscription_name": { "type": "string", "description": "Subscription resource to reactivate" },
                             "ttl": { "type": "string", "description": "Optional replacement TTL for the reactivated subscription" }
@@ -552,6 +566,8 @@ impl WorkspaceEventsConnector {
                     }),
                     json!({
                         "type": "object",
+                        "required": ["operation"],
+                        "additionalProperties": false,
                         "properties": {
                             "operation": { "type": "object" }
                         }
@@ -575,6 +591,7 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["subscription_name"],
+                        "additionalProperties": false,
                         "properties": {
                             "subscription_name": { "type": "string", "description": "Subscription resource to delete" },
                             "validate_only": { "type": "boolean", "description": "If true, validate the delete without executing it" }
@@ -582,6 +599,8 @@ impl WorkspaceEventsConnector {
                     }),
                     json!({
                         "type": "object",
+                        "required": ["operation"],
+                        "additionalProperties": false,
                         "properties": {
                             "operation": { "type": "object" }
                         }
@@ -605,13 +624,16 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["pubsub_subscription"],
+                        "additionalProperties": false,
                         "properties": {
                             "pubsub_subscription": { "type": "string", "description": "Fully-qualified Pub/Sub subscription name" },
-                            "max_messages": { "type": "integer", "description": "Maximum messages to pull in one request" }
+                            "max_messages": { "type": "integer", "minimum": 1, "description": "Maximum messages to pull in one request" }
                         }
                     }),
                     json!({
                         "type": "object",
+                        "required": ["received_messages", "decoded_events"],
+                        "additionalProperties": false,
                         "properties": {
                             "received_messages": { "type": "array", "items": { "type": "object" } },
                             "decoded_events": { "type": "array", "items": { "type": "object" } }
@@ -637,16 +659,19 @@ impl WorkspaceEventsConnector {
                     json!({
                         "type": "object",
                         "required": ["pubsub_subscription", "ack_ids"],
+                        "additionalProperties": false,
                         "properties": {
                             "pubsub_subscription": { "type": "string", "description": "Fully-qualified Pub/Sub subscription name" },
-                            "ack_ids": { "type": "array", "items": { "type": "string" }, "description": "Ack IDs returned by pull_events" }
+                            "ack_ids": { "type": "array", "minItems": 1, "items": { "type": "string" }, "description": "Ack IDs returned by pull_events" }
                         }
                     }),
                     json!({
                         "type": "object",
+                        "required": ["status", "acked_count"],
+                        "additionalProperties": false,
                         "properties": {
-                            "status": { "type": "string" },
-                            "acked_count": { "type": "integer" }
+                            "status": { "type": "string", "const": "acked" },
+                            "acked_count": { "type": "integer", "minimum": 0 }
                         }
                     }),
                     "workspace_events.delivery.ack",

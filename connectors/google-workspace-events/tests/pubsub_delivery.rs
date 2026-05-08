@@ -49,6 +49,305 @@ fn manifest_declares_operation(manifest: &str, id: &str) -> bool {
         .any(|line| line.starts_with("[provides.operations.") && line.contains(id))
 }
 
+const SCHEMA_OPERATION_IDS: [&str; 8] = [
+    "workspace_events.describe_provisioning",
+    "workspace_events.list_subscriptions",
+    "workspace_events.get_subscription",
+    "workspace_events.create_subscription",
+    "workspace_events.reactivate_subscription",
+    "workspace_events.delete_subscription",
+    "workspace_events.pull_events",
+    "workspace_events.ack_events",
+];
+
+fn workspace_events_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml"))
+        .expect("Google Workspace Events manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn manifest_operation_schema(
+    manifest: &toml::Value,
+    operation_id: &str,
+    schema_key: &str,
+) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_id)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn introspection_operation<'a>(introspection: &'a Value, operation_id: &str) -> &'a Value {
+    array_field(introspection, "operations")
+        .iter()
+        .find(|operation| field(operation, "id") == operation_id)
+        .expect("introspection should include operation")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn assert_manifest_runtime_schema_parity(manifest: &toml::Value, introspection: &Value) {
+    let manifest_ops = manifest_operations(manifest);
+    assert_eq!(
+        manifest_ops.len(),
+        SCHEMA_OPERATION_IDS.len(),
+        "manifest operation count should match schema coverage set"
+    );
+
+    for operation_id in SCHEMA_OPERATION_IDS {
+        let operation = introspection_operation(introspection, operation_id);
+        let input_schema = manifest_operation_schema(manifest, operation_id, "input_schema");
+        let output_schema = manifest_operation_schema(manifest, operation_id, "output_schema");
+
+        assert_eq!(
+            &input_schema,
+            field(operation, "input_schema"),
+            "{operation_id} manifest input_schema should match runtime introspection"
+        );
+        assert_eq!(
+            &output_schema,
+            field(operation, "output_schema"),
+            "{operation_id} manifest output_schema should match runtime introspection"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_catalog_input_schema_examples(manifest: &toml::Value) {
+    let describe = manifest_operation_schema(
+        manifest,
+        "workspace_events.describe_provisioning",
+        "input_schema",
+    );
+    assert_schema_accepts(&describe, &json!({}));
+    assert_schema_accepts(
+        &describe,
+        &json!({ "scope_triggers": ["User selects Chat message events"] }),
+    );
+    assert_schema_rejects(&describe, &json!({ "scope_triggers": [] }));
+    assert_schema_rejects(&describe, &json!({ "unexpected": true }));
+
+    let list = manifest_operation_schema(
+        manifest,
+        "workspace_events.list_subscriptions",
+        "input_schema",
+    );
+    assert_schema_accepts(&list, &json!({}));
+    assert_schema_accepts(&list, &json!({ "page_size": 25, "page_token": "token-1" }));
+    assert_schema_rejects(&list, &json!({ "page_size": -1 }));
+    assert_schema_rejects(&list, &json!({ "page_size": 25, "extra": true }));
+
+    let get = manifest_operation_schema(
+        manifest,
+        "workspace_events.get_subscription",
+        "input_schema",
+    );
+    assert_schema_accepts(&get, &json!({ "subscription_name": "subscriptions/sub-1" }));
+    assert_schema_rejects(&get, &json!({}));
+}
+
+fn assert_lifecycle_input_schema_examples(manifest: &toml::Value) {
+    let create = manifest_operation_schema(
+        manifest,
+        "workspace_events.create_subscription",
+        "input_schema",
+    );
+    assert_schema_accepts(
+        &create,
+        &json!({
+            "target_resource": "//chat.googleapis.com/spaces/AAAA",
+            "event_types": ["google.workspace.chat.message.v1.created"],
+            "pubsub_topic": "projects/demo/topics/workspace-events",
+            "ttl": "86400s",
+            "include_resource": true,
+            "field_mask": "message"
+        }),
+    );
+    assert_schema_rejects(
+        &create,
+        &json!({
+            "target_resource": "//chat.googleapis.com/spaces/AAAA",
+            "event_types": [],
+            "pubsub_topic": "projects/demo/topics/workspace-events"
+        }),
+    );
+    assert_schema_rejects(
+        &create,
+        &json!({
+            "target_resource": "//chat.googleapis.com/spaces/AAAA",
+            "event_types": ["google.workspace.chat.message.v1.created"],
+            "pubsub_topic": "projects/demo/topics/workspace-events",
+            "extra": true
+        }),
+    );
+
+    let reactivate = manifest_operation_schema(
+        manifest,
+        "workspace_events.reactivate_subscription",
+        "input_schema",
+    );
+    assert_schema_accepts(
+        &reactivate,
+        &json!({ "subscription_name": "subscriptions/sub-1", "ttl": "86400s" }),
+    );
+    assert_schema_rejects(&reactivate, &json!({}));
+
+    let delete = manifest_operation_schema(
+        manifest,
+        "workspace_events.delete_subscription",
+        "input_schema",
+    );
+    assert_schema_accepts(
+        &delete,
+        &json!({ "subscription_name": "subscriptions/sub-1", "validate_only": true }),
+    );
+    assert_schema_rejects(
+        &delete,
+        &json!({ "subscription_name": "subscriptions/sub-1", "validate_only": "true" }),
+    );
+}
+
+fn assert_delivery_input_schema_examples(manifest: &toml::Value) {
+    let pull = manifest_operation_schema(manifest, "workspace_events.pull_events", "input_schema");
+    assert_schema_accepts(
+        &pull,
+        &json!({
+            "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+            "max_messages": 10
+        }),
+    );
+    assert_schema_accepts(
+        &pull,
+        &json!({ "pubsub_subscription": "projects/demo/subscriptions/workspace-events" }),
+    );
+    assert_schema_rejects(
+        &pull,
+        &json!({
+            "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+            "max_messages": 0
+        }),
+    );
+
+    let ack = manifest_operation_schema(manifest, "workspace_events.ack_events", "input_schema");
+    assert_schema_accepts(
+        &ack,
+        &json!({
+            "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+            "ack_ids": ["ack-1", "ack-2"]
+        }),
+    );
+    assert_schema_rejects(
+        &ack,
+        &json!({
+            "pubsub_subscription": "projects/demo/subscriptions/workspace-events",
+            "ack_ids": []
+        }),
+    );
+}
+
+fn assert_input_schema_examples(manifest: &toml::Value) {
+    assert_catalog_input_schema_examples(manifest);
+    assert_lifecycle_input_schema_examples(manifest);
+    assert_delivery_input_schema_examples(manifest);
+}
+
+fn assert_output_schema_examples(manifest: &toml::Value) {
+    let describe = manifest_operation_schema(
+        manifest,
+        "workspace_events.describe_provisioning",
+        "output_schema",
+    );
+    assert_schema_accepts(
+        &describe,
+        &json!({ "bundle": {}, "effective_scopes": ["https://www.googleapis.com/auth/chat.messages.readonly"] }),
+    );
+    assert_schema_rejects(&describe, &json!({ "bundle": {} }));
+
+    let list = manifest_operation_schema(
+        manifest,
+        "workspace_events.list_subscriptions",
+        "output_schema",
+    );
+    assert_schema_accepts(
+        &list,
+        &json!({ "subscriptions": [{ "name": "subscriptions/sub-1" }], "next_page_token": "" }),
+    );
+    assert_schema_rejects(&list, &json!({ "subscriptions": [] }));
+
+    let get = manifest_operation_schema(
+        manifest,
+        "workspace_events.get_subscription",
+        "output_schema",
+    );
+    assert_schema_accepts(
+        &get,
+        &json!({ "subscription": { "name": "subscriptions/sub-1" } }),
+    );
+    assert_schema_rejects(
+        &get,
+        &json!({ "subscription": { "name": "subscriptions/sub-1" }, "extra": true }),
+    );
+
+    for operation_id in [
+        "workspace_events.create_subscription",
+        "workspace_events.reactivate_subscription",
+        "workspace_events.delete_subscription",
+    ] {
+        let schema = manifest_operation_schema(manifest, operation_id, "output_schema");
+        assert_schema_accepts(&schema, &json!({ "operation": { "name": "operations/1" } }));
+        assert_schema_rejects(&schema, &json!({}));
+    }
+
+    let pull = manifest_operation_schema(manifest, "workspace_events.pull_events", "output_schema");
+    assert_schema_accepts(
+        &pull,
+        &json!({ "received_messages": [], "decoded_events": [] }),
+    );
+    assert_schema_rejects(&pull, &json!({ "received_messages": [] }));
+
+    let ack = manifest_operation_schema(manifest, "workspace_events.ack_events", "output_schema");
+    assert_schema_accepts(&ack, &json!({ "status": "acked", "acked_count": 2 }));
+    assert_schema_rejects(&ack, &json!({ "status": "ok", "acked_count": 2 }));
+}
+
 async fn mount_subscription_list(server: &MockServer) {
     Mock::given(method("GET"))
         .and(path("/v1/subscriptions"))
@@ -121,6 +420,22 @@ async fn assert_introspection_matches_manifest(connector: &WorkspaceEventsConnec
         manifest.contains("Pub/Sub-backed event delivery"),
         "manifest should describe Pub/Sub-backed Workspace Events delivery"
     );
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    run_async_test(async {
+        let manifest = workspace_events_manifest();
+        let connector = WorkspaceEventsConnector::new();
+        let introspection = connector
+            .handle_introspect()
+            .await
+            .expect("introspection should serialize");
+
+        assert_manifest_runtime_schema_parity(&manifest, &introspection);
+        assert_input_schema_examples(&manifest);
+        assert_output_schema_examples(&manifest);
+    });
 }
 
 #[test]

@@ -6,21 +6,23 @@
 //!
 //! ## Status
 //!
-//! **The MP12 / CHKP / GPV cryptographic operations are not implemented.**
-//! `trap_gen` and `delegate` return deterministic SHAKE256-derived seeded
-//! representations so downstream wiring can pin fixtures. `sample_pre` and
-//! `verify` still return `Err(LatticePqError::NotImplemented { ... })` after
-//! their cheap structural checks. This crate exists to pin the API contract
-//! that:
+//! `trap_gen`, `delegate`, `sample_pre`, and `verify` now expose the reviewed
+//! `fcp-internal-mp12-chkp-no-ffi-v1` route for profiles that the internal
+//! arithmetic path explicitly supports. The current supported arithmetic
+//! profiles are `SMALL_TEST` and `V4_REFERENCE`. `SMALL_TEST` uses a compact
+//! dense relation for exhaustive checks; `V4_REFERENCE` uses the same public
+//! material shape with a bounded sparse-`R` basis route so verifiers can
+//! reconstruct the public matrix without trapdoor access.
+//! This crate exists to pin the API contract that:
 //!
 //! - `fcp_policy::lattice_delegation::LatticeDelegationVerifier` (br-kyopb.1.3.2)
 //!   will implement against,
 //! - the Lean 4 formal proof (br-kyopb.1.3.3) will model, and
 //! - the throughput benchmark (br-kyopb.1.3.4) will measure.
 //!
-//! The `NotImplemented` discriminant names the responsible follow-up bead.
-//! **Production code MUST treat `NotImplemented` as "fall back to V3
-//! (Ed25519) capability verification" rather than as a hard failure.** See
+//! Unsupported TrapGen/Delegate/SamplePre/Verify profiles return
+//! [`LatticePqError::UnsupportedPrimitiveRoute`] instead of silently falling
+//! back to deterministic fixture trapdoors. See
 //! `docs/post-quantum/v3_v4_compatibility_ledger.md` for the cross-version
 //! dispatch rules.
 //!
@@ -44,12 +46,14 @@
 
 #![forbid(unsafe_code)]
 
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
 };
 use thiserror::Error;
+use zeroize::Zeroize;
 
 // ── Parameters and representation profile ─────────────────────────────────
 
@@ -61,24 +65,39 @@ use thiserror::Error;
 /// without changing public matrix or token wire formats.
 pub const LATTICE_REPRESENTATION_VERSION: u16 = 2;
 
+/// Public matrix material representation version.
+///
+/// Version 1 distinguishes legacy fixture seed-only public keys from
+/// verifier-computable route material that carries the public tail block needed
+/// to reconstruct `A_zp` without trapdoor access.
+pub const PUBLIC_MATRIX_MATERIAL_VERSION: u16 = 1;
+
 /// Public SHAKE fixture compatibility generation.
 ///
 /// This stays at version 1 so previously pinned public matrix fixtures keep
 /// their deterministic hashes while the secret representation evolves.
 pub const FIXTURE_SHAKE_COMPATIBILITY_VERSION: u16 = 1;
 
+/// Reviewed primitive route selected by
+/// `docs/post-quantum/lattice_primitive_route_packet_2026-05-08.md`.
+pub const PRIMITIVE_ROUTE_ID: &str = "fcp-internal-mp12-chkp-no-ffi-v1";
+
+/// Route revision for the internal no-FFI TrapGen/Delegate implementation.
+pub const PRIMITIVE_ROUTE_REVISION: u16 = 1;
+
 const MATRIX_SEED_BYTES: usize = 32;
 const SECRET_SEED_BUNDLE_BYTES: usize = 96;
+const TRAP_GEN_ENTROPY_BYTES: usize = 32;
+const BASIS_ENVELOPE_MAGIC: &[u8] = b"fcp-pq-basis-v1";
 const MAX_PUBLIC_MATRIX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREIMAGE_ENCODED_BYTES: usize = 1024 * 1024;
 const MAX_TRAPDOOR_SECRET_BYTES: usize = 1024 * 1024;
+const V4_SPARSE_R_WEIGHT: u32 = 8;
 
 /// Lattice security parameters (§3.2 of the design doc).
 ///
-/// The stub carries these as opaque values so call-sites can already
-/// thread them through dispatch code; the real cryptographic crate
-/// (br-kyopb.1.3.1 implementation) will use them to drive matrix
-/// dimensions and Gaussian widths.
+/// These values drive matrix dimensions, coefficient widths, route support
+/// shape, and centered-norm enforcement for the reviewed internal route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LatticeParams {
     /// Module rank `n`.
@@ -308,6 +327,80 @@ pub struct LatticeRepresentationProfile {
     pub preimage_encoded_bytes: usize,
 }
 
+/// Explicit entropy input for production `TrapGen`.
+///
+/// Production callers use [`Self::from_os_random`]. Tests and deterministic
+/// evidence use [`Self::from_fixture_seed`], which records only a hash of the
+/// fixture id so logs can prove which fixture ran without exposing the seed.
+#[derive(Clone, Eq)]
+pub struct TrapGenEntropy {
+    bytes: [u8; TRAP_GEN_ENTROPY_BYTES],
+    fixture_id_hash: Option<[u8; 32]>,
+}
+
+impl TrapGenEntropy {
+    /// Build entropy from the operating system CSPRNG.
+    #[must_use]
+    pub fn from_os_random() -> Self {
+        let mut bytes = [0_u8; TRAP_GEN_ENTROPY_BYTES];
+        rand::rngs::OsRng.fill_bytes(&mut bytes);
+        Self {
+            bytes,
+            fixture_id_hash: None,
+        }
+    }
+
+    /// Build deterministic entropy for named fixtures.
+    ///
+    /// The fixture id is hashed before storage; the raw id and seed never
+    /// appear in trapdoor metadata or debug output.
+    #[must_use]
+    pub fn from_fixture_seed(fixture_id: &[u8], seed: [u8; TRAP_GEN_ENTROPY_BYTES]) -> Self {
+        let mut bytes = [0_u8; TRAP_GEN_ENTROPY_BYTES];
+        shake256_fill(
+            b"trap-gen-entropy-fixture",
+            |shaker| {
+                update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+                update_len_prefixed(shaker, fixture_id);
+                update_len_prefixed(shaker, &seed);
+            },
+            &mut bytes,
+        );
+        Self {
+            bytes,
+            fixture_id_hash: Some(*blake3::hash(fixture_id).as_bytes()),
+        }
+    }
+
+    /// Hash of the fixture id for deterministic test evidence.
+    #[must_use]
+    pub const fn fixture_id_hash(&self) -> Option<[u8; 32]> {
+        self.fixture_id_hash
+    }
+}
+
+impl PartialEq for TrapGenEntropy {
+    fn eq(&self, other: &Self) -> bool {
+        self.fixture_id_hash == other.fixture_id_hash
+            && constant_time_bytes_eq(&self.bytes, &other.bytes)
+    }
+}
+
+impl std::fmt::Debug for TrapGenEntropy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TrapGenEntropy")
+            .field("fixture_id_hash", &self.fixture_id_hash)
+            .field("secret_material", &"<redacted>")
+            .finish_non_exhaustive()
+    }
+}
+
+impl Drop for TrapGenEntropy {
+    fn drop(&mut self) {
+        self.bytes.zeroize();
+    }
+}
+
 /// Which trapdoor layer a secret representation belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TrapdoorScope {
@@ -362,11 +455,11 @@ impl SecretStorageLengthBucket {
 pub enum TrapdoorRelationResult {
     /// Metadata matches the deterministic fixture contract only.
     FixtureOnly,
-    /// Metadata is structurally compatible with a future reviewed primitive.
+    /// Metadata and route arithmetic match the reviewed primitive.
     MetadataConsistent,
     /// Metadata does not match the public key, parent key, or parameter profile.
     MetadataMismatch,
-    /// A cryptographic relation check needs arithmetic that is not implemented.
+    /// A cryptographic relation check is unsupported for this route/profile.
     UnsupportedPrimitive,
 }
 
@@ -383,6 +476,77 @@ pub enum TrapdoorNormQualityBucket {
     Oversized,
     /// No quality statement is available yet.
     Unknown,
+}
+
+/// Public matrix material route carried by verifier-facing public keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PublicMatrixMaterialKind {
+    /// Legacy fixture path where the 32-byte field is only a deterministic
+    /// seed placeholder and cannot reconstruct a production `A` matrix.
+    FixtureSeedOnly,
+    /// Reviewed route material containing the public seed plus the public tail
+    /// block needed to reconstruct `A = [A_bar | I - A_bar * R]`.
+    RouteTailCoefficients,
+}
+
+/// Verifier-computable public matrix material.
+///
+/// This material is public and serializable. Its custom [`Debug`] keeps logs
+/// summarized so evidence artifacts do not accidentally dump expanded matrices.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicMatrixMaterial {
+    /// Public matrix material version.
+    pub version: u16,
+    /// Material route.
+    pub kind: PublicMatrixMaterialKind,
+    /// Hash of [`PRIMITIVE_ROUTE_ID`] for route-bound public material.
+    pub route_id_hash: [u8; 32],
+    /// Primitive route revision.
+    pub route_revision: u16,
+    /// Seed for the public `A_bar` block, or the legacy fixture seed.
+    pub public_seed: [u8; 32],
+    /// Encoded public tail coefficients for route material.
+    #[serde(with = "hex_vec")]
+    pub tail_coefficients: Vec<u8>,
+}
+
+impl PublicMatrixMaterial {
+    /// Construct legacy fixture seed-only public material.
+    #[must_use]
+    pub const fn fixture_seed_only(seed: [u8; 32]) -> Self {
+        Self {
+            version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            kind: PublicMatrixMaterialKind::FixtureSeedOnly,
+            route_id_hash: ZERO_HASH,
+            route_revision: FIXTURE_SHAKE_COMPATIBILITY_VERSION,
+            public_seed: seed,
+            tail_coefficients: Vec::new(),
+        }
+    }
+
+    /// Public seed or fixture seed carried by this material.
+    #[must_use]
+    pub const fn seed(&self) -> [u8; 32] {
+        self.public_seed
+    }
+
+    /// Encoded public tail byte length.
+    #[must_use]
+    pub fn tail_coefficients_len(&self) -> usize {
+        self.tail_coefficients.len()
+    }
+}
+
+impl std::fmt::Debug for PublicMatrixMaterial {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PublicMatrixMaterial")
+            .field("version", &self.version)
+            .field("kind", &self.kind)
+            .field("route_revision", &self.route_revision)
+            .field("public_seed_len", &MATRIX_SEED_BYTES)
+            .field("tail_coefficients_len", &self.tail_coefficients.len())
+            .finish_non_exhaustive()
+    }
 }
 
 /// Public, serializable metadata for a secret trapdoor representation.
@@ -577,6 +741,802 @@ fn checked_profile_product(
     Ok(requested)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteDimensions {
+    abar_cols: u32,
+    gadget_cols: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BasisEnvelopeView {
+    route_id_hash: [u8; 32],
+    route_revision: u16,
+    scope: TrapdoorScope,
+    params_hash: [u8; 32],
+    public_matrix_hash: [u8; 32],
+    parent_public_matrix_hash: [u8; 32],
+    zone_id_hash: [u8; 32],
+    period_id_hash: [u8; 32],
+    entropy_id_hash: [u8; 32],
+    public_seed: [u8; 32],
+    r_seed: [u8; 32],
+    relation_digest: [u8; 32],
+}
+
+const ZERO_HASH: [u8; 32] = [0_u8; 32];
+
+#[must_use]
+pub fn primitive_route_profile_name(params: LatticeParams) -> &'static str {
+    if params == LatticeParams::SMALL_TEST {
+        "SMALL_TEST"
+    } else if params == LatticeParams::V4_REFERENCE {
+        "V4_REFERENCE"
+    } else {
+        "CUSTOM"
+    }
+}
+
+fn route_id_hash() -> [u8; 32] {
+    *blake3::hash(PRIMITIVE_ROUTE_ID.as_bytes()).as_bytes()
+}
+
+fn params_hash(params: LatticeParams) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/params-hash-v1|");
+    hasher.update(&params.n.to_le_bytes());
+    hasher.update(&params.q.to_le_bytes());
+    hasher.update(&params.m.to_le_bytes());
+    hasher.update(&params.sigma_x100.to_le_bytes());
+    hasher.update(&[params.depth]);
+    *hasher.finalize().as_bytes()
+}
+
+fn period_hash(period: DelegationPeriod) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/period-hash-v1|");
+    hasher.update(&period.start_secs.to_le_bytes());
+    hasher.update(&period.end_secs.to_le_bytes());
+    *hasher.finalize().as_bytes()
+}
+
+fn route_dimensions(
+    params: LatticeParams,
+    primitive: &'static str,
+) -> LatticePqResult<RouteDimensions> {
+    params.validate()?;
+    if params != LatticeParams::SMALL_TEST && params != LatticeParams::V4_REFERENCE {
+        return Err(LatticePqError::UnsupportedPrimitiveRoute {
+            primitive,
+            route_id: PRIMITIVE_ROUTE_ID,
+            profile: primitive_route_profile_name(params),
+            reason: "internal route supports only the reviewed SMALL_TEST and V4_REFERENCE profiles",
+        });
+    }
+    if params.m <= params.n {
+        return Err(LatticePqError::InvalidParameter {
+            field: "m",
+            value: u64::from(params.m),
+            reason: "internal gadget route requires room for an A_bar block plus gadget columns",
+        });
+    }
+    Ok(RouteDimensions {
+        abar_cols: params.m - params.n,
+        gadget_cols: params.n,
+    })
+}
+
+fn encoded_tail_coefficients_len(params: LatticeParams) -> LatticePqResult<usize> {
+    let dims = route_dimensions(params, "public_matrix_material")?;
+    checked_profile_product(
+        "public_matrix_tail",
+        &[
+            usize::try_from(params.n).expect("u32 n fits in usize"),
+            usize::try_from(dims.gadget_cols).expect("u32 gadget columns fit in usize"),
+            params.coefficient_bytes()?,
+        ],
+        MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+    )
+}
+
+fn route_r_support(
+    params: LatticeParams,
+    r_seed: &[u8; 32],
+    gadget_col: u32,
+    dims: RouteDimensions,
+) -> LatticePqResult<Vec<(u32, i64)>> {
+    if params == LatticeParams::SMALL_TEST {
+        let mut support =
+            Vec::with_capacity(usize::try_from(dims.abar_cols).expect("u32 cols fit in usize"));
+        for abar_col in 0..dims.abar_cols {
+            support.push((abar_col, r_coeff(params, r_seed, abar_col, gadget_col)));
+        }
+        return Ok(support);
+    }
+
+    if params != LatticeParams::V4_REFERENCE {
+        return Err(LatticePqError::UnsupportedPrimitiveRoute {
+            primitive: "route_r_support",
+            route_id: PRIMITIVE_ROUTE_ID,
+            profile: primitive_route_profile_name(params),
+            reason: "sparse R support is defined only for V4_REFERENCE",
+        });
+    }
+    if dims.abar_cols < V4_SPARSE_R_WEIGHT {
+        return Err(LatticePqError::InvalidParameter {
+            field: "m",
+            value: u64::from(params.m),
+            reason: "V4 sparse route requires at least V4_SPARSE_R_WEIGHT A_bar columns",
+        });
+    }
+
+    let mut shaker = Shake256::default();
+    update_len_prefixed(&mut shaker, BASIS_ENVELOPE_MAGIC);
+    update_len_prefixed(&mut shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+    update_len_prefixed(&mut shaker, b"route-v4-sparse-r-support-v1");
+    Update::update(&mut shaker, &PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+    Update::update(&mut shaker, &params_hash(params));
+    update_len_prefixed(&mut shaker, r_seed);
+    Update::update(&mut shaker, &gadget_col.to_le_bytes());
+    let mut reader = shaker.finalize_xof();
+    let mut support =
+        Vec::with_capacity(usize::try_from(V4_SPARSE_R_WEIGHT).expect("weight fits in usize"));
+    while support.len() < usize::try_from(V4_SPARSE_R_WEIGHT).expect("weight fits in usize") {
+        let mut candidate = [0_u8; 9];
+        reader.read(&mut candidate);
+        let mut index_bytes = [0_u8; 8];
+        index_bytes.copy_from_slice(&candidate[..8]);
+        let abar_col = u32::try_from(u64::from_le_bytes(index_bytes) % u64::from(dims.abar_cols))
+            .expect("modulo abar_cols fits in u32");
+        if support.iter().any(|(seen, _)| *seen == abar_col) {
+            continue;
+        }
+        let sign = if candidate[8] & 1 == 0 { -1 } else { 1 };
+        support.push((abar_col, sign));
+    }
+    Ok(support)
+}
+
+fn encode_coeff(params: LatticeParams, coeff: u64, out: &mut Vec<u8>) -> LatticePqResult<()> {
+    if coeff >= params.q {
+        return Err(LatticePqError::InvalidParameter {
+            field: "coefficient",
+            value: coeff,
+            reason: "coefficient must be reduced modulo q",
+        });
+    }
+    let coefficient_bytes = params.coefficient_bytes()?;
+    let bytes = coeff.to_le_bytes();
+    out.extend_from_slice(&bytes[..coefficient_bytes]);
+    Ok(())
+}
+
+fn decode_coeff(params: LatticeParams, bytes: &[u8], index: usize) -> LatticePqResult<u64> {
+    let coefficient_bytes = params.coefficient_bytes()?;
+    let offset =
+        index
+            .checked_mul(coefficient_bytes)
+            .ok_or(LatticePqError::RepresentationTooLarge {
+                material: "coefficient_index",
+                requested: usize::MAX,
+                max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+            })?;
+    let end =
+        offset
+            .checked_add(coefficient_bytes)
+            .ok_or(LatticePqError::RepresentationTooLarge {
+                material: "coefficient_index",
+                requested: usize::MAX,
+                max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+            })?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_tail",
+            expected: end,
+            got: bytes.len(),
+        })?;
+    let mut coeff_bytes = [0_u8; 8];
+    coeff_bytes[..coefficient_bytes].copy_from_slice(slice);
+    let coeff = u64::from_le_bytes(coeff_bytes);
+    if coeff >= params.q {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_tail",
+            reason: "public tail coefficient is not reduced modulo q",
+        });
+    }
+    Ok(coeff)
+}
+
+#[cfg(test)]
+fn tail_coeff(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    r_seed: &[u8; 32],
+    row: u32,
+    gadget_col: u32,
+) -> u64 {
+    let dims = route_dimensions(params, "tail_coeff").expect("route dimensions already checked");
+    let support =
+        route_r_support(params, r_seed, gadget_col, dims).expect("route R support checked");
+    let product = tail_product(params, public_seed, &support, row);
+    let identity = i128::from(row == gadget_col);
+    reduce_i128_mod_q(identity - product, params.q)
+}
+
+fn tail_product(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    support: &[(u32, i64)],
+    row: u32,
+) -> i128 {
+    let mut product = 0_i128;
+    for (abar_col, r) in support {
+        let a = public_coeff(params, public_seed, row, *abar_col);
+        product += i128::from(a) * i128::from(*r);
+    }
+    product
+}
+
+fn v4_public_abar_row(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    row: u32,
+    dims: RouteDimensions,
+) -> Vec<u64> {
+    debug_assert_eq!(params, LatticeParams::V4_REFERENCE);
+    let mut shaker = Shake256::default();
+    update_len_prefixed(&mut shaker, SHAKE_DOMAIN_PREFIX);
+    update_len_prefixed(&mut shaker, b"route-public-abar-row-v1");
+    update_len_prefixed(&mut shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+    update_params(&mut shaker, params);
+    update_len_prefixed(&mut shaker, public_seed);
+    Update::update(&mut shaker, &row.to_le_bytes());
+    let mut reader = shaker.finalize_xof();
+    let mut coeffs =
+        Vec::with_capacity(usize::try_from(dims.abar_cols).expect("u32 cols fit in usize"));
+    for _ in 0..dims.abar_cols {
+        let mut out = [0_u8; 8];
+        reader.read(&mut out);
+        coeffs.push(u64::from_le_bytes(out) % params.q);
+    }
+    coeffs
+}
+
+fn tail_product_from_row(row_coefficients: &[u64], support: &[(u32, i64)]) -> i128 {
+    let mut product = 0_i128;
+    for (abar_col, r) in support {
+        let a = row_coefficients[usize::try_from(*abar_col).expect("u32 col fits in usize")];
+        product += i128::from(a) * i128::from(*r);
+    }
+    product
+}
+
+fn route_public_matrix_material(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    r_seed: &[u8; 32],
+) -> LatticePqResult<PublicMatrixMaterial> {
+    let dims = route_dimensions(params, "public_matrix_material")?;
+    let r_supports = (0..dims.gadget_cols)
+        .map(|gadget_col| route_r_support(params, r_seed, gadget_col, dims))
+        .collect::<LatticePqResult<Vec<_>>>()?;
+    let mut tail_coefficients = Vec::with_capacity(encoded_tail_coefficients_len(params)?);
+    for row in 0..params.n {
+        let row_coefficients = (params == LatticeParams::V4_REFERENCE)
+            .then(|| v4_public_abar_row(params, public_seed, row, dims));
+        for gadget_col in 0..dims.gadget_cols {
+            let support = &r_supports[usize::try_from(gadget_col).expect("u32 col fits usize")];
+            let product = row_coefficients.as_ref().map_or_else(
+                || tail_product(params, public_seed, support, row),
+                |coefficients| tail_product_from_row(coefficients, support),
+            );
+            let tail = reduce_i128_mod_q(i128::from(row == gadget_col) - product, params.q);
+            let relation_lhs = reduce_i128_mod_q(product + i128::from(tail), params.q);
+            let relation_rhs = u64::from(row == gadget_col);
+            if relation_lhs != relation_rhs {
+                return Err(LatticePqError::InvalidTrapdoorSecret {
+                    material: "basis_relation",
+                    reason: "internal gadget relation did not reduce to the identity gadget",
+                });
+            }
+            encode_coeff(params, tail, &mut tail_coefficients)?;
+        }
+    }
+    Ok(PublicMatrixMaterial {
+        version: PUBLIC_MATRIX_MATERIAL_VERSION,
+        kind: PublicMatrixMaterialKind::RouteTailCoefficients,
+        route_id_hash: route_id_hash(),
+        route_revision: PRIMITIVE_ROUTE_REVISION,
+        public_seed: *public_seed,
+        tail_coefficients,
+    })
+}
+
+fn validate_route_public_matrix_material(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+) -> LatticePqResult<()> {
+    let expected_len = encoded_tail_coefficients_len(params)?;
+    if material.version != PUBLIC_MATRIX_MATERIAL_VERSION {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_material_version",
+            expected: usize::from(PUBLIC_MATRIX_MATERIAL_VERSION),
+            got: usize::from(material.version),
+        });
+    }
+    if material.kind != PublicMatrixMaterialKind::RouteTailCoefficients {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_material",
+            reason: "supported route requires public tail coefficients",
+        });
+    }
+    if material.route_id_hash != route_id_hash()
+        || material.route_revision != PRIMITIVE_ROUTE_REVISION
+    {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_material",
+            reason: "public material route id or revision mismatch",
+        });
+    }
+    if material.tail_coefficients.len() != expected_len {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_tail",
+            expected: expected_len,
+            got: material.tail_coefficients.len(),
+        });
+    }
+    for index in 0..(expected_len / params.coefficient_bytes()?) {
+        let _ = decode_coeff(params, &material.tail_coefficients, index)?;
+    }
+    Ok(())
+}
+
+fn public_matrix_digest(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+) -> LatticePqResult<[u8; 32]> {
+    let dims = route_dimensions(params, "public_matrix_digest")?;
+    validate_route_public_matrix_material(params, material)?;
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/public-matrix-material-v1|");
+    hasher.update(PRIMITIVE_ROUTE_ID.as_bytes());
+    hasher.update(&PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+    hasher.update(&params_hash(params));
+    hasher.update(&material.public_seed);
+
+    if params == LatticeParams::SMALL_TEST {
+        for row in 0..params.n {
+            for col in 0..dims.abar_cols {
+                let coeff = public_coeff(params, &material.public_seed, row, col);
+                hasher.update(&coeff.to_le_bytes());
+            }
+        }
+    } else {
+        hasher.update(b"seed-derived-abar-v1");
+        hasher.update(&dims.abar_cols.to_le_bytes());
+    }
+    hasher.update(&material.tail_coefficients);
+    Ok(*hasher.finalize().as_bytes())
+}
+
+fn public_matrix_coeff(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    row: u32,
+    col: u32,
+) -> LatticePqResult<u64> {
+    let dims = route_dimensions(params, "public_matrix_coeff")?;
+    validate_route_public_matrix_material(params, material)?;
+    if row >= params.n {
+        return Err(LatticePqError::InvalidParameter {
+            field: "row",
+            value: u64::from(row),
+            reason: "row is outside the public matrix",
+        });
+    }
+    if col >= params.m {
+        return Err(LatticePqError::InvalidParameter {
+            field: "col",
+            value: u64::from(col),
+            reason: "column is outside the public matrix",
+        });
+    }
+    if col < dims.abar_cols {
+        return Ok(public_coeff(params, &material.public_seed, row, col));
+    }
+    let tail_col = col - dims.abar_cols;
+    let index = usize::try_from(row)
+        .expect("u32 row fits in usize")
+        .checked_mul(usize::try_from(dims.gadget_cols).expect("u32 cols fit in usize"))
+        .and_then(|base| {
+            base.checked_add(usize::try_from(tail_col).expect("u32 tail col fits in usize"))
+        })
+        .ok_or(LatticePqError::RepresentationTooLarge {
+            material: "public_matrix_tail_index",
+            requested: usize::MAX,
+            max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+        })?;
+    decode_coeff(params, &material.tail_coefficients, index)
+}
+
+fn read_fixed<const N: usize>(bytes: &[u8], offset: &mut usize) -> Option<[u8; N]> {
+    let end = offset.checked_add(N)?;
+    let slice = bytes.get(*offset..end)?;
+    *offset = end;
+    Some(slice.try_into().expect("slice length matches fixed array"))
+}
+
+fn read_u16(bytes: &[u8], offset: &mut usize) -> Option<u16> {
+    Some(u16::from_le_bytes(read_fixed::<2>(bytes, offset)?))
+}
+
+fn read_scope(bytes: &[u8], offset: &mut usize) -> Option<TrapdoorScope> {
+    let tag = *bytes.get(*offset)?;
+    *offset += 1;
+    match tag {
+        0 => Some(TrapdoorScope::Root),
+        1 => Some(TrapdoorScope::Child),
+        _ => None,
+    }
+}
+
+fn parse_basis_envelope(bytes: &[u8]) -> Option<BasisEnvelopeView> {
+    let magic_end = BASIS_ENVELOPE_MAGIC.len();
+    if bytes.get(..magic_end)? != BASIS_ENVELOPE_MAGIC {
+        return None;
+    }
+    let mut offset = magic_end;
+    let route_id_hash = read_fixed(bytes, &mut offset)?;
+    let route_revision = read_u16(bytes, &mut offset)?;
+    let scope = read_scope(bytes, &mut offset)?;
+    let params_hash = read_fixed(bytes, &mut offset)?;
+    let public_matrix_hash = read_fixed(bytes, &mut offset)?;
+    let parent_public_matrix_hash = read_fixed(bytes, &mut offset)?;
+    let zone_id_hash = read_fixed(bytes, &mut offset)?;
+    let period_id_hash = read_fixed(bytes, &mut offset)?;
+    let entropy_id_hash = read_fixed(bytes, &mut offset)?;
+    let public_seed = read_fixed(bytes, &mut offset)?;
+    let r_seed = read_fixed(bytes, &mut offset)?;
+    let relation_digest = read_fixed(bytes, &mut offset)?;
+    if offset != bytes.len() {
+        return None;
+    }
+    Some(BasisEnvelopeView {
+        route_id_hash,
+        route_revision,
+        scope,
+        params_hash,
+        public_matrix_hash,
+        parent_public_matrix_hash,
+        zone_id_hash,
+        period_id_hash,
+        entropy_id_hash,
+        public_seed,
+        r_seed,
+        relation_digest,
+    })
+}
+
+fn encode_basis_envelope(view: &BasisEnvelopeView) -> Vec<u8> {
+    let mut out = Vec::with_capacity(BASIS_ENVELOPE_MAGIC.len() + 322);
+    out.extend_from_slice(BASIS_ENVELOPE_MAGIC);
+    out.extend_from_slice(&view.route_id_hash);
+    out.extend_from_slice(&view.route_revision.to_le_bytes());
+    out.push(match view.scope {
+        TrapdoorScope::Root => 0,
+        TrapdoorScope::Child => 1,
+    });
+    out.extend_from_slice(&view.params_hash);
+    out.extend_from_slice(&view.public_matrix_hash);
+    out.extend_from_slice(&view.parent_public_matrix_hash);
+    out.extend_from_slice(&view.zone_id_hash);
+    out.extend_from_slice(&view.period_id_hash);
+    out.extend_from_slice(&view.entropy_id_hash);
+    out.extend_from_slice(&view.public_seed);
+    out.extend_from_slice(&view.r_seed);
+    out.extend_from_slice(&view.relation_digest);
+    out
+}
+
+fn public_coeff(params: LatticeParams, seed: &[u8; 32], row: u32, col: u32) -> u64 {
+    if params == LatticeParams::V4_REFERENCE {
+        let dims = route_dimensions(params, "public_coeff")
+            .expect("V4_REFERENCE route dimensions are valid");
+        debug_assert!(col < dims.abar_cols);
+        let mut shaker = Shake256::default();
+        update_len_prefixed(&mut shaker, SHAKE_DOMAIN_PREFIX);
+        update_len_prefixed(&mut shaker, b"route-public-abar-row-v1");
+        update_len_prefixed(&mut shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+        update_params(&mut shaker, params);
+        update_len_prefixed(&mut shaker, seed);
+        Update::update(&mut shaker, &row.to_le_bytes());
+        let mut reader = shaker.finalize_xof();
+        let mut out = [0_u8; 8];
+        for _ in 0..=col {
+            reader.read(&mut out);
+        }
+        return u64::from_le_bytes(out) % params.q;
+    }
+
+    let mut out = [0_u8; 8];
+    shake256_fill(
+        b"route-public-abar-coeff",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            update_params(shaker, params);
+            update_len_prefixed(shaker, seed);
+            Update::update(shaker, &row.to_le_bytes());
+            Update::update(shaker, &col.to_le_bytes());
+        },
+        &mut out,
+    );
+    u64::from_le_bytes(out) % params.q
+}
+
+fn r_coeff(params: LatticeParams, seed: &[u8; 32], row: u32, col: u32) -> i64 {
+    let mut out = [0_u8; 1];
+    shake256_fill(
+        b"route-small-r-coeff",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            update_params(shaker, params);
+            update_len_prefixed(shaker, seed);
+            Update::update(shaker, &row.to_le_bytes());
+            Update::update(shaker, &col.to_le_bytes());
+        },
+        &mut out,
+    );
+    i64::from(out[0] % 3) - 1
+}
+
+fn reduce_i128_mod_q(value: i128, q: u64) -> u64 {
+    let q_i128 = i128::from(q);
+    let reduced = value.rem_euclid(q_i128);
+    u64::try_from(reduced).expect("positive residue less than q fits in u64")
+}
+
+fn route_public_hash(
+    scope: TrapdoorScope,
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    parent_public_matrix_hash: [u8; 32],
+    zone_id_hash: [u8; 32],
+    period_id_hash: [u8; 32],
+    relation_digest: &[u8; 32],
+) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/route-public-hash-v1|");
+    hasher.update(PRIMITIVE_ROUTE_ID.as_bytes());
+    hasher.update(&PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+    hasher.update(&[match scope {
+        TrapdoorScope::Root => 0,
+        TrapdoorScope::Child => 1,
+    }]);
+    hasher.update(&params_hash(params));
+    hasher.update(public_seed);
+    hasher.update(&parent_public_matrix_hash);
+    hasher.update(&zone_id_hash);
+    hasher.update(&period_id_hash);
+    hasher.update(relation_digest);
+    *hasher.finalize().as_bytes()
+}
+
+fn derive_root_public_seed(params: LatticeParams, entropy: &TrapGenEntropy) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"route-root-public-seed",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            Update::update(shaker, &PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+            update_params(shaker, params);
+            update_len_prefixed(shaker, &entropy.bytes);
+        },
+        &mut out,
+    );
+    out
+}
+
+fn derive_root_r_seed(params: LatticeParams, entropy: &TrapGenEntropy) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"route-root-r-seed",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            Update::update(shaker, &PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+            update_params(shaker, params);
+            update_len_prefixed(shaker, &entropy.bytes);
+        },
+        &mut out,
+    );
+    out
+}
+
+fn derive_child_public_seed(
+    parent_pub: &MasterPublicKey,
+    zone_id: &[u8; 32],
+    period: DelegationPeriod,
+    params: LatticeParams,
+) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"route-child-public-seed",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            Update::update(shaker, &PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+            update_len_prefixed(shaker, &parent_pub.hash);
+            update_len_prefixed(shaker, zone_id);
+            update_period(shaker, period);
+            update_params(shaker, params);
+            Update::update(shaker, &[params.depth]);
+        },
+        &mut out,
+    );
+    out
+}
+
+fn derive_child_r_seed(
+    parent_r_seed: &[u8; 32],
+    child_public_seed: &[u8; 32],
+    zone_id: &[u8; 32],
+    period: DelegationPeriod,
+    params: LatticeParams,
+) -> [u8; 32] {
+    let mut out = [0_u8; 32];
+    shake256_fill(
+        b"route-child-r-seed",
+        |shaker| {
+            update_len_prefixed(shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+            Update::update(shaker, &PRIMITIVE_ROUTE_REVISION.to_le_bytes());
+            update_len_prefixed(shaker, parent_r_seed);
+            update_len_prefixed(shaker, child_public_seed);
+            update_len_prefixed(shaker, zone_id);
+            update_period(shaker, period);
+            update_params(shaker, params);
+        },
+        &mut out,
+    );
+    out
+}
+
+fn build_root_basis_envelope(
+    params: LatticeParams,
+    entropy: &TrapGenEntropy,
+) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
+    let public_seed = derive_root_public_seed(params, entropy);
+    let r_seed = derive_root_r_seed(params, entropy);
+    let public_matrix = route_public_matrix_material(params, &public_seed, &r_seed)?;
+    let relation_digest = public_matrix_digest(params, &public_matrix)?;
+    let public_hash = route_public_hash(
+        TrapdoorScope::Root,
+        params,
+        &public_seed,
+        ZERO_HASH,
+        ZERO_HASH,
+        ZERO_HASH,
+        &relation_digest,
+    );
+    let entropy_id_hash = entropy.fixture_id_hash.unwrap_or(ZERO_HASH);
+    let view = BasisEnvelopeView {
+        route_id_hash: route_id_hash(),
+        route_revision: PRIMITIVE_ROUTE_REVISION,
+        scope: TrapdoorScope::Root,
+        params_hash: params_hash(params),
+        public_matrix_hash: public_hash,
+        parent_public_matrix_hash: ZERO_HASH,
+        zone_id_hash: ZERO_HASH,
+        period_id_hash: ZERO_HASH,
+        entropy_id_hash,
+        public_seed,
+        r_seed,
+        relation_digest,
+    };
+    let envelope = encode_basis_envelope(&view);
+    Ok((
+        MasterPublicKey {
+            hash: public_hash,
+            public_matrix,
+            params,
+        },
+        MasterTrapdoor::from_basis_envelope(params, public_hash, envelope)?,
+    ))
+}
+
+fn basis_relation_matches_root(
+    metadata: TrapdoorRepresentationMetadata,
+    bytes: &[u8],
+    public: &MasterPublicKey,
+) -> bool {
+    if metadata.material_kind != TrapdoorMaterialKind::BasisEnvelope {
+        return false;
+    }
+    let Some(view) = parse_basis_envelope(bytes) else {
+        return false;
+    };
+    if view.route_id_hash != route_id_hash()
+        || view.route_revision != PRIMITIVE_ROUTE_REVISION
+        || view.scope != TrapdoorScope::Root
+        || view.params_hash != params_hash(metadata.params)
+        || view.public_matrix_hash != metadata.public_matrix_hash
+        || view.public_matrix_hash != public.hash
+        || view.parent_public_matrix_hash != ZERO_HASH
+        || view.zone_id_hash != ZERO_HASH
+        || view.period_id_hash != ZERO_HASH
+    {
+        return false;
+    }
+    let Ok(expected_material) =
+        route_public_matrix_material(metadata.params, &view.public_seed, &view.r_seed)
+    else {
+        return false;
+    };
+    if expected_material != public.public_matrix {
+        return false;
+    }
+    let Ok(relation_digest) = public_matrix_digest(metadata.params, &public.public_matrix) else {
+        return false;
+    };
+    let expected_public_hash = route_public_hash(
+        TrapdoorScope::Root,
+        metadata.params,
+        &view.public_seed,
+        ZERO_HASH,
+        ZERO_HASH,
+        ZERO_HASH,
+        &relation_digest,
+    );
+    view.relation_digest == relation_digest && expected_public_hash == public.hash
+}
+
+fn basis_relation_matches_child(
+    metadata: TrapdoorRepresentationMetadata,
+    bytes: &[u8],
+    child_public: &ZonePeriodPublicKey,
+    parent_public: &MasterPublicKey,
+) -> bool {
+    if metadata.material_kind != TrapdoorMaterialKind::BasisEnvelope {
+        return false;
+    }
+    let Some(view) = parse_basis_envelope(bytes) else {
+        return false;
+    };
+    let zone_id_hash = *blake3::hash(&child_public.zone_id).as_bytes();
+    let period_id_hash = period_hash(child_public.period);
+    if view.route_id_hash != route_id_hash()
+        || view.route_revision != PRIMITIVE_ROUTE_REVISION
+        || view.scope != TrapdoorScope::Child
+        || view.params_hash != params_hash(metadata.params)
+        || view.public_matrix_hash != metadata.public_matrix_hash
+        || view.public_matrix_hash != child_public.hash
+        || view.parent_public_matrix_hash != parent_public.hash
+        || view.zone_id_hash != zone_id_hash
+        || view.period_id_hash != period_id_hash
+    {
+        return false;
+    }
+    let Ok(expected_material) =
+        route_public_matrix_material(metadata.params, &view.public_seed, &view.r_seed)
+    else {
+        return false;
+    };
+    if expected_material != child_public.public_matrix {
+        return false;
+    }
+    let Ok(relation_digest) = public_matrix_digest(metadata.params, &child_public.public_matrix)
+    else {
+        return false;
+    };
+    let expected_public_hash = route_public_hash(
+        TrapdoorScope::Child,
+        metadata.params,
+        &view.public_seed,
+        parent_public.hash,
+        zone_id_hash,
+        period_id_hash,
+        &relation_digest,
+    );
+    view.relation_digest == relation_digest && expected_public_hash == child_public.hash
+}
+
 // ── Wire-format placeholders ──────────────────────────────────────────────
 
 /// Time window `(start, end)` a delegation certificate is valid in,
@@ -600,13 +1560,16 @@ impl DelegationPeriod {
 
 /// Master public-matrix bundle returned by [`trap_gen`].
 ///
-/// In the real implementation `A_root` is an `n×m` matrix over `Z_q`
-/// (≈30 KB at `V4_REFERENCE`); we expose only its 32-byte public seed
-/// placeholder so the public type is fixed-size and copy-friendly.
+/// In the production route, `A_root` is an `n×m` matrix over `Z_q` derived
+/// from a public seed plus a verifier-facing tail block. The expanded
+/// `V4_REFERENCE` matrix is allocation-bounded at 32 MiB, while the serialized
+/// public tail is 1 MiB.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MasterPublicKey {
-    /// 32-byte SHAKE256-derived public matrix seed placeholder.
+    /// 32-byte public binding hash for the route material.
     pub hash: [u8; 32],
+    /// Verifier-computable public matrix material.
+    pub public_matrix: PublicMatrixMaterial,
     /// Parameters this key was generated for.
     pub params: LatticeParams,
 }
@@ -730,8 +1693,10 @@ impl MasterTrapdoor {
             TrapdoorRelationResult::MetadataMismatch
         } else if metadata.material_kind == TrapdoorMaterialKind::FixtureShakeSeedBundle {
             TrapdoorRelationResult::FixtureOnly
+        } else if basis_relation_matches_root(metadata, &self.bytes, public) {
+            TrapdoorRelationResult::MetadataConsistent
         } else {
-            TrapdoorRelationResult::UnsupportedPrimitive
+            TrapdoorRelationResult::MetadataMismatch
         };
         TrapdoorRelationSummary {
             metadata,
@@ -762,17 +1727,20 @@ impl std::fmt::Debug for MasterTrapdoor {
 
 impl Drop for MasterTrapdoor {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        self.bytes.zeroize();
     }
 }
 
 /// Per-`(zone, period)` public matrix `A_zp` returned by [`delegate`].
 ///
-/// As with [`MasterPublicKey`], we carry a public matrix seed placeholder.
+/// As with [`MasterPublicKey`], this carries verifier-computable public
+/// material rather than the private basis seed.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZonePeriodPublicKey {
-    /// 32-byte SHAKE256-derived public matrix seed placeholder.
+    /// 32-byte public binding hash for the route material.
     pub hash: [u8; 32],
+    /// Verifier-computable public matrix material.
+    pub public_matrix: PublicMatrixMaterial,
     /// Zone identifier this delegation authorizes for. Opaque to this
     /// crate — `fcp_policy` owns the canonical `ZoneId` type.
     pub zone_id: [u8; 32],
@@ -908,8 +1876,10 @@ impl ZonePeriodTrapdoor {
             TrapdoorRelationResult::MetadataMismatch
         } else if metadata.material_kind == TrapdoorMaterialKind::FixtureShakeSeedBundle {
             TrapdoorRelationResult::FixtureOnly
+        } else if basis_relation_matches_child(metadata, &self.bytes, child_public, parent_public) {
+            TrapdoorRelationResult::MetadataConsistent
         } else {
-            TrapdoorRelationResult::UnsupportedPrimitive
+            TrapdoorRelationResult::MetadataMismatch
         };
         TrapdoorRelationSummary {
             metadata,
@@ -940,7 +1910,7 @@ impl std::fmt::Debug for ZonePeriodTrapdoor {
 
 impl Drop for ZonePeriodTrapdoor {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        self.bytes.zeroize();
     }
 }
 
@@ -1031,7 +2001,7 @@ impl std::fmt::Debug for LatticePreimage {
 
 impl Drop for LatticePreimage {
     fn drop(&mut self) {
-        self.bytes.fill(0);
+        self.bytes.zeroize();
     }
 }
 
@@ -1201,22 +2171,399 @@ pub fn expand_operation_hash_rhs(h: OperationHash, params: LatticeParams) -> Vec
     out
 }
 
+/// Reconstruct one public matrix coefficient from verifier-facing material.
+///
+/// This is the public half of the route: it never reads a trapdoor envelope or
+/// secret `R` seed. It exists so [`verify`] can evaluate `A_zp * e` from the
+/// same public material that crosses the policy/certificate boundary.
+///
+/// # Errors
+///
+/// Returns [`LatticePqError::ParameterMismatch`] when `params` do not match the
+/// key, [`LatticePqError::UnsupportedPrimitiveRoute`] when the route does not
+/// support verifier reconstruction for the profile, and encoding/parameter
+/// errors for malformed public material or out-of-range coordinates.
+pub fn reconstruct_public_matrix_coefficient(
+    key: &ZonePeriodPublicKey,
+    row: u32,
+    col: u32,
+    params: LatticeParams,
+) -> LatticePqResult<u64> {
+    if params != key.params {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: key.params,
+        });
+    }
+    public_matrix_coeff(params, &key.public_matrix, row, col)
+}
+
+/// Recompute the public matrix material digest from verifier-facing data.
+///
+/// # Errors
+///
+/// Returns the same route and encoding errors as
+/// [`reconstruct_public_matrix_coefficient`].
+pub fn reconstruct_public_matrix_digest(
+    key: &ZonePeriodPublicKey,
+    params: LatticeParams,
+) -> LatticePqResult<[u8; 32]> {
+    if params != key.params {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: key.params,
+        });
+    }
+    public_matrix_digest(params, &key.public_matrix)
+}
+
+fn centered_lift(coeff: u64, q: u64) -> i128 {
+    if coeff > q / 2 {
+        i128::from(coeff) - i128::from(q)
+    } else {
+        i128::from(coeff)
+    }
+}
+
+const fn square_u128(value: u128) -> u128 {
+    value.saturating_mul(value)
+}
+
+fn centered_abs_u128(coeff: u64, q: u64) -> u128 {
+    centered_lift(coeff, q).unsigned_abs()
+}
+
+fn route_preimage_nonzero_budget(params: LatticeParams) -> LatticePqResult<usize> {
+    let _dims = route_dimensions(params, "preimage_norm_bound")?;
+    if params == LatticeParams::V4_REFERENCE {
+        let rhs_terms = usize::try_from(params.n).expect("u32 n fits in usize");
+        let route_terms = rhs_terms
+            .checked_mul(usize::try_from(V4_SPARSE_R_WEIGHT).expect("weight fits in usize"))
+            .and_then(|terms| terms.checked_add(rhs_terms))
+            .expect("V4 route preimage nonzero budget fits in usize");
+        Ok(route_terms)
+    } else {
+        Ok(usize::try_from(params.m).expect("u32 m fits in usize"))
+    }
+}
+
+/// Hard centered-coefficient norm bound enforced by [`verify`].
+///
+/// The current route samples `e = [R*x ; x]` for the centered operation RHS
+/// `x`. `V4_REFERENCE` uses a sparse `R` with `V4_SPARSE_R_WEIGHT` non-zero
+/// entries per RHS coordinate, so the public verifier enforces the same
+/// route-level nonzero budget without learning the secret `R` seed. The bound
+/// is intentionally a hard fail-closed cap over centered residues, not a
+/// structural success check.
+///
+/// # Errors
+///
+/// Returns parameter or route errors for malformed or unsupported profiles.
+pub fn preimage_norm_bound_squared(params: LatticeParams) -> LatticePqResult<u128> {
+    let max_centered = u128::from(params.q / 2);
+    let max_centered_squared = square_u128(max_centered);
+    let budget = route_preimage_nonzero_budget(params)? as u128;
+    Ok(max_centered_squared
+        .saturating_mul(budget)
+        .saturating_sub(1))
+}
+
+fn decode_preimage_coeff(
+    params: LatticeParams,
+    bytes: &[u8],
+    index: usize,
+) -> LatticePqResult<u64> {
+    let coefficient_bytes = params.coefficient_bytes()?;
+    let offset =
+        index
+            .checked_mul(coefficient_bytes)
+            .ok_or(LatticePqError::RepresentationTooLarge {
+                material: "preimage_index",
+                requested: usize::MAX,
+                max: MAX_PREIMAGE_ENCODED_BYTES,
+            })?;
+    let end =
+        offset
+            .checked_add(coefficient_bytes)
+            .ok_or(LatticePqError::RepresentationTooLarge {
+                material: "preimage_index",
+                requested: usize::MAX,
+                max: MAX_PREIMAGE_ENCODED_BYTES,
+            })?;
+    let slice = bytes
+        .get(offset..end)
+        .ok_or(LatticePqError::InvalidEncodingLength {
+            material: "preimage",
+            expected: params.preimage_encoded_bytes()?,
+            got: bytes.len(),
+        })?;
+    let mut coeff_bytes = [0_u8; 8];
+    coeff_bytes[..coefficient_bytes].copy_from_slice(slice);
+    let coeff = u64::from_le_bytes(coeff_bytes);
+    if coeff >= params.q {
+        return Err(LatticePqError::InvalidParameter {
+            field: "preimage_coefficient",
+            value: coeff,
+            reason: "preimage coefficient must be reduced modulo q",
+        });
+    }
+    Ok(coeff)
+}
+
+fn preimage_coefficients(
+    params: LatticeParams,
+    preimage: &LatticePreimage,
+) -> LatticePqResult<Vec<u64>> {
+    let expected = params.preimage_encoded_bytes()?;
+    if preimage.bytes.len() != expected {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "preimage",
+            expected,
+            got: preimage.bytes.len(),
+        });
+    }
+    let coeff_count = usize::try_from(params.m).expect("u32 m fits in usize");
+    (0..coeff_count)
+        .map(|index| decode_preimage_coeff(params, &preimage.bytes, index))
+        .collect()
+}
+
+fn preimage_norm_squared_from_coefficients(params: LatticeParams, coeffs: &[u64]) -> u128 {
+    coeffs.iter().fold(0_u128, |acc, coeff| {
+        acc.saturating_add(square_u128(centered_abs_u128(*coeff, params.q)))
+    })
+}
+
+/// Compute the centered `l2` norm squared for an encoded lattice preimage.
+///
+/// # Errors
+///
+/// Returns parameter, allocation, length, or coefficient-canonicalization
+/// errors if the preimage cannot be decoded for `params`.
+pub fn preimage_norm_squared(
+    params: LatticeParams,
+    preimage: &LatticePreimage,
+) -> LatticePqResult<u128> {
+    let coeffs = preimage_coefficients(params, preimage)?;
+    Ok(preimage_norm_squared_from_coefficients(params, &coeffs))
+}
+
+fn constant_time_residue_vec_eq(left: &[u64], right: &[u64]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    let mut diff = 0_u64;
+    for (left_coeff, right_coeff) in left.iter().zip(right.iter()) {
+        diff |= left_coeff ^ right_coeff;
+    }
+    diff == 0
+}
+
+fn validated_zone_basis_view(
+    key: &ZonePeriodPublicKey,
+    trap: &ZonePeriodTrapdoor,
+    params: LatticeParams,
+) -> LatticePqResult<BasisEnvelopeView> {
+    let metadata = trap.metadata();
+    if metadata.scope != TrapdoorScope::Child
+        || metadata.material_kind != TrapdoorMaterialKind::BasisEnvelope
+        || metadata.params != params
+        || metadata.public_matrix_hash != key.hash
+    {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "zone_period_basis_envelope",
+            reason: "trapdoor metadata does not match the zone-period public key",
+        });
+    }
+    let view = parse_basis_envelope(&trap.bytes).ok_or(LatticePqError::InvalidTrapdoorSecret {
+        material: "zone_period_basis_envelope",
+        reason: "basis envelope could not be decoded",
+    })?;
+    let zone_id_hash = *blake3::hash(&key.zone_id).as_bytes();
+    let period_id_hash = period_hash(key.period);
+    if view.route_id_hash != route_id_hash()
+        || view.route_revision != PRIMITIVE_ROUTE_REVISION
+        || view.scope != TrapdoorScope::Child
+        || view.params_hash != params_hash(params)
+        || view.public_matrix_hash != key.hash
+        || view.zone_id_hash != zone_id_hash
+        || view.period_id_hash != period_id_hash
+    {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "zone_period_basis_envelope",
+            reason: "basis envelope route or public binding metadata mismatch",
+        });
+    }
+    let expected_material = route_public_matrix_material(params, &view.public_seed, &view.r_seed)?;
+    if expected_material != key.public_matrix {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "zone_period_basis_envelope",
+            reason: "basis envelope R seed does not reproduce the public matrix material",
+        });
+    }
+    let relation_digest = public_matrix_digest(params, &key.public_matrix)?;
+    let expected_public_hash = route_public_hash(
+        TrapdoorScope::Child,
+        params,
+        &view.public_seed,
+        view.parent_public_matrix_hash,
+        zone_id_hash,
+        period_id_hash,
+        &relation_digest,
+    );
+    if view.relation_digest != relation_digest || expected_public_hash != key.hash {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "zone_period_basis_envelope",
+            reason: "basis envelope relation digest does not match the public key",
+        });
+    }
+    Ok(view)
+}
+
+fn route_preimage_coefficients(
+    params: LatticeParams,
+    r_seed: &[u8; 32],
+    rhs: &[u64],
+) -> LatticePqResult<Vec<u64>> {
+    let dims = route_dimensions(params, "sample_pre")?;
+    if rhs.len() != usize::try_from(params.n).expect("u32 n fits in usize") {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "operation_rhs",
+            expected: usize::try_from(params.n).expect("u32 n fits in usize"),
+            got: rhs.len(),
+        });
+    }
+    let mut centered = vec![0_i128; usize::try_from(params.m).expect("u32 m fits in usize")];
+    let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
+    for (gadget_col, rhs_coeff) in rhs.iter().enumerate() {
+        let x = centered_lift(*rhs_coeff, params.q);
+        for (abar_col, r_coeff) in route_r_support(
+            params,
+            r_seed,
+            u32::try_from(gadget_col).expect("gadget col fits in u32"),
+            dims,
+        )? {
+            let index = usize::try_from(abar_col).expect("u32 A_bar col fits in usize");
+            centered[index] += i128::from(r_coeff) * x;
+        }
+        centered[abar_cols + gadget_col] = x;
+    }
+    Ok(centered
+        .into_iter()
+        .map(|coeff| reduce_i128_mod_q(coeff, params.q))
+        .collect())
+}
+
+fn encode_preimage_coefficients(
+    params: LatticeParams,
+    coeffs: &[u64],
+) -> LatticePqResult<LatticePreimage> {
+    if coeffs.len() != usize::try_from(params.m).expect("u32 m fits in usize") {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "preimage",
+            expected: usize::try_from(params.m).expect("u32 m fits in usize"),
+            got: coeffs.len(),
+        });
+    }
+    let mut bytes = Vec::with_capacity(params.preimage_encoded_bytes()?);
+    for coeff in coeffs {
+        encode_coeff(params, *coeff, &mut bytes)?;
+    }
+    LatticePreimage::from_encoded_bytes(params, bytes)
+}
+
+fn public_matrix_vector_product(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    coeffs: &[u64],
+) -> LatticePqResult<Vec<u64>> {
+    let dims = route_dimensions(params, "verify")?;
+    validate_route_public_matrix_material(params, material)?;
+    if coeffs.len() != usize::try_from(params.m).expect("u32 m fits in usize") {
+        return Err(LatticePqError::InvalidEncodingLength {
+            material: "preimage",
+            expected: usize::try_from(params.m).expect("u32 m fits in usize"),
+            got: coeffs.len(),
+        });
+    }
+    let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
+    let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
+    let mut out = Vec::with_capacity(usize::try_from(params.n).expect("u32 n fits in usize"));
+    for row in 0..params.n {
+        let row_coefficients = (params == LatticeParams::V4_REFERENCE)
+            .then(|| v4_public_abar_row(params, &material.public_seed, row, dims));
+        let mut sum = 0_i128;
+        for (col, preimage_coeff) in coeffs.iter().take(abar_cols).enumerate() {
+            if *preimage_coeff == 0 {
+                continue;
+            }
+            let matrix_coeff = row_coefficients.as_ref().map_or_else(
+                || {
+                    public_coeff(
+                        params,
+                        &material.public_seed,
+                        row,
+                        u32::try_from(col).expect("A_bar col fits in u32"),
+                    )
+                },
+                |coefficients| coefficients[col],
+            );
+            sum += i128::from(matrix_coeff) * i128::from(*preimage_coeff);
+        }
+        for tail_col in 0..gadget_cols {
+            let preimage_coeff = coeffs[abar_cols + tail_col];
+            if preimage_coeff == 0 {
+                continue;
+            }
+            let tail_index = usize::try_from(row)
+                .expect("u32 row fits in usize")
+                .checked_mul(gadget_cols)
+                .and_then(|base| base.checked_add(tail_col))
+                .ok_or(LatticePqError::RepresentationTooLarge {
+                    material: "public_matrix_tail_index",
+                    requested: usize::MAX,
+                    max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+                })?;
+            let matrix_coeff = decode_coeff(params, &material.tail_coefficients, tail_index)?;
+            sum += i128::from(matrix_coeff) * i128::from(preimage_coeff);
+        }
+        out.push(reduce_i128_mod_q(sum, params.q));
+    }
+    Ok(out)
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────
 
 /// Failure modes for the lattice-trapdoor primitives.
 ///
-/// The `NotImplemented` variant is the dominant outcome from this stub
-/// crate; production code MUST treat it as a graceful "V4 path not
-/// available, fall back to V3" signal.
+/// Supported route primitives use [`LatticePqError::UnsupportedPrimitiveRoute`]
+/// when a parameter profile is outside the reviewed internal route instead of
+/// returning fixture success. [`LatticePqError::NotImplemented`] is retained
+/// for future primitive surfaces that have not landed yet.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum LatticePqError {
-    /// Stub crate hit — the primitive is not implemented yet.
+    /// A primitive surface is not implemented yet.
     #[error("lattice primitive `{primitive}` not implemented (responsible bead: {bead})")]
     NotImplemented {
         /// Name of the primitive that was called.
         primitive: &'static str,
         /// Bead ID expected to land the implementation.
         bead: &'static str,
+    },
+
+    /// The reviewed primitive route does not support this profile yet.
+    #[error(
+        "unsupported lattice primitive route `{route_id}` for `{primitive}` profile `{profile}`: {reason}"
+    )]
+    UnsupportedPrimitiveRoute {
+        /// Primitive that rejected the route/profile pair.
+        primitive: &'static str,
+        /// Route id selected by the reviewed route packet.
+        route_id: &'static str,
+        /// Parameter profile name.
+        profile: &'static str,
+        /// Human-readable rejection reason.
+        reason: &'static str,
     },
 
     /// Parameter profile is malformed before any cryptographic work starts.
@@ -1295,12 +2642,10 @@ pub enum LatticePqError {
     },
 
     /// Preimage failed the verification equation `A · e ≡ h (mod q)`.
-    /// Returned by future real implementation, never by the stub.
     #[error("preimage failed verification equation")]
     VerificationEquationFailed,
 
     /// Preimage norm exceeded the hard bound `B`.
-    /// Returned by future real implementation, never by the stub.
     #[error("preimage norm exceeded bound (got {got_squared}, max squared {max_squared})")]
     PreimageNormTooLarge {
         /// Computed `‖e‖₂²`.
@@ -1313,31 +2658,59 @@ pub enum LatticePqError {
 /// Convenience alias.
 pub type LatticePqResult<T> = Result<T, LatticePqError>;
 
-// ── Primitives (stubs) ────────────────────────────────────────────────────
+// ── Primitives ────────────────────────────────────────────────────────────
 
 /// **`TrapGen`** (§3.3 layer 0).
 ///
-/// Real impl: Micciancio-Peikert (TCC 2012) gadget-trapdoor matrix
-/// sampler — produces `(A_root ∈ Z_q^{n×m}, T_root)` such that
-/// `A_root · T_root ≡ G (mod q)` for the gadget matrix `G`.
-///
-/// **Scaffold:** returns deterministic SHAKE256-derived byte placeholders
-/// from `params` so call-sites have stable handles to thread, but the bytes
-/// are NOT cryptographic material. The public seed and trapdoor placeholder
-/// use distinct domain tags.
+/// Implements the reviewed internal route for supported profiles. The route
+/// constructs an MP12-style relation `A_root · [R; I] = I (mod q)` and stores
+/// the entropy-derived `R` seed in a redacted basis envelope. `SMALL_TEST`
+/// uses dense `R` for exhaustive checks; `V4_REFERENCE` uses bounded sparse
+/// `R` supports.
 ///
 /// # Errors
 ///
-/// Currently always succeeds (it's a deterministic placeholder). The
-/// real implementation may fail on entropy starvation; signature
-/// remains `LatticePqResult` to preserve forward compatibility.
+/// Returns [`LatticePqError::UnsupportedPrimitiveRoute`] for profiles outside
+/// the reviewed supported arithmetic set.
 pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
+    let entropy = TrapGenEntropy::from_os_random();
+    trap_gen_with_entropy(params, &entropy)
+}
+
+/// Deterministic `TrapGen` entry point for tests and evidence.
+///
+/// This is the production route with caller-supplied entropy, not the legacy
+/// SHAKE seed-bundle fixture route.
+///
+/// # Errors
+///
+/// Returns the same errors as [`trap_gen`].
+pub fn trap_gen_with_entropy(
+    params: LatticeParams,
+    entropy: &TrapGenEntropy,
+) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
+    let _dims = route_dimensions(params, "trap_gen")?;
+    build_root_basis_envelope(params, entropy)
+}
+
+/// Fixture-only SHAKE seed-bundle `TrapGen` compatibility helper.
+///
+/// This helper exists for representation fixtures, legacy bridge benches, and
+/// negative tests. It must not be used as a production trapdoor source.
+///
+/// # Errors
+///
+/// Returns parameter validation and encoding errors for malformed profiles.
+pub fn trap_gen_fixture(
+    params: LatticeParams,
+) -> LatticePqResult<(MasterPublicKey, MasterTrapdoor)> {
     params.validate()?;
     let public_hash = trap_gen_seed(params, b"master-public-matrix-seed");
     let trapdoor_bytes = trap_gen_secret_bundle(params)?;
     Ok((
         MasterPublicKey {
             hash: public_hash,
+            public_matrix: PublicMatrixMaterial::fixture_seed_only(public_hash),
             params,
         },
         MasterTrapdoor::from_fixture_seed_bundle(params, public_hash, trapdoor_bytes)?,
@@ -1346,14 +2719,10 @@ pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, Mast
 
 /// **Delegate** (§3.3 layer 1).
 ///
-/// Real impl: Cash-Hofheinz-Kiltz-Peikert (Eurocrypt 2010) basis-
-/// shortening — given the parent `(A_par, T_par)` and a `(zone, period)`
-/// label, derive `(A_zp, T_zp)` for the child certificate.
-///
-/// **Scaffold:** binds `(zone_id, period)` into a deterministic SHAKE256
-/// public matrix seed plus a distinct trapdoor placeholder. Always succeeds
-/// when `params` agree and `period` is well-ordered, but does NOT perform
-/// CHKP basis-shortening.
+/// Implements the reviewed internal route for supported profiles. The child
+/// trapdoor is derived from the parent basis envelope under explicit parent,
+/// zone, period, route, depth, and parameter domain separation. Fixture parent
+/// trapdoors are rejected by this production entry point.
 ///
 /// # Errors
 ///
@@ -1361,7 +2730,108 @@ pub fn trap_gen(params: LatticeParams) -> LatticePqResult<(MasterPublicKey, Mast
 ///   parent's bound parameters.
 /// - [`LatticePqError::InvalidPeriod`] if `period.start_secs >=
 ///   period.end_secs`.
+/// - [`LatticePqError::InvalidTrapdoorSecret`] if the parent is a fixture or
+///   malformed basis envelope.
+/// - [`LatticePqError::UnsupportedPrimitiveRoute`] if `params` is not
+///   supported by the reviewed route.
 pub fn delegate(
+    parent_pub: &MasterPublicKey,
+    parent_trap: &MasterTrapdoor,
+    zone_id: [u8; 32],
+    period: DelegationPeriod,
+    params: LatticeParams,
+) -> LatticePqResult<(ZonePeriodPublicKey, ZonePeriodTrapdoor)> {
+    if params != parent_pub.params {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: parent_pub.params,
+        });
+    }
+    if params != parent_trap.params() {
+        return Err(LatticePqError::ParameterMismatch {
+            caller: params,
+            key: parent_trap.params(),
+        });
+    }
+    params.validate()?;
+    if period.start_secs >= period.end_secs {
+        return Err(LatticePqError::InvalidPeriod {
+            start_secs: period.start_secs,
+            end_secs: period.end_secs,
+        });
+    }
+    let _dims = route_dimensions(params, "delegate")?;
+    if parent_trap.material_kind() == TrapdoorMaterialKind::FixtureShakeSeedBundle {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "fixture_parent_trapdoor",
+            reason: "production delegate requires a basis envelope parent, not SHAKE fixture material",
+        });
+    }
+    if parent_trap.relation_summary(parent_pub).result != TrapdoorRelationResult::MetadataConsistent
+    {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "parent_basis_envelope",
+            reason: "parent basis envelope does not validate against the parent public key",
+        });
+    }
+    let parent_view =
+        parse_basis_envelope(&parent_trap.bytes).ok_or(LatticePqError::InvalidTrapdoorSecret {
+            material: "parent_basis_envelope",
+            reason: "parent basis envelope could not be decoded",
+        })?;
+
+    let public_seed = derive_child_public_seed(parent_pub, &zone_id, period, params);
+    let r_seed = derive_child_r_seed(&parent_view.r_seed, &public_seed, &zone_id, period, params);
+    let public_matrix = route_public_matrix_material(params, &public_seed, &r_seed)?;
+    let relation_digest = public_matrix_digest(params, &public_matrix)?;
+    let zone_id_hash = *blake3::hash(&zone_id).as_bytes();
+    let period_id_hash = period_hash(period);
+    let public_hash = route_public_hash(
+        TrapdoorScope::Child,
+        params,
+        &public_seed,
+        parent_pub.hash,
+        zone_id_hash,
+        period_id_hash,
+        &relation_digest,
+    );
+    let view = BasisEnvelopeView {
+        route_id_hash: route_id_hash(),
+        route_revision: PRIMITIVE_ROUTE_REVISION,
+        scope: TrapdoorScope::Child,
+        params_hash: params_hash(params),
+        public_matrix_hash: public_hash,
+        parent_public_matrix_hash: parent_pub.hash,
+        zone_id_hash,
+        period_id_hash,
+        entropy_id_hash: parent_view.entropy_id_hash,
+        public_seed,
+        r_seed,
+        relation_digest,
+    };
+    let envelope = encode_basis_envelope(&view);
+
+    Ok((
+        ZonePeriodPublicKey {
+            hash: public_hash,
+            public_matrix,
+            zone_id,
+            period,
+            params,
+        },
+        ZonePeriodTrapdoor::from_basis_envelope(params, parent_pub.hash, public_hash, envelope)?,
+    ))
+}
+
+/// Fixture-only SHAKE seed-bundle delegation compatibility helper.
+///
+/// This preserves deterministic legacy evidence without allowing fixture
+/// trapdoors through the production [`delegate`] path.
+///
+/// # Errors
+///
+/// Returns the same parameter and period validation errors as [`delegate`].
+pub fn delegate_fixture(
     parent_pub: &MasterPublicKey,
     parent_trap: &MasterTrapdoor,
     zone_id: [u8; 32],
@@ -1394,6 +2864,7 @@ pub fn delegate(
     Ok((
         ZonePeriodPublicKey {
             hash: pub_hash,
+            public_matrix: PublicMatrixMaterial::fixture_seed_only(pub_hash),
             zone_id,
             period,
             params,
@@ -1409,25 +2880,24 @@ pub fn delegate(
 
 /// **`SamplePre`** (§3.3 layer 2).
 ///
-/// Real impl: Gentry-Peikert-Vaikuntanathan (STOC 2008) preimage
-/// sampling — given `(A_zp, T_zp, h)`, sample `e ← D_{Λ⊥(A_zp), h, σ}`
-/// such that `A_zp · e ≡ h (mod q)` and `‖e‖₂ ≤ B = σ · √m · ω(√log n)`.
-///
-/// **Stub:** returns
-/// `Err(LatticePqError::NotImplemented { primitive: "sample_pre", bead:
-/// "kyopb.1.3.1.1.4" })`.
+/// Current reviewed route sampler: given `(A_zp, T_zp, h)`, expand `h` into a
+/// centered RHS `x`, parse the child basis envelope's `R` seed, and emit
+/// `e = [R*x ; x]`. The verifier independently checks `A_zp * e == h (mod q)`
+/// and the hard centered-norm cap from [`preimage_norm_bound_squared`].
 ///
 /// # Errors
 ///
-/// - Always [`LatticePqError::NotImplemented`] until the real Gaussian
-///   preimage sampler lands.
 /// - [`LatticePqError::ParameterMismatch`] if `params` disagree with
-///   `key.params`. Checked BEFORE the not-implemented return so
-///   parameter-validation tests can already cover the path.
+///   `key.params` or `trap.params`.
+/// - [`LatticePqError::InvalidTrapdoorSecret`] for fixture, malformed, or
+///   public-key-mismatched basis envelopes.
+/// - [`LatticePqError::UnsupportedPrimitiveRoute`] for unsupported profiles.
+/// - [`LatticePqError::PreimageNormTooLarge`] if the sampled witness exceeds
+///   the route norm cap.
 pub fn sample_pre(
     key: &ZonePeriodPublicKey,
     trap: &ZonePeriodTrapdoor,
-    _h: OperationHash,
+    h: OperationHash,
     params: LatticeParams,
 ) -> LatticePqResult<LatticePreimage> {
     if params != key.params {
@@ -1443,10 +2913,18 @@ pub fn sample_pre(
         });
     }
     params.validate()?;
-    Err(LatticePqError::NotImplemented {
-        primitive: "sample_pre",
-        bead: "kyopb.1.3.1.1.4",
-    })
+    let view = validated_zone_basis_view(key, trap, params)?;
+    let rhs = expand_operation_hash_rhs(h, params);
+    let coeffs = route_preimage_coefficients(params, &view.r_seed, &rhs)?;
+    let norm_squared = preimage_norm_squared_from_coefficients(params, &coeffs);
+    let max_squared = preimage_norm_bound_squared(params)?;
+    if norm_squared > max_squared {
+        return Err(LatticePqError::PreimageNormTooLarge {
+            got_squared: norm_squared,
+            max_squared,
+        });
+    }
+    encode_preimage_coefficients(params, &coeffs)
 }
 
 /// **Verify** (§3.3 verification equation).
@@ -1454,23 +2932,21 @@ pub fn sample_pre(
 /// Real impl: check `A_zp · e ≡ h (mod q)` and `‖e‖₂ ≤ B`. Returns `Ok(())`
 /// on success, an error variant explaining the failure mode otherwise.
 ///
-/// **Stub:** does the cheap structural checks (parameter agreement,
-/// period containment) so call-sites can already exercise the negative
-/// branches; returns
-/// `Err(LatticePqError::NotImplemented { primitive: "verify", bead:
-/// "kyopb.1.3.1.1.4" })` for any positive case.
-///
 /// # Errors
 ///
 /// - [`LatticePqError::ParameterMismatch`] if `params` disagree with
 ///   `key.params`.
 /// - [`LatticePqError::OutsidePeriod`] if `now_secs ∉ key.period`.
-/// - [`LatticePqError::NotImplemented`] for the cryptographic check
-///   (until the real verification equation lands).
+/// - [`LatticePqError::InvalidEncodingLength`] or
+///   [`LatticePqError::InvalidParameter`] for malformed preimages.
+/// - [`LatticePqError::PreimageNormTooLarge`] when the centered norm exceeds
+///   the hard cap.
+/// - [`LatticePqError::VerificationEquationFailed`] when `A_zp * e` does not
+///   match the operation RHS.
 pub fn verify(
     key: &ZonePeriodPublicKey,
-    _h: OperationHash,
-    _preimage: &LatticePreimage,
+    h: OperationHash,
+    preimage: &LatticePreimage,
     now_secs: u64,
     params: LatticeParams,
 ) -> LatticePqResult<()> {
@@ -1488,10 +2964,22 @@ pub fn verify(
             end_secs: key.period.end_secs,
         });
     }
-    Err(LatticePqError::NotImplemented {
-        primitive: "verify",
-        bead: "kyopb.1.3.1.1.4",
-    })
+    let coeffs = preimage_coefficients(params, preimage)?;
+    let norm_squared = preimage_norm_squared_from_coefficients(params, &coeffs);
+    let max_squared = preimage_norm_bound_squared(params)?;
+    if norm_squared > max_squared {
+        return Err(LatticePqError::PreimageNormTooLarge {
+            got_squared: norm_squared,
+            max_squared,
+        });
+    }
+    let lhs = public_matrix_vector_product(params, &key.public_matrix, &coeffs)?;
+    let rhs = expand_operation_hash_rhs(h, params);
+    if constant_time_residue_vec_eq(&lhs, &rhs) {
+        Ok(())
+    } else {
+        Err(LatticePqError::VerificationEquationFailed)
+    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1499,11 +2987,8 @@ pub fn verify(
 /// Compute the canonical operation hash
 /// `H(zone | period | op | principal)`.
 ///
-/// **Stub:** uses BLAKE3; real impl will use SHAKE256 expanded to
-/// `Z_q^n` per §3.3 of the design doc. Domain-separated by a stable
-/// tag so this output is forward-compatible with the eventual real
-/// hash-to-`Z_q^n` (the SHAKE256 expansion will start from this same
-/// 32-byte digest).
+/// Uses a stable BLAKE3 transcript as the operation digest; verification then
+/// expands this digest to `Z_q^n` with [`expand_operation_hash_rhs`].
 #[must_use]
 pub fn operation_hash(
     zone_id: &[u8; 32],
@@ -1534,6 +3019,13 @@ mod tests {
             start_secs: 1_000,
             end_secs: 2_000,
         }
+    }
+
+    fn fixture_entropy() -> TrapGenEntropy {
+        TrapGenEntropy::from_fixture_seed(
+            b"fixture:small_test:trapgen-delegate-route-v1",
+            [0x5A; TRAP_GEN_ENTROPY_BYTES],
+        )
     }
 
     #[test]
@@ -1578,10 +3070,10 @@ mod tests {
     }
 
     #[test]
-    fn trap_gen_is_deterministic_on_params() {
+    fn trap_gen_fixture_is_deterministic_on_params() {
         let p = LatticeParams::V4_REFERENCE;
-        let (pk1, tr1) = trap_gen(p).expect("stub trap_gen never fails");
-        let (pk2, tr2) = trap_gen(p).expect("stub trap_gen never fails");
+        let (pk1, tr1) = trap_gen_fixture(p).expect("fixture trap_gen succeeds");
+        let (pk2, tr2) = trap_gen_fixture(p).expect("fixture trap_gen succeeds");
         assert_eq!(pk1, pk2, "same params → same public key");
         assert_eq!(tr1, tr2, "same params → same trapdoor");
         assert_ne!(
@@ -1598,14 +3090,14 @@ mod tests {
     fn trap_gen_distinguishes_param_variants() {
         let mut alt = LatticeParams::V4_REFERENCE;
         alt.depth = 3;
-        let (pk_ref, _) = trap_gen(LatticeParams::V4_REFERENCE).unwrap();
-        let (pk_alt, _) = trap_gen(alt).unwrap();
+        let (pk_ref, _) = trap_gen_fixture(LatticeParams::V4_REFERENCE).unwrap();
+        let (pk_alt, _) = trap_gen_fixture(alt).unwrap();
         assert_ne!(pk_ref.hash, pk_alt.hash, "different params → different key");
     }
 
     #[test]
     fn trap_gen_shake256_seed_fixtures_are_pinned() {
-        let (master_pub, master_trap) = trap_gen(LatticeParams::V4_REFERENCE).unwrap();
+        let (master_pub, master_trap) = trap_gen_fixture(LatticeParams::V4_REFERENCE).unwrap();
         assert_eq!(
             hex::encode(master_pub.hash),
             "7f00d711a9de7cec422265e9cfb180de6c37aa7da3ff0375abf0249199b491ad"
@@ -1618,14 +3110,196 @@ mod tests {
     }
 
     #[test]
-    fn delegate_round_trips_through_stub() {
+    fn trap_gen_with_entropy_small_test_validates_basis_relation() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let (master_pub_again, master_trap_again) =
+            trap_gen_with_entropy(p, &fixture_entropy()).unwrap();
+
+        assert_eq!(master_pub, master_pub_again);
+        assert_eq!(master_trap, master_trap_again);
+        assert_eq!(
+            hex::encode(master_pub.hash),
+            "6c843a0141f3e4c56905b170e80221693173f70b1456f1d66caa30eda19b2423"
+        );
+        assert_eq!(
+            master_trap.material_kind(),
+            TrapdoorMaterialKind::BasisEnvelope
+        );
+        assert!(master_trap.encoded_len() < MAX_TRAPDOOR_SECRET_BYTES);
+        assert_eq!(
+            master_trap.relation_summary(&master_pub).result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
+        assert!(entropy.fixture_id_hash().is_some());
+        assert!(
+            format!("{entropy:?}").contains("<redacted>"),
+            "entropy debug output must redact secret bytes"
+        );
+    }
+
+    #[test]
+    fn production_public_matrix_material_reconstructs_small_test_coefficients() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0xA5; 32];
+        let period = ref_period();
+        let (child_pub, child_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let child_view = parse_basis_envelope(&child_trap.bytes).unwrap();
+        let expected_material =
+            route_public_matrix_material(p, &child_view.public_seed, &child_view.r_seed).unwrap();
+
+        assert_eq!(
+            child_pub.public_matrix.kind,
+            PublicMatrixMaterialKind::RouteTailCoefficients
+        );
+        assert_eq!(child_pub.public_matrix, expected_material);
+        assert_eq!(
+            child_pub.public_matrix.tail_coefficients_len(),
+            usize::try_from(p.n).unwrap()
+                * usize::try_from(p.n).unwrap()
+                * p.coefficient_bytes().unwrap()
+        );
+        assert_eq!(
+            reconstruct_public_matrix_digest(&child_pub, p).unwrap(),
+            child_view.relation_digest
+        );
+        assert_eq!(
+            reconstruct_public_matrix_coefficient(&child_pub, 0, 0, p).unwrap(),
+            public_coeff(p, &child_view.public_seed, 0, 0)
+        );
+        assert_eq!(
+            reconstruct_public_matrix_coefficient(&child_pub, 0, p.m - p.n, p).unwrap(),
+            tail_coeff(p, &child_view.public_seed, &child_view.r_seed, 0, 0)
+        );
+        assert_eq!(
+            child_trap.relation_summary(&child_pub, &master_pub).result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
+    }
+
+    #[test]
+    fn public_matrix_material_rejects_wrong_binding_and_malformed_tail() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0xA5; 32];
+        let period = ref_period();
+        let (child_pub, child_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+
+        let mut wrong_hash = child_pub.clone();
+        wrong_hash.hash[0] ^= 0x80;
+        assert_eq!(
+            child_trap.relation_summary(&wrong_hash, &master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut malformed_tail = child_pub.clone();
+        malformed_tail.public_matrix.tail_coefficients.pop();
+        let err = reconstruct_public_matrix_digest(&malformed_tail, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "public_matrix_tail",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+        assert_eq!(
+            child_trap
+                .relation_summary(&malformed_tail, &master_pub)
+                .result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let original_digest = reconstruct_public_matrix_digest(&child_pub, p).unwrap();
+        let mut wrong_seed = child_pub.clone();
+        wrong_seed.public_matrix.public_seed[0] ^= 0x01;
+        assert_ne!(
+            reconstruct_public_matrix_digest(&wrong_seed, p).unwrap(),
+            original_digest,
+            "public seed must affect verifier reconstruction"
+        );
+        assert_eq!(
+            child_trap.relation_summary(&wrong_seed, &master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut wrong_route = child_pub;
+        wrong_route.public_matrix.route_revision += 1;
+        let err = reconstruct_public_matrix_digest(&wrong_route, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "public_matrix_material",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn public_matrix_reconstruction_fail_closes_custom_profiles() {
+        let mut p = LatticeParams::V4_REFERENCE;
+        p.depth = 3;
+        let (master_pub, master_trap) = trap_gen_fixture(p).unwrap();
+        let zone = [7u8; 32];
+        let period = ref_period();
+        let (zone_pub, _) = delegate_fixture(&master_pub, &master_trap, zone, period, p).unwrap();
+
+        assert_eq!(
+            zone_pub.public_matrix.kind,
+            PublicMatrixMaterialKind::FixtureSeedOnly
+        );
+        let err = reconstruct_public_matrix_coefficient(&zone_pub, 0, 0, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::UnsupportedPrimitiveRoute {
+                    primitive: "public_matrix_coeff",
+                    profile: "CUSTOM",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn trap_gen_with_entropy_fail_closes_custom_profiles() {
+        let mut p = LatticeParams::V4_REFERENCE;
+        p.depth = 3;
+        let err = trap_gen_with_entropy(p, &fixture_entropy())
+            .expect_err("custom TrapGen must stay fail-closed until a reviewed route lands");
+        assert!(
+            matches!(
+                err,
+                LatticePqError::UnsupportedPrimitiveRoute {
+                    primitive: "trap_gen",
+                    route_id: PRIMITIVE_ROUTE_ID,
+                    profile: "CUSTOM",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn delegate_fixture_round_trips_through_seed_bundle() {
         let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (master_pub, master_trap) = trap_gen_fixture(p).unwrap();
         let zone = [7u8; 32];
         let period = ref_period();
 
-        let (zp_pub, zp_trap) =
-            delegate(&master_pub, &master_trap, zone, period, p).expect("delegate stub succeeds");
+        let (zp_pub, zp_trap) = delegate_fixture(&master_pub, &master_trap, zone, period, p)
+            .expect("fixture delegate succeeds");
 
         assert_eq!(zp_pub.zone_id, zone);
         assert_eq!(zp_pub.period, period);
@@ -1644,35 +3318,291 @@ mod tests {
     }
 
     #[test]
+    fn delegate_small_test_validates_child_relation_and_domain_separation() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0xA5; 32];
+        let period = ref_period();
+        let (child_pub, child_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+
+        assert_eq!(
+            child_trap.relation_summary(&child_pub, &master_pub).result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
+        assert_eq!(
+            child_trap.material_kind(),
+            TrapdoorMaterialKind::BasisEnvelope
+        );
+        assert_ne!(child_pub.hash, master_pub.hash);
+
+        let (different_zone_pub, _) =
+            delegate(&master_pub, &master_trap, [0xA6; 32], period, p).unwrap();
+        assert_ne!(
+            child_pub.hash, different_zone_pub.hash,
+            "zone must affect child key"
+        );
+
+        let shifted_start = DelegationPeriod {
+            start_secs: period.start_secs + 1,
+            end_secs: period.end_secs,
+        };
+        let (different_start_pub, _) =
+            delegate(&master_pub, &master_trap, zone, shifted_start, p).unwrap();
+        assert_ne!(
+            child_pub.hash, different_start_pub.hash,
+            "period start must affect child key"
+        );
+
+        let shifted_end = DelegationPeriod {
+            start_secs: period.start_secs,
+            end_secs: period.end_secs + 1,
+        };
+        let (different_end_pub, _) =
+            delegate(&master_pub, &master_trap, zone, shifted_end, p).unwrap();
+        assert_ne!(
+            child_pub.hash, different_end_pub.hash,
+            "period end must affect child key"
+        );
+
+        let other_entropy =
+            TrapGenEntropy::from_fixture_seed(b"fixture:alternate-parent", [0xB6; 32]);
+        let (other_parent_pub, other_parent_trap) =
+            trap_gen_with_entropy(p, &other_entropy).unwrap();
+        let (different_parent_pub, _) =
+            delegate(&other_parent_pub, &other_parent_trap, zone, period, p).unwrap();
+        assert_ne!(
+            child_pub.hash, different_parent_pub.hash,
+            "parent hash must affect child key"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // V4 route acceptance keeps related cases together.
+    fn v4_reference_public_matrix_route_reconstructs_and_rejects_malformed_material() {
+        let p = LatticeParams::V4_REFERENCE;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let (master_pub_again, master_trap_again) =
+            trap_gen_with_entropy(p, &fixture_entropy()).unwrap();
+        assert_eq!(master_pub, master_pub_again);
+        assert_eq!(master_trap, master_trap_again);
+        assert_eq!(
+            master_pub.public_matrix.kind,
+            PublicMatrixMaterialKind::RouteTailCoefficients
+        );
+        assert_eq!(
+            master_pub.public_matrix.tail_coefficients_len(),
+            usize::try_from(p.n).unwrap()
+                * usize::try_from(p.n).unwrap()
+                * p.coefficient_bytes().unwrap()
+        );
+        assert!(
+            master_pub.public_matrix.tail_coefficients_len() <= MAX_PREIMAGE_ENCODED_BYTES,
+            "V4 public tail must stay within the explicit route artifact budget"
+        );
+        assert_eq!(
+            master_trap.relation_summary(&master_pub).result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
+        assert_eq!(
+            master_trap.secret_storage_len_bucket(),
+            SecretStorageLengthBucket::UpTo4KiB
+        );
+
+        let zone = [0xA5; 32];
+        let period = ref_period();
+        let (child_pub, child_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let child_view = parse_basis_envelope(&child_trap.bytes).unwrap();
+        assert_eq!(
+            child_trap.relation_summary(&child_pub, &master_pub).result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
+        assert_eq!(
+            reconstruct_public_matrix_digest(&child_pub, p).unwrap(),
+            child_view.relation_digest
+        );
+        assert_eq!(
+            reconstruct_public_matrix_coefficient(&child_pub, 0, 0, p).unwrap(),
+            public_coeff(p, &child_view.public_seed, 0, 0)
+        );
+        assert_eq!(
+            reconstruct_public_matrix_coefficient(&child_pub, 0, p.m - p.n, p).unwrap(),
+            tail_coeff(p, &child_view.public_seed, &child_view.r_seed, 0, 0)
+        );
+        assert_eq!(
+            reconstruct_public_matrix_coefficient(&child_pub, p.n - 1, p.m - 1, p).unwrap(),
+            tail_coeff(
+                p,
+                &child_view.public_seed,
+                &child_view.r_seed,
+                p.n - 1,
+                p.n - 1
+            )
+        );
+
+        let zone_json = serde_json::to_string(&child_pub).unwrap();
+        assert!(!zone_json.contains("r_seed"));
+        assert!(!zone_json.contains("trapdoor"));
+        let zone_back: ZonePeriodPublicKey = serde_json::from_str(&zone_json).unwrap();
+        assert_eq!(zone_back, child_pub);
+
+        let mut wrong_hash = child_pub.clone();
+        wrong_hash.hash[0] ^= 0x80;
+        assert_eq!(
+            child_trap.relation_summary(&wrong_hash, &master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut malformed_tail = child_pub.clone();
+        malformed_tail.public_matrix.tail_coefficients.pop();
+        let err = reconstruct_public_matrix_digest(&malformed_tail, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "public_matrix_tail",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let original_digest = reconstruct_public_matrix_digest(&child_pub, p).unwrap();
+        let mut wrong_seed = child_pub.clone();
+        wrong_seed.public_matrix.public_seed[0] ^= 0x01;
+        assert_ne!(
+            reconstruct_public_matrix_digest(&wrong_seed, p).unwrap(),
+            original_digest
+        );
+        assert_eq!(
+            child_trap.relation_summary(&wrong_seed, &master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut wrong_route = child_pub.clone();
+        wrong_route.public_matrix.route_revision += 1;
+        let err = reconstruct_public_matrix_digest(&wrong_route, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "public_matrix_material",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let err =
+            reconstruct_public_matrix_coefficient(&child_pub, 0, 0, LatticeParams::SMALL_TEST)
+                .unwrap_err();
+        assert!(matches!(err, LatticePqError::ParameterMismatch { .. }));
+    }
+
+    #[test]
+    fn delegate_rejects_fixture_parent_and_malformed_basis() {
+        let p = LatticeParams::SMALL_TEST;
+        let zone = [0x33; 32];
+        let period = ref_period();
+        let (fixture_pub, fixture_trap) = trap_gen_fixture(p).unwrap();
+        let err = delegate(&fixture_pub, &fixture_trap, zone, period, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "fixture_parent_trapdoor",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+
+        let entropy = fixture_entropy();
+        let (master_pub, mut master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let last = master_trap.bytes.len() - 1;
+        master_trap.bytes[last] ^= 0x01;
+        assert_eq!(
+            master_trap.relation_summary(&master_pub).result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+        let err = delegate(&master_pub, &master_trap, zone, period, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "parent_basis_envelope",
+                    ..
+                }
+            ),
+            "got {err:?}"
+        );
+    }
+
+    #[test]
+    fn child_relation_rejects_wrong_zone_and_period_metadata() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0x44; 32];
+        let period = ref_period();
+        let (child_pub, child_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+
+        let mut wrong_zone_pub = child_pub.clone();
+        wrong_zone_pub.zone_id[0] ^= 0xFF;
+        assert_eq!(
+            child_trap
+                .relation_summary(&wrong_zone_pub, &master_pub)
+                .result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+
+        let mut wrong_period_pub = child_pub;
+        wrong_period_pub.period.end_secs += 1;
+        assert_eq!(
+            child_trap
+                .relation_summary(&wrong_period_pub, &master_pub)
+                .result,
+            TrapdoorRelationResult::MetadataMismatch
+        );
+    }
+
+    #[test]
     fn trapdoor_metadata_round_trips_without_secret_material() {
         let p = LatticeParams::SMALL_TEST;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
         let zone = [7u8; 32];
-        let (zone_pub, zone_trap) =
-            delegate(&master_pub, &master_trap, zone, ref_period(), p).unwrap();
+        let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, ref_period(), p)
+            .expect("production delegate succeeds for SMALL_TEST");
 
         let master_metadata = master_trap.metadata();
         assert_eq!(master_metadata.version, LATTICE_REPRESENTATION_VERSION);
         assert_eq!(master_metadata.scope, TrapdoorScope::Root);
         assert_eq!(
             master_metadata.material_kind,
-            TrapdoorMaterialKind::FixtureShakeSeedBundle
+            TrapdoorMaterialKind::BasisEnvelope
         );
         assert_eq!(master_metadata.public_matrix_hash, master_pub.hash);
         assert_eq!(master_metadata.parent_public_matrix_hash, None);
         assert_eq!(
             master_metadata.secret_storage_len_bucket,
-            SecretStorageLengthBucket::UpTo128
+            SecretStorageLengthBucket::UpTo4KiB
         );
 
         let json = serde_json::to_string(&master_metadata).unwrap();
         assert!(!json.contains("secret_material"));
         assert!(!json.contains("seed_bundle"));
+        assert!(!json.contains("r_seed"));
         let master_back: TrapdoorRepresentationMetadata = serde_json::from_str(&json).unwrap();
         assert_eq!(master_back, master_metadata);
 
         let zone_metadata = zone_trap.metadata();
         assert_eq!(zone_metadata.scope, TrapdoorScope::Child);
+        assert_eq!(
+            zone_metadata.material_kind,
+            TrapdoorMaterialKind::BasisEnvelope
+        );
         assert_eq!(
             zone_metadata.parent_public_matrix_hash,
             Some(master_pub.hash)
@@ -1686,9 +3616,11 @@ mod tests {
     #[test]
     fn trapdoor_metadata_validation_rejects_malformed_public_envelopes() {
         let p = LatticeParams::SMALL_TEST;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
         let (zone_pub, zone_trap) =
             delegate(&master_pub, &master_trap, [0x22; 32], ref_period(), p).unwrap();
+        let (_, fixture_master_trap) = trap_gen_fixture(p).unwrap();
 
         let mut wrong_version = master_trap.metadata();
         wrong_version.version = LATTICE_REPRESENTATION_VERSION + 1;
@@ -1747,7 +3679,7 @@ mod tests {
             "got {err:?}"
         );
 
-        let mut wrong_fixture_bucket = master_trap.metadata();
+        let mut wrong_fixture_bucket = fixture_master_trap.metadata();
         wrong_fixture_bucket.secret_storage_len_bucket = SecretStorageLengthBucket::UpTo4KiB;
         let err = wrong_fixture_bucket.validate().unwrap_err();
         assert!(
@@ -1791,23 +3723,30 @@ mod tests {
     #[test]
     fn trapdoor_relation_summaries_are_redaction_safe() {
         let p = LatticeParams::SMALL_TEST;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
         let zone = [11u8; 32];
         let period = ref_period();
         let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
 
         let root_summary = master_trap.relation_summary(&master_pub);
-        assert_eq!(root_summary.result, TrapdoorRelationResult::FixtureOnly);
+        assert_eq!(
+            root_summary.result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
         assert_eq!(
             root_summary.norm_quality_bucket,
-            TrapdoorNormQualityBucket::FixtureSeed
+            TrapdoorNormQualityBucket::Small
         );
 
         let child_summary = zone_trap.relation_summary(&zone_pub, &master_pub);
-        assert_eq!(child_summary.result, TrapdoorRelationResult::FixtureOnly);
+        assert_eq!(
+            child_summary.result,
+            TrapdoorRelationResult::MetadataConsistent
+        );
         assert_eq!(
             child_summary.norm_quality_bucket,
-            TrapdoorNormQualityBucket::FixtureSeed
+            TrapdoorNormQualityBucket::Small
         );
 
         let summary_json = serde_json::to_string(&child_summary).unwrap();
@@ -1819,7 +3758,8 @@ mod tests {
     #[test]
     fn trapdoor_relation_summaries_detect_public_metadata_mismatch() {
         let p = LatticeParams::SMALL_TEST;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
         let (zone_pub, zone_trap) =
             delegate(&master_pub, &master_trap, [0x33; 32], ref_period(), p).unwrap();
 
@@ -1847,7 +3787,7 @@ mod tests {
     }
 
     #[test]
-    fn basis_envelope_constructors_are_basis_capable_but_not_success_claims() {
+    fn basis_envelope_constructors_reject_unvalidated_basis_bytes() {
         let p = LatticeParams::SMALL_TEST;
         let public_hash = [0x44; 32];
         let parent_hash = [0x55; 32];
@@ -1870,10 +3810,11 @@ mod tests {
 
         let public = MasterPublicKey {
             hash: public_hash,
+            public_matrix: PublicMatrixMaterial::fixture_seed_only(public_hash),
             params: p,
         };
         let summary = root.relation_summary(&public);
-        assert_eq!(summary.result, TrapdoorRelationResult::UnsupportedPrimitive);
+        assert_eq!(summary.result, TrapdoorRelationResult::MetadataMismatch);
         assert_eq!(
             summary.norm_quality_bucket,
             TrapdoorNormQualityBucket::Small
@@ -1932,7 +3873,7 @@ mod tests {
     #[test]
     fn zone_period_matrix_seed_is_deterministic_and_domain_separated() {
         let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (master_pub, master_trap) = trap_gen_fixture(p).unwrap();
         let zone = [7u8; 32];
         let period = ref_period();
 
@@ -1942,7 +3883,8 @@ mod tests {
             "7fbac36f184f312452bf9a49cb8eca8b80d820079bfbeda16cc253448d23e3ea"
         );
 
-        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let (zp_pub, zp_trap) =
+            delegate_fixture(&master_pub, &master_trap, zone, period, p).unwrap();
         assert_eq!(zp_pub.hash, seed, "delegate exposes the public seed");
         assert_eq!(zp_trap.encoded_len(), 96);
         assert!(
@@ -1964,7 +3906,7 @@ mod tests {
     #[test]
     fn delegate_rejects_param_mismatch() {
         let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (master_pub, master_trap) = trap_gen_fixture(p).unwrap();
         let mut wrong = p;
         wrong.n = 256;
         let err = delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), wrong).unwrap_err();
@@ -1977,7 +3919,7 @@ mod tests {
     #[test]
     fn delegate_rejects_invalid_period() {
         let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+        let (master_pub, master_trap) = trap_gen_fixture(p).unwrap();
         let bad = DelegationPeriod {
             start_secs: 5_000,
             end_secs: 5_000,
@@ -1995,60 +3937,149 @@ mod tests {
         );
     }
 
+    fn constant_preimage(params: LatticeParams, coeff: u64) -> LatticePreimage {
+        let mut bytes = Vec::with_capacity(params.preimage_encoded_bytes().unwrap());
+        for _ in 0..params.m {
+            encode_coeff(params, coeff, &mut bytes).unwrap();
+        }
+        LatticePreimage::from_encoded_bytes(params, bytes).unwrap()
+    }
+
     #[test]
-    fn full_pipeline_round_trip_terminates_at_not_implemented() {
-        // TrapGen → Delegate → operation_hash → SamplePre → Verify
-        // exercises every type and every cheap-check branch. The two
-        // cryptographic primitives (sample_pre, verify) terminate at
-        // NotImplemented so the test asserts the *contract*, not a fake
-        // success.
-        let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+    fn full_pipeline_round_trip_samples_and_verifies_small_test() {
+        // TrapGen -> Delegate -> operation_hash -> SamplePre -> Verify
+        // exercises every production primitive on the tiny deterministic route.
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
         let zone = [42u8; 32];
         let period = ref_period();
         let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
         let h = operation_hash(&zone, period, b"op:read.user.profile", b"principal:alice");
 
-        let pre_err = sample_pre(&zp_pub, &zp_trap, h, p).unwrap_err();
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
+        assert_eq!(preimage.encoded_len(), p.preimage_encoded_bytes().unwrap());
+        let norm_squared = preimage_norm_squared(p, &preimage).unwrap();
+        let max_squared = preimage_norm_bound_squared(p).unwrap();
         assert!(
-            matches!(
-                pre_err,
-                LatticePqError::NotImplemented {
-                    primitive: "sample_pre",
-                    ..
-                }
-            ),
-            "sample_pre stub must signal NotImplemented; got {pre_err:?}"
+            norm_squared <= max_squared,
+            "sampled norm {norm_squared} must fit bound {max_squared}"
         );
 
-        // Build a placeholder preimage so verify can run its cheap-check
-        // path; verify itself must still terminate at NotImplemented.
-        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
+        let coeffs = preimage_coefficients(p, &preimage).unwrap();
+        let lhs = public_matrix_vector_product(p, &zp_pub.public_matrix, &coeffs).unwrap();
+        assert_eq!(lhs, expand_operation_hash_rhs(h, p));
+
         let now = period.start_secs + 100;
-        let v_err = verify(&zp_pub, h, &placeholder_pre, now, p).unwrap_err();
+        verify(&zp_pub, h, &preimage, now, p).unwrap();
+        let json = serde_json::to_string(&preimage).unwrap();
+        let back: LatticePreimage = serde_json::from_str(&json).unwrap();
+        verify(&zp_pub, h, &back, now, p).unwrap();
+    }
+
+    #[test]
+    fn v4_reference_sample_pre_verify_round_trip() {
+        let p = LatticeParams::V4_REFERENCE;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [42u8; 32];
+        let period = ref_period();
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let h = operation_hash(&zone, period, b"op:v4.read", b"principal:v4-fixture");
+
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
+        assert_eq!(preimage.encoded_len(), p.preimage_encoded_bytes().unwrap());
+        let norm_squared = preimage_norm_squared(p, &preimage).unwrap();
+        let max_squared = preimage_norm_bound_squared(p).unwrap();
+        assert!(
+            norm_squared <= max_squared,
+            "V4 sampled norm {norm_squared} must fit bound {max_squared}"
+        );
+        verify(&zp_pub, h, &preimage, period.start_secs, p).unwrap();
+    }
+
+    #[test]
+    fn verify_rejects_forged_malformed_and_over_bound_preimages() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0x2A; 32];
+        let period = ref_period();
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let h = operation_hash(&zone, period, b"op", b"principal");
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
+        let now = period.start_secs;
+
+        let mut forged_coeffs = preimage_coefficients(p, &preimage).unwrap();
+        let coeff = forged_coeffs
+            .iter_mut()
+            .find(|coeff| centered_abs_u128(**coeff, p.q) < u128::from(p.q / 2))
+            .expect("sample has at least one coefficient below the centered max");
+        *coeff = (*coeff + 1) % p.q;
+        let forged = encode_preimage_coefficients(p, &forged_coeffs).unwrap();
+        let err = verify(&zp_pub, h, &forged, now, p).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::VerificationEquationFailed),
+            "got {err:?}"
+        );
+
+        let wrong_zone_h = operation_hash(&[0x2B; 32], period, b"op", b"principal");
+        let err = verify(&zp_pub, wrong_zone_h, &preimage, now, p).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::VerificationEquationFailed),
+            "got {err:?}"
+        );
+
+        let wrong_period_h = operation_hash(
+            &zone,
+            DelegationPeriod {
+                start_secs: period.start_secs + 1,
+                end_secs: period.end_secs + 1,
+            },
+            b"op",
+            b"principal",
+        );
+        let err = verify(&zp_pub, wrong_period_h, &preimage, now, p).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::VerificationEquationFailed),
+            "got {err:?}"
+        );
+
+        let mut malformed = preimage;
+        malformed.bytes.pop();
+        let err = verify(&zp_pub, h, &malformed, now, p).unwrap_err();
         assert!(
             matches!(
-                v_err,
-                LatticePqError::NotImplemented {
-                    primitive: "verify",
+                err,
+                LatticePqError::InvalidEncodingLength {
+                    material: "preimage",
                     ..
                 }
             ),
-            "verify stub must signal NotImplemented after cheap checks; got {v_err:?}"
+            "got {err:?}"
+        );
+
+        let too_large = constant_preimage(p, p.q / 2);
+        let err = verify(&zp_pub, h, &too_large, now, p).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::PreimageNormTooLarge { .. }),
+            "got {err:?}"
         );
     }
 
     #[test]
-    fn verify_rejects_outside_period_before_reaching_not_implemented() {
-        let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
+    fn verify_rejects_outside_period_before_arithmetic() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0u8; 32];
         let period = ref_period();
-        let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], period, p).unwrap();
-        let h = operation_hash(&[0u8; 32], period, b"op", b"princ");
-        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let h = operation_hash(&zone, period, b"op", b"princ");
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
 
         // 999 is one second before the period opens.
-        let err = verify(&zp_pub, h, &placeholder_pre, 999, p).unwrap_err();
+        let err = verify(&zp_pub, h, &preimage, 999, p).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2062,7 +4093,7 @@ mod tests {
         );
 
         // 2000 is the exclusive upper bound.
-        let err = verify(&zp_pub, h, &placeholder_pre, 2_000, p).unwrap_err();
+        let err = verify(&zp_pub, h, &preimage, 2_000, p).unwrap_err();
         assert!(
             matches!(
                 err,
@@ -2076,18 +4107,51 @@ mod tests {
     }
 
     #[test]
-    fn verify_rejects_param_mismatch_before_reaching_not_implemented() {
-        let p = LatticeParams::V4_REFERENCE;
-        let (master_pub, master_trap) = trap_gen(p).unwrap();
-        let (zp_pub, _) = delegate(&master_pub, &master_trap, [0u8; 32], ref_period(), p).unwrap();
-        let h = operation_hash(&[0u8; 32], ref_period(), b"op", b"princ");
-        let placeholder_pre = LatticePreimage::fixture_zero(p).unwrap();
+    fn sample_pre_and_verify_reject_param_mismatch_and_unsupported_profiles() {
+        let p = LatticeParams::SMALL_TEST;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [0u8; 32];
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, ref_period(), p).unwrap();
+        let h = operation_hash(&zone, ref_period(), b"op", b"princ");
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
 
         let mut wrong = p;
         wrong.q = 7919;
-        let err = verify(&zp_pub, h, &placeholder_pre, 1_500, wrong).unwrap_err();
+        let err = sample_pre(&zp_pub, &zp_trap, h, wrong).unwrap_err();
         assert!(
             matches!(err, LatticePqError::ParameterMismatch { .. }),
+            "got {err:?}"
+        );
+        let err = verify(&zp_pub, h, &preimage, 1_500, wrong).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::ParameterMismatch { .. }),
+            "got {err:?}"
+        );
+
+        let mut custom = LatticeParams::V4_REFERENCE;
+        custom.depth = 3;
+        let (fixture_pub, fixture_trap) = trap_gen_fixture(custom).unwrap();
+        let (fixture_zone_pub, _) =
+            delegate_fixture(&fixture_pub, &fixture_trap, zone, ref_period(), custom).unwrap();
+        let fixture_preimage = LatticePreimage::fixture_zero(custom).unwrap();
+        let err = verify(
+            &fixture_zone_pub,
+            h,
+            &fixture_preimage,
+            ref_period().start_secs,
+            custom,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::UnsupportedPrimitiveRoute {
+                    primitive: "preimage_norm_bound",
+                    profile: "CUSTOM",
+                    ..
+                }
+            ),
             "got {err:?}"
         );
     }

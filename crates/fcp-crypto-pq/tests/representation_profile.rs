@@ -1,16 +1,21 @@
-use std::{fs, process::Command, time::Instant};
+use std::{borrow::Cow, fs, process::Command, time::Instant};
 
 use serde::Serialize;
 
 use fcp_crypto_pq::{
     DelegationPeriod, LATTICE_REPRESENTATION_VERSION, LatticeParams, LatticePqError,
-    LatticePreimage, LatticeRepresentationProfile, OperationHash, SecretStorageLengthBucket,
-    TrapdoorNormQualityBucket, TrapdoorRelationResult, delegate, operation_hash, trap_gen, verify,
+    LatticePreimage, LatticeRepresentationProfile, OperationHash, PRIMITIVE_ROUTE_ID,
+    PRIMITIVE_ROUTE_REVISION, PUBLIC_MATRIX_MATERIAL_VERSION, PublicMatrixMaterialKind,
+    SecretStorageLengthBucket, TrapGenEntropy, TrapdoorNormQualityBucket, TrapdoorRelationResult,
+    delegate, delegate_fixture, expand_operation_hash_rhs, operation_hash,
+    preimage_norm_bound_squared, preimage_norm_squared, primitive_route_profile_name,
+    reconstruct_public_matrix_coefficient, reconstruct_public_matrix_digest, sample_pre,
+    trap_gen_fixture, trap_gen_with_entropy, verify,
 };
 
 #[derive(Debug, Serialize)]
 struct EvidenceLog<'a> {
-    command_line: &'a str,
+    command_line: Cow<'a, str>,
     git_revision: String,
     artifact_path: &'a str,
     fixture_id: &'a str,
@@ -33,6 +38,17 @@ struct EvidenceLog<'a> {
 }
 
 const ARTIFACT_PATH: &str = "target/fcp-crypto-pq/representation-profile-evidence.jsonl";
+const ROUTE_ARTIFACT_PATH: &str = "target/fcp-crypto-pq/trapgen-delegate-route-evidence.jsonl";
+const PUBLIC_MATRIX_ARTIFACT_PATH: &str =
+    "target/fcp-crypto-pq/public-matrix-reconstruction-evidence.jsonl";
+const SAMPLE_PRE_VERIFY_ARTIFACT_PATH: &str =
+    "target/fcp-crypto-pq/sample-pre-verify-evidence.jsonl";
+const ROUTE_FIXTURE_ID: &str = "fixture:small_test:trapgen-delegate-route-v1";
+const REPRESENTATION_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq representation_profile_evidence_jsonl_is_secret_free -- --nocapture";
+const ROUTE_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq trapgen_delegate_route_evidence_jsonl_is_secret_free -- --nocapture";
+const PUBLIC_MATRIX_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq public_matrix_reconstruction_evidence_jsonl_is_secret_free -- --nocapture";
+const SAMPLE_PRE_VERIFY_EVIDENCE_COMMAND: &str =
+    "cargo test -p fcp-crypto-pq sample_pre_verify_evidence_jsonl_is_secret_free -- --nocapture";
 
 #[derive(Debug, Serialize)]
 struct MatrixDimensions {
@@ -118,6 +134,97 @@ struct PolicyBridgeCompatibility {
     rejects_legacy_fixed_64_byte_preimage: bool,
 }
 
+#[derive(Debug, Serialize)]
+struct RouteEvidenceLog<'a> {
+    command_line: Cow<'a, str>,
+    git_revision: String,
+    primitive_route_id: &'a str,
+    primitive_route_revision: u16,
+    representation_version: u16,
+    parameter_profile: &'a str,
+    fixture_id: String,
+    zone_id_hash: String,
+    period_id_hash: String,
+    matrix_dimensions: MatrixDimensions,
+    root_relation_result: Option<TrapdoorRelationResult>,
+    child_relation_result: Option<TrapdoorRelationResult>,
+    trapdoor_norm_quality_bucket: RouteTrapdoorNormQualityEvidence,
+    allocation_summary: AllocationEstimate,
+    timing_ms: u128,
+    result: &'a str,
+    skip_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct RouteTrapdoorNormQualityEvidence {
+    root: Option<TrapdoorNormQualityBucket>,
+    child: Option<TrapdoorNormQualityBucket>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicMatrixEvidenceLog<'a> {
+    command_line: Cow<'a, str>,
+    git_revision: String,
+    primitive_route_id: &'a str,
+    primitive_route_revision: u16,
+    representation_version: u16,
+    public_matrix_material_version: u16,
+    parameter_profile: &'a str,
+    fixture_id: String,
+    zone_id_hash: String,
+    period_id_hash: String,
+    public_material_summary: PublicMaterialSummary,
+    matrix_dimensions: MatrixDimensions,
+    child_relation_result: Option<TrapdoorRelationResult>,
+    reconstruction_result: &'a str,
+    allocation_summary: AllocationEstimate,
+    timing_ms: u128,
+    result: &'a str,
+    skip_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Serialize)]
+struct PublicMaterialSummary {
+    kind: PublicMatrixMaterialKind,
+    public_seed_bytes: usize,
+    tail_coefficients_bytes: usize,
+    binding_hash_hex: String,
+    material_digest_hex: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SamplePreVerifyEvidenceLog<'a> {
+    command_line: Cow<'a, str>,
+    git_revision: String,
+    primitive_route_id: &'a str,
+    primitive_route_revision: u16,
+    representation_version: u16,
+    parameter_profile: &'a str,
+    fixture_id: String,
+    zone_id_hash: String,
+    period_id_hash: String,
+    h_fixture_id: String,
+    matrix_dimensions: MatrixDimensions,
+    norm_bound_squared: u128,
+    observed_norm_squared: u128,
+    observed_norm_bucket: &'a str,
+    primitive_timings_ms: PrimitiveTimings,
+    verify_outcome: &'a str,
+    error_mapping: Option<&'a str>,
+    timeout_cancel_result: &'a str,
+    cleanup: &'a str,
+    result: &'a str,
+    skip_reason: Option<&'a str>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize)]
+struct PrimitiveTimings {
+    trap_gen: u128,
+    delegate: u128,
+    sample_pre: u128,
+    verify: u128,
+}
+
 const fn period() -> DelegationPeriod {
     DelegationPeriod {
         start_secs: 1_700_000_000,
@@ -130,9 +237,6 @@ const fn verify_result(
 ) -> (&'static str, Option<&'static str>) {
     match verify_outcome {
         Ok(()) => ("passed", None),
-        Err(LatticePqError::NotImplemented { .. }) => {
-            ("skipped", Some("verify primitive not implemented"))
-        }
         Err(_) => ("failed", None),
     }
 }
@@ -157,6 +261,33 @@ fn fixture_id(profile: &str) -> &'static str {
         "V4_REFERENCE" => "fixture:v4_reference:representation-v2",
         _ => "fixture:unknown:representation-v2",
     }
+}
+
+fn hashed_fixture_id() -> String {
+    format!(
+        "hash:{}",
+        hex::encode(blake3::hash(ROUTE_FIXTURE_ID.as_bytes()).as_bytes())
+    )
+}
+
+fn route_fixture_entropy() -> TrapGenEntropy {
+    TrapGenEntropy::from_fixture_seed(ROUTE_FIXTURE_ID.as_bytes(), [0x5A; 32])
+}
+
+fn evidence_command_line<'a>(env_key: &str, default_command: &'a str) -> Cow<'a, str> {
+    std::env::var(env_key).map_or(Cow::Borrowed(default_command), Cow::Owned)
+}
+
+fn zone_id_hash(zone: &[u8; 32]) -> String {
+    hex::encode(blake3::hash(zone).as_bytes())
+}
+
+fn period_id_hash(period: DelegationPeriod) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/route-evidence-period-hash-v1|");
+    hasher.update(&period.start_secs.to_le_bytes());
+    hasher.update(&period.end_secs.to_le_bytes());
+    hex::encode(hasher.finalize().as_bytes())
 }
 
 const fn matrix_dimensions(
@@ -237,12 +368,15 @@ fn evidence_for(profile: &'static str, params: LatticeParams) -> EvidenceLog<'st
     let representation = params
         .representation_profile()
         .expect("test profiles must have bounded representation");
-    let (master_pub, master_trap) = trap_gen(params).expect("trap_gen scaffold succeeds");
+    let entropy = route_fixture_entropy();
+    let (master_pub, master_trap) =
+        trap_gen_with_entropy(params, &entropy).expect("route trap_gen succeeds");
     let zone = [0xA5; 32];
-    let (zone_pub, zone_trap) =
-        delegate(&master_pub, &master_trap, zone, period(), params).expect("delegate succeeds");
-    let preimage = LatticePreimage::fixture_zero(params).expect("fixture preimage length is valid");
+    let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period(), params)
+        .expect("route delegate succeeds");
     let op_hash = operation_hash(&zone, period(), b"op:read", b"principal:alice");
+    let preimage =
+        sample_pre(&zone_pub, &zone_trap, op_hash, params).expect("route SamplePre succeeds");
     let root_relation = master_trap.relation_summary(&master_pub);
     let child_relation = zone_trap.relation_summary(&zone_pub, &master_pub);
     let verify_outcome = verify(&zone_pub, op_hash, &preimage, period().start_secs, params);
@@ -255,7 +389,10 @@ fn evidence_for(profile: &'static str, params: LatticeParams) -> EvidenceLog<'st
     );
 
     EvidenceLog {
-        command_line: "rch exec -- env CARGO_TARGET_DIR=<redacted> cargo test -p fcp-crypto-pq representation_profile_evidence_jsonl_is_secret_free -- --nocapture",
+        command_line: evidence_command_line(
+            "FCP_CRYPTO_PQ_REPRESENTATION_EVIDENCE_COMMAND_LINE",
+            REPRESENTATION_EVIDENCE_COMMAND,
+        ),
         git_revision: git_revision(),
         artifact_path: ARTIFACT_PATH,
         fixture_id: fixture_id(profile),
@@ -318,6 +455,28 @@ fn write_jsonl_artifact(lines: &[String]) {
     fs::write(ARTIFACT_PATH, jsonl).expect("evidence artifact writes");
 }
 
+fn write_route_jsonl_artifact(lines: &[String]) {
+    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
+    let mut jsonl = lines.join("\n");
+    jsonl.push('\n');
+    fs::write(ROUTE_ARTIFACT_PATH, jsonl).expect("route evidence artifact writes");
+}
+
+fn write_public_matrix_jsonl_artifact(lines: &[String]) {
+    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
+    let mut jsonl = lines.join("\n");
+    jsonl.push('\n');
+    fs::write(PUBLIC_MATRIX_ARTIFACT_PATH, jsonl).expect("public matrix evidence artifact writes");
+}
+
+fn write_sample_pre_verify_jsonl_artifact(lines: &[String]) {
+    fs::create_dir_all("target/fcp-crypto-pq").expect("evidence artifact directory is writable");
+    let mut jsonl = lines.join("\n");
+    jsonl.push('\n');
+    fs::write(SAMPLE_PRE_VERIFY_ARTIFACT_PATH, jsonl)
+        .expect("SamplePre/Verify evidence artifact writes");
+}
+
 #[test]
 fn representation_profile_evidence_jsonl_is_secret_free() {
     let mut lines = Vec::new();
@@ -350,18 +509,18 @@ fn representation_profile_evidence_jsonl_is_secret_free() {
         );
         assert_eq!(
             evidence.relation_check_result.root,
-            TrapdoorRelationResult::FixtureOnly,
-            "root relation must be an explicit fixture-only summary"
+            TrapdoorRelationResult::MetadataConsistent,
+            "root relation must validate against the route public key"
         );
         assert_eq!(
             evidence.relation_check_result.child,
-            TrapdoorRelationResult::FixtureOnly,
-            "child relation must be an explicit fixture-only summary"
+            TrapdoorRelationResult::MetadataConsistent,
+            "child relation must validate against the route public key"
         );
         assert_eq!(
             evidence.trapdoor_norm_quality_bucket.root,
-            TrapdoorNormQualityBucket::FixtureSeed,
-            "fixture trapdoor must not claim a basis norm"
+            TrapdoorNormQualityBucket::Small,
+            "route trapdoor should report a bounded basis norm bucket"
         );
 
         let line = serde_json::to_string(&evidence).expect("evidence log serializes");
@@ -391,5 +550,1209 @@ fn representation_profile_evidence_jsonl_is_secret_free() {
             .len()
             > 0,
         "evidence artifact must be non-empty"
+    );
+}
+
+fn public_material_summary(
+    binding_hash: [u8; 32],
+    kind: PublicMatrixMaterialKind,
+    public_seed_bytes: usize,
+    tail_coefficients_bytes: usize,
+    material_digest: Option<[u8; 32]>,
+) -> PublicMaterialSummary {
+    PublicMaterialSummary {
+        kind,
+        public_seed_bytes,
+        tail_coefficients_bytes,
+        binding_hash_hex: hex::encode(binding_hash),
+        material_digest_hex: material_digest.map(hex::encode),
+    }
+}
+
+fn h_fixture_id(profile: &str, scenario: &str, h: OperationHash) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/sample-pre-verify-h-fixture-v1|");
+    hasher.update(profile.as_bytes());
+    hasher.update(scenario.as_bytes());
+    hasher.update(&h.0);
+    format!("hash:{}", hex::encode(hasher.finalize().as_bytes()))
+}
+
+const fn observed_norm_bucket(norm_squared: u128, bound_squared: u128) -> &'static str {
+    if norm_squared == 0 {
+        "zero"
+    } else if norm_squared > bound_squared {
+        "over_bound"
+    } else if norm_squared <= bound_squared / 4 {
+        "lte_25_percent_bound"
+    } else if norm_squared <= bound_squared / 2 {
+        "lte_50_percent_bound"
+    } else {
+        "lte_bound"
+    }
+}
+
+const fn verify_outcome_and_mapping(
+    outcome: &Result<(), LatticePqError>,
+) -> (&'static str, Option<&'static str>, &'static str) {
+    match outcome {
+        Ok(()) => ("passed", None, "passed"),
+        Err(LatticePqError::VerificationEquationFailed) => {
+            ("denied", Some("VerificationEquationFailed"), "denied")
+        }
+        Err(LatticePqError::PreimageNormTooLarge { .. }) => {
+            ("denied", Some("PreimageNormTooLarge"), "denied")
+        }
+        Err(LatticePqError::ParameterMismatch { .. }) => {
+            ("denied", Some("ParameterMismatch"), "denied")
+        }
+        Err(LatticePqError::OutsidePeriod { .. }) => ("denied", Some("OutsidePeriod"), "denied"),
+        Err(LatticePqError::InvalidEncodingLength { .. }) => {
+            ("denied", Some("InvalidEncodingLength"), "denied")
+        }
+        Err(LatticePqError::InvalidParameter { .. }) => {
+            ("denied", Some("InvalidParameter"), "denied")
+        }
+        Err(LatticePqError::UnsupportedPrimitiveRoute { .. }) => {
+            ("denied", Some("UnsupportedPrimitiveRoute"), "denied")
+        }
+        Err(LatticePqError::InvalidTrapdoorSecret { .. }) => {
+            ("denied", Some("InvalidTrapdoorSecret"), "denied")
+        }
+        Err(LatticePqError::RepresentationTooLarge { .. }) => {
+            ("denied", Some("RepresentationTooLarge"), "denied")
+        }
+        Err(LatticePqError::InvalidPeriod { .. }) => ("denied", Some("InvalidPeriod"), "denied"),
+        Err(LatticePqError::NotImplemented { .. }) => ("failed", Some("NotImplemented"), "failed"),
+    }
+}
+
+fn constant_preimage(params: LatticeParams, coeff: u64) -> LatticePreimage {
+    let coefficient_bytes = params
+        .coefficient_bytes()
+        .expect("test params have coefficient width");
+    let coeff_bytes = coeff.to_le_bytes();
+    let mut bytes = Vec::with_capacity(
+        params
+            .preimage_encoded_bytes()
+            .expect("test params have preimage length"),
+    );
+    for _ in 0..params.m {
+        bytes.extend_from_slice(&coeff_bytes[..coefficient_bytes]);
+    }
+    LatticePreimage::from_encoded_bytes(params, bytes).expect("constant preimage length is valid")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_pre_verify_evidence<'a>(
+    command_line: Cow<'a, str>,
+    profile: &'a str,
+    params: LatticeParams,
+    representation: &LatticeRepresentationProfile,
+    zone: &[u8; 32],
+    period: DelegationPeriod,
+    scenario: &'a str,
+    h: OperationHash,
+    norm_bound_squared: u128,
+    observed_norm_squared: u128,
+    primitive_timings_ms: PrimitiveTimings,
+    outcome: &Result<(), LatticePqError>,
+    skip_reason: Option<&'a str>,
+) -> SamplePreVerifyEvidenceLog<'a> {
+    let (verify_outcome, error_mapping, result) = verify_outcome_and_mapping(outcome);
+    SamplePreVerifyEvidenceLog {
+        command_line,
+        git_revision: git_revision(),
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        parameter_profile: profile,
+        fixture_id: hashed_fixture_id(),
+        zone_id_hash: zone_id_hash(zone),
+        period_id_hash: period_id_hash(period),
+        h_fixture_id: h_fixture_id(profile, scenario, h),
+        matrix_dimensions: matrix_dimensions(params, representation),
+        norm_bound_squared,
+        observed_norm_squared,
+        observed_norm_bucket: observed_norm_bucket(observed_norm_squared, norm_bound_squared),
+        primitive_timings_ms,
+        verify_outcome,
+        error_mapping,
+        timeout_cancel_result: "not_applicable_sync_arithmetic",
+        cleanup: "artifact_rewritten",
+        result,
+        skip_reason,
+    }
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Evidence scenarios are intentionally explicit.
+fn public_matrix_reconstruction_evidence_jsonl_is_secret_free() {
+    let command_line = evidence_command_line(
+        "FCP_CRYPTO_PQ_PUBLIC_MATRIX_EVIDENCE_COMMAND_LINE",
+        PUBLIC_MATRIX_EVIDENCE_COMMAND,
+    );
+    let started = Instant::now();
+    let zone = [0xA5; 32];
+    let period = period();
+    let small = LatticeParams::SMALL_TEST;
+    let small_representation = small
+        .representation_profile()
+        .expect("small profile representation is bounded");
+    let entropy = route_fixture_entropy();
+    let (master_pub, master_trap) =
+        trap_gen_with_entropy(small, &entropy).expect("SMALL_TEST route TrapGen succeeds");
+    let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, small)
+        .expect("SMALL_TEST route Delegate succeeds");
+    let material_digest = reconstruct_public_matrix_digest(&zone_pub, small)
+        .expect("public matrix digest reconstructs");
+    let abar_coeff = reconstruct_public_matrix_coefficient(&zone_pub, 0, 0, small)
+        .expect("A_bar coefficient reconstructs");
+    let tail_coeff = reconstruct_public_matrix_coefficient(&zone_pub, 0, small.m - small.n, small)
+        .expect("tail coefficient reconstructs");
+    assert!(abar_coeff < small.q);
+    assert!(tail_coeff < small.q);
+    let child_relation = zone_trap.relation_summary(&zone_pub, &master_pub);
+    assert_eq!(
+        child_relation.result,
+        TrapdoorRelationResult::MetadataConsistent
+    );
+
+    let base_success = PublicMatrixEvidenceLog {
+        command_line: command_line.clone(),
+        git_revision: git_revision(),
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+        parameter_profile: primitive_route_profile_name(small),
+        fixture_id: hashed_fixture_id(),
+        zone_id_hash: zone_id_hash(&zone),
+        period_id_hash: period_id_hash(period),
+        public_material_summary: public_material_summary(
+            zone_pub.hash,
+            zone_pub.public_matrix.kind,
+            zone_pub.public_matrix.seed().len(),
+            zone_pub.public_matrix.tail_coefficients_len(),
+            Some(material_digest),
+        ),
+        matrix_dimensions: matrix_dimensions(small, &small_representation),
+        child_relation_result: Some(child_relation.result),
+        reconstruction_result: "passed",
+        allocation_summary: allocation_estimate(&small_representation),
+        timing_ms: started.elapsed().as_millis(),
+        result: "passed",
+        skip_reason: None,
+    };
+    let mut malformed_tail = zone_pub.clone();
+    malformed_tail.public_matrix.tail_coefficients.pop();
+    let malformed_tail_result = reconstruct_public_matrix_digest(&malformed_tail, small);
+    assert!(matches!(
+        malformed_tail_result,
+        Err(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_tail",
+            ..
+        })
+    ));
+
+    let mut wrong_binding = zone_pub.clone();
+    wrong_binding.hash[0] ^= 0x80;
+    let wrong_binding_relation = zone_trap.relation_summary(&wrong_binding, &master_pub);
+    assert_eq!(
+        wrong_binding_relation.result,
+        TrapdoorRelationResult::MetadataMismatch
+    );
+
+    let mut wrong_seed = zone_pub.clone();
+    wrong_seed.public_matrix.public_seed[0] ^= 0x01;
+    assert_ne!(
+        reconstruct_public_matrix_digest(&wrong_seed, small).expect("wrong seed still encodes"),
+        material_digest,
+        "public seed must affect verifier reconstruction"
+    );
+    let wrong_seed_relation = zone_trap.relation_summary(&wrong_seed, &master_pub);
+    assert_eq!(
+        wrong_seed_relation.result,
+        TrapdoorRelationResult::MetadataMismatch
+    );
+
+    let mut wrong_route = zone_pub;
+    wrong_route.public_matrix.route_revision += 1;
+    let wrong_route_result = reconstruct_public_matrix_digest(&wrong_route, small);
+    assert!(matches!(
+        wrong_route_result,
+        Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_material",
+            ..
+        })
+    ));
+
+    let v4 = LatticeParams::V4_REFERENCE;
+    let v4_representation = v4
+        .representation_profile()
+        .expect("V4 representation remains allocation bounded");
+    let (v4_master_pub, v4_master_trap) =
+        trap_gen_with_entropy(v4, &entropy).expect("V4 route TrapGen succeeds");
+    let (v4_zone_pub, v4_zone_trap) = delegate(&v4_master_pub, &v4_master_trap, zone, period, v4)
+        .expect("V4 route Delegate succeeds");
+    let v4_material_digest =
+        reconstruct_public_matrix_digest(&v4_zone_pub, v4).expect("V4 digest reconstructs");
+    let v4_abar_coeff = reconstruct_public_matrix_coefficient(&v4_zone_pub, 0, 0, v4)
+        .expect("V4 A_bar coefficient reconstructs");
+    let v4_tail_coeff = reconstruct_public_matrix_coefficient(&v4_zone_pub, 0, v4.m - v4.n, v4)
+        .expect("V4 tail coefficient reconstructs");
+    assert!(v4_abar_coeff < v4.q);
+    assert!(v4_tail_coeff < v4.q);
+    let v4_child_relation = v4_zone_trap.relation_summary(&v4_zone_pub, &v4_master_pub);
+    assert_eq!(
+        v4_child_relation.result,
+        TrapdoorRelationResult::MetadataConsistent
+    );
+    assert_eq!(
+        v4_zone_pub.public_matrix.tail_coefficients_len(),
+        usize::try_from(v4.n).expect("n fits")
+            * usize::try_from(v4.n).expect("n fits")
+            * v4.coefficient_bytes().expect("V4 coefficient bytes")
+    );
+
+    let v4_success = PublicMatrixEvidenceLog {
+        command_line: command_line.clone(),
+        git_revision: git_revision(),
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+        parameter_profile: primitive_route_profile_name(v4),
+        fixture_id: hashed_fixture_id(),
+        zone_id_hash: zone_id_hash(&zone),
+        period_id_hash: period_id_hash(period),
+        public_material_summary: public_material_summary(
+            v4_zone_pub.hash,
+            v4_zone_pub.public_matrix.kind,
+            v4_zone_pub.public_matrix.seed().len(),
+            v4_zone_pub.public_matrix.tail_coefficients_len(),
+            Some(v4_material_digest),
+        ),
+        matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+        child_relation_result: Some(v4_child_relation.result),
+        reconstruction_result: "passed",
+        allocation_summary: allocation_estimate(&v4_representation),
+        timing_ms: started.elapsed().as_millis(),
+        result: "passed",
+        skip_reason: None,
+    };
+
+    let mut v4_malformed_tail = v4_zone_pub.clone();
+    v4_malformed_tail.public_matrix.tail_coefficients.pop();
+    let v4_malformed_tail_result = reconstruct_public_matrix_digest(&v4_malformed_tail, v4);
+    assert!(matches!(
+        v4_malformed_tail_result,
+        Err(LatticePqError::InvalidEncodingLength {
+            material: "public_matrix_tail",
+            ..
+        })
+    ));
+
+    let mut v4_wrong_binding = v4_zone_pub.clone();
+    v4_wrong_binding.hash[0] ^= 0x80;
+    let v4_wrong_binding_relation =
+        v4_zone_trap.relation_summary(&v4_wrong_binding, &v4_master_pub);
+    assert_eq!(
+        v4_wrong_binding_relation.result,
+        TrapdoorRelationResult::MetadataMismatch
+    );
+
+    let mut v4_wrong_seed = v4_zone_pub.clone();
+    v4_wrong_seed.public_matrix.public_seed[0] ^= 0x01;
+    assert_ne!(
+        reconstruct_public_matrix_digest(&v4_wrong_seed, v4).expect("wrong V4 seed encodes"),
+        v4_material_digest,
+        "V4 public seed must affect verifier reconstruction"
+    );
+    let v4_wrong_seed_relation = v4_zone_trap.relation_summary(&v4_wrong_seed, &v4_master_pub);
+    assert_eq!(
+        v4_wrong_seed_relation.result,
+        TrapdoorRelationResult::MetadataMismatch
+    );
+
+    let mut v4_wrong_route = v4_zone_pub;
+    v4_wrong_route.public_matrix.route_revision += 1;
+    let v4_wrong_route_result = reconstruct_public_matrix_digest(&v4_wrong_route, v4);
+    assert!(matches!(
+        v4_wrong_route_result,
+        Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_material",
+            ..
+        })
+    ));
+
+    let mut custom = LatticeParams::V4_REFERENCE;
+    custom.depth = 3;
+    let custom_representation = custom
+        .representation_profile()
+        .expect("custom representation remains allocation bounded");
+    let (fixture_master_pub, fixture_master_trap) =
+        trap_gen_fixture(custom).expect("fixture custom setup succeeds");
+    let (fixture_zone_pub, _) = delegate_fixture(
+        &fixture_master_pub,
+        &fixture_master_trap,
+        zone,
+        period,
+        custom,
+    )
+    .expect("fixture custom delegate succeeds");
+    let unsupported_custom = reconstruct_public_matrix_coefficient(&fixture_zone_pub, 0, 0, custom);
+    assert!(matches!(
+        unsupported_custom,
+        Err(LatticePqError::UnsupportedPrimitiveRoute { .. })
+    ));
+
+    let mut lines = vec![
+        serde_json::to_string(&base_success).expect("evidence serializes"),
+        serde_json::to_string(&v4_success).expect("V4 evidence serializes"),
+    ];
+
+    for evidence in [
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(small),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                malformed_tail.hash,
+                malformed_tail.public_matrix.kind,
+                malformed_tail.public_matrix.seed().len(),
+                malformed_tail.public_matrix.tail_coefficients_len(),
+                None,
+            ),
+            matrix_dimensions: matrix_dimensions(small, &small_representation),
+            child_relation_result: None,
+            reconstruction_result: "invalid_encoding_length",
+            allocation_summary: allocation_estimate(&small_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("malformed public tail"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(small),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                wrong_binding.hash,
+                wrong_binding.public_matrix.kind,
+                wrong_binding.public_matrix.seed().len(),
+                wrong_binding.public_matrix.tail_coefficients_len(),
+                Some(reconstruct_public_matrix_digest(&wrong_binding, small).unwrap()),
+            ),
+            matrix_dimensions: matrix_dimensions(small, &small_representation),
+            child_relation_result: Some(wrong_binding_relation.result),
+            reconstruction_result: "binding_mismatch",
+            allocation_summary: allocation_estimate(&small_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("wrong public binding hash"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(small),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                wrong_seed.hash,
+                wrong_seed.public_matrix.kind,
+                wrong_seed.public_matrix.seed().len(),
+                wrong_seed.public_matrix.tail_coefficients_len(),
+                Some(reconstruct_public_matrix_digest(&wrong_seed, small).unwrap()),
+            ),
+            matrix_dimensions: matrix_dimensions(small, &small_representation),
+            child_relation_result: Some(wrong_seed_relation.result),
+            reconstruction_result: "public_seed_mismatch",
+            allocation_summary: allocation_estimate(&small_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("wrong public seed"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(small),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                wrong_route.hash,
+                wrong_route.public_matrix.kind,
+                wrong_route.public_matrix.seed().len(),
+                wrong_route.public_matrix.tail_coefficients_len(),
+                None,
+            ),
+            matrix_dimensions: matrix_dimensions(small, &small_representation),
+            child_relation_result: None,
+            reconstruction_result: "route_mismatch",
+            allocation_summary: allocation_estimate(&small_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("wrong route revision"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(v4),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                v4_malformed_tail.hash,
+                v4_malformed_tail.public_matrix.kind,
+                v4_malformed_tail.public_matrix.seed().len(),
+                v4_malformed_tail.public_matrix.tail_coefficients_len(),
+                None,
+            ),
+            matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+            child_relation_result: None,
+            reconstruction_result: "invalid_encoding_length",
+            allocation_summary: allocation_estimate(&v4_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("V4 malformed public tail"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(v4),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                v4_wrong_binding.hash,
+                v4_wrong_binding.public_matrix.kind,
+                v4_wrong_binding.public_matrix.seed().len(),
+                v4_wrong_binding.public_matrix.tail_coefficients_len(),
+                Some(reconstruct_public_matrix_digest(&v4_wrong_binding, v4).unwrap()),
+            ),
+            matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+            child_relation_result: Some(v4_wrong_binding_relation.result),
+            reconstruction_result: "binding_mismatch",
+            allocation_summary: allocation_estimate(&v4_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("V4 wrong public binding hash"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(v4),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                v4_wrong_seed.hash,
+                v4_wrong_seed.public_matrix.kind,
+                v4_wrong_seed.public_matrix.seed().len(),
+                v4_wrong_seed.public_matrix.tail_coefficients_len(),
+                Some(reconstruct_public_matrix_digest(&v4_wrong_seed, v4).unwrap()),
+            ),
+            matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+            child_relation_result: Some(v4_wrong_seed_relation.result),
+            reconstruction_result: "public_seed_mismatch",
+            allocation_summary: allocation_estimate(&v4_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("V4 wrong public seed"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(v4),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                v4_wrong_route.hash,
+                v4_wrong_route.public_matrix.kind,
+                v4_wrong_route.public_matrix.seed().len(),
+                v4_wrong_route.public_matrix.tail_coefficients_len(),
+                None,
+            ),
+            matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+            child_relation_result: None,
+            reconstruction_result: "route_mismatch",
+            allocation_summary: allocation_estimate(&v4_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("V4 wrong route revision"),
+        },
+        PublicMatrixEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            public_matrix_material_version: PUBLIC_MATRIX_MATERIAL_VERSION,
+            parameter_profile: primitive_route_profile_name(custom),
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            public_material_summary: public_material_summary(
+                fixture_zone_pub.hash,
+                fixture_zone_pub.public_matrix.kind,
+                fixture_zone_pub.public_matrix.seed().len(),
+                fixture_zone_pub.public_matrix.tail_coefficients_len(),
+                None,
+            ),
+            matrix_dimensions: matrix_dimensions(custom, &custom_representation),
+            child_relation_result: None,
+            reconstruction_result: "unsupported_profile",
+            allocation_summary: allocation_estimate(&custom_representation),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some("unsupported custom profile"),
+        },
+    ] {
+        lines.push(serde_json::to_string(&evidence).expect("denial evidence serializes"));
+    }
+
+    for line in &lines {
+        assert!(
+            !line.contains("/Users/") && !line.contains("/tmp/"),
+            "public matrix evidence must not expose local paths: {line}"
+        );
+        assert!(
+            !line.contains("trapdoor_coefficients")
+                && !line.contains("secret_seed")
+                && !line.contains("expanded_secret_matrix")
+                && !line.contains("preimage_coefficients"),
+            "public matrix evidence must not expose forbidden secret labels: {line}"
+        );
+        assert!(
+            !line.contains("op:") && !line.contains("principal:") && !line.contains("alice"),
+            "public matrix evidence must not expose raw operation/principal text or PII: {line}"
+        );
+        assert!(
+            !line.contains("tail_coefficients\":\""),
+            "public matrix evidence must summarize public material instead of dumping it: {line}"
+        );
+        eprintln!("{line}");
+    }
+    write_public_matrix_jsonl_artifact(&lines);
+    assert!(
+        fs::metadata(PUBLIC_MATRIX_ARTIFACT_PATH)
+            .expect("public matrix evidence artifact exists")
+            .len()
+            > 0,
+        "public matrix evidence artifact must be non-empty"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Keep SamplePre/Verify evidence cases explicit.
+fn sample_pre_verify_evidence_jsonl_is_secret_free() {
+    let command_line = evidence_command_line(
+        "FCP_CRYPTO_PQ_SAMPLE_PRE_VERIFY_EVIDENCE_COMMAND_LINE",
+        SAMPLE_PRE_VERIFY_EVIDENCE_COMMAND,
+    );
+    let zone = [0xA5; 32];
+    let period = period();
+    let mut lines = Vec::new();
+
+    for (profile, params) in [
+        ("SMALL_TEST", LatticeParams::SMALL_TEST),
+        ("V4_REFERENCE", LatticeParams::V4_REFERENCE),
+    ] {
+        let representation = params
+            .representation_profile()
+            .expect("profile representation is bounded");
+        let entropy = route_fixture_entropy();
+        let trap_gen_started = Instant::now();
+        let (master_pub, master_trap) =
+            trap_gen_with_entropy(params, &entropy).expect("route TrapGen succeeds");
+        let trap_gen_ms = trap_gen_started.elapsed().as_millis();
+
+        let delegate_started = Instant::now();
+        let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, params)
+            .expect("route Delegate succeeds");
+        let delegate_ms = delegate_started.elapsed().as_millis();
+
+        let h = operation_hash(
+            &zone,
+            period,
+            b"sample-pre-verify:read",
+            b"sample-principal",
+        );
+        let rhs = expand_operation_hash_rhs(h, params);
+        assert_eq!(
+            rhs.len(),
+            usize::try_from(params.n).expect("u32 n fits in usize")
+        );
+
+        let sample_started = Instant::now();
+        let preimage =
+            sample_pre(&zone_pub, &zone_trap, h, params).expect("route SamplePre succeeds");
+        let sample_pre_ms = sample_started.elapsed().as_millis();
+        let norm_bound_squared = preimage_norm_bound_squared(params).expect("norm bound computes");
+        let observed_norm_squared =
+            preimage_norm_squared(params, &preimage).expect("sample norm computes");
+        assert!(
+            observed_norm_squared <= norm_bound_squared,
+            "sampled norm must fit bound"
+        );
+
+        let verify_started = Instant::now();
+        let success = verify(&zone_pub, h, &preimage, period.start_secs, params);
+        let verify_ms = verify_started.elapsed().as_millis();
+        assert!(success.is_ok(), "success case must verify: {success:?}");
+        let timings = PrimitiveTimings {
+            trap_gen: trap_gen_ms,
+            delegate: delegate_ms,
+            sample_pre: sample_pre_ms,
+            verify: verify_ms,
+        };
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "success",
+            h,
+            norm_bound_squared,
+            observed_norm_squared,
+            timings,
+            &success,
+            None,
+        );
+        lines.push(serde_json::to_string(&evidence).expect("success evidence serializes"));
+
+        let forged_equation = LatticePreimage::fixture_zero(params).expect("zero preimage exists");
+        let verify_started = Instant::now();
+        let forged_equation_result =
+            verify(&zone_pub, h, &forged_equation, period.start_secs, params);
+        let forged_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                forged_equation_result,
+                Err(LatticePqError::VerificationEquationFailed)
+            ),
+            "forged equation must fail with equation mapping: {forged_equation_result:?}"
+        );
+        let forged_norm =
+            preimage_norm_squared(params, &forged_equation).expect("forged norm computes");
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "forged equation",
+            h,
+            norm_bound_squared,
+            forged_norm,
+            PrimitiveTimings {
+                verify: forged_verify_ms,
+                ..timings
+            },
+            &forged_equation_result,
+            Some("forged equation"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("forged evidence serializes"));
+
+        let too_large = constant_preimage(params, params.q / 2);
+        let verify_started = Instant::now();
+        let over_norm_result = verify(&zone_pub, h, &too_large, period.start_secs, params);
+        let over_norm_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                over_norm_result,
+                Err(LatticePqError::PreimageNormTooLarge { .. })
+            ),
+            "over-norm preimage must map to norm error: {over_norm_result:?}"
+        );
+        let over_norm = preimage_norm_squared(params, &too_large).expect("over norm computes");
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "wrong norm",
+            h,
+            norm_bound_squared,
+            over_norm,
+            PrimitiveTimings {
+                verify: over_norm_verify_ms,
+                ..timings
+            },
+            &over_norm_result,
+            Some("wrong norm"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("norm evidence serializes"));
+
+        let wrong_zone_h = operation_hash(
+            &[0xA6; 32],
+            period,
+            b"sample-pre-verify:read",
+            b"sample-principal",
+        );
+        let verify_started = Instant::now();
+        let wrong_zone_result = verify(
+            &zone_pub,
+            wrong_zone_h,
+            &preimage,
+            period.start_secs,
+            params,
+        );
+        let wrong_zone_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                wrong_zone_result,
+                Err(LatticePqError::VerificationEquationFailed)
+            ),
+            "wrong zone RHS must fail equation: {wrong_zone_result:?}"
+        );
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "wrong zone",
+            wrong_zone_h,
+            norm_bound_squared,
+            observed_norm_squared,
+            PrimitiveTimings {
+                verify: wrong_zone_verify_ms,
+                ..timings
+            },
+            &wrong_zone_result,
+            Some("wrong zone"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("wrong-zone evidence serializes"));
+
+        let wrong_period = DelegationPeriod {
+            start_secs: period.start_secs + 60,
+            end_secs: period.end_secs + 60,
+        };
+        let wrong_period_h = operation_hash(
+            &zone,
+            wrong_period,
+            b"sample-pre-verify:read",
+            b"sample-principal",
+        );
+        let verify_started = Instant::now();
+        let wrong_period_result = verify(
+            &zone_pub,
+            wrong_period_h,
+            &preimage,
+            period.start_secs,
+            params,
+        );
+        let wrong_period_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                wrong_period_result,
+                Err(LatticePqError::VerificationEquationFailed)
+            ),
+            "wrong period RHS must fail equation: {wrong_period_result:?}"
+        );
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "wrong period",
+            wrong_period_h,
+            norm_bound_squared,
+            observed_norm_squared,
+            PrimitiveTimings {
+                verify: wrong_period_verify_ms,
+                ..timings
+            },
+            &wrong_period_result,
+            Some("wrong period"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("wrong-period evidence serializes"));
+
+        let mut malformed = preimage.clone();
+        malformed.bytes.pop();
+        let verify_started = Instant::now();
+        let malformed_result = verify(&zone_pub, h, &malformed, period.start_secs, params);
+        let malformed_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                malformed_result,
+                Err(LatticePqError::InvalidEncodingLength {
+                    material: "preimage",
+                    ..
+                })
+            ),
+            "malformed preimage must fail length mapping: {malformed_result:?}"
+        );
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "malformed preimage",
+            h,
+            norm_bound_squared,
+            0,
+            PrimitiveTimings {
+                verify: malformed_verify_ms,
+                ..timings
+            },
+            &malformed_result,
+            Some("malformed preimage"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("malformed evidence serializes"));
+
+        let verify_started = Instant::now();
+        let outside_period_result = verify(&zone_pub, h, &preimage, period.end_secs, params);
+        let outside_period_verify_ms = verify_started.elapsed().as_millis();
+        assert!(
+            matches!(
+                outside_period_result,
+                Err(LatticePqError::OutsidePeriod { .. })
+            ),
+            "outside period must fail before arithmetic: {outside_period_result:?}"
+        );
+        let evidence = sample_pre_verify_evidence(
+            command_line.clone(),
+            profile,
+            params,
+            &representation,
+            &zone,
+            period,
+            "outside period",
+            h,
+            norm_bound_squared,
+            observed_norm_squared,
+            PrimitiveTimings {
+                verify: outside_period_verify_ms,
+                ..timings
+            },
+            &outside_period_result,
+            Some("outside period"),
+        );
+        lines.push(serde_json::to_string(&evidence).expect("outside-period evidence serializes"));
+    }
+
+    for line in &lines {
+        assert!(
+            !line.contains("/Users/") && !line.contains("/tmp/"),
+            "SamplePre/Verify evidence must not expose local paths: {line}"
+        );
+        assert!(
+            !line.contains("trapdoor_coefficients")
+                && !line.contains("secret_seed")
+                && !line.contains("expanded_secret_matrix")
+                && !line.contains("preimage_coefficients")
+                && !line.contains("preimage_bytes")
+                && !line.contains("bytes\":\""),
+            "SamplePre/Verify evidence must not expose preimage/trapdoor material: {line}"
+        );
+        assert!(
+            !line.contains("op:") && !line.contains("principal:") && !line.contains("alice"),
+            "SamplePre/Verify evidence must not expose raw operation/principal text or PII: {line}"
+        );
+        eprintln!("{line}");
+    }
+    write_sample_pre_verify_jsonl_artifact(&lines);
+    assert!(
+        fs::metadata(SAMPLE_PRE_VERIFY_ARTIFACT_PATH)
+            .expect("SamplePre/Verify evidence artifact exists")
+            .len()
+            > 0,
+        "SamplePre/Verify evidence artifact must be non-empty"
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // Keep the e2e evidence scenarios linear and auditable.
+fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
+    let command_line = evidence_command_line(
+        "FCP_CRYPTO_PQ_ROUTE_EVIDENCE_COMMAND_LINE",
+        ROUTE_EVIDENCE_COMMAND,
+    );
+    let zone = [0xA5; 32];
+    let period = period();
+    let started = Instant::now();
+    let small = LatticeParams::SMALL_TEST;
+    let mut unsupported_params = LatticeParams::V4_REFERENCE;
+    unsupported_params.depth = 3;
+    let small_representation = small
+        .representation_profile()
+        .expect("small profile representation is bounded");
+    let unsupported_representation = unsupported_params
+        .representation_profile()
+        .expect("unsupported representation remains allocation bounded");
+    let entropy = route_fixture_entropy();
+    let (master_pub, master_trap) =
+        trap_gen_with_entropy(small, &entropy).expect("SMALL_TEST route TrapGen succeeds");
+    let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, small)
+        .expect("SMALL_TEST route Delegate succeeds");
+    let root_relation = master_trap.relation_summary(&master_pub);
+    let child_relation = zone_trap.relation_summary(&zone_pub, &master_pub);
+    let base_success = RouteEvidenceLog {
+        command_line: command_line.clone(),
+        git_revision: git_revision(),
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        parameter_profile: primitive_route_profile_name(small),
+        fixture_id: hashed_fixture_id(),
+        zone_id_hash: zone_id_hash(&zone),
+        period_id_hash: period_id_hash(period),
+        matrix_dimensions: matrix_dimensions(small, &small_representation),
+        root_relation_result: Some(root_relation.result),
+        child_relation_result: Some(child_relation.result),
+        trapdoor_norm_quality_bucket: RouteTrapdoorNormQualityEvidence {
+            root: Some(root_relation.norm_quality_bucket),
+            child: Some(child_relation.norm_quality_bucket),
+        },
+        allocation_summary: AllocationEstimate {
+            public_matrix_expanded: small_representation.public_matrix_expanded_bytes,
+            max_public_matrix_expanded: 64 * 1024 * 1024,
+            preimage_encoded: small_representation.preimage_encoded_bytes,
+            max_preimage_encoded: 1024 * 1024,
+        },
+        timing_ms: started.elapsed().as_millis(),
+        result: "passed",
+        skip_reason: None,
+    };
+    assert_eq!(
+        base_success.root_relation_result,
+        Some(TrapdoorRelationResult::MetadataConsistent)
+    );
+    assert_eq!(
+        base_success.child_relation_result,
+        Some(TrapdoorRelationResult::MetadataConsistent)
+    );
+
+    let mut lines = vec![serde_json::to_string(&base_success).expect("route evidence serializes")];
+
+    let malformed_root =
+        fcp_crypto_pq::MasterTrapdoor::from_basis_envelope(small, master_pub.hash, vec![0xAA; 32])
+            .expect("malformed root envelope has valid length");
+    let malformed_child = fcp_crypto_pq::ZonePeriodTrapdoor::from_basis_envelope(
+        small,
+        master_pub.hash,
+        zone_pub.hash,
+        vec![0x55; 32],
+    )
+    .expect("malformed child envelope has valid length");
+    let denial_scenarios: Vec<(
+        &str,
+        Option<TrapdoorRelationResult>,
+        Option<TrapdoorRelationResult>,
+    )> = vec![
+        (
+            "malformed root basis",
+            Some(malformed_root.relation_summary(&master_pub).result),
+            None,
+        ),
+        (
+            "malformed child basis",
+            None,
+            Some(
+                malformed_child
+                    .relation_summary(&zone_pub, &master_pub)
+                    .result,
+            ),
+        ),
+        ("wrong parent", None, {
+            let other_entropy =
+                TrapGenEntropy::from_fixture_seed(b"fixture:route-wrong-parent", [0xB6; 32]);
+            let (other_parent_pub, _) = trap_gen_with_entropy(small, &other_entropy)
+                .expect("alternate parent route setup succeeds");
+            Some(
+                zone_trap
+                    .relation_summary(&zone_pub, &other_parent_pub)
+                    .result,
+            )
+        }),
+        ("wrong zone", None, {
+            let mut wrong_zone_pub = zone_pub.clone();
+            wrong_zone_pub.zone_id[0] ^= 0xFF;
+            Some(
+                zone_trap
+                    .relation_summary(&wrong_zone_pub, &master_pub)
+                    .result,
+            )
+        }),
+        ("wrong period", None, {
+            let mut wrong_period_pub = zone_pub.clone();
+            wrong_period_pub.period.end_secs += 1;
+            Some(
+                zone_trap
+                    .relation_summary(&wrong_period_pub, &master_pub)
+                    .result,
+            )
+        }),
+        ("wrong parameter profile", None, {
+            let mut wrong_params_pub = zone_pub.clone();
+            wrong_params_pub.params.q = 263;
+            Some(
+                zone_trap
+                    .relation_summary(&wrong_params_pub, &master_pub)
+                    .result,
+            )
+        }),
+        ("unsupported custom profile", None, None),
+        ("fixture-only trapdoor used on production route", None, None),
+    ];
+
+    for (scenario, root_result, child_result) in denial_scenarios {
+        match scenario {
+            "unsupported custom profile" => {
+                let err = trap_gen_with_entropy(unsupported_params, &route_fixture_entropy())
+                    .expect_err("unsupported custom route must fail closed");
+                assert!(matches!(
+                    err,
+                    LatticePqError::UnsupportedPrimitiveRoute { .. }
+                ));
+            }
+            "fixture-only trapdoor used on production route" => {
+                let (fixture_pub, fixture_trap) =
+                    trap_gen_fixture(small).expect("fixture setup succeeds");
+                let err = delegate(&fixture_pub, &fixture_trap, zone, period, small)
+                    .expect_err("fixture parent must not enter production delegate");
+                assert!(matches!(
+                    err,
+                    LatticePqError::InvalidTrapdoorSecret {
+                        material: "fixture_parent_trapdoor",
+                        ..
+                    }
+                ));
+            }
+            _ => {
+                if let Some(result) = root_result {
+                    assert_eq!(result, TrapdoorRelationResult::MetadataMismatch);
+                }
+                if let Some(result) = child_result {
+                    assert_eq!(result, TrapdoorRelationResult::MetadataMismatch);
+                }
+            }
+        }
+
+        let evidence = RouteEvidenceLog {
+            command_line: command_line.clone(),
+            git_revision: git_revision(),
+            primitive_route_id: PRIMITIVE_ROUTE_ID,
+            primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+            representation_version: LATTICE_REPRESENTATION_VERSION,
+            parameter_profile: if scenario == "unsupported custom profile" {
+                primitive_route_profile_name(unsupported_params)
+            } else {
+                primitive_route_profile_name(small)
+            },
+            fixture_id: hashed_fixture_id(),
+            zone_id_hash: zone_id_hash(&zone),
+            period_id_hash: period_id_hash(period),
+            matrix_dimensions: matrix_dimensions(
+                if scenario == "unsupported custom profile" {
+                    unsupported_params
+                } else {
+                    small
+                },
+                &if scenario == "unsupported custom profile" {
+                    unsupported_representation
+                } else {
+                    small_representation
+                },
+            ),
+            root_relation_result: root_result,
+            child_relation_result: child_result,
+            trapdoor_norm_quality_bucket: RouteTrapdoorNormQualityEvidence {
+                root: root_result.map(|_| root_relation.norm_quality_bucket),
+                child: child_result.map(|_| child_relation.norm_quality_bucket),
+            },
+            allocation_summary: allocation_estimate(&if scenario == "unsupported custom profile" {
+                unsupported_representation
+            } else {
+                small_representation
+            }),
+            timing_ms: started.elapsed().as_millis(),
+            result: "denied",
+            skip_reason: Some(scenario),
+        };
+        let line = serde_json::to_string(&evidence).expect("denial evidence serializes");
+        lines.push(line);
+    }
+
+    for line in &lines {
+        assert!(
+            !line.contains("/Users/") && !line.contains("/tmp/"),
+            "route evidence must not expose local paths: {line}"
+        );
+        assert!(
+            !line.contains("trapdoor_coefficients")
+                && !line.contains("secret_seed")
+                && !line.contains("expanded_secret_matrix"),
+            "route evidence must not expose forbidden secret labels: {line}"
+        );
+        assert!(
+            !line.contains("op:") && !line.contains("principal:") && !line.contains("alice"),
+            "route evidence must not expose raw operation/principal text or PII: {line}"
+        );
+        assert!(
+            !line.contains("fixture:small_test") && !line.contains("route-wrong-parent"),
+            "route evidence must hash fixture ids instead of logging raw names: {line}"
+        );
+        eprintln!("{line}");
+    }
+    write_route_jsonl_artifact(&lines);
+    assert!(
+        fs::metadata(ROUTE_ARTIFACT_PATH)
+            .expect("route evidence artifact exists")
+            .len()
+            > 0,
+        "route evidence artifact must be non-empty"
     );
 }

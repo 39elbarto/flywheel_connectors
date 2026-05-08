@@ -11,19 +11,22 @@
 //! - **ML-DSA-65** — V4 owner-key candidate. Real FIPS 204 primitives
 //!   via [`fcp_crypto::ml_dsa`] (`RustCrypto` `ml-dsa` crate).
 //! - **Lattice-trapdoor** — V4 capability-delegation candidate. Calls
-//!   into [`fcp_crypto_pq`] (br-kyopb.1.3.1 stubs). The cryptographic
-//!   bodies of `sample_pre` / `verify` currently return
+//!   into [`fcp_crypto_pq`]. This benchmark keeps the explicit fixture-only
+//!   setup/delegation helpers as a bridge-cost floor even though the production
+//!   V4 TrapGen/Delegate public-matrix route now exists. `sample_pre` / `verify`
+//!   currently return
 //!   `LatticePqError::NotImplemented`; the structural / hashing /
-//!   parameter-check work IS real (SHAKE256 derivation of public-matrix
-//!   placeholders, period-bounds checks, parameter agreement, etc.).
+//!   parameter-check work IS real (public-matrix seed derivation,
+//!   period-bounds checks, parameter agreement, etc.).
 //!
 //! ## What the lattice numbers mean — IMPORTANT
 //!
-//! Because `sample_pre` and `verify` are stubs, the lattice-trapdoor
-//! group reflects **the cost of the stub primitives, NOT the cost the
-//! real Micciancio-Peikert `TrapGen` / Cash-Hofheinz-Kiltz-Peikert
-//! basis-shortening / Gentry-Peikert-Vaikuntanathan `SamplePre` will
-//! incur once they land** (kyopb.1.3.1.x or follow-up work).
+//! Because this benchmark's `V4_REFERENCE` TrapGen/Delegate path is
+//! deliberately fixture-only and `sample_pre` / `verify` are stubs, the
+//! lattice-trapdoor group reflects **the cost of the bridge-floor primitives,
+//! NOT the cost the real large-profile Micciancio-Peikert `TrapGen` /
+//! Cash-Hofheinz-Kiltz-Peikert basis-shortening /
+//! Gentry-Peikert-Vaikuntanathan `SamplePre` will incur once they land**.
 //!
 //! This bench's lattice numbers are therefore a **lower bound** on
 //! actual production throughput — they represent only the bridge
@@ -57,8 +60,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use fcp_crypto::{Ed25519SigningKey, Ed25519VerifyingKey, MlDsa65SigningKey, MlDsa65VerifyingKey};
 use fcp_crypto_pq::{
     DelegationPeriod, LatticeParams, LatticePreimage, MasterPublicKey, MasterTrapdoor,
-    ZonePeriodPublicKey, ZonePeriodTrapdoor, delegate, operation_hash, sample_pre, trap_gen,
-    verify,
+    ZonePeriodPublicKey, ZonePeriodTrapdoor, delegate_fixture, operation_hash, sample_pre,
+    trap_gen_fixture, verify,
 };
 
 const SAMPLE_MESSAGE: &[u8] = b"capability-token canonical body for throughput-bench/v0";
@@ -82,9 +85,9 @@ fn lattice_setup() -> (
     ZonePeriodTrapdoor,
 ) {
     let params = LatticeParams::V4_REFERENCE;
-    let (mp, mt) = trap_gen(params).expect("stub trap_gen never fails");
-    let (zp, zt) = delegate(&mp, &mt, REQUEST_ZONE, ref_period(), params)
-        .expect("stub delegate never fails on agreeing params");
+    let (mp, mt) = trap_gen_fixture(params).expect("fixture trap_gen never fails");
+    let (zp, zt) = delegate_fixture(&mp, &mt, REQUEST_ZONE, ref_period(), params)
+        .expect("fixture delegate never fails on agreeing params");
     (params, mp, mt, zp, zt)
 }
 
@@ -114,7 +117,7 @@ fn bench_keygen(c: &mut Criterion) {
         // number is a lower bound.
         let params = LatticeParams::V4_REFERENCE;
         b.iter(|| {
-            let _ = black_box(trap_gen(black_box(params)).expect("stub never fails"));
+            let _ = black_box(trap_gen_fixture(black_box(params)).expect("fixture never fails"));
         });
     });
 
@@ -153,14 +156,14 @@ fn bench_sign(c: &mut Criterion) {
     group.bench_function("lattice_delegate_one_hop", |b| {
         b.iter(|| {
             let _ = black_box(
-                delegate(
+                delegate_fixture(
                     black_box(&mp),
                     black_box(&mt),
                     black_box(REQUEST_ZONE),
                     black_box(ref_period()),
                     black_box(params),
                 )
-                .expect("stub delegate never fails"),
+                .expect("fixture delegate never fails"),
             );
         });
     });
@@ -286,15 +289,15 @@ fn bench_end_to_end(c: &mut Criterion) {
     group.bench_function("lattice_full_pipeline_floor", |b| {
         let params = LatticeParams::V4_REFERENCE;
         b.iter(|| {
-            let (mp, mt) = trap_gen(black_box(params)).expect("trap_gen stub");
-            let (zp, zt) = delegate(
+            let (mp, mt) = trap_gen_fixture(black_box(params)).expect("trap_gen fixture");
+            let (zp, zt) = delegate_fixture(
                 black_box(&mp),
                 black_box(&mt),
                 black_box(REQUEST_ZONE),
                 black_box(ref_period()),
                 black_box(params),
             )
-            .expect("delegate stub");
+            .expect("delegate fixture");
             let h = operation_hash(
                 black_box(&REQUEST_ZONE),
                 black_box(ref_period()),

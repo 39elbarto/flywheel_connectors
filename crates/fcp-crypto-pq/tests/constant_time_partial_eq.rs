@@ -10,7 +10,9 @@
 //! All three are equality candidates a future caller might compare
 //! on a hot dispatch path.
 
-use fcp_crypto_pq::{DelegationPeriod, LatticeParams, LatticePreimage, delegate, trap_gen};
+use fcp_crypto_pq::{
+    DelegationPeriod, LatticeParams, LatticePreimage, delegate_fixture, trap_gen_fixture,
+};
 
 fn preimage_with(byte: u8) -> LatticePreimage {
     let params = LatticeParams::SMALL_TEST;
@@ -53,9 +55,9 @@ fn lattice_preimage_eq_distinguishes_last_byte_diff() {
 #[test]
 fn master_trapdoor_eq_reflects_byte_equality() {
     let p = LatticeParams::V4_REFERENCE;
-    let (_pk_a, td_a) = trap_gen(p).expect("stub trap_gen succeeds");
-    let (_pk_b, td_b) = trap_gen(p).expect("stub trap_gen succeeds");
-    // Stub trap_gen is deterministic in the placeholder impl; equality
+    let (_pk_a, td_a) = trap_gen_fixture(p).expect("fixture trap_gen succeeds");
+    let (_pk_b, td_b) = trap_gen_fixture(p).expect("fixture trap_gen succeeds");
+    // Fixture trap_gen is deterministic; equality
     // exercises the constant-time impl regardless of whether the two
     // outputs match.
     let _ = td_a == td_b;
@@ -68,13 +70,14 @@ fn master_trapdoor_eq_reflects_byte_equality() {
 #[test]
 fn zone_period_trapdoor_eq_reflects_byte_equality() {
     let p = LatticeParams::V4_REFERENCE;
-    let (root_pk, master_td) = trap_gen(p).expect("trap_gen");
+    let (root_pk, master_td) = trap_gen_fixture(p).expect("trap_gen fixture");
     let zone = [0u8; 32];
     let period = DelegationPeriod {
         start_secs: 0,
         end_secs: u64::MAX,
     };
-    let (_zp_pk, zp_td) = delegate(&root_pk, &master_td, zone, period, p).expect("delegate");
+    let (_zp_pk, zp_td) =
+        delegate_fixture(&root_pk, &master_td, zone, period, p).expect("delegate fixture");
     let zp_td_clone = zp_td.clone();
     assert_eq!(zp_td, zp_td_clone);
 }

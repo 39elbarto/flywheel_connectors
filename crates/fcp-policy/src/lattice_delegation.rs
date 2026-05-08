@@ -571,6 +571,7 @@ impl LatticeDelegationVerifierImpl {
         let crypto_zone = Self::zone_to_crypto(&leaf.zone_id);
         let zp_pub = pq::ZonePeriodPublicKey {
             hash: leaf.pub_matrix_seed,
+            public_matrix: pq::PublicMatrixMaterial::fixture_seed_only(leaf.pub_matrix_seed),
             zone_id: crypto_zone,
             period: crypto_period,
             params: self.params,

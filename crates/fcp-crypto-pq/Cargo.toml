@@ -21,6 +21,12 @@ sha3 = "0.11.0"
 # Constant-time byte comparison for trapdoor / preimage types (br-1zlht).
 subtle = { workspace = true }
 
+# OS entropy for production TrapGen entry points.
+rand = { workspace = true }
+
+# Explicit secret zeroization for entropy and trapdoor buffers.
+zeroize = { workspace = true }
+
 # Wire-format support — DelegationCertificate / LatticeSubToken serialize via
 # CBOR for cross-version dispatch (matches the rest of FCP3).
 serde = { workspace = true }

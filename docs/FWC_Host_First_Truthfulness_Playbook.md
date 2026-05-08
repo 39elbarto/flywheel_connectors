@@ -317,6 +317,11 @@ should use `fwc auth login`, `fwc auth profiles`, `fwc auth set-priority`,
 `fwc auth migrate-from-claude-code` against a configured host endpoint when they
 need node-local truth about API-key or OAuth provider profiles.
 
+`fwc auth list --provider <provider>` is the provider-profile list alias, and
+`fwc auth show <profile_id> --provider <provider>` is the provider-profile show
+alias. Without `--provider`, `fwc auth list` and `fwc auth show <connector>`
+continue to inspect the local connector credential store.
+
 The maintained host admin contract for provider auth profiles is:
 
 | Action | Method and path |

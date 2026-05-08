@@ -1609,8 +1609,8 @@ enum AuthCommand {
     /// Complete an in-progress host-managed OAuth authorization-code login.
     LoginComplete(AuthLoginCompleteArgs),
 
-    /// List all stored connector credentials with redacted fields.
-    List,
+    /// List stored connector credentials, or host-managed provider profiles with `--provider`.
+    List(AuthListArgs),
 
     /// List or show host-managed provider auth profiles.
     Profiles(AuthProfilesArgs),
@@ -1618,8 +1618,8 @@ enum AuthCommand {
     /// Change the host-managed selection priority for one provider auth profile.
     SetPriority(AuthSetPriorityArgs),
 
-    /// Show one stored credential with redacted fields and status hints.
-    Show(TargetArgs),
+    /// Show one stored credential, or one host-managed provider profile with `--provider`.
+    Show(AuthShowArgs),
 
     /// Remove one stored credential from the local store (requires `--yes`).
     Remove(AuthRemoveArgs),
@@ -1854,6 +1854,23 @@ struct AuthLoginCompleteArgs {
     /// Provider error description when the callback was rejected.
     #[arg(long)]
     error_description: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthListArgs {
+    /// Provider id to list host-managed profiles for. Omit to list local connector credentials.
+    #[arg(long)]
+    provider: Option<String>,
+}
+
+#[derive(Args, Debug, Serialize)]
+struct AuthShowArgs {
+    /// Connector id for local credentials, or profile id when `--provider` is set.
+    target: String,
+
+    /// Provider id for host-managed profile inspection.
+    #[arg(long)]
+    provider: Option<String>,
 }
 
 #[derive(Args, Debug, Serialize)]
@@ -12132,14 +12149,14 @@ fn auth_dispatch_with_store_and_host(
         AuthCommand::LoginComplete(complete_args) => {
             auth_login_complete_dispatch(complete_args, explicit_host)
         }
-        AuthCommand::List => auth_list_dispatch(store),
+        AuthCommand::List(list_args) => auth_list_dispatch(list_args, store, explicit_host),
         AuthCommand::Profiles(profiles_args) => {
             auth_profiles_dispatch(profiles_args, explicit_host)
         }
         AuthCommand::SetPriority(priority_args) => {
             auth_set_priority_dispatch(priority_args, explicit_host)
         }
-        AuthCommand::Show(target) => auth_show_dispatch(target, store),
+        AuthCommand::Show(target) => auth_show_dispatch(target, store, explicit_host),
         AuthCommand::Remove(target) => auth_remove_dispatch(target, store),
         AuthCommand::RemoveProfile(remove_args) => {
             auth_remove_profile_dispatch(remove_args, explicit_host)
@@ -12536,11 +12553,35 @@ fn auth_profiles_dispatch(
     args: &AuthProfilesArgs,
     explicit_host: Option<&str>,
 ) -> Result<DispatchOutcome> {
-    let host = match auth_host_config(
+    auth_provider_profile_read_dispatch(
+        &args.provider,
+        args.profile.as_deref(),
         "profiles",
-        serde_json::to_value(args)?,
+        explicit_host,
+    )
+}
+
+fn auth_provider_profile_read_dispatch(
+    provider: &str,
+    profile: Option<&str>,
+    subcommand: &str,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    let usage = match (subcommand, profile) {
+        ("show", Some(profile_id)) => {
+            format!("fwc auth show {profile_id} --provider {provider} --host <endpoint>")
+        }
+        ("list", None) => format!("fwc auth list --provider {provider} --host <endpoint>"),
+        _ => format!("fwc auth profiles {provider} --host <endpoint>"),
+    };
+    let host = match auth_host_config(
+        subcommand,
+        json!({
+            "provider": provider,
+            "profile": profile,
+        }),
         vec![
-            format!("fwc auth profiles {} --host <endpoint>", args.provider),
+            usage,
             "Set `FWC_HOST` or `FCP_HOST_ENDPOINT`, or configure an active FCP context.".to_owned(),
         ],
         explicit_host,
@@ -12549,29 +12590,29 @@ fn auth_profiles_dispatch(
         Err(outcome) => return Ok(outcome),
     };
     let client = HostAdminClient::new(&host.endpoint)?;
-    let response = match args.profile.as_deref() {
-        Some(profile_id) => client.auth_profile(&args.provider, profile_id)?,
-        None => client.auth_profiles(&args.provider)?,
+    let response = match profile {
+        Some(profile_id) => client.auth_profile(provider, profile_id)?,
+        None => client.auth_profiles(provider)?,
     };
     let envelope = CommandEnvelope::new(CommandAvailability::LiveRuntime, "auth");
     let mut payload = json!({
         "status": "ok",
         "command": "auth",
-        "subcommand": "profiles",
+        "subcommand": subcommand,
         "source": "host-admin-api",
-        "provider": args.provider,
-        "profile_id": args.profile,
+        "provider": provider,
+        "profile_id": profile,
         "result": response,
         "next_actions": [
-            format!("fwc auth login {} --profile <profile> --api-key <secret> --host {}", args.provider, host.endpoint),
-            format!("fwc auth refresh {} --host {}", args.provider, host.endpoint),
+            format!("fwc auth login {provider} --profile <profile> --api-key <secret> --host {}", host.endpoint),
+            format!("fwc auth refresh {provider} --host {}", host.endpoint),
         ],
     });
     attach_auth_host_contract(
         &mut payload,
         &host.endpoint,
-        &args.provider,
-        args.profile.as_deref(),
+        provider,
+        profile,
         "provider-auth-profile-read",
         false,
     );
@@ -12979,7 +13020,15 @@ fn auth_add_dispatch(args: &AuthAddArgs, store: &CredentialStore) -> Result<Disp
     })
 }
 
-fn auth_list_dispatch(store: &CredentialStore) -> Result<DispatchOutcome> {
+fn auth_list_dispatch(
+    args: &AuthListArgs,
+    store: &CredentialStore,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(provider) = args.provider.as_deref() {
+        return auth_provider_profile_read_dispatch(provider, None, "list", explicit_host);
+    }
+
     let credentials = match auth_load_all_credentials(store) {
         Ok(credentials) => credentials,
         Err(error) => return Ok(auth_store_error_dispatch("list", store, &error)),
@@ -13018,16 +13067,29 @@ fn auth_list_dispatch(store: &CredentialStore) -> Result<DispatchOutcome> {
     })
 }
 
-fn auth_show_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<DispatchOutcome> {
-    if let Err(message) = validate_connector_id(&args.connector) {
+fn auth_show_dispatch(
+    args: &AuthShowArgs,
+    store: &CredentialStore,
+    explicit_host: Option<&str>,
+) -> Result<DispatchOutcome> {
+    if let Some(provider) = args.provider.as_deref() {
+        return auth_provider_profile_read_dispatch(
+            provider,
+            Some(&args.target),
+            "show",
+            explicit_host,
+        );
+    }
+
+    if let Err(message) = validate_connector_id(&args.target) {
         return Ok(auth_invalid_connector_dispatch("show", &message));
     }
-    let credential = match auth_load_credential(store, &args.connector) {
+    let credential = match auth_load_credential(store, &args.target) {
         Ok(credential) => credential,
         Err(AuthLookupError::Missing) => {
             return Ok(auth_missing_credential_dispatch(
                 "show",
-                &args.connector,
+                &args.target,
                 store,
             ));
         }
@@ -13057,8 +13119,8 @@ fn auth_show_dispatch(args: &TargetArgs, store: &CredentialStore) -> Result<Disp
             auth_method_tag(&credential.auth_method),
         ),
         "next_actions": [
-            format!("fwc auth test {}", args.connector),
-            format!("fwc auth remove {} --yes", args.connector),
+            format!("fwc auth test {}", args.target),
+            format!("fwc auth remove {} --yes", args.target),
             "fwc auth status".to_owned(),
         ],
     });
@@ -29079,8 +29141,9 @@ deny_ptrace = true
 
         let show = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::Show(super::TargetArgs {
-                    connector: "github".to_owned(),
+                command: super::AuthCommand::Show(super::AuthShowArgs {
+                    target: "github".to_owned(),
+                    provider: None,
                 }),
             },
             &store,
@@ -29200,7 +29263,7 @@ deny_ptrace = true
 
         let list = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::List,
+                command: super::AuthCommand::List(super::AuthListArgs { provider: None }),
             },
             &store,
         )
@@ -29639,7 +29702,7 @@ deny_ptrace = true
 
         let listed = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::List,
+                command: super::AuthCommand::List(super::AuthListArgs { provider: None }),
             },
             &store,
         )
@@ -40643,8 +40706,9 @@ require_attestation_types = ["in-toto"]"#,
         let (_tempdir, store) = temp_auth_store();
         let result = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::Show(super::TargetArgs {
-                    connector: "nonexistent".to_owned(),
+                command: super::AuthCommand::Show(super::AuthShowArgs {
+                    target: "nonexistent".to_owned(),
+                    provider: None,
                 }),
             },
             &store,
@@ -40677,7 +40741,7 @@ require_attestation_types = ["in-toto"]"#,
         let (_tempdir, store) = temp_auth_store();
         let result = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::List,
+                command: super::AuthCommand::List(super::AuthListArgs { provider: None }),
             },
             &store,
         )
@@ -44717,6 +44781,19 @@ require_attestation_types = ["in-toto"]"#,
                 }),
             ),
             (
+                format!("GET /rpc/admin/auth/profiles/{provider}/{profile}"),
+                json!({
+                    "profile": {
+                        "provider": provider,
+                        "profile_id": profile,
+                        "method": "api_key",
+                        "label": "primary",
+                        "priority": 0,
+                        "created_at": "2026-05-07T00:00:00Z"
+                    }
+                }),
+            ),
+            (
                 format!("POST /rpc/admin/auth/profiles/{provider}/{profile}/priority"),
                 json!({
                     "profile": {
@@ -44727,6 +44804,30 @@ require_attestation_types = ["in-toto"]"#,
                         "priority": -10,
                         "created_at": "2026-05-07T00:00:00Z"
                     }
+                }),
+            ),
+            (
+                format!("GET /rpc/admin/auth/profiles/{provider}"),
+                json!({
+                    "provider": provider,
+                    "profiles": [
+                        {
+                            "provider": provider,
+                            "profile_id": profile,
+                            "method": "api_key",
+                            "label": "primary",
+                            "priority": -10,
+                            "created_at": "2026-05-07T00:00:00Z"
+                        },
+                        {
+                            "provider": provider,
+                            "profile_id": "backup",
+                            "method": "api_key",
+                            "label": "backup",
+                            "priority": 20,
+                            "created_at": "2026-05-07T00:00:00Z"
+                        }
+                    ]
                 }),
             ),
             (
@@ -44812,6 +44913,22 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(profiles_payload["subcommand"], "profiles");
         assert_eq!(profiles_payload["result"]["profile"]["profile_id"], profile);
 
+        let (show_exit, show_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "show",
+            profile,
+            "--provider",
+            provider,
+        ]);
+        assert_eq!(show_exit, CliExitCode::Success.into());
+        assert_eq!(show_payload["subcommand"], "show");
+        assert_eq!(show_payload["source"], "host-admin-api");
+        assert_eq!(show_payload["result"]["profile"]["profile_id"], profile);
+
         let (priority_exit, priority_payload) = execute_json(&[
             "fwc",
             "--json",
@@ -44844,6 +44961,24 @@ require_attestation_types = ["in-toto"]"#,
         assert_eq!(
             profile_list_payload["result"]["profiles"][1]["profile_id"],
             "backup"
+        );
+
+        let (auth_list_exit, auth_list_payload) = execute_json(&[
+            "fwc",
+            "--json",
+            "--host",
+            &host,
+            "auth",
+            "list",
+            "--provider",
+            provider,
+        ]);
+        assert_eq!(auth_list_exit, CliExitCode::Success.into());
+        assert_eq!(auth_list_payload["subcommand"], "list");
+        assert_eq!(auth_list_payload["source"], "host-admin-api");
+        assert_eq!(
+            auth_list_payload["result"]["profiles"][0]["profile_id"],
+            profile
         );
 
         let (refresh_exit, refresh_payload) = execute_json(&[
@@ -45280,7 +45415,7 @@ require_attestation_types = ["in-toto"]"#,
 
         let list = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::List,
+                command: super::AuthCommand::List(super::AuthListArgs { provider: None }),
             },
             &store,
         )
@@ -45311,8 +45446,9 @@ require_attestation_types = ["in-toto"]"#,
 
         let show = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::Show(super::TargetArgs {
-                    connector: "github-prod".to_owned(),
+                command: super::AuthCommand::Show(super::AuthShowArgs {
+                    target: "github-prod".to_owned(),
+                    provider: None,
                 }),
             },
             &store,
@@ -45346,8 +45482,9 @@ require_attestation_types = ["in-toto"]"#,
 
         let show = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::Show(super::TargetArgs {
-                    connector: "linear".to_owned(),
+                command: super::AuthCommand::Show(super::AuthShowArgs {
+                    target: "linear".to_owned(),
+                    provider: None,
                 }),
             },
             &store,
@@ -45413,7 +45550,7 @@ require_attestation_types = ["in-toto"]"#,
 
         let list = super::auth_dispatch_with_store(
             &super::AuthArgs {
-                command: super::AuthCommand::List,
+                command: super::AuthCommand::List(super::AuthListArgs { provider: None }),
             },
             &store,
         )

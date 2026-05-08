@@ -52,6 +52,7 @@ async fn anthropic_connector_emits_redacted_advanced_e2e_evidence() {
         "anthropic_request_built",
         "anthropic_response_decoded",
         "anthropic_oauth_refresh",
+        "anthropic_cli_auth_boundary",
         "audit_receipt",
     ] {
         assert!(
@@ -63,6 +64,7 @@ async fn anthropic_connector_emits_redacted_advanced_e2e_evidence() {
     assert!(jsonl.contains("\"provider_mode\":\"live\"") || jsonl.contains("\"skip_reason\""));
     for forbidden in [
         "oauth-fixture-token",
+        "setup-fixture-token",
         "anthropic-fixture-key",
         "ANTHROPIC_API_KEY",
         "Bearer ",
@@ -83,6 +85,7 @@ async fn anthropic_connector_emits_redacted_advanced_e2e_evidence() {
 async fn run_fixture_script(records: &mut Vec<Value>) {
     let server = MockServer::start().await;
     mount_fixture_message(&server).await;
+    record_cli_auth_boundary(records).await;
 
     let mut configured = configured_connector(
         json!({
@@ -277,6 +280,29 @@ async fn run_fixture_script(records: &mut Vec<Value>) {
             "kind": "cleanup",
             "op": "anthropic.cleanup",
             "cleanup_result": cleanup_result
+        }),
+    ));
+}
+
+async fn record_cli_auth_boundary(records: &mut Vec<Value>) {
+    let mut connector = AnthropicConnector::new();
+    let err = connector
+        .handle_configure(json!({
+            "setup_token": "setup-fixture-token"
+        }))
+        .await
+        .expect_err("setup-token must not target the direct Anthropic API origin");
+    records.push(evidence_record(
+        "anthropic_cli_auth_boundary",
+        "fixture",
+        "anthropic.configure",
+        MODEL_FIXTURE,
+        0,
+        json!({
+            "unsupported_default_api_denied": true,
+            "error_mapping": classify_error(&err),
+            "host_managed_runtime_required": true,
+            "token_text_logged": false
         }),
     ));
 }

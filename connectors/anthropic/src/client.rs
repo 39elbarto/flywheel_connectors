@@ -97,6 +97,12 @@ impl AnthropicAuth {
     pub const fn uses_claude_code_oauth(&self) -> bool {
         matches!(self, Self::ClaudeCodeOAuth(_) | Self::SetupToken(_))
     }
+
+    /// Whether this credential comes from Claude Code rather than the direct Anthropic API.
+    #[must_use]
+    pub const fn requires_claude_code_runtime_boundary(&self) -> bool {
+        matches!(self, Self::ClaudeCodeOAuth(_) | Self::SetupToken(_))
+    }
 }
 
 impl fmt::Debug for AnthropicAuth {

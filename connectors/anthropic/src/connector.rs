@@ -121,6 +121,7 @@ impl AnthropicConfig {
                 || Ok(DEFAULT_BASE_URL.to_string()),
                 validate_anthropic_base_url,
             )?;
+        validate_auth_base_url_boundary(&auth, &base_url)?;
 
         let api_version = match params.get("api_version") {
             Some(value) => {
@@ -188,6 +189,36 @@ fn validate_anthropic_base_url(base_url: &str) -> FcpResult<String> {
         })?;
 
     Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn validate_auth_base_url_boundary(auth: &AnthropicAuth, base_url: &str) -> FcpResult<()> {
+    if auth.requires_claude_code_runtime_boundary() && is_default_anthropic_api_origin(base_url) {
+        return Err(FcpError::InvalidRequest {
+            code: 1003,
+            message: concat!(
+                "Claude Code OAuth and setup-token credentials are Claude Code runtime credentials; ",
+                "do not send them directly to https://api.anthropic.com. Use api_key or ",
+                "credential_id for direct Anthropic API calls, or route Claude Code credentials ",
+                "through a host-managed Claude CLI/provider boundary or localhost verification gateway."
+            )
+            .into(),
+        });
+    }
+    Ok(())
+}
+
+fn is_default_anthropic_api_origin(base_url: &str) -> bool {
+    let Ok(parsed) = Url::parse(base_url.trim()) else {
+        return false;
+    };
+    let host = parsed
+        .host_str()
+        .map(|host| host.trim_end_matches('.').to_ascii_lowercase());
+    parsed.scheme() == "https"
+        && host.as_deref() == Some("api.anthropic.com")
+        && matches!(parsed.path(), "" | "/")
+        && parsed.query().is_none()
+        && parsed.fragment().is_none()
 }
 
 fn parse_anthropic_base_url(base_url: &str) -> Result<Url, String> {
@@ -1984,6 +2015,7 @@ mod tests {
         let result = connector
             .handle_configure(json!({
                 "claude_code_oauth_token": "oauth-token",
+                "base_url": "http://127.0.0.1:1",
                 "default_betas": ["code-execution-2025-08-25", "files-api-2025-04-14"]
             }))
             .await
@@ -2000,6 +2032,45 @@ mod tests {
                 .auth
                 .uses_claude_code_oauth()
         );
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_rejects_claude_code_tokens_on_default_api_origin() {
+        for config in [
+            json!({ "claude_code_oauth_token": "oauth-token" }),
+            json!({ "oauth_token": "oauth-token" }),
+            json!({ "setup_token": "setup-token" }),
+        ] {
+            let mut connector = AnthropicConnector::new();
+            let result = connector.handle_configure(config).await;
+
+            let err = result.expect_err("Claude Code token must not target direct Anthropic API");
+            assert!(
+                matches!(err, FcpError::InvalidRequest { .. }),
+                "expected InvalidRequest, got {err:?}"
+            );
+            let message = match err {
+                FcpError::InvalidRequest { message, .. } => message,
+                _ => String::new(),
+            };
+            assert!(message.contains("Claude Code runtime credentials"));
+            assert!(message.contains("https://api.anthropic.com"));
+        }
+    }
+
+    #[fcp_async_core::runtime::test]
+    async fn test_configure_setup_token_allows_loopback_gateway() {
+        let mut connector = AnthropicConnector::new();
+        let result = connector
+            .handle_configure(json!({
+                "setup_token": "setup-token",
+                "base_url": "http://127.0.0.1:1"
+            }))
+            .await
+            .unwrap();
+
+        assert_eq!(result["status"], "configured");
+        assert_eq!(result["auth_method"], "setup_token");
     }
 
     #[fcp_async_core::runtime::test]

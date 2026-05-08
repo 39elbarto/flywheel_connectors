@@ -29,8 +29,9 @@ Important runtime truths the contract preserves:
 - Configuration accepts exactly one auth method: `api_key`, `auth_token`, `bearer_token`, `claude_code_oauth_token`, `oauth_token`, `setup_token`, or `credential_id`.
 - `credential_id` must parse as a UUID and requires host-side egress credential injection for live traffic.
 - API-key mode sends `x-api-key`.
-- Bearer, Claude Code OAuth, and setup-token modes send `Authorization: Bearer ...`.
-- Claude Code OAuth and setup-token modes automatically add `claude-code-20250219` and `oauth-2025-04-20` beta headers.
+- Bearer-token mode sends `Authorization: Bearer ...` for provider-mediated or gateway deployments.
+- Claude Code OAuth and setup-token modes are Claude Code runtime credentials, not direct default Anthropic API credentials; configuration rejects them against `https://api.anthropic.com` and only allows them behind a localhost verification or host-managed provider boundary.
+- Claude Code OAuth and setup-token modes automatically add `claude-code-20250219` and `oauth-2025-04-20` beta headers when they are configured behind that boundary.
 - Default base URL is `https://api.anthropic.com`.
 - Loopback HTTP base URLs are accepted only for deterministic tests.
 - Default API version is `2023-06-01`, overridable by config `api_version` or `FCP_ANTHROPIC_API_VERSION`.
@@ -55,6 +56,7 @@ The first Anthropic README slice documents the existing runtime surface:
 ## Auth And Scope Boundary
 
 - Authentication mechanisms: Anthropic API key, bearer token, Claude Code OAuth token, setup token, or host-injected credential ID.
+- Direct Anthropic API calls use `api_key` or `credential_id`; Claude Code OAuth and setup-token credentials must be routed through a host-managed Claude CLI/provider boundary or a localhost verification fixture.
 - Home zone: `z:work`.
 - Allowed source zones: `z:owner`, `z:private`, and `z:work`.
 - Allowed target zone: `z:work`.
@@ -114,6 +116,7 @@ The current implementation does not include:
 - persistent conversation storage
 - FCP subscription-based streaming
 - direct credential vaulting or OAuth refresh
+- direct use of Claude Code subscription/setup tokens against `https://api.anthropic.com`
 - public-zone invocation
 - connector-local storage of prompts, thinking traces, streamed deltas, or tool inputs
 - automatic 1M-context beta header injection for retired beta paths
@@ -194,6 +197,7 @@ The verification surface captures:
 
 - If `health` reports `not_configured`, configure with exactly one auth method and then run handshake.
 - If `self_check` reports `credential_injection_required`, run behind the host egress injection layer or switch to a direct live-test key.
+- If `claude_code_oauth_token`, `oauth_token`, or `setup_token` is rejected against the default API origin, use `api_key` or `credential_id` for direct Anthropic API calls, or route the Claude Code credential through a host-managed Claude CLI/provider boundary.
 - If base URL validation fails, use `https://api.anthropic.com` or a localhost origin for tests.
 - If a model is rejected, run `anthropic.models.normalize` or choose one of the supported canonical IDs.
 - If `enable_1m_context` fails, switch to `claude-opus-4-7`, `claude-opus-4-6`, or `claude-sonnet-4-6`.

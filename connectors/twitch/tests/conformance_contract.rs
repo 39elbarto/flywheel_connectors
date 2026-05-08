@@ -97,7 +97,7 @@ fn operation_metadata_is_read_only_safe_and_approval_free() {
         assert!(ids.contains(expected), "missing operation {expected}");
     }
 
-    for operation in ops {
+    for operation in &ops {
         assert_eq!(operation.capability.as_str(), "twitch.read");
         assert_eq!(operation.risk_level, RiskLevel::Low);
         assert_eq!(operation.safety_tier, SafetyTier::Safe);

@@ -477,9 +477,15 @@ async fn assert_network_error() -> Result<(), String> {
     let token_server = MockServer::start().await;
     mount_token(&token_server).await;
 
-    let dead_api = MockServer::start().await;
-    let dead_api_url = dead_api.uri();
-    drop(dead_api);
+    let dead_api_listener = std::net::TcpListener::bind("127.0.0.1:0")
+        .map_err(|error| format!("reserve dead API port: {error}"))?;
+    let dead_api_url = format!(
+        "http://{}",
+        dead_api_listener
+            .local_addr()
+            .map_err(|error| format!("read dead API port: {error}"))?
+    );
+    drop(dead_api_listener);
 
     let mut connector = TwitchConnector::new();
     connector
@@ -515,14 +521,18 @@ async fn assert_network_error() -> Result<(), String> {
         .await
         .expect_err("dead API loopback should fail invocation");
 
-    assert!(matches!(
-        error,
+    if !matches!(
+        &error,
         FcpError::External {
             service,
             retryable: true,
             ..
         } if service == "twitch"
-    ));
+    ) {
+        return Err(format!(
+            "network error should map to retryable Twitch external error: {error:?}"
+        ));
+    }
     Ok(())
 }
 

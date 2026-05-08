@@ -50,6 +50,15 @@ pub enum SignalError {
     #[error("Rate limited, retry after {retry_after_ms}ms")]
     RateLimited { retry_after_ms: u64 },
 
+    /// signal-cli REST daemon returned an HTTP status that belongs to the
+    /// provider boundary, not connector configuration.
+    #[error("Signal daemon HTTP {status_code}: {message}")]
+    ApiStatus {
+        status_code: u16,
+        message: String,
+        retryable: bool,
+    },
+
     /// Configuration error.
     #[error("Configuration error: {0}")]
     Config(String),
@@ -68,6 +77,7 @@ impl SignalError {
             | Self::RateLimited { .. }
             | Self::Async(_)
             | Self::BridgeTimeout { .. } => true,
+            Self::ApiStatus { retryable, .. } => *retryable,
             Self::BridgeNotRunning
             | Self::BridgeError { .. }
             | Self::Json(_)
@@ -143,6 +153,17 @@ impl SignalError {
                 retry_after_ms: *retry_after_ms,
                 violation: None,
             },
+            Self::ApiStatus {
+                status_code,
+                message,
+                retryable,
+            } => FcpError::External {
+                service: "signal".into(),
+                message: format!("Signal daemon HTTP {status_code}: {message}"),
+                status_code: Some(*status_code),
+                retryable: *retryable,
+                retry_after: None,
+            },
             Self::Config(msg) => FcpError::InvalidRequest {
                 code: 1001,
                 message: format!("Configuration error: {msg}"),
@@ -163,10 +184,21 @@ impl SignalError {
                 retry_after_ms: 30_000,
             },
             _ => {
-                if let Ok(err_resp) = serde_json::from_str::<crate::types::ApiErrorResponse>(body) {
-                    Self::Config(err_resp.error.unwrap_or_else(|| format!("HTTP {status}")))
+                let message = if let Ok(err_resp) =
+                    serde_json::from_str::<crate::types::ApiErrorResponse>(body)
+                {
+                    err_resp.error.unwrap_or_else(|| format!("HTTP {status}"))
                 } else {
-                    Self::Config(format!("HTTP {status}: {body}"))
+                    format!("HTTP {status}: {body}")
+                };
+                if (500..=599).contains(&status) {
+                    Self::ApiStatus {
+                        status_code: status,
+                        message,
+                        retryable: true,
+                    }
+                } else {
+                    Self::Config(message)
                 }
             }
         }
@@ -354,7 +386,23 @@ mod tests {
     #[test]
     fn from_api_response_500() {
         let err = SignalError::from_api_response(500, "internal error");
-        assert!(matches!(err, SignalError::Config(_)));
+        assert!(matches!(
+            err,
+            SignalError::ApiStatus {
+                status_code: 500,
+                retryable: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            err.to_fcp_error(),
+            FcpError::External {
+                service,
+                status_code: Some(500),
+                retryable: true,
+                ..
+            } if service == "signal"
+        ));
     }
 
     #[test]

@@ -45,4 +45,6 @@ percent-encoding.workspace = true
 [dev-dependencies]
 ciborium.workspace = true
 fcp-crypto = { path = "../../crates/fcp-crypto" }
+fcp-testkit = { path = "../../crates/fcp-testkit" }
+toml.workspace = true
 wiremock.workspace = true

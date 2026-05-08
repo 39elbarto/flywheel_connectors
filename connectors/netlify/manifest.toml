@@ -27,6 +27,8 @@ capability = "netlify.sites.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", additionalProperties = false, properties = {} }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.sites_list.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -45,6 +47,8 @@ capability = "netlify.sites.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["site_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" } } }
+output_schema = { type = "object" }
 
 [provides.operations.sites_get.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -63,6 +67,8 @@ capability = "netlify.sites.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["name"], additionalProperties = false, properties = { name = { type = "string", description = "New Netlify site name" }, custom_domain = { type = "string", description = "Optional custom domain to attach" } } }
+output_schema = { type = "object" }
 
 [provides.operations.sites_create.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -81,6 +87,8 @@ capability = "netlify.sites.write"
 risk = "critical"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["site_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID to delete" } } }
+output_schema = { type = "object", required = ["deleted", "site_id"], additionalProperties = false, properties = { deleted = { type = "boolean", const = true }, site_id = { type = "string", description = "Deleted Netlify site ID" } } }
 
 [provides.operations.sites_delete.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -99,6 +107,8 @@ capability = "netlify.deploys.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["site_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" } } }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.deploys_list.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -117,6 +127,8 @@ capability = "netlify.deploys.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["site_id", "deploy_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, deploy_id = { type = "string", description = "Netlify deploy ID" } } }
+output_schema = { type = "object" }
 
 [provides.operations.deploys_get.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -135,6 +147,8 @@ capability = "netlify.deploys.write"
 risk = "high"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["site_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, branch = { type = "string", description = "Optional Git branch for the deploy" }, title = { type = "string", description = "Optional deploy title" } } }
+output_schema = { type = "object" }
 
 [provides.operations.deploys_create.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -153,6 +167,8 @@ capability = "netlify.deploys.write"
 risk = "high"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["site_id", "deploy_id"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, deploy_id = { type = "string", description = "Deploy ID to roll back to" } } }
+output_schema = { type = "object" }
 
 [provides.operations.deploys_rollback.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -171,6 +187,8 @@ capability = "netlify.dns.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", additionalProperties = false, properties = {} }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.dns_list_zones.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -189,6 +207,8 @@ capability = "netlify.env.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "none"
+input_schema = { type = "object", required = ["site_id", "account_slug"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, account_slug = { type = "string", description = "Netlify account slug" } } }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.env_list.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -207,6 +227,8 @@ capability = "netlify.env.write"
 risk = "medium"
 safety_tier = "risky"
 idempotency = "strict"
+input_schema = { type = "object", required = ["site_id", "account_slug", "key", "value"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, account_slug = { type = "string", description = "Netlify account slug" }, key = { type = "string", description = "Environment variable key" }, value = { type = "string", description = "Environment variable value" }, context = { type = "string", description = "Optional Netlify environment context" }, is_secret = { type = "boolean", description = "Whether Netlify should treat the value as secret" } } }
+output_schema = { type = "array", items = { type = "object" } }
 
 [provides.operations.env_set.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -225,6 +247,8 @@ capability = "netlify.env.write"
 risk = "high"
 safety_tier = "dangerous"
 idempotency = "strict"
+input_schema = { type = "object", required = ["site_id", "account_slug", "key"], additionalProperties = false, properties = { site_id = { type = "string", description = "Netlify site ID" }, account_slug = { type = "string", description = "Netlify account slug" }, key = { type = "string", description = "Environment variable key to delete" } } }
+output_schema = { type = "object", required = ["deleted", "key"], additionalProperties = false, properties = { deleted = { type = "boolean", const = true }, key = { type = "string", description = "Deleted environment variable key" } } }
 
 [provides.operations.env_delete.network_constraints]
 host_allow = ["api.netlify.com"]
@@ -243,6 +267,8 @@ capability = "netlify.sites.read"
 risk = "low"
 safety_tier = "safe"
 idempotency = "strict"
+input_schema = { type = "object", additionalProperties = false, properties = {} }
+output_schema = { type = "object", required = ["healthy", "user_id", "email"], additionalProperties = false, properties = { healthy = { type = "boolean", const = true }, user_id = { type = "string", description = "Netlify user ID" }, email = { type = ["string", "null"], description = "Netlify user email when available" } } }
 
 [provides.operations.health.network_constraints]
 host_allow = ["api.netlify.com"]

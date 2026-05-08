@@ -15,7 +15,7 @@ use fcp_prelude::{
 use fcp_sdk::migration::{ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig};
 use reqwest::Url;
 use serde::Serialize;
-use serde_json::json;
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 use tracing::info;
 
@@ -313,6 +313,65 @@ impl NetlifyConnector {
     }
 }
 
+fn string_property(description: &str) -> Value {
+    json!({"type": "string", "description": description})
+}
+
+fn boolean_property(description: &str) -> Value {
+    json!({"type": "boolean", "description": description})
+}
+
+fn object_schema(required: &[&str], properties: Vec<(&str, Value)>) -> Value {
+    let properties = properties
+        .into_iter()
+        .map(|(name, schema)| (name.to_string(), schema))
+        .collect::<Map<String, Value>>();
+    let mut schema = Map::new();
+    schema.insert("type".into(), Value::String("object".into()));
+    if !required.is_empty() {
+        schema.insert("required".into(), json!(required));
+    }
+    schema.insert("additionalProperties".into(), Value::Bool(false));
+    schema.insert("properties".into(), Value::Object(properties));
+    Value::Object(schema)
+}
+
+fn no_input_schema() -> Value {
+    object_schema(&[], Vec::new())
+}
+
+fn array_output_schema() -> Value {
+    json!({"type": "array", "items": {"type": "object"}})
+}
+
+fn object_output_schema() -> Value {
+    json!({"type": "object"})
+}
+
+fn delete_output_schema(field: &str, description: &str) -> Value {
+    object_schema(
+        &["deleted", field],
+        vec![
+            ("deleted", json!({"type": "boolean", "const": true})),
+            (field, string_property(description)),
+        ],
+    )
+}
+
+fn health_output_schema() -> Value {
+    object_schema(
+        &["healthy", "user_id", "email"],
+        vec![
+            ("healthy", json!({"type": "boolean", "const": true})),
+            ("user_id", string_property("Netlify user ID")),
+            (
+                "email",
+                json!({"type": ["string", "null"], "description": "Netlify user email when available"}),
+            ),
+        ],
+    )
+}
+
 impl Default for NetlifyConnector {
     fn default() -> Self {
         Self::new()
@@ -338,8 +397,8 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SITES_LIST),
             summary: "List all sites".into(),
             description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            input_schema: no_input_schema(),
+            output_schema: array_output_schema(),
             capability: CapabilityId::from_static(CAP_SITES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -352,8 +411,11 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SITES_GET),
             summary: "Get site details".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id"],
+                vec![("site_id", string_property("Netlify site ID"))],
+            ),
+            output_schema: object_output_schema(),
             capability: CapabilityId::from_static(CAP_SITES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -371,8 +433,17 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SITES_CREATE),
             summary: "Create a new site".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["name"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["name"],
+                vec![
+                    ("name", string_property("New Netlify site name")),
+                    (
+                        "custom_domain",
+                        string_property("Optional custom domain to attach"),
+                    ),
+                ],
+            ),
+            output_schema: object_output_schema(),
             capability: CapabilityId::from_static(CAP_SITES_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -390,8 +461,11 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SITES_DELETE),
             summary: "Delete a site".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id"],
+                vec![("site_id", string_property("Netlify site ID to delete"))],
+            ),
+            output_schema: delete_output_schema("site_id", "Deleted Netlify site ID"),
             capability: CapabilityId::from_static(CAP_SITES_WRITE),
             risk_level: RiskLevel::Critical,
             safety_tier: SafetyTier::Dangerous,
@@ -409,8 +483,11 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_DEPLOYS_LIST),
             summary: "List deploys for a site".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id"]}),
-            output_schema: json!({"type":"array"}),
+            input_schema: object_schema(
+                &["site_id"],
+                vec![("site_id", string_property("Netlify site ID"))],
+            ),
+            output_schema: array_output_schema(),
             capability: CapabilityId::from_static(CAP_DEPLOYS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -423,8 +500,14 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_DEPLOYS_GET),
             summary: "Get deploy details".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id","deploy_id"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id", "deploy_id"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    ("deploy_id", string_property("Netlify deploy ID")),
+                ],
+            ),
+            output_schema: object_output_schema(),
             capability: CapabilityId::from_static(CAP_DEPLOYS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -442,8 +525,18 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_DEPLOYS_CREATE),
             summary: "Create a deploy".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    (
+                        "branch",
+                        string_property("Optional Git branch for the deploy"),
+                    ),
+                    ("title", string_property("Optional deploy title")),
+                ],
+            ),
+            output_schema: object_output_schema(),
             capability: CapabilityId::from_static(CAP_DEPLOYS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
@@ -461,8 +554,14 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_DEPLOYS_ROLLBACK),
             summary: "Rollback to a deploy".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id","deploy_id"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id", "deploy_id"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    ("deploy_id", string_property("Deploy ID to roll back to")),
+                ],
+            ),
+            output_schema: object_output_schema(),
             capability: CapabilityId::from_static(CAP_DEPLOYS_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Risky,
@@ -480,8 +579,8 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_DNS_LIST_ZONES),
             summary: "List DNS zones".into(),
             description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"array"}),
+            input_schema: no_input_schema(),
+            output_schema: array_output_schema(),
             capability: CapabilityId::from_static(CAP_DNS_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -494,8 +593,14 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ENV_LIST),
             summary: "List environment variables".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id","account_slug"]}),
-            output_schema: json!({"type":"array"}),
+            input_schema: object_schema(
+                &["site_id", "account_slug"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    ("account_slug", string_property("Netlify account slug")),
+                ],
+            ),
+            output_schema: array_output_schema(),
             capability: CapabilityId::from_static(CAP_ENV_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -513,8 +618,24 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ENV_SET),
             summary: "Set environment variable".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id","account_slug","key","value"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id", "account_slug", "key", "value"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    ("account_slug", string_property("Netlify account slug")),
+                    ("key", string_property("Environment variable key")),
+                    ("value", string_property("Environment variable value")),
+                    (
+                        "context",
+                        string_property("Optional Netlify environment context"),
+                    ),
+                    (
+                        "is_secret",
+                        boolean_property("Whether Netlify should treat the value as secret"),
+                    ),
+                ],
+            ),
+            output_schema: array_output_schema(),
             capability: CapabilityId::from_static(CAP_ENV_WRITE),
             risk_level: RiskLevel::Medium,
             safety_tier: SafetyTier::Risky,
@@ -532,8 +653,15 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ENV_DELETE),
             summary: "Delete environment variable".into(),
             description: None,
-            input_schema: json!({"type":"object","required":["site_id","account_slug","key"]}),
-            output_schema: json!({"type":"object"}),
+            input_schema: object_schema(
+                &["site_id", "account_slug", "key"],
+                vec![
+                    ("site_id", string_property("Netlify site ID")),
+                    ("account_slug", string_property("Netlify account slug")),
+                    ("key", string_property("Environment variable key to delete")),
+                ],
+            ),
+            output_schema: delete_output_schema("key", "Deleted environment variable key"),
             capability: CapabilityId::from_static(CAP_ENV_WRITE),
             risk_level: RiskLevel::High,
             safety_tier: SafetyTier::Dangerous,
@@ -551,8 +679,8 @@ fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Verify API token".into(),
             description: None,
-            input_schema: json!({"type":"object"}),
-            output_schema: json!({"type":"object"}),
+            input_schema: no_input_schema(),
+            output_schema: health_output_schema(),
             capability: CapabilityId::from_static(CAP_SITES_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,

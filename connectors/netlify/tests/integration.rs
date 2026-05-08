@@ -13,7 +13,7 @@ use fcp_netlify::connector::NetlifyConnector;
 use fcp_netlify::error::NetlifyError;
 use fcp_netlify::types::{CreateDeployRequest, CreateSiteRequest, NetlifyAuth, SetEnvVarRequest};
 use fcp_netlify::types::{SetEnvVarValue, User};
-use fcp_prelude::{ApprovalMode, FcpConnector, RiskLevel, SafetyTier};
+use fcp_prelude::{ApprovalMode, FcpConnector, OperationInfo, RiskLevel, SafetyTier};
 use fcp_sdk::migration::{
     ConnectorErrorMapping, ConnectorRuntime, ConnectorRuntimeConfig, HttpRetryConfig,
 };
@@ -69,6 +69,272 @@ fn test_deploy(deploy_id: &str, site_id: &str, state: &str) -> Value {
         "branch": "main",
         "title": "FCP deploy"
     })
+}
+
+const SCHEMA_OPERATIONS: [(&str, &str); 13] = [
+    ("sites_list", "netlify.sites.list"),
+    ("sites_get", "netlify.sites.get"),
+    ("sites_create", "netlify.sites.create"),
+    ("sites_delete", "netlify.sites.delete"),
+    ("deploys_list", "netlify.deploys.list"),
+    ("deploys_get", "netlify.deploys.get"),
+    ("deploys_create", "netlify.deploys.create"),
+    ("deploys_rollback", "netlify.deploys.rollback"),
+    ("dns_list_zones", "netlify.dns.list_zones"),
+    ("env_list", "netlify.env.list"),
+    ("env_set", "netlify.env.set"),
+    ("env_delete", "netlify.env.delete"),
+    ("health", "netlify.health"),
+];
+
+fn netlify_manifest() -> toml::Value {
+    toml::from_str(include_str!("../manifest.toml")).expect("Netlify manifest TOML should parse")
+}
+
+fn manifest_operations(manifest: &toml::Value) -> &toml::Table {
+    manifest
+        .get("provides")
+        .and_then(|provides| provides.get("operations"))
+        .and_then(toml::Value::as_table)
+        .expect("manifest should contain provides.operations")
+}
+
+fn manifest_operation_schema(
+    manifest: &toml::Value,
+    operation_key: &str,
+    schema_key: &str,
+) -> Value {
+    let schema = manifest_operations(manifest)
+        .get(operation_key)
+        .and_then(|operation| operation.get(schema_key))
+        .expect("operation should define requested schema");
+
+    serde_json::to_value(schema).expect("manifest schema should convert to JSON")
+}
+
+fn runtime_operation<'a>(operations: &'a [OperationInfo], operation_id: &str) -> &'a OperationInfo {
+    operations
+        .iter()
+        .find(|operation| operation.id.as_str() == operation_id)
+        .expect("runtime introspection should include operation")
+}
+
+fn assert_schema_accepts(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        errors.is_empty(),
+        "schema should accept payload {payload:#}: {errors:#?}"
+    );
+}
+
+fn assert_schema_rejects(schema: &Value, payload: &Value) {
+    let validator = jsonschema::validator_for(schema).expect("schema should compile");
+    let errors = validator
+        .iter_errors(payload)
+        .map(|error| error.to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        !errors.is_empty(),
+        "schema should reject payload {payload:#}"
+    );
+}
+
+fn assert_manifest_runtime_schema_parity(manifest: &toml::Value, operations: &[OperationInfo]) {
+    let manifest_ops = manifest_operations(manifest);
+    assert_eq!(
+        manifest_ops.len(),
+        SCHEMA_OPERATIONS.len(),
+        "manifest operation count should match schema coverage set"
+    );
+
+    for (operation_key, operation_id) in SCHEMA_OPERATIONS {
+        let operation = runtime_operation(operations, operation_id);
+        let input_schema = manifest_operation_schema(manifest, operation_key, "input_schema");
+        let output_schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+
+        assert_eq!(
+            input_schema, operation.input_schema,
+            "{operation_id} manifest input_schema should match runtime introspection"
+        );
+        assert_eq!(
+            output_schema, operation.output_schema,
+            "{operation_id} manifest output_schema should match runtime introspection"
+        );
+        assert!(
+            jsonschema::validator_for(&input_schema).is_ok(),
+            "{operation_id} manifest input_schema should compile"
+        );
+        assert!(
+            jsonschema::validator_for(&output_schema).is_ok(),
+            "{operation_id} manifest output_schema should compile"
+        );
+    }
+}
+
+fn assert_catalog_input_schema_examples(manifest: &toml::Value) {
+    for operation_key in ["sites_list", "dns_list_zones", "health"] {
+        let schema = manifest_operation_schema(manifest, operation_key, "input_schema");
+        assert_schema_accepts(&schema, &json!({}));
+        assert_schema_rejects(&schema, &json!({ "unexpected": true }));
+    }
+
+    let sites_get = manifest_operation_schema(manifest, "sites_get", "input_schema");
+    assert_schema_accepts(&sites_get, &json!({ "site_id": "site-1" }));
+    assert_schema_rejects(&sites_get, &json!({}));
+    assert_schema_rejects(&sites_get, &json!({ "site_id": "site-1", "extra": true }));
+
+    let sites_create = manifest_operation_schema(manifest, "sites_create", "input_schema");
+    assert_schema_accepts(
+        &sites_create,
+        &json!({ "name": "fcp-site", "custom_domain": "example.com" }),
+    );
+    assert_schema_rejects(&sites_create, &json!({ "custom_domain": "example.com" }));
+    assert_schema_rejects(&sites_create, &json!({ "name": "fcp-site", "extra": true }));
+
+    let sites_delete = manifest_operation_schema(manifest, "sites_delete", "input_schema");
+    assert_schema_accepts(&sites_delete, &json!({ "site_id": "site-1" }));
+    assert_schema_rejects(&sites_delete, &json!({}));
+
+    let deploys_list = manifest_operation_schema(manifest, "deploys_list", "input_schema");
+    assert_schema_accepts(&deploys_list, &json!({ "site_id": "site-1" }));
+    assert_schema_rejects(
+        &deploys_list,
+        &json!({ "site_id": "site-1", "extra": true }),
+    );
+
+    let deploys_get = manifest_operation_schema(manifest, "deploys_get", "input_schema");
+    assert_schema_accepts(
+        &deploys_get,
+        &json!({ "site_id": "site-1", "deploy_id": "deploy-1" }),
+    );
+    assert_schema_rejects(&deploys_get, &json!({ "site_id": "site-1" }));
+
+    let deploys_create = manifest_operation_schema(manifest, "deploys_create", "input_schema");
+    assert_schema_accepts(
+        &deploys_create,
+        &json!({ "site_id": "site-1", "branch": "main", "title": "FCP deploy" }),
+    );
+    assert_schema_rejects(&deploys_create, &json!({ "branch": "main" }));
+    assert_schema_rejects(
+        &deploys_create,
+        &json!({ "site_id": "site-1", "extra": true }),
+    );
+
+    let deploys_rollback = manifest_operation_schema(manifest, "deploys_rollback", "input_schema");
+    assert_schema_accepts(
+        &deploys_rollback,
+        &json!({ "site_id": "site-1", "deploy_id": "deploy-1" }),
+    );
+    assert_schema_rejects(&deploys_rollback, &json!({ "site_id": "site-1" }));
+
+    let env_list = manifest_operation_schema(manifest, "env_list", "input_schema");
+    assert_schema_accepts(
+        &env_list,
+        &json!({ "site_id": "site-1", "account_slug": "acme" }),
+    );
+    assert_schema_rejects(&env_list, &json!({ "site_id": "site-1" }));
+
+    let env_set = manifest_operation_schema(manifest, "env_set", "input_schema");
+    assert_schema_accepts(
+        &env_set,
+        &json!({
+            "site_id": "site-1",
+            "account_slug": "acme",
+            "key": "API_KEY",
+            "value": "secret-value",
+            "context": "production",
+            "is_secret": true
+        }),
+    );
+    assert_schema_rejects(
+        &env_set,
+        &json!({
+            "site_id": "site-1",
+            "account_slug": "acme",
+            "key": "API_KEY"
+        }),
+    );
+    assert_schema_rejects(
+        &env_set,
+        &json!({
+            "site_id": "site-1",
+            "account_slug": "acme",
+            "key": "API_KEY",
+            "value": "secret-value",
+            "is_secret": "yes"
+        }),
+    );
+
+    let env_delete = manifest_operation_schema(manifest, "env_delete", "input_schema");
+    assert_schema_accepts(
+        &env_delete,
+        &json!({ "site_id": "site-1", "account_slug": "acme", "key": "API_KEY" }),
+    );
+    assert_schema_rejects(
+        &env_delete,
+        &json!({ "site_id": "site-1", "account_slug": "acme" }),
+    );
+}
+
+fn assert_catalog_output_schema_examples(manifest: &toml::Value) {
+    for operation_key in [
+        "sites_list",
+        "deploys_list",
+        "dns_list_zones",
+        "env_list",
+        "env_set",
+    ] {
+        let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+        assert_schema_accepts(&schema, &json!([]));
+        assert_schema_accepts(&schema, &json!([{}]));
+        assert_schema_rejects(&schema, &json!({}));
+    }
+
+    for operation_key in [
+        "sites_get",
+        "sites_create",
+        "deploys_get",
+        "deploys_create",
+        "deploys_rollback",
+    ] {
+        let schema = manifest_operation_schema(manifest, operation_key, "output_schema");
+        assert_schema_accepts(&schema, &json!({}));
+        assert_schema_accepts(&schema, &json!({ "id": "resource-1" }));
+        assert_schema_rejects(&schema, &json!([]));
+    }
+
+    let sites_delete = manifest_operation_schema(manifest, "sites_delete", "output_schema");
+    assert_schema_accepts(
+        &sites_delete,
+        &json!({ "deleted": true, "site_id": "site-1" }),
+    );
+    assert_schema_rejects(
+        &sites_delete,
+        &json!({ "deleted": false, "site_id": "site-1" }),
+    );
+    assert_schema_rejects(&sites_delete, &json!({ "deleted": true }));
+
+    let env_delete = manifest_operation_schema(manifest, "env_delete", "output_schema");
+    assert_schema_accepts(&env_delete, &json!({ "deleted": true, "key": "API_KEY" }));
+    assert_schema_rejects(&env_delete, &json!({ "key": "API_KEY" }));
+
+    let health = manifest_operation_schema(manifest, "health", "output_schema");
+    assert_schema_accepts(
+        &health,
+        &json!({ "healthy": true, "user_id": "user-1", "email": null }),
+    );
+    assert_schema_accepts(
+        &health,
+        &json!({ "healthy": true, "user_id": "user-1", "email": "dev@example.com" }),
+    );
+    assert_schema_rejects(
+        &health,
+        &json!({ "healthy": false, "user_id": "user-1", "email": null }),
+    );
 }
 
 #[fcp_async_core::test]
@@ -429,6 +695,16 @@ fn async_timeout_and_cancellation_mapping_is_bounded() {
     let cancelled = NetlifyError::from_async_error(AsyncError::Cancelled);
     assert_eq!(cancelled.to_string(), "Async error: operation cancelled");
     assert!(!cancelled.is_retryable());
+}
+
+#[test]
+fn manifest_operation_schemas_compile_and_validate_core_payloads() {
+    let manifest = netlify_manifest();
+    let introspection = NetlifyConnector::new().introspect();
+
+    assert_manifest_runtime_schema_parity(&manifest, &introspection.operations);
+    assert_catalog_input_schema_examples(&manifest);
+    assert_catalog_output_schema_examples(&manifest);
 }
 
 #[test]

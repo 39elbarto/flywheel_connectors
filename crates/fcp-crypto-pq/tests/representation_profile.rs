@@ -49,6 +49,7 @@ const ROUTE_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq trapgen_delega
 const PUBLIC_MATRIX_EVIDENCE_COMMAND: &str = "cargo test -p fcp-crypto-pq public_matrix_reconstruction_evidence_jsonl_is_secret_free -- --nocapture";
 const SAMPLE_PRE_VERIFY_EVIDENCE_COMMAND: &str =
     "cargo test -p fcp-crypto-pq sample_pre_verify_evidence_jsonl_is_secret_free -- --nocapture";
+const V4_ROUTE_FIXTURE_ID: &str = "fixture:v4_reference:trapgen-delegate-route-v1";
 
 #[derive(Debug, Serialize)]
 struct MatrixDimensions {
@@ -150,7 +151,9 @@ struct RouteEvidenceLog<'a> {
     child_relation_result: Option<TrapdoorRelationResult>,
     trapdoor_norm_quality_bucket: RouteTrapdoorNormQualityEvidence,
     allocation_summary: AllocationEstimate,
+    primitive_timings_ms: RoutePrimitiveTimings,
     timing_ms: u128,
+    cleanup: &'a str,
     result: &'a str,
     skip_reason: Option<&'a str>,
 }
@@ -159,6 +162,13 @@ struct RouteEvidenceLog<'a> {
 struct RouteTrapdoorNormQualityEvidence {
     root: Option<TrapdoorNormQualityBucket>,
     child: Option<TrapdoorNormQualityBucket>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+struct RoutePrimitiveTimings {
+    trap_gen: u128,
+    delegate: u128,
+    relation_checks: u128,
 }
 
 #[derive(Debug, Serialize)]
@@ -263,15 +273,23 @@ fn fixture_id(profile: &str) -> &'static str {
     }
 }
 
-fn hashed_fixture_id() -> String {
+fn hashed_fixture_id_for(fixture_id: &str) -> String {
     format!(
         "hash:{}",
-        hex::encode(blake3::hash(ROUTE_FIXTURE_ID.as_bytes()).as_bytes())
+        hex::encode(blake3::hash(fixture_id.as_bytes()).as_bytes())
     )
+}
+
+fn hashed_fixture_id() -> String {
+    hashed_fixture_id_for(ROUTE_FIXTURE_ID)
 }
 
 fn route_fixture_entropy() -> TrapGenEntropy {
     TrapGenEntropy::from_fixture_seed(ROUTE_FIXTURE_ID.as_bytes(), [0x5A; 32])
+}
+
+fn v4_route_fixture_entropy() -> TrapGenEntropy {
+    TrapGenEntropy::from_fixture_seed(V4_ROUTE_FIXTURE_ID.as_bytes(), [0xA9; 32])
 }
 
 fn evidence_command_line<'a>(env_key: &str, default_command: &'a str) -> Cow<'a, str> {
@@ -1522,23 +1540,38 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
     );
     let zone = [0xA5; 32];
     let period = period();
-    let started = Instant::now();
     let small = LatticeParams::SMALL_TEST;
+    let v4 = LatticeParams::V4_REFERENCE;
     let mut unsupported_params = LatticeParams::V4_REFERENCE;
     unsupported_params.depth = 3;
     let small_representation = small
         .representation_profile()
         .expect("small profile representation is bounded");
+    let v4_representation = v4
+        .representation_profile()
+        .expect("V4 profile representation is bounded");
     let unsupported_representation = unsupported_params
         .representation_profile()
         .expect("unsupported representation remains allocation bounded");
     let entropy = route_fixture_entropy();
+    let small_started = Instant::now();
+    let small_trap_gen_started = Instant::now();
     let (master_pub, master_trap) =
         trap_gen_with_entropy(small, &entropy).expect("SMALL_TEST route TrapGen succeeds");
+    let small_trap_gen_ms = small_trap_gen_started.elapsed().as_millis();
+    let small_delegate_started = Instant::now();
     let (zone_pub, zone_trap) = delegate(&master_pub, &master_trap, zone, period, small)
         .expect("SMALL_TEST route Delegate succeeds");
+    let small_delegate_ms = small_delegate_started.elapsed().as_millis();
+    let small_relation_started = Instant::now();
     let root_relation = master_trap.relation_summary(&master_pub);
     let child_relation = zone_trap.relation_summary(&zone_pub, &master_pub);
+    let small_relation_ms = small_relation_started.elapsed().as_millis();
+    let small_timings = RoutePrimitiveTimings {
+        trap_gen: small_trap_gen_ms,
+        delegate: small_delegate_ms,
+        relation_checks: small_relation_ms,
+    };
     let base_success = RouteEvidenceLog {
         command_line: command_line.clone(),
         git_revision: git_revision(),
@@ -1562,7 +1595,9 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
             preimage_encoded: small_representation.preimage_encoded_bytes,
             max_preimage_encoded: 1024 * 1024,
         },
-        timing_ms: started.elapsed().as_millis(),
+        primitive_timings_ms: small_timings,
+        timing_ms: small_started.elapsed().as_millis(),
+        cleanup: "not_applicable_no_external_resources",
         result: "passed",
         skip_reason: None,
     };
@@ -1576,6 +1611,59 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
     );
 
     let mut lines = vec![serde_json::to_string(&base_success).expect("route evidence serializes")];
+
+    let v4_entropy = v4_route_fixture_entropy();
+    let v4_started = Instant::now();
+    let v4_trap_gen_started = Instant::now();
+    let (v4_master_pub, v4_master_trap) =
+        trap_gen_with_entropy(v4, &v4_entropy).expect("V4 route TrapGen succeeds");
+    let v4_trap_gen_ms = v4_trap_gen_started.elapsed().as_millis();
+    let v4_delegate_started = Instant::now();
+    let (v4_zone_pub, v4_zone_trap) = delegate(&v4_master_pub, &v4_master_trap, zone, period, v4)
+        .expect("V4 route Delegate succeeds");
+    let v4_delegate_ms = v4_delegate_started.elapsed().as_millis();
+    let v4_relation_started = Instant::now();
+    let v4_root_relation = v4_master_trap.relation_summary(&v4_master_pub);
+    let v4_child_relation = v4_zone_trap.relation_summary(&v4_zone_pub, &v4_master_pub);
+    let v4_relation_ms = v4_relation_started.elapsed().as_millis();
+    let v4_timings = RoutePrimitiveTimings {
+        trap_gen: v4_trap_gen_ms,
+        delegate: v4_delegate_ms,
+        relation_checks: v4_relation_ms,
+    };
+    let v4_success = RouteEvidenceLog {
+        command_line: command_line.clone(),
+        git_revision: git_revision(),
+        primitive_route_id: PRIMITIVE_ROUTE_ID,
+        primitive_route_revision: PRIMITIVE_ROUTE_REVISION,
+        representation_version: LATTICE_REPRESENTATION_VERSION,
+        parameter_profile: primitive_route_profile_name(v4),
+        fixture_id: hashed_fixture_id_for(V4_ROUTE_FIXTURE_ID),
+        zone_id_hash: zone_id_hash(&zone),
+        period_id_hash: period_id_hash(period),
+        matrix_dimensions: matrix_dimensions(v4, &v4_representation),
+        root_relation_result: Some(v4_root_relation.result),
+        child_relation_result: Some(v4_child_relation.result),
+        trapdoor_norm_quality_bucket: RouteTrapdoorNormQualityEvidence {
+            root: Some(v4_root_relation.norm_quality_bucket),
+            child: Some(v4_child_relation.norm_quality_bucket),
+        },
+        allocation_summary: allocation_estimate(&v4_representation),
+        primitive_timings_ms: v4_timings,
+        timing_ms: v4_started.elapsed().as_millis(),
+        cleanup: "not_applicable_no_external_resources",
+        result: "passed",
+        skip_reason: None,
+    };
+    assert_eq!(
+        v4_success.root_relation_result,
+        Some(TrapdoorRelationResult::MetadataConsistent)
+    );
+    assert_eq!(
+        v4_success.child_relation_result,
+        Some(TrapdoorRelationResult::MetadataConsistent)
+    );
+    lines.push(serde_json::to_string(&v4_success).expect("V4 route evidence serializes"));
 
     let malformed_root =
         fcp_crypto_pq::MasterTrapdoor::from_basis_envelope(small, master_pub.hash, vec![0xAA; 32])
@@ -1718,7 +1806,9 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
             } else {
                 small_representation
             }),
-            timing_ms: started.elapsed().as_millis(),
+            primitive_timings_ms: small_timings,
+            timing_ms: small_started.elapsed().as_millis(),
+            cleanup: "not_applicable_no_external_resources",
             result: "denied",
             skip_reason: Some(scenario),
         };
@@ -1742,7 +1832,9 @@ fn trapgen_delegate_route_evidence_jsonl_is_secret_free() {
             "route evidence must not expose raw operation/principal text or PII: {line}"
         );
         assert!(
-            !line.contains("fixture:small_test") && !line.contains("route-wrong-parent"),
+            !line.contains("fixture:small_test")
+                && !line.contains("fixture:v4_reference")
+                && !line.contains("route-wrong-parent"),
             "route evidence must hash fixture ids instead of logging raw names: {line}"
         );
         eprintln!("{line}");

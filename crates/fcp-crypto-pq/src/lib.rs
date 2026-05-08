@@ -1002,10 +1002,84 @@ fn v4_public_abar_row(
     coeffs
 }
 
+fn v4_public_abar_selected_row(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    row: u32,
+    selected_cols: &[u32],
+) -> Vec<u64> {
+    debug_assert_eq!(params, LatticeParams::V4_REFERENCE);
+    if selected_cols.is_empty() {
+        return Vec::new();
+    }
+    debug_assert!(selected_cols.windows(2).all(|cols| cols[0] < cols[1]));
+
+    let mut shaker = Shake256::default();
+    update_len_prefixed(&mut shaker, SHAKE_DOMAIN_PREFIX);
+    update_len_prefixed(&mut shaker, b"route-public-abar-row-v1");
+    update_len_prefixed(&mut shaker, PRIMITIVE_ROUTE_ID.as_bytes());
+    update_params(&mut shaker, params);
+    update_len_prefixed(&mut shaker, public_seed);
+    Update::update(&mut shaker, &row.to_le_bytes());
+    let mut reader = shaker.finalize_xof();
+    let mut coeffs = Vec::with_capacity(selected_cols.len());
+    let mut next_selected = 0_usize;
+    let max_col = *selected_cols
+        .last()
+        .expect("selected_cols is known non-empty");
+    for col in 0..=max_col {
+        let mut out = [0_u8; 8];
+        reader.read(&mut out);
+        if selected_cols[next_selected] == col {
+            coeffs.push(u64::from_le_bytes(out) % params.q);
+            next_selected += 1;
+            if next_selected == selected_cols.len() {
+                break;
+            }
+        }
+    }
+    coeffs
+}
+
+#[cfg(test)]
 fn tail_product_from_row(row_coefficients: &[u64], support: &[(u32, i64)]) -> i128 {
     let mut product = 0_i128;
     for (abar_col, r) in support {
         let a = row_coefficients[usize::try_from(*abar_col).expect("u32 col fits in usize")];
+        product += i128::from(a) * i128::from(*r);
+    }
+    product
+}
+
+fn v4_index_r_supports(r_supports: &[Vec<(u32, i64)>]) -> (Vec<u32>, Vec<Vec<(usize, i64)>>) {
+    let mut selected_cols: Vec<u32> = r_supports
+        .iter()
+        .flat_map(|support| support.iter().map(|(abar_col, _)| *abar_col))
+        .collect();
+    selected_cols.sort_unstable();
+    selected_cols.dedup();
+
+    let indexed_supports = r_supports
+        .iter()
+        .map(|support| {
+            support
+                .iter()
+                .map(|(abar_col, r)| {
+                    let index = selected_cols
+                        .binary_search(abar_col)
+                        .expect("every support column was selected");
+                    (index, *r)
+                })
+                .collect()
+        })
+        .collect();
+    (selected_cols, indexed_supports)
+}
+
+fn tail_product_from_selected_row(row_coefficients: &[u64], support: &[(usize, i64)]) -> i128 {
+    let mut product = 0_i128;
+    for (abar_col, r) in support {
+        let a = row_coefficients[*abar_col];
         product += i128::from(a) * i128::from(*r);
     }
     product
@@ -1021,25 +1095,43 @@ fn route_public_matrix_material(
         .map(|gadget_col| route_r_support(params, r_seed, gadget_col, dims))
         .collect::<LatticePqResult<Vec<_>>>()?;
     let mut tail_coefficients = Vec::with_capacity(encoded_tail_coefficients_len(params)?);
-    for row in 0..params.n {
-        let row_coefficients = (params == LatticeParams::V4_REFERENCE)
-            .then(|| v4_public_abar_row(params, public_seed, row, dims));
-        for gadget_col in 0..dims.gadget_cols {
-            let support = &r_supports[usize::try_from(gadget_col).expect("u32 col fits usize")];
-            let product = row_coefficients.as_ref().map_or_else(
-                || tail_product(params, public_seed, support, row),
-                |coefficients| tail_product_from_row(coefficients, support),
-            );
-            let tail = reduce_i128_mod_q(i128::from(row == gadget_col) - product, params.q);
-            let relation_lhs = reduce_i128_mod_q(product + i128::from(tail), params.q);
-            let relation_rhs = u64::from(row == gadget_col);
-            if relation_lhs != relation_rhs {
-                return Err(LatticePqError::InvalidTrapdoorSecret {
-                    material: "basis_relation",
-                    reason: "internal gadget relation did not reduce to the identity gadget",
-                });
+
+    if params == LatticeParams::V4_REFERENCE {
+        let (selected_cols, indexed_r_supports) = v4_index_r_supports(&r_supports);
+        for row in 0..params.n {
+            let row_coefficients =
+                v4_public_abar_selected_row(params, public_seed, row, &selected_cols);
+            for (gadget_col, support) in indexed_r_supports.iter().enumerate() {
+                let product = tail_product_from_selected_row(&row_coefficients, support);
+                let gadget_col_u32 = u32::try_from(gadget_col).expect("gadget column fits in u32");
+                let tail = reduce_i128_mod_q(i128::from(row == gadget_col_u32) - product, params.q);
+                let relation_lhs = reduce_i128_mod_q(product + i128::from(tail), params.q);
+                let relation_rhs = u64::from(row == gadget_col_u32);
+                if relation_lhs != relation_rhs {
+                    return Err(LatticePqError::InvalidTrapdoorSecret {
+                        material: "basis_relation",
+                        reason: "internal gadget relation did not reduce to the identity gadget",
+                    });
+                }
+                encode_coeff(params, tail, &mut tail_coefficients)?;
             }
-            encode_coeff(params, tail, &mut tail_coefficients)?;
+        }
+    } else {
+        for row in 0..params.n {
+            for gadget_col in 0..dims.gadget_cols {
+                let support = &r_supports[usize::try_from(gadget_col).expect("u32 col fits usize")];
+                let product = tail_product(params, public_seed, support, row);
+                let tail = reduce_i128_mod_q(i128::from(row == gadget_col) - product, params.q);
+                let relation_lhs = reduce_i128_mod_q(product + i128::from(tail), params.q);
+                let relation_rhs = u64::from(row == gadget_col);
+                if relation_lhs != relation_rhs {
+                    return Err(LatticePqError::InvalidTrapdoorSecret {
+                        material: "basis_relation",
+                        reason: "internal gadget relation did not reduce to the identity gadget",
+                    });
+                }
+                encode_coeff(params, tail, &mut tail_coefficients)?;
+            }
         }
     }
     Ok(PublicMatrixMaterial {
@@ -3242,6 +3334,47 @@ mod tests {
             ),
             "got {err:?}"
         );
+    }
+
+    #[test]
+    fn v4_selected_abar_rows_match_full_rows_for_sparse_supports() {
+        let p = LatticeParams::V4_REFERENCE;
+        let dims = route_dimensions(p, "selected-row-test").unwrap();
+        let entropy = fixture_entropy();
+        let public_seed = derive_root_public_seed(p, &entropy);
+        let r_seed = derive_root_r_seed(p, &entropy);
+        let r_supports = (0..dims.gadget_cols)
+            .map(|gadget_col| route_r_support(p, &r_seed, gadget_col, dims))
+            .collect::<LatticePqResult<Vec<_>>>()
+            .unwrap();
+        let (selected_cols, indexed_supports) = v4_index_r_supports(&r_supports);
+
+        assert!(!selected_cols.is_empty());
+        assert!(
+            selected_cols.len()
+                <= usize::try_from(dims.gadget_cols * V4_SPARSE_R_WEIGHT)
+                    .expect("support count fits usize"),
+            "selected row must stay bounded by sparse R support"
+        );
+
+        for row in [0, 1, p.n - 1] {
+            let full_row = v4_public_abar_row(p, &public_seed, row, dims);
+            let selected_row = v4_public_abar_selected_row(p, &public_seed, row, &selected_cols);
+            for (selected_index, abar_col) in selected_cols.iter().enumerate() {
+                assert_eq!(
+                    selected_row[selected_index],
+                    full_row[usize::try_from(*abar_col).expect("u32 column fits usize")],
+                    "selected-row stream must preserve the public A_bar coefficient"
+                );
+            }
+            for (support, indexed_support) in r_supports.iter().zip(indexed_supports.iter()) {
+                assert_eq!(
+                    tail_product_from_selected_row(&selected_row, indexed_support),
+                    tail_product_from_row(&full_row, support),
+                    "selected-row products must match full-row products"
+                );
+            }
+        }
     }
 
     #[test]

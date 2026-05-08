@@ -1,6 +1,7 @@
 # V4 Throughput Benchmark: Lattice Delegation vs Ed25519 and ML-DSA-65
 
-**Bead:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e]).
+**Beads:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e])
+and `flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]).
 **Bench file:** `crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs`.
 **E2E harness:** `crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs`.
 **Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` and
@@ -19,16 +20,56 @@ real lattice sub-token through policy enforcement.
 | --- | ---: | ---: | ---: | ---: |
 | Ed25519 | 36.523 us | 38.531 us | 82.795 us | 104.99 us |
 | ML-DSA-65 | 771.99 us | 1.2600 ms | 130.22 us | 1.5139 ms |
-| V4 lattice real route | 480.29 ms | 1.6327 s delegate / 536.96 ms sample_pre | 498.33 ms | 2.1870 s |
+| V4 lattice real route, `.12` optimized | 90.730 ms | 182.59 ms delegate / 91.276 ms sample_pre | 96.026 ms | 460.30 ms |
+| V4 lattice real route, `.5` baseline | 480.29 ms | 1.6327 s delegate / 536.96 ms sample_pre | 498.33 ms | 2.1870 s |
 
 Read this as a correctness closeout, not a production performance closeout. The
-new route is real and no longer hides behind `NotImplemented`, but it is far
-above the hot-path targets. The closeout filed follow-up beads for the three
-measured bottlenecks:
+new route is real and no longer hides behind `NotImplemented`. The `.12`
+sparse-support materialization pass cuts setup/delegation by about 5x-9x, but
+the V4 route is still above hot-path latency targets and still needs dedicated
+`sample_pre`, verifier, and host-dispatch optimization.
 
-- `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency.
+The `.5` closeout filed follow-up beads for the three measured bottlenecks:
+
+- `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency. The first closeout pass now streams only sparse `R` support columns while materializing V4 public tail coefficients.
 - `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency.
 - `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency.
+
+## 2026-05-08 `.12` Optimization Update
+
+The `.12` pass removes avoidable dense-row work from V4 public-matrix tail
+materialization. The previous route generated and reduced every coefficient in
+each public `A_bar` row before multiplying by the sparse `R` supports. The
+optimized route indexes the selected support columns once, streams the same
+row-domain SHAKE output in order, retains only the selected coefficients, and
+computes the tail products from those selected coefficients. It does not change
+the domain separation, public seed, request/zone/period binding, public material
+format, or verifier-computable `ZonePeriodPublicKey` material.
+
+The after benchmark command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-opt12-bench \
+  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa lattice -- --noplot
+```
+
+| Benchmark | `.5` before mean | `.12` after interval | `.12` after mean | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `keygen/lattice_trapdoor_master_setup` | 480.29 ms | 90.177 ms - 91.687 ms | 90.730 ms | about 5.3x faster |
+| `sign_or_issue/lattice_delegate_one_hop` | 1.6327 s | 181.33 ms - 185.02 ms | 182.59 ms | about 8.9x faster |
+| `sign_or_issue/lattice_sample_pre_real_route` | 536.96 ms | 90.660 ms - 92.192 ms | 91.276 ms | about 5.9x faster |
+| `verify/lattice_verify_real_route` | 498.33 ms | 92.877 ms - 98.068 ms | 96.026 ms | about 5.2x faster |
+| `end_to_end/lattice_full_crypto_route` | 2.1870 s | 453.27 ms - 469.05 ms | 460.30 ms | about 4.8x faster |
+
+The unit proof added for this optimization compares selected V4 `A_bar`
+coefficients and sparse tail products against the previous full-row expansion
+for representative rows, and the existing V4 public-matrix route test continues
+to reconstruct, digest, and reject malformed material. The redaction-safe route
+JSONL evidence now includes `V4_REFERENCE` records with command line, git
+revision, primitive route id/revision, representation version, parameter
+profile, hashed fixture/zone/period identifiers, matrix dimensions, allocation
+summary, separate `trap_gen`/`delegate`/relation-check timings, cleanup, result,
+and skip reason fields.
 
 ## Methodology
 

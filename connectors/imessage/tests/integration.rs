@@ -27,7 +27,10 @@ async fn lifecycle_loopback_token_and_shutdown_contract() {
     mock_server_info(&server, 200, server_info_body(true)).await;
 
     let mut connector = configured_connector(&server).await;
-    assert_eq!(connector.health().await.status, HealthState::Ready);
+    assert!(matches!(
+        connector.health().await.status,
+        HealthState::Ready
+    ));
     assert!(connector.doctor().passed);
 
     let identity = establish_handshake(&mut connector, ZoneId::work()).await;

@@ -2,7 +2,8 @@
 
 **Beads:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e]),
 `flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]), and
-`flywheel_connectors-kyopb.1.3.1.1.13` ([J.5.3.1.1.h]).
+`flywheel_connectors-kyopb.1.3.1.1.13` ([J.5.3.1.1.h]), and
+`flywheel_connectors-kyopb.1.3.1.1.14` ([J.5.3.1.1.i]).
 **Bench file:** `crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs`.
 **E2E harness:** `crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs`.
 **Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` and
@@ -29,14 +30,17 @@ Read this as a correctness closeout, not a production performance closeout. The
 new route is real and no longer hides behind `NotImplemented`. The `.12`
 sparse-support materialization pass cuts setup/delegation by about 5x-9x, and
 the `.13` buffered selected-row verifier pass cuts another 28%-34% from the V4
-lattice timings. The route is still above hot-path latency targets and still
-needs deeper `sample_pre`, verifier, and host-dispatch optimization.
+lattice timings. The `.14` dispatcher pass shows that the host policy pipeline
+is not adding meaningful non-check overhead; the remaining hot-dispatch cost is
+the V4 lattice verifier inside `capability_verify`. The route is still above
+hot-path latency targets and still needs deeper verifier optimization.
 
 The `.5` closeout filed follow-up beads for the three measured bottlenecks:
 
 - `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency. The first closeout pass now streams only sparse `R` support columns while materializing V4 public tail coefficients.
 - `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency. The first closeout pass now buffers selected-row XOF reads and verifies V4 route preimages from nonzero `A_bar` support columns instead of scanning every `A_bar` coefficient.
-- `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency.
+- `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency. The closeout reclassified the old e2e `policy_dispatcher_ms` sum as duplicate measurement, exposes `capability_verify` per-check timing, and leaves the residual hot-path work in the lattice verifier itself.
+- `flywheel_connectors-kyopb.1.3.1.1.15`: follow-up for the remaining V4 verifier crypto hot path now that `.14` proved host pipeline overhead is not the bottleneck.
 
 ## 2026-05-08 `.12` Optimization Update
 
@@ -104,6 +108,53 @@ This pass does not change the public matrix material version, primitive route
 revision, operation-hash RHS expansion, norm cap, period check, parameter
 agreement, or malformed/forged preimage rejection behavior.
 
+## 2026-05-08 `.14` Dispatcher Evidence Update
+
+The `.14` pass does not change the lattice arithmetic. It fixes the host e2e
+evidence so operators can distinguish the production `EnforcementPipeline` hot
+path from the harness's standalone verifier comparison. The previous host e2e
+summary added standalone `policy_verify_ms` and `dispatcher_ms` together as
+`policy_dispatcher_ms`; that double-counted lattice verification because
+`dispatcher_ms` already runs `CapabilityVerifyCheck`, which calls
+`LatticeDelegationVerifierImpl::verify_sub_token`.
+
+The after command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-dispatch14-check \
+  cargo test -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture
+```
+
+The updated JSONL artifact still records the standalone verifier timing for
+comparison, but it now also records the production pipeline total, the
+`capability_verify` check timing, non-check pipeline overhead, per-check timing
+records, build profile, host class, a hashed `CARGO_TARGET_DIR` fingerprint,
+and a stable relative artifact path. The raw target directory path is not
+written to the evidence artifact.
+
+| V4 host e2e field | Before `.14` baseline | After `.14` evidence | Meaning |
+| --- | ---: | ---: | --- |
+| `standalone_policy_verify_ms` / old `policy_verify_ms` | 2569.290 ms | 2624.742 ms | Harness-only comparison verifier call |
+| `pipeline_total_ms` / old `dispatcher_ms` | 2565.295 ms | 2660.044 ms | Production `EnforcementPipeline` latency |
+| `pipeline_capability_verify_ms` | not recorded | 2660.041 ms | Time spent in `CapabilityVerifyCheck` |
+| `pipeline_non_check_overhead_ms` | not recorded | 0.003 ms | Pipeline overhead outside checks |
+| old `policy_dispatcher_ms` / duplicate sum | 5134.585 ms | 5284.786 ms | Duplicate measurement retained only as a diagnostic |
+
+The optimized evidence also adds V4 denial coverage through the production
+pipeline:
+
+| Scenario | Pipeline total | Error mapping |
+| --- | ---: | --- |
+| `allow_v4_reference` | 2660.044 ms | allow |
+| `deny_forged_v4_reference` | 2641.901 ms | `LATTICE_VERIFICATION_EQUATION_FAILED` |
+| `deny_trust_set_replay_v4_reference` | 0.027 ms | `LATTICE_REQUEST_BINDING_MISMATCH` |
+
+This proves the host dispatcher is not the current bottleneck: the V4 allow and
+forged-denial paths are dominated by the verifier crypto check, while replay
+denial fails at request-binding speed. The remaining `>10ms` hot-dispatch gap
+therefore belongs in a verifier-crypto follow-up rather than another host
+dispatcher bead: `flywheel_connectors-kyopb.1.3.1.1.15`.
+
 ## Methodology
 
 The benchmark command was run through `rch` on worker `vmi1153651`:
@@ -123,12 +174,13 @@ The host/policy e2e harness was run separately and wrote redaction-safe JSONL to
 target/fcp-host/lattice-policy-dispatcher-evidence.jsonl
 ```
 
-That e2e artifact records command line, git revision, parameter profile,
-fixture hash, zone/period/certificate/trust-set/request hashes, matrix
-dimensions, primitive timings, verifier result, dispatcher decision, error
-mapping, cleanup result, and skip reason fields. It intentionally stores hashes
-and buckets rather than raw principals, zones, operation names, preimages,
-trapdoors, or credentials.
+That e2e artifact records command line, git revision, build profile, hashed
+`CARGO_TARGET_DIR` fingerprint, host class, parameter profile, fixture hash,
+zone/period/certificate/trust-set/request hashes, matrix dimensions, primitive
+timings, per-check pipeline timings, verifier result, dispatcher decision,
+error mapping, cleanup result, artifact path, and skip reason fields. It
+intentionally stores hashes and buckets rather than raw principals, zones,
+operation names, preimages, trapdoors, raw target paths, or credentials.
 
 ## Criterion Results
 
@@ -195,7 +247,7 @@ zone, mismatched period, mismatched operation, mismatched principal, malformed
 preimage, missing certificate, incomplete delegation chain, chain too deep, and
 trust-set/request-binding replay mismatch.
 
-The `V4_REFERENCE` record measured:
+The original `.5` `V4_REFERENCE` record measured:
 
 | Primitive | Time |
 | --- | ---: |
@@ -206,13 +258,15 @@ The `V4_REFERENCE` record measured:
 | `dispatcher_ms` | 3528.587 ms |
 | `policy_dispatcher_ms` | 7040.603 ms |
 
-Those e2e numbers are slower than the isolated Criterion run because the e2e
-path uses the full policy/host envelope and records evidence for each scenario.
-They are still useful because they measure the actual user-facing enforcement
-path: once a lattice token is present, the dispatcher requires a configured
-`LatticeDelegationVerifierImpl`, denies forged lattice tokens even if legacy
-string claims are present, and maps policy failures to stable `LATTICE_*` reason
-codes.
+The `.14` evidence shows that `policy_dispatcher_ms` was a duplicate
+measurement rather than the production dispatcher latency. The production path
+is `pipeline_total_ms`; for the current debug run it was 2660.044 ms, with
+2660.041 ms inside `capability_verify` and only 0.003 ms outside check records.
+The evidence still proves the user-facing enforcement behavior: once a lattice
+token is present, the dispatcher requires a configured
+`LatticeDelegationVerifierImpl`, denies forged lattice material even if legacy
+string claims include wildcard capability, rejects request-binding replay, and
+maps policy failures to stable `LATTICE_*` reason codes.
 
 ## Decision Thresholds
 
@@ -226,7 +280,7 @@ optimization work where the system is not yet user-optimal.
 | `delegate` | file follow-up if one-hop delegate blocks issuance UX | 7.002s e2e, 1.633s isolated | `.12` |
 | `sample_pre` | target <=10ms for hot issuance | 3.520s e2e, 537ms isolated | `.13` |
 | `verify` | target <=10ms for hot dispatch | 3.512s e2e, 498ms isolated | `.13` |
-| policy dispatcher | target <=10ms total hot path | 7.041s e2e | `.14` |
+| policy dispatcher | target <=10ms total hot path | 2.660s debug e2e pipeline total; 0.003ms non-check overhead | `.14` diagnosis complete; `.15` tracks verifier follow-up |
 
 ## Reproducibility
 

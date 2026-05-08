@@ -923,6 +923,27 @@ impl EnforcementDecision {
             .filter(|c| c.outcome.is_skip())
             .count()
     }
+
+    /// Wall-clock time for the first executed check with the given name.
+    #[must_use]
+    pub fn check_elapsed_ms(&self, name: &str) -> Option<f64> {
+        self.checks_run
+            .iter()
+            .find(|record| record.name == name)
+            .map(|record| record.elapsed_ms)
+    }
+
+    /// Sum of the recorded per-check wall-clock times.
+    #[must_use]
+    pub fn check_elapsed_total_ms(&self) -> f64 {
+        self.checks_run.iter().map(|record| record.elapsed_ms).sum()
+    }
+
+    /// Pipeline wall-clock time not attributed to an individual check record.
+    #[must_use]
+    pub fn non_check_overhead_ms(&self) -> f64 {
+        (self.elapsed_ms - self.check_elapsed_total_ms()).max(0.0)
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4602,6 +4623,46 @@ mod tests {
         };
         assert_eq!(decision.allow_count(), 2);
         assert_eq!(decision.skip_count(), 1);
+    }
+
+    #[test]
+    fn decision_reports_named_check_and_overhead_timings() {
+        let decision = EnforcementDecision {
+            outcome: PipelineOutcome::Allow,
+            checks_run: vec![
+                CheckRecord {
+                    name: "canonical_decode".into(),
+                    outcome: CheckOutcome::Allow,
+                    elapsed_ms: 0.25,
+                },
+                CheckRecord {
+                    name: "capability_verify".into(),
+                    outcome: CheckOutcome::Allow,
+                    elapsed_ms: 2.5,
+                },
+            ],
+            elapsed_ms: 3.0,
+        };
+
+        assert_eq!(decision.check_elapsed_ms("capability_verify"), Some(2.5));
+        assert_eq!(decision.check_elapsed_ms("missing_check"), None);
+        assert!((decision.check_elapsed_total_ms() - 2.75).abs() < f64::EPSILON);
+        assert!((decision.non_check_overhead_ms() - 0.25).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn decision_overhead_never_goes_negative_when_clocks_round() {
+        let decision = EnforcementDecision {
+            outcome: PipelineOutcome::Allow,
+            checks_run: vec![CheckRecord {
+                name: "capability_verify".into(),
+                outcome: CheckOutcome::Allow,
+                elapsed_ms: 1.1,
+            }],
+            elapsed_ms: 1.0,
+        };
+
+        assert!(decision.non_check_overhead_ms() <= f64::EPSILON);
     }
 
     #[test]

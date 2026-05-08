@@ -6,8 +6,8 @@ use std::time::Instant;
 
 use fcp_crypto_pq as pq;
 use fcp_host::{
-    CapabilityVerifyCheck, EnforcementConfig, EnforcementContextBuilder, EnforcementPipeline,
-    PipelineOutcome,
+    CapabilityVerifyCheck, CheckOutcome, EnforcementConfig, EnforcementContextBuilder,
+    EnforcementPipeline, PipelineOutcome,
 };
 use fcp_policy::{
     DelegationCertificate, DelegationCertificateId, DelegationPeriod, LatticeDelegationVerifier,
@@ -50,12 +50,28 @@ struct PrimitiveTimings {
     sample_pre_ms: f64,
     policy_verify_ms: f64,
     dispatcher_ms: f64,
+    pipeline_capability_verify_ms: f64,
+    pipeline_non_check_overhead_ms: f64,
+    duplicated_measurement_ms: f64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct CheckTimingRecord {
+    name: String,
+    outcome: &'static str,
+    elapsed_ms: f64,
 }
 
 #[derive(Debug, Serialize)]
 struct EvidenceRecord {
     command_line: &'static str,
     git_revision: String,
+    build_profile: &'static str,
+    cargo_target_dir_hash: String,
+    cargo_target_dir_class: &'static str,
+    worker_host_class: String,
+    timing_sample_count: u32,
+    artifact_path: &'static str,
     parameter_profile: &'static str,
     fixture_id_hash: String,
     scenario: &'static str,
@@ -69,6 +85,7 @@ struct EvidenceRecord {
     request_binding_result: &'static str,
     matrix_dimensions: MatrixDimensions,
     primitive_timings: PrimitiveTimings,
+    pipeline_checks: Vec<CheckTimingRecord>,
     norm_bound_bucket: String,
     verifier_result: String,
     receipt_id_hash: Option<String>,
@@ -87,6 +104,14 @@ struct ScenarioRecordInputs {
     dispatcher_decision: &'static str,
     error_mapping: Option<String>,
     timings: PrimitiveTimings,
+    pipeline_checks: Vec<CheckTimingRecord>,
+}
+
+struct DispatchResult {
+    timings: PrimitiveTimings,
+    decision: &'static str,
+    error: Option<String>,
+    pipeline_checks: Vec<CheckTimingRecord>,
 }
 
 fn artifact_path() -> PathBuf {
@@ -105,6 +130,40 @@ fn git_revision() -> String {
         .map(|value| value.trim().to_owned())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_owned())
+}
+
+const fn build_profile() -> &'static str {
+    if cfg!(debug_assertions) {
+        "debug"
+    } else {
+        "release"
+    }
+}
+
+fn cargo_target_dir_evidence() -> (String, &'static str) {
+    match std::env::var("CARGO_TARGET_DIR") {
+        Ok(value) if !value.is_empty() => {
+            let class = if value.starts_with("/tmp/") {
+                "tmp_absolute"
+            } else if value.starts_with('/') {
+                "absolute"
+            } else {
+                "relative"
+            };
+            (
+                digest_hex(b"fcp-host/e2e/cargo-target-dir-v1|", value.as_bytes()),
+                class,
+            )
+        }
+        _ => (
+            digest_hex(b"fcp-host/e2e/cargo-target-dir-v1|", b"unset"),
+            "unset",
+        ),
+    }
+}
+
+fn worker_host_class() -> String {
+    format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH)
 }
 
 fn digest_hex(domain: &[u8], bytes: &[u8]) -> String {
@@ -285,31 +344,56 @@ fn context_for(
 fn dispatch(
     verifier: LatticeDelegationVerifierImpl,
     ctx: &fcp_host::EnforcementContext,
-) -> (PrimitiveTimings, &'static str, Option<String>) {
+) -> DispatchResult {
     let config = EnforcementConfig::new().with_lattice_delegation_verifier(Arc::new(verifier));
     let pipeline =
         EnforcementPipeline::with_checks_and_config(vec![Box::new(CapabilityVerifyCheck)], config);
-    let start = Instant::now();
     let decision = pipeline.evaluate(ctx);
-    let dispatcher_ms = start.elapsed().as_secs_f64() * 1000.0;
-    match decision.outcome {
-        PipelineOutcome::Allow => (
-            PrimitiveTimings {
-                dispatcher_ms,
-                ..PrimitiveTimings::default()
+    let pipeline_checks = decision
+        .checks_run
+        .iter()
+        .map(|record| CheckTimingRecord {
+            name: record.name.clone(),
+            outcome: match &record.outcome {
+                CheckOutcome::Allow => "allow",
+                CheckOutcome::Deny { .. } => "deny",
+                CheckOutcome::Skip { .. } => "skip",
             },
-            "allow",
-            None,
-        ),
-        PipelineOutcome::Deny { reason_code, .. } => (
-            PrimitiveTimings {
-                dispatcher_ms,
-                ..PrimitiveTimings::default()
-            },
-            "deny",
-            Some(reason_code),
-        ),
+            elapsed_ms: record.elapsed_ms,
+        })
+        .collect();
+    let (dispatcher_decision, dispatcher_error) = match &decision.outcome {
+        PipelineOutcome::Allow => ("allow", None),
+        PipelineOutcome::Deny { reason_code, .. } => ("deny", Some(reason_code.clone())),
+    };
+
+    DispatchResult {
+        timings: PrimitiveTimings {
+            dispatcher_ms: decision.elapsed_ms,
+            pipeline_capability_verify_ms: decision
+                .check_elapsed_ms("capability_verify")
+                .unwrap_or_default(),
+            pipeline_non_check_overhead_ms: decision.non_check_overhead_ms(),
+            ..PrimitiveTimings::default()
+        },
+        decision: dispatcher_decision,
+        error: dispatcher_error,
+        pipeline_checks,
     }
+}
+
+fn timing_summary(primitive_timings: PrimitiveTimings) -> String {
+    format!(
+        "trap_gen_ms={:.3};delegate_ms={:.3};sample_pre_ms={:.3};standalone_policy_verify_ms={:.3};pipeline_total_ms={:.3};pipeline_capability_verify_ms={:.3};pipeline_non_check_overhead_ms={:.3};duplicated_measurement_ms={:.3}",
+        primitive_timings.trap_gen_ms,
+        primitive_timings.delegate_ms,
+        primitive_timings.sample_pre_ms,
+        primitive_timings.policy_verify_ms,
+        primitive_timings.dispatcher_ms,
+        primitive_timings.pipeline_capability_verify_ms,
+        primitive_timings.pipeline_non_check_overhead_ms,
+        primitive_timings.duplicated_measurement_ms
+    )
 }
 
 fn record_for(
@@ -320,9 +404,21 @@ fn record_for(
     let mut primitive_timings = fixture.primitive_timings;
     primitive_timings.policy_verify_ms = inputs.timings.policy_verify_ms;
     primitive_timings.dispatcher_ms = inputs.timings.dispatcher_ms;
+    primitive_timings.pipeline_capability_verify_ms = inputs.timings.pipeline_capability_verify_ms;
+    primitive_timings.pipeline_non_check_overhead_ms =
+        inputs.timings.pipeline_non_check_overhead_ms;
+    primitive_timings.duplicated_measurement_ms =
+        primitive_timings.policy_verify_ms + primitive_timings.dispatcher_ms;
+    let (cargo_target_dir_hash, cargo_target_dir_class) = cargo_target_dir_evidence();
     EvidenceRecord {
         command_line: COMMAND_LINE,
         git_revision: git_revision.to_owned(),
+        build_profile: build_profile(),
+        cargo_target_dir_hash,
+        cargo_target_dir_class,
+        worker_host_class: worker_host_class(),
+        timing_sample_count: 1,
+        artifact_path: RELATIVE_ARTIFACT_PATH,
         parameter_profile: fixture.profile,
         fixture_id_hash: fixture.fixture_id_hash.clone(),
         scenario: inputs.scenario,
@@ -351,18 +447,13 @@ fn record_for(
         request_binding_result: inputs.request_binding_result,
         matrix_dimensions: matrix_dimensions(fixture.params),
         primitive_timings,
+        pipeline_checks: inputs.pipeline_checks,
         norm_bound_bucket: fixture.norm_bound_bucket.clone(),
         verifier_result: inputs.verifier_result,
         receipt_id_hash: inputs.receipt_id_hash,
         dispatcher_decision: inputs.dispatcher_decision,
         error_mapping: inputs.error_mapping,
-        benchmark_summary: format!(
-            "trap_gen_ms={:.3};delegate_ms={:.3};sample_pre_ms={:.3};policy_dispatcher_ms={:.3}",
-            primitive_timings.trap_gen_ms,
-            primitive_timings.delegate_ms,
-            primitive_timings.sample_pre_ms,
-            primitive_timings.policy_verify_ms + primitive_timings.dispatcher_ms
-        ),
+        benchmark_summary: timing_summary(primitive_timings),
         cleanup_result: "artifact_flushed",
         skip_reason: None,
     }
@@ -445,12 +536,12 @@ fn run_scenario(
         }
     };
 
-    let (dispatcher_timing, dispatcher_decision, dispatcher_error) = dispatch(verifier, &ctx);
+    let dispatch_result = dispatch(verifier, &ctx);
     if let Some(expected_error) = expected_error.as_deref() {
-        assert_eq!(dispatcher_error.as_deref(), Some(expected_error));
+        assert_eq!(dispatch_result.error.as_deref(), Some(expected_error));
     } else {
-        assert_eq!(dispatcher_decision, "allow");
-        assert!(dispatcher_error.is_none());
+        assert_eq!(dispatch_result.decision, "allow");
+        assert!(dispatch_result.error.is_none());
     }
 
     record_for(
@@ -461,13 +552,20 @@ fn run_scenario(
             request_binding_result,
             verifier_result,
             receipt_id_hash,
-            dispatcher_decision,
-            error_mapping: dispatcher_error,
+            dispatcher_decision: dispatch_result.decision,
+            error_mapping: dispatch_result.error,
             timings: PrimitiveTimings {
                 policy_verify_ms,
-                dispatcher_ms: dispatcher_timing.dispatcher_ms,
+                dispatcher_ms: dispatch_result.timings.dispatcher_ms,
+                pipeline_capability_verify_ms: dispatch_result
+                    .timings
+                    .pipeline_capability_verify_ms,
+                pipeline_non_check_overhead_ms: dispatch_result
+                    .timings
+                    .pipeline_non_check_overhead_ms,
                 ..PrimitiveTimings::default()
             },
+            pipeline_checks: dispatch_result.pipeline_checks,
         },
     )
 }
@@ -512,6 +610,20 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
         "match",
         small.verifier.clone(),
         context_for(&small, forged),
+    ));
+
+    let mut forged_v4 = v4.sub_token.clone();
+    *forged_v4
+        .preimage_bytes
+        .first_mut()
+        .expect("fixture preimage must not be empty") ^= 0x01;
+    records.push(run_scenario(
+        &git_revision,
+        &v4,
+        "deny_forged_v4_reference",
+        "match",
+        v4.verifier.clone(),
+        context_for(&v4, forged_v4),
     ));
 
     let mut wrong_zone_ctx = context_for(&small, small.sub_token.clone());
@@ -644,6 +756,21 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
         context_for(&small, small.sub_token.clone()),
     ));
 
+    let mut extra_v4_cert = v4.certificate.clone();
+    extra_v4_cert.cert_id = cert_id(0xE3);
+    let v4_trust_replay_verifier = LatticeDelegationVerifierImpl::with_certificates(
+        v4.params,
+        [v4.certificate.clone(), extra_v4_cert],
+    );
+    records.push(run_scenario(
+        &git_revision,
+        &v4,
+        "deny_trust_set_replay_v4_reference",
+        "mismatch",
+        v4_trust_replay_verifier,
+        context_for(&v4, v4.sub_token.clone()),
+    ));
+
     let path = artifact_path();
     let parent = path.parent().expect("artifact has parent");
     fs::create_dir_all(parent).expect("create artifact directory");
@@ -674,6 +801,14 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
             "JSONL artifact leaked forbidden text {forbidden:?}"
         );
     }
+    if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR")
+        && !target_dir.is_empty()
+    {
+        assert!(
+            !artifact.contains(&target_dir),
+            "JSONL artifact leaked raw CARGO_TARGET_DIR"
+        );
+    }
     assert!(
         artifact.contains("\"dispatcher_decision\":\"allow\""),
         "artifact records dispatcher allow"
@@ -686,5 +821,52 @@ fn lattice_policy_dispatcher_e2e_writes_redaction_safe_jsonl() {
         artifact.contains("LATTICE_REQUEST_BINDING_MISMATCH"),
         "artifact records request-binding replay denial"
     );
-    assert_eq!(records.len(), 12);
+    assert!(
+        artifact.contains("\"pipeline_capability_verify_ms\""),
+        "artifact records capability_verify check timing"
+    );
+    assert!(
+        artifact.contains("\"pipeline_checks\""),
+        "artifact records per-check timing details"
+    );
+    assert!(
+        artifact.contains("\"cargo_target_dir_hash\""),
+        "artifact records CARGO_TARGET_DIR fingerprint"
+    );
+    assert!(
+        artifact.contains(
+            "\"artifact_path\":\"target/fcp-host/lattice-policy-dispatcher-evidence.jsonl\""
+        ),
+        "artifact records stable relative artifact path"
+    );
+    assert!(
+        artifact.contains("deny_forged_v4_reference"),
+        "artifact covers V4 forged denial in the pipeline"
+    );
+    assert!(
+        artifact.contains("deny_trust_set_replay_v4_reference"),
+        "artifact covers V4 replay denial in the pipeline"
+    );
+    assert_eq!(records.len(), 14);
+}
+
+#[test]
+fn timing_summary_keeps_duplicate_measurement_visible_but_not_primary() {
+    let summary = timing_summary(PrimitiveTimings {
+        trap_gen_ms: 1.0,
+        delegate_ms: 2.0,
+        sample_pre_ms: 3.0,
+        policy_verify_ms: 4.0,
+        dispatcher_ms: 5.0,
+        pipeline_capability_verify_ms: 4.9,
+        pipeline_non_check_overhead_ms: 0.1,
+        duplicated_measurement_ms: 9.0,
+    });
+
+    assert!(summary.contains("standalone_policy_verify_ms=4.000"));
+    assert!(summary.contains("pipeline_total_ms=5.000"));
+    assert!(summary.contains("pipeline_capability_verify_ms=4.900"));
+    assert!(summary.contains("pipeline_non_check_overhead_ms=0.100"));
+    assert!(summary.contains("duplicated_measurement_ms=9.000"));
+    assert!(!summary.contains("/tmp/"));
 }

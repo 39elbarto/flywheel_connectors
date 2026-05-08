@@ -24,6 +24,9 @@ subtle = { workspace = true }
 # OS entropy for production TrapGen entry points.
 rand = { workspace = true }
 
+# Work-stealing row scheduler for V4 verifier matrix products.
+rayon = { workspace = true }
+
 # Explicit secret zeroization for entropy and trapdoor buffers.
 zeroize = { workspace = true }
 

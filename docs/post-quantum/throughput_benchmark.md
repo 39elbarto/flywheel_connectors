@@ -1,9 +1,10 @@
 # V4 Throughput Benchmark: Lattice Delegation vs Ed25519 and ML-DSA-65
 
 **Beads:** `flywheel_connectors-kyopb.1.3.1.1.5` ([J.5.3.1.1.e]),
-`flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]), and
-`flywheel_connectors-kyopb.1.3.1.1.13` ([J.5.3.1.1.h]), and
-`flywheel_connectors-kyopb.1.3.1.1.14` ([J.5.3.1.1.i]).
+`flywheel_connectors-kyopb.1.3.1.1.12` ([J.5.3.1.1.g]),
+`flywheel_connectors-kyopb.1.3.1.1.13` ([J.5.3.1.1.h]),
+`flywheel_connectors-kyopb.1.3.1.1.14` ([J.5.3.1.1.i]), and
+`flywheel_connectors-kyopb.1.3.1.1.15` ([J.5.3.1.1.j]).
 **Bench file:** `crates/fcp-crypto-pq/benches/lattice_vs_ed25519_vs_mldsa.rs`.
 **E2E harness:** `crates/fcp-host/tests/lattice_policy_dispatcher_e2e.rs`.
 **Companion docs:** `docs/post-quantum/lattice_trapdoor_delegation.md` and
@@ -22,6 +23,7 @@ real lattice sub-token through policy enforcement.
 | --- | ---: | ---: | ---: | ---: |
 | Ed25519 | 36.523 us | 38.531 us | 82.795 us | 104.99 us |
 | ML-DSA-65 | 771.99 us | 1.2600 ms | 130.22 us | 1.5139 ms |
+| V4 lattice verifier hot path, `.15` warm materialization | unchanged from `.13` | unchanged from `.13` | 412.29 us | host debug pipeline 8.398 ms allow / 8.280 ms forged denial |
 | V4 lattice real route, `.13` optimized | 68.724 ms | 143.84 ms delegate / 69.130 ms sample_pre | 64.649 ms | 337.18 ms |
 | V4 lattice real route, `.12` optimized | 90.730 ms | 182.59 ms delegate / 91.276 ms sample_pre | 96.026 ms | 460.30 ms |
 | V4 lattice real route, `.5` baseline | 480.29 ms | 1.6327 s delegate / 536.96 ms sample_pre | 498.33 ms | 2.1870 s |
@@ -32,15 +34,20 @@ sparse-support materialization pass cuts setup/delegation by about 5x-9x, and
 the `.13` buffered selected-row verifier pass cuts another 28%-34% from the V4
 lattice timings. The `.14` dispatcher pass shows that the host policy pipeline
 is not adding meaningful non-check overhead; the remaining hot-dispatch cost is
-the V4 lattice verifier inside `capability_verify`. The route is still above
-hot-path latency targets and still needs deeper verifier optimization.
+the V4 lattice verifier inside `capability_verify`. The `.15` pass moves the
+release warmed V4 verifier path under 1ms and puts both warmed debug allow and
+forged-denial paths under the 10ms dispatcher target. It does this by caching
+only public selected `A_bar` material, scheduling row products with Rayon, and
+using a V4-specific public-tail coefficient decoder inside the row product.
+Cold materialization is still visible in debug evidence and should stay visible
+in operator logs; it is not hidden or counted as pipeline overhead.
 
 The `.5` closeout filed follow-up beads for the three measured bottlenecks:
 
 - `flywheel_connectors-kyopb.1.3.1.1.12`: optimize `trap_gen` and `delegate` setup latency. The first closeout pass now streams only sparse `R` support columns while materializing V4 public tail coefficients.
 - `flywheel_connectors-kyopb.1.3.1.1.13`: optimize `sample_pre` and verifier latency. The first closeout pass now buffers selected-row XOF reads and verifies V4 route preimages from nonzero `A_bar` support columns instead of scanning every `A_bar` coefficient.
 - `flywheel_connectors-kyopb.1.3.1.1.14`: optimize host policy dispatcher pipeline latency. The closeout reclassified the old e2e `policy_dispatcher_ms` sum as duplicate measurement, exposes `capability_verify` per-check timing, and leaves the residual hot-path work in the lattice verifier itself.
-- `flywheel_connectors-kyopb.1.3.1.1.15`: follow-up for the remaining V4 verifier crypto hot path now that `.14` proved host pipeline overhead is not the bottleneck.
+- `flywheel_connectors-kyopb.1.3.1.1.15`: optimize the remaining V4 verifier crypto hot path by separating fast header validation from tail-coefficient decoding, specializing V4 public-tail decoding, parallelizing V4 row products, and reusing bounded public selected-`A_bar` material across repeated verifies.
 
 ## 2026-05-08 `.12` Optimization Update
 
@@ -155,6 +162,71 @@ denial fails at request-binding speed. The remaining `>10ms` hot-dispatch gap
 therefore belongs in a verifier-crypto follow-up rather than another host
 dispatcher bead: `flywheel_connectors-kyopb.1.3.1.1.15`.
 
+## 2026-05-08 `.15` Verifier Hot Path Update
+
+The `.15` pass keeps the full V4 lattice equation and all request-binding
+checks intact. It does not cache verification decisions, receipts, preimages,
+operation hashes, principals, zones, periods, certificates, trust sets, or
+request bindings. The only reusable verifier material is public selected
+`A_bar` coefficients derived from the public seed and the nonzero `A_bar`
+columns in the preimage. The cache key includes route id, route revision,
+parameter hash, public seed, selected-column hash, and selected-column count;
+the public tail block is still decoded and multiplied during verification so
+malformed tail material remains rejected.
+
+The before benchmark command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-verify15-before \
+  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa lattice_verify_real_route -- --sample-size 10
+```
+
+The after benchmark command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-verify15-cache-bench-final \
+  cargo bench -p fcp-crypto-pq --bench lattice_vs_ed25519_vs_mldsa lattice_verify_real_route -- --sample-size 10
+```
+
+| Benchmark | `.14`/pre-`.15` mean | `.15` after interval | `.15` after mean | Change |
+| --- | ---: | ---: | ---: | ---: |
+| `verify/lattice_verify_real_route` | 65.268 ms | 410.96 us - 414.48 us | 412.29 us | about 158x faster on the warmed verifier path |
+
+Before the selected-`A_bar` material cache, the best release verifier precursor
+in this pass was still around 10.813 ms with Rayon row products and chunked XOF
+reads. That precursor is useful for understanding cold/cache-miss cost, but the
+hot repeated-verifier path is the warmed materialized path measured above.
+
+The no-mock host e2e command was:
+
+```sh
+CARGO_TARGET_DIR=/tmp/fcp-pq-verify15-host-final2 \
+  cargo test -p fcp-host --test lattice_policy_dispatcher_e2e -- --nocapture
+```
+
+The `.15` host artifact records both the standalone comparison verifier and the
+production pipeline timing. In this debug run, the first standalone
+`V4_REFERENCE` allow comparison includes public materialization and measured
+450.457 ms; the subsequent production pipeline check reuses the bounded public
+material cache and measured 8.398 ms. The forged-token path still maps to
+`LATTICE_VERIFICATION_EQUATION_FAILED`, and request-binding replay still
+short-circuits before crypto-heavy verification.
+
+| Scenario | Standalone verifier | Pipeline total | Pipeline `capability_verify` | Error mapping |
+| --- | ---: | ---: | ---: | --- |
+| `allow_v4_reference` | 450.457 ms | 8.401 ms | 8.398 ms | allow |
+| `deny_forged_v4_reference` | 435.410 ms | 8.282 ms | 8.280 ms | `LATTICE_VERIFICATION_EQUATION_FAILED` |
+| `deny_trust_set_replay_v4_reference` | 0.021 ms | 0.022 ms | 0.022 ms | `LATTICE_REQUEST_BINDING_MISMATCH` |
+
+The e2e JSONL redaction scan over the emitted records found no raw target
+paths, principals, zones, operations, preimage bytes, trapdoor material, bearer
+strings, or token material. The unit proof compares the parallel/cached V4
+product against a serial product, rejects a different operation hash after the
+cache is warm, rejects malformed tail coefficients after fast header
+validation and specialized V4 tail decoding, and verifies cache-key
+invalidation for public seed, route id, route revision, parameter profile, and
+selected-column changes.
+
 ## Methodology
 
 The benchmark command was run through `rch` on worker `vmi1153651`:
@@ -258,10 +330,10 @@ The original `.5` `V4_REFERENCE` record measured:
 | `dispatcher_ms` | 3528.587 ms |
 | `policy_dispatcher_ms` | 7040.603 ms |
 
-The `.14` evidence shows that `policy_dispatcher_ms` was a duplicate
+The `.15` evidence keeps the `.14` distinction that `policy_dispatcher_ms` was a duplicate
 measurement rather than the production dispatcher latency. The production path
-is `pipeline_total_ms`; for the current debug run it was 2660.044 ms, with
-2660.041 ms inside `capability_verify` and only 0.003 ms outside check records.
+is `pipeline_total_ms`; for the current warmed debug run it was 8.401 ms, with
+8.398 ms inside `capability_verify` and only 0.003 ms outside check records.
 The evidence still proves the user-facing enforcement behavior: once a lattice
 token is present, the dispatcher requires a configured
 `LatticeDelegationVerifierImpl`, denies forged lattice material even if legacy
@@ -279,8 +351,8 @@ optimization work where the system is not yet user-optimal.
 | `trap_gen` / setup | file follow-up if setup exceeds 1s in e2e | 3.498s e2e, 480ms isolated | `.12` |
 | `delegate` | file follow-up if one-hop delegate blocks issuance UX | 7.002s e2e, 1.633s isolated | `.12` |
 | `sample_pre` | target <=10ms for hot issuance | 3.520s e2e, 537ms isolated | `.13` |
-| `verify` | target <=10ms for hot dispatch | 3.512s e2e, 498ms isolated | `.13` |
-| policy dispatcher | target <=10ms total hot path | 2.660s debug e2e pipeline total; 0.003ms non-check overhead | `.14` diagnosis complete; `.15` tracks verifier follow-up |
+| `verify` | target <=10ms for hot dispatch | 412.29us warmed Criterion; 8.398ms warmed debug e2e allow; 8.280ms warmed debug e2e forged denial; cold debug materialization remains visible at about 450ms | `.15` hot path complete; keep cold/cache-miss evidence visible |
+| policy dispatcher | target <=10ms total hot path | 8.401ms warmed debug e2e pipeline total; 0.003ms non-check overhead | `.14` diagnosis complete; `.15` verifier follow-up complete for warmed hot path |
 
 ## Reproducibility
 

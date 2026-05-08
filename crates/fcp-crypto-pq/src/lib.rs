@@ -46,7 +46,11 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex, OnceLock};
+
 use rand::RngCore;
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use sha3::{
     Shake256,
@@ -93,7 +97,10 @@ const MAX_PUBLIC_MATRIX_EXPANDED_BYTES: usize = 64 * 1024 * 1024;
 const MAX_PREIMAGE_ENCODED_BYTES: usize = 1024 * 1024;
 const MAX_TRAPDOOR_SECRET_BYTES: usize = 1024 * 1024;
 const V4_SPARSE_R_WEIGHT: u32 = 8;
-const V4_ROW_XOF_CHUNK_COEFFS: usize = 256;
+const V4_ROW_XOF_CHUNK_COEFFS: usize = 1024;
+const V4_VERIFY_PARALLEL_ROW_THRESHOLD: usize = 128;
+const V4_ABAR_SELECTION_CACHE_ENTRIES: usize = 1;
+const V4_COEFFICIENT_BYTES: usize = 4;
 
 /// Lattice security parameters (§3.2 of the design doc).
 ///
@@ -1059,6 +1066,114 @@ fn v4_public_abar_selected_row(
     coeffs
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct V4AbarSelectionCacheKey {
+    route_id_hash: [u8; 32],
+    route_revision: u16,
+    params_hash: [u8; 32],
+    public_seed: [u8; 32],
+    selected_cols_hash: [u8; 32],
+    selected_cols_len: usize,
+}
+
+struct V4AbarSelectionCacheEntry {
+    key: V4AbarSelectionCacheKey,
+    coeffs: Arc<[u32]>,
+}
+
+static V4_ABAR_SELECTION_CACHE: OnceLock<Mutex<VecDeque<V4AbarSelectionCacheEntry>>> =
+    OnceLock::new();
+
+fn selected_cols_hash(selected_cols: &[u32]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"fcp-pq/v4-selected-abar-cols-v1|");
+    hasher.update(
+        &u64::try_from(selected_cols.len())
+            .expect("selected cols length fits in u64")
+            .to_le_bytes(),
+    );
+    for col in selected_cols {
+        hasher.update(&col.to_le_bytes());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+fn v4_abar_selection_cache_key(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    selected_cols: &[u32],
+) -> V4AbarSelectionCacheKey {
+    V4AbarSelectionCacheKey {
+        route_id_hash: material.route_id_hash,
+        route_revision: material.route_revision,
+        params_hash: params_hash(params),
+        public_seed: material.public_seed,
+        selected_cols_hash: selected_cols_hash(selected_cols),
+        selected_cols_len: selected_cols.len(),
+    }
+}
+
+fn build_v4_selected_abar_coefficients(
+    params: LatticeParams,
+    public_seed: &[u8; 32],
+    selected_cols: &[u32],
+) -> Arc<[u32]> {
+    debug_assert_eq!(params, LatticeParams::V4_REFERENCE);
+    let rows = (0..params.n)
+        .into_par_iter()
+        .with_min_len(32)
+        .map(|row| {
+            v4_public_abar_selected_row(params, public_seed, row, selected_cols)
+                .into_iter()
+                .map(|coeff| u32::try_from(coeff).expect("V4 coefficient fits in u32"))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    let mut coeffs = Vec::with_capacity(
+        usize::try_from(params.n).expect("u32 n fits in usize") * selected_cols.len(),
+    );
+    for row in rows {
+        coeffs.extend(row);
+    }
+    coeffs.into()
+}
+
+fn v4_selected_abar_coefficients(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    selected_cols: &[u32],
+) -> Arc<[u32]> {
+    let key = v4_abar_selection_cache_key(params, material, selected_cols);
+    let cache = V4_ABAR_SELECTION_CACHE.get_or_init(|| Mutex::new(VecDeque::new()));
+    {
+        let entries = cache
+            .lock()
+            .expect("V4 public material cache mutex must not be poisoned");
+        if let Some(entry) = entries.iter().find(|entry| entry.key == key) {
+            return Arc::clone(&entry.coeffs);
+        }
+    }
+
+    let coeffs = build_v4_selected_abar_coefficients(params, &material.public_seed, selected_cols);
+    {
+        let mut entries = cache
+            .lock()
+            .expect("V4 public material cache mutex must not be poisoned");
+        if let Some(entry) = entries.iter().find(|entry| entry.key == key) {
+            return Arc::clone(&entry.coeffs);
+        }
+        entries.push_front(V4AbarSelectionCacheEntry {
+            key,
+            coeffs: Arc::clone(&coeffs),
+        });
+        while entries.len() > V4_ABAR_SELECTION_CACHE_ENTRIES {
+            entries.pop_back();
+        }
+        drop(entries);
+    }
+    coeffs
+}
+
 #[cfg(test)]
 fn tail_product_from_row(row_coefficients: &[u64], support: &[(u32, i64)]) -> i128 {
     let mut product = 0_i128;
@@ -1177,6 +1292,17 @@ fn validate_route_public_matrix_material(
     params: LatticeParams,
     material: &PublicMatrixMaterial,
 ) -> LatticePqResult<()> {
+    let expected_len = validate_route_public_matrix_material_header(params, material)?;
+    for index in 0..(expected_len / params.coefficient_bytes()?) {
+        let _ = decode_coeff(params, &material.tail_coefficients, index)?;
+    }
+    Ok(())
+}
+
+fn validate_route_public_matrix_material_header(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+) -> LatticePqResult<usize> {
     let expected_len = encoded_tail_coefficients_len(params)?;
     if material.version != PUBLIC_MATRIX_MATERIAL_VERSION {
         return Err(LatticePqError::InvalidEncodingLength {
@@ -1206,10 +1332,7 @@ fn validate_route_public_matrix_material(
             got: material.tail_coefficients.len(),
         });
     }
-    for index in 0..(expected_len / params.coefficient_bytes()?) {
-        let _ = decode_coeff(params, &material.tail_coefficients, index)?;
-    }
-    Ok(())
+    Ok(expected_len)
 }
 
 fn public_matrix_digest(
@@ -1414,6 +1537,42 @@ fn reduce_i128_mod_q(value: i128, q: u64) -> u64 {
     let q_i128 = i128::from(q);
     let reduced = value.rem_euclid(q_i128);
     u64::try_from(reduced).expect("positive residue less than q fits in u64")
+}
+
+fn reduce_u128_mod_q(value: u128, q: u64) -> u64 {
+    u64::try_from(value % u128::from(q)).expect("residue less than q fits in u64")
+}
+
+fn decode_v4_tail_coeff_at(
+    params: LatticeParams,
+    tail_coefficients: &[u8],
+    byte_offset: usize,
+) -> LatticePqResult<u32> {
+    let end = byte_offset.checked_add(V4_COEFFICIENT_BYTES).ok_or(
+        LatticePqError::RepresentationTooLarge {
+            material: "public_matrix_tail_index",
+            requested: usize::MAX,
+            max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+        },
+    )?;
+    let slice =
+        tail_coefficients
+            .get(byte_offset..end)
+            .ok_or(LatticePqError::InvalidEncodingLength {
+                material: "public_matrix_tail",
+                expected: end,
+                got: tail_coefficients.len(),
+            })?;
+    let mut coeff_bytes = [0_u8; V4_COEFFICIENT_BYTES];
+    coeff_bytes.copy_from_slice(slice);
+    let coeff = u32::from_le_bytes(coeff_bytes);
+    if u64::from(coeff) >= params.q {
+        return Err(LatticePqError::InvalidTrapdoorSecret {
+            material: "public_matrix_tail",
+            reason: "public tail coefficient is not reduced modulo q",
+        });
+    }
+    Ok(coeff)
 }
 
 fn route_public_hash(
@@ -2600,39 +2759,105 @@ fn public_matrix_vector_product_v4(
     dims: RouteDimensions,
 ) -> LatticePqResult<Vec<u64>> {
     debug_assert_eq!(params, LatticeParams::V4_REFERENCE);
+    let _expected_len = validate_route_public_matrix_material_header(params, material)?;
     let abar_terms = route_preimage_abar_terms(dims, coeffs);
-    let selected_cols: Vec<u32> = abar_terms.iter().map(|(col, _)| *col).collect();
-    let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
-    let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
+    let selected_cols = abar_terms.iter().map(|(col, _)| *col).collect::<Vec<_>>();
+    let abar_coefficients = v4_selected_abar_coefficients(params, material, &selected_cols);
+    let rows = usize::try_from(params.n).expect("u32 n fits in usize");
+    if rows < V4_VERIFY_PARALLEL_ROW_THRESHOLD {
+        return public_matrix_vector_product_v4_serial(
+            params,
+            material,
+            coeffs,
+            dims,
+            &abar_terms,
+            &abar_coefficients,
+        );
+    }
+    (0..params.n)
+        .into_par_iter()
+        .with_min_len(32)
+        .map(|row| {
+            v4_public_matrix_row_product(
+                params,
+                material,
+                coeffs,
+                dims,
+                &abar_terms,
+                &abar_coefficients,
+                row,
+            )
+        })
+        .collect()
+}
+
+fn public_matrix_vector_product_v4_serial(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    coeffs: &[u64],
+    dims: RouteDimensions,
+    abar_terms: &[(u32, u64)],
+    abar_coefficients: &[u32],
+) -> LatticePqResult<Vec<u64>> {
     let mut out = Vec::with_capacity(usize::try_from(params.n).expect("u32 n fits in usize"));
     for row in 0..params.n {
-        let row_coefficients =
-            v4_public_abar_selected_row(params, &material.public_seed, row, &selected_cols);
-        let mut sum = 0_i128;
-        for (selected_index, (_, preimage_coeff)) in abar_terms.iter().enumerate() {
-            let matrix_coeff = row_coefficients[selected_index];
-            sum += i128::from(matrix_coeff) * i128::from(*preimage_coeff);
-        }
-        for tail_col in 0..gadget_cols {
-            let preimage_coeff = coeffs[abar_cols + tail_col];
-            if preimage_coeff == 0 {
-                continue;
-            }
-            let tail_index = usize::try_from(row)
-                .expect("u32 row fits in usize")
-                .checked_mul(gadget_cols)
-                .and_then(|base| base.checked_add(tail_col))
-                .ok_or(LatticePqError::RepresentationTooLarge {
-                    material: "public_matrix_tail_index",
-                    requested: usize::MAX,
-                    max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
-                })?;
-            let matrix_coeff = decode_coeff(params, &material.tail_coefficients, tail_index)?;
-            sum += i128::from(matrix_coeff) * i128::from(preimage_coeff);
-        }
-        out.push(reduce_i128_mod_q(sum, params.q));
+        out.push(v4_public_matrix_row_product(
+            params,
+            material,
+            coeffs,
+            dims,
+            abar_terms,
+            abar_coefficients,
+            row,
+        )?);
     }
     Ok(out)
+}
+
+fn v4_public_matrix_row_product(
+    params: LatticeParams,
+    material: &PublicMatrixMaterial,
+    coeffs: &[u64],
+    dims: RouteDimensions,
+    abar_terms: &[(u32, u64)],
+    abar_coefficients: &[u32],
+    row: u32,
+) -> LatticePqResult<u64> {
+    let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
+    let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
+    let selected_cols = abar_terms.len();
+    let row_usize = usize::try_from(row).expect("u32 row fits in usize");
+    let row_start = row_usize * selected_cols;
+    let row_tail_start = row_usize
+        .checked_mul(gadget_cols)
+        .and_then(|base| base.checked_mul(V4_COEFFICIENT_BYTES))
+        .ok_or(LatticePqError::RepresentationTooLarge {
+            material: "public_matrix_tail_index",
+            requested: usize::MAX,
+            max: MAX_PUBLIC_MATRIX_EXPANDED_BYTES,
+        })?;
+    debug_assert_eq!(
+        params
+            .coefficient_bytes()
+            .expect("V4 coefficient width is valid"),
+        V4_COEFFICIENT_BYTES
+    );
+
+    let mut sum = 0_u128;
+    for (selected_index, (_, preimage_coeff)) in abar_terms.iter().enumerate() {
+        let matrix_coeff = abar_coefficients[row_start + selected_index];
+        sum += u128::from(matrix_coeff) * u128::from(*preimage_coeff);
+    }
+    for tail_col in 0..gadget_cols {
+        let preimage_coeff = coeffs[abar_cols + tail_col];
+        let byte_offset = row_tail_start + tail_col * V4_COEFFICIENT_BYTES;
+        let matrix_coeff =
+            decode_v4_tail_coeff_at(params, &material.tail_coefficients, byte_offset)?;
+        if preimage_coeff != 0 {
+            sum += u128::from(matrix_coeff) * u128::from(preimage_coeff);
+        }
+    }
+    Ok(reduce_u128_mod_q(sum, params.q))
 }
 
 fn public_matrix_vector_product(
@@ -2641,7 +2866,6 @@ fn public_matrix_vector_product(
     coeffs: &[u64],
 ) -> LatticePqResult<Vec<u64>> {
     let dims = route_dimensions(params, "verify")?;
-    validate_route_public_matrix_material(params, material)?;
     if coeffs.len() != usize::try_from(params.m).expect("u32 m fits in usize") {
         return Err(LatticePqError::InvalidEncodingLength {
             material: "preimage",
@@ -2652,6 +2876,7 @@ fn public_matrix_vector_product(
     if params == LatticeParams::V4_REFERENCE {
         return public_matrix_vector_product_v4(params, material, coeffs, dims);
     }
+    validate_route_public_matrix_material(params, material)?;
     let abar_cols = usize::try_from(dims.abar_cols).expect("u32 A_bar cols fit in usize");
     let gadget_cols = usize::try_from(dims.gadget_cols).expect("u32 gadget cols fit in usize");
     let mut out = Vec::with_capacity(usize::try_from(params.n).expect("u32 n fits in usize"));
@@ -4229,6 +4454,22 @@ mod tests {
         assert_eq!(lhs, expand_operation_hash_rhs(h, p));
         let dims = route_dimensions(p, "v4-product-support-test").unwrap();
         let abar_terms = route_preimage_abar_terms(dims, &coeffs);
+        let selected_cols = abar_terms.iter().map(|(col, _)| *col).collect::<Vec<_>>();
+        let abar_coefficients =
+            v4_selected_abar_coefficients(p, &zp_pub.public_matrix, &selected_cols);
+        let serial_lhs = public_matrix_vector_product_v4_serial(
+            p,
+            &zp_pub.public_matrix,
+            &coeffs,
+            dims,
+            &abar_terms,
+            &abar_coefficients,
+        )
+        .unwrap();
+        assert_eq!(
+            lhs, serial_lhs,
+            "bounded parallel verifier product must match the serial V4 product"
+        );
         assert!(
             abar_terms.len()
                 <= usize::try_from(p.n * V4_SPARSE_R_WEIGHT).expect("support count fits usize"),
@@ -4242,6 +4483,100 @@ mod tests {
             );
         }
         verify(&zp_pub, h, &preimage, period.start_secs, p).unwrap();
+        let wrong_operation =
+            operation_hash(&zone, period, b"op:v4.write", b"principal:v4-fixture");
+        let err = verify(&zp_pub, wrong_operation, &preimage, period.start_secs, p).unwrap_err();
+        assert!(
+            matches!(err, LatticePqError::VerificationEquationFailed),
+            "public material cache must not reuse a prior operation decision: {err:?}"
+        );
+    }
+
+    #[test]
+    fn v4_reference_verify_rejects_malformed_tail_after_fast_header_validation() {
+        let p = LatticeParams::V4_REFERENCE;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [42u8; 32];
+        let period = ref_period();
+        let (mut zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let h = operation_hash(&zone, period, b"op:v4.read", b"principal:v4-fixture");
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
+
+        let coefficient_bytes = p.coefficient_bytes().unwrap();
+        let tail_len = zp_pub.public_matrix.tail_coefficients.len();
+        let last_coeff_offset = tail_len - coefficient_bytes;
+        let invalid = p.q.to_le_bytes();
+        zp_pub.public_matrix.tail_coefficients
+            [last_coeff_offset..last_coeff_offset + coefficient_bytes]
+            .copy_from_slice(&invalid[..coefficient_bytes]);
+
+        let err = verify(&zp_pub, h, &preimage, period.start_secs, p).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                LatticePqError::InvalidTrapdoorSecret {
+                    material: "public_matrix_tail",
+                    ..
+                }
+            ),
+            "V4 fast verifier path must still reject non-canonical tail material: {err:?}"
+        );
+    }
+
+    #[test]
+    fn v4_abar_materialization_cache_key_tracks_profile_seed_and_selection() {
+        let p = LatticeParams::V4_REFERENCE;
+        let entropy = fixture_entropy();
+        let (master_pub, master_trap) = trap_gen_with_entropy(p, &entropy).unwrap();
+        let zone = [42u8; 32];
+        let period = ref_period();
+        let (zp_pub, zp_trap) = delegate(&master_pub, &master_trap, zone, period, p).unwrap();
+        let h = operation_hash(&zone, period, b"op:v4.read", b"principal:v4-fixture");
+        let preimage = sample_pre(&zp_pub, &zp_trap, h, p).unwrap();
+        let coeffs = preimage_coefficients(p, &preimage).unwrap();
+        let dims = route_dimensions(p, "v4-cache-key-test").unwrap();
+        let abar_terms = route_preimage_abar_terms(dims, &coeffs);
+        let selected_cols = abar_terms.iter().map(|(col, _)| *col).collect::<Vec<_>>();
+        let key = v4_abar_selection_cache_key(p, &zp_pub.public_matrix, &selected_cols);
+
+        let mut different_material = zp_pub.public_matrix.clone();
+        different_material.public_seed[0] ^= 0xA5;
+        assert_ne!(
+            key,
+            v4_abar_selection_cache_key(p, &different_material, &selected_cols),
+            "public seed changes must not reuse cached A_bar material"
+        );
+        let mut different_route = zp_pub.public_matrix.clone();
+        different_route.route_id_hash[0] ^= 0x5A;
+        assert_ne!(
+            key,
+            v4_abar_selection_cache_key(p, &different_route, &selected_cols),
+            "route id changes must not reuse cached A_bar material"
+        );
+        let mut different_revision = zp_pub.public_matrix.clone();
+        different_revision.route_revision += 1;
+        assert_ne!(
+            key,
+            v4_abar_selection_cache_key(p, &different_revision, &selected_cols),
+            "route revision changes must not reuse cached A_bar material"
+        );
+
+        let mut different_profile = p;
+        different_profile.depth -= 1;
+        assert_ne!(
+            key,
+            v4_abar_selection_cache_key(different_profile, &zp_pub.public_matrix, &selected_cols),
+            "profile changes must not reuse cached A_bar material"
+        );
+
+        let mut different_selection = selected_cols;
+        different_selection.pop();
+        assert_ne!(
+            key,
+            v4_abar_selection_cache_key(p, &zp_pub.public_matrix, &different_selection),
+            "selected-column changes must not reuse cached A_bar material"
+        );
     }
 
     #[test]

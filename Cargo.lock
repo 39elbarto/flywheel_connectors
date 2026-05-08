@@ -2492,6 +2492,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "fcp-anthropic-vertex"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "chrono",
+ "ciborium",
+ "fcp-async-core",
+ "fcp-core",
+ "fcp-crypto",
+ "fcp-google-discovery",
+ "fcp-prelude",
+ "fcp-sdk",
+ "fcp-testkit",
+ "futures-util",
+ "hex",
+ "jsonschema",
+ "reqwest 0.13.2",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+ "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "wiremock",
+]
+
+[[package]]
 name = "fcp-apple-notes"
 version = "0.1.0"
 dependencies = [
@@ -3297,6 +3328,7 @@ dependencies = [
  "fcp-crypto",
  "hex",
  "rand 0.8.6",
+ "rayon",
  "serde",
  "serde_json",
  "sha3",

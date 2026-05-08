@@ -402,45 +402,151 @@ fn operator_guidance() -> OperatorGuidance {
     }
 }
 
+fn item_get_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id"],
+        "additionalProperties": false,
+        "properties": {
+            "id": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Public Hacker News item ID"
+            }
+        }
+    })
+}
+
+fn user_get_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["username"],
+        "additionalProperties": false,
+        "properties": {
+            "username": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Case-sensitive Hacker News username"
+            }
+        }
+    })
+}
+
+fn feed_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+            "limit": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "Optional maximum number of item IDs to return"
+            }
+        }
+    })
+}
+
+fn item_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": [
+            "id",
+            "type",
+            "by",
+            "time",
+            "text",
+            "dead",
+            "parent",
+            "poll",
+            "kids",
+            "url",
+            "score",
+            "title",
+            "parts",
+            "descendants",
+            "deleted"
+        ],
+        "additionalProperties": false,
+        "properties": {
+            "id": { "type": "integer", "minimum": 0 },
+            "type": { "type": ["string", "null"] },
+            "by": { "type": ["string", "null"] },
+            "time": { "type": ["integer", "null"], "minimum": 0 },
+            "text": { "type": ["string", "null"] },
+            "dead": { "type": "boolean" },
+            "parent": { "type": ["integer", "null"], "minimum": 0 },
+            "poll": { "type": ["integer", "null"], "minimum": 0 },
+            "kids": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 }
+            },
+            "url": { "type": ["string", "null"] },
+            "score": { "type": ["integer", "null"] },
+            "title": { "type": ["string", "null"] },
+            "parts": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 }
+            },
+            "descendants": { "type": ["integer", "null"], "minimum": 0 },
+            "deleted": { "type": "boolean" }
+        }
+    })
+}
+
+fn user_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["id", "created", "karma", "about", "submitted"],
+        "additionalProperties": false,
+        "properties": {
+            "id": { "type": "string", "minLength": 1 },
+            "created": { "type": "integer", "minimum": 0 },
+            "karma": { "type": "integer" },
+            "about": { "type": ["string", "null"] },
+            "submitted": {
+                "type": "array",
+                "items": { "type": "integer", "minimum": 0 }
+            }
+        }
+    })
+}
+
+fn feed_output_schema() -> serde_json::Value {
+    json!({
+        "type": "array",
+        "items": { "type": "integer", "minimum": 0 }
+    })
+}
+
+fn health_input_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "additionalProperties": false
+    })
+}
+
+fn health_output_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "required": ["status"],
+        "additionalProperties": false,
+        "properties": {
+            "status": { "type": "string", "enum": ["ok"] }
+        }
+    })
+}
+
 fn hackernews_resource_types() -> Vec<ResourceTypeInfo> {
     vec![
         ResourceTypeInfo {
             name: "hackernews.item".into(),
             uri_pattern: "hackernews://items/{item_id}".into(),
-            schema: json!({
-                "type": "object",
-                "required": ["id", "type"],
-                "properties": {
-                    "id": {"type": "integer"},
-                    "type": {"type": "string"},
-                    "by": {"type": "string"},
-                    "time": {"type": "integer"},
-                    "title": {"type": "string"},
-                    "text": {"type": "string"},
-                    "url": {"type": "string"},
-                    "score": {"type": "integer"},
-                    "parent": {"type": "integer"},
-                    "kids": {"type": "array", "items": {"type": "integer"}},
-                    "descendants": {"type": "integer"},
-                    "deleted": {"type": "boolean"},
-                    "dead": {"type": "boolean"}
-                }
-            }),
+            schema: item_output_schema(),
         },
         ResourceTypeInfo {
             name: "hackernews.user".into(),
             uri_pattern: "hackernews://users/{username}".into(),
-            schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": {"type": "string"},
-                    "created": {"type": "integer"},
-                    "karma": {"type": "integer"},
-                    "about": {"type": "string"},
-                    "submitted": {"type": "array", "items": {"type": "integer"}}
-                }
-            }),
+            schema: user_output_schema(),
         },
         ResourceTypeInfo {
             name: "hackernews.feed_snapshot".into(),
@@ -448,12 +554,13 @@ fn hackernews_resource_types() -> Vec<ResourceTypeInfo> {
             schema: json!({
                 "type": "object",
                 "required": ["feed", "item_ids"],
+                "additionalProperties": false,
                 "properties": {
                     "feed": {
                         "type": "string",
                         "enum": ["top", "new", "best", "ask", "show", "job"]
                     },
-                    "item_ids": {"type": "array", "items": {"type": "integer"}}
+                    "item_ids": feed_output_schema()
                 }
             }),
         },
@@ -467,14 +574,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ITEM_GET),
             summary: "Get an item by ID".into(),
             description: Some("Retrieves one public Firebase item by numeric ID. Covers stories, comments, jobs, polls, and poll options, but does not recursively expand comment trees or enrich feed snapshots.".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["id"],
-                "properties": {
-                    "id": { "type": "integer", "description": "Item ID" }
-                }
-            }),
-            output_schema: json!({ "type": "object" }),
+            input_schema: item_get_input_schema(),
+            output_schema: item_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -496,23 +597,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_USER_GET),
             summary: "Get a user by username".into(),
             description: Some("Retrieves one public Hacker News user profile by case-sensitive username. No login, private account state, or authenticated actor context is exposed.".into()),
-            input_schema: json!({
-                "type": "object",
-                "required": ["username"],
-                "properties": {
-                    "username": { "type": "string", "description": "HN username (case-sensitive)" }
-                }
-            }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string" },
-                    "created": { "type": "integer" },
-                    "karma": { "type": "integer" },
-                    "about": { "type": "string" },
-                    "submitted": { "type": "array", "items": { "type": "integer" } }
-                }
-            }),
+            input_schema: user_get_input_schema(),
+            output_schema: user_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -533,16 +619,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_TOP_STORIES),
             summary: "Get top story IDs".into(),
             description: Some("Returns a top-stories snapshot as numeric item IDs only. Use item.get to expand stories; there is no automatic hydration or search surface.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -563,16 +641,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_NEW_STORIES),
             summary: "Get new story IDs".into(),
             description: Some("Returns a newest-stories snapshot as numeric item IDs only. This is a feed snapshot, not a write, search, or live-streaming API.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -593,16 +663,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_BEST_STORIES),
             summary: "Get best story IDs".into(),
             description: Some("Returns a best-stories snapshot as numeric item IDs only. Upstream ranking semantics come from Hacker News; the connector does not re-rank or search.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -623,16 +685,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_ASK_STORIES),
             summary: "Get Ask HN story IDs".into(),
             description: Some("Returns an Ask HN feed snapshot as numeric item IDs only. There is no thread expansion or reply/write surface.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -653,16 +707,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_SHOW_STORIES),
             summary: "Get Show HN story IDs".into(),
             description: Some("Returns a Show HN feed snapshot as numeric item IDs only. The connector does not auto-expand items or scrape extra metadata from news.ycombinator.com.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -683,16 +729,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_JOB_STORIES),
             summary: "Get job story IDs".into(),
             description: Some("Returns a Jobs feed snapshot as numeric item IDs only. The connector does not submit jobs, favorite posts, or perform authenticated actions.".into()),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "limit": { "type": "integer", "description": "Limit number of IDs returned" }
-                }
-            }),
-            output_schema: json!({
-                "type": "array",
-                "items": { "type": "integer" }
-            }),
+            input_schema: feed_input_schema(),
+            output_schema: feed_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -713,13 +751,8 @@ pub fn operations_info() -> Vec<OperationInfo> {
             id: OperationId::from_static(OP_HEALTH),
             summary: "Check HN API health".into(),
             description: Some("Verifies the public Firebase Hacker News API is reachable. This does not validate search, writes, or any authenticated surface because those are not in scope.".into()),
-            input_schema: json!({ "type": "object" }),
-            output_schema: json!({
-                "type": "object",
-                "properties": {
-                    "status": { "type": "string" }
-                }
-            }),
+            input_schema: health_input_schema(),
+            output_schema: health_output_schema(),
             capability: CapabilityId::from_static(CAP_READ),
             risk_level: RiskLevel::Low,
             safety_tier: SafetyTier::Safe,
@@ -1056,6 +1089,18 @@ impl HackerNewsConnector {
 mod tests {
     use super::*;
 
+    const EXPECTED_MANIFEST_SCHEMA_OPS: [&str; 9] = [
+        OP_ITEM_GET,
+        OP_USER_GET,
+        OP_TOP_STORIES,
+        OP_NEW_STORIES,
+        OP_BEST_STORIES,
+        OP_ASK_STORIES,
+        OP_SHOW_STORIES,
+        OP_JOB_STORIES,
+        OP_HEALTH,
+    ];
+
     fn base_handshake() -> HandshakeRequest {
         HandshakeRequest {
             protocol_version: "2.0.0".into(),
@@ -1092,6 +1137,75 @@ mod tests {
 
     fn test_config() -> serde_json::Value {
         json!({})
+    }
+
+    fn hackernews_manifest() -> Result<toml::Value, String> {
+        toml::from_str(MANIFEST_TOML)
+            .map_err(|err| format!("Hacker News manifest TOML should parse: {err}"))
+    }
+
+    fn manifest_operations(
+        manifest: &toml::Value,
+    ) -> Result<&toml::map::Map<String, toml::Value>, String> {
+        manifest
+            .get("provides")
+            .and_then(|provides| provides.get("operations"))
+            .and_then(toml::Value::as_table)
+            .ok_or_else(|| "manifest should declare operation tables".to_owned())
+    }
+
+    fn operation_schema(
+        manifest: &toml::Value,
+        operation_id: &str,
+        field: &str,
+    ) -> Result<serde_json::Value, String> {
+        let schema = manifest_operations(manifest)?
+            .get(operation_id)
+            .and_then(toml::Value::as_table)
+            .and_then(|operation| operation.get(field))
+            .ok_or_else(|| format!("{operation_id} should declare {field}"))?;
+        if !schema.as_table().is_some_and(|table| !table.is_empty()) {
+            return Err(format!(
+                "{operation_id}.{field} should be a non-empty schema table"
+            ));
+        }
+        serde_json::to_value(schema)
+            .map_err(|err| format!("{operation_id}.{field} should convert to JSON: {err}"))
+    }
+
+    fn validator_for(schema: &serde_json::Value) -> Result<jsonschema::Validator, String> {
+        jsonschema::Validator::new(schema)
+            .map_err(|err| format!("manifest operation schema should compile: {err}"))
+    }
+
+    fn assert_schema_accepts(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        let errors = validator
+            .iter_errors(payload)
+            .map(|error| error.to_string())
+            .collect::<Vec<_>>();
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "schema should accept {payload}; errors: {errors:?}"
+            ))
+        }
+    }
+
+    fn assert_schema_rejects(
+        schema: &serde_json::Value,
+        payload: &serde_json::Value,
+    ) -> Result<(), String> {
+        let validator = validator_for(schema)?;
+        if validator.iter_errors(payload).next().is_some() {
+            Ok(())
+        } else {
+            Err(format!("schema should reject {payload}"))
+        }
     }
 
     #[fcp_async_core::runtime::test]
@@ -1272,6 +1386,116 @@ mod tests {
     }
 
     #[test]
+    fn manifest_operation_schemas_compile_and_validate_core_payloads() -> Result<(), String> {
+        let manifest = hackernews_manifest()?;
+        let operations = manifest_operations(&manifest)?;
+
+        for operation_id in EXPECTED_MANIFEST_SCHEMA_OPS {
+            assert!(
+                operations.contains_key(operation_id),
+                "manifest should declare operation {operation_id}"
+            );
+            for field in ["input_schema", "output_schema"] {
+                let schema = operation_schema(&manifest, operation_id, field)?;
+                let _validator = validator_for(&schema)?;
+            }
+        }
+
+        for operation in operations_info() {
+            let _input_validator = validator_for(&operation.input_schema)?;
+            let _output_validator = validator_for(&operation.output_schema)?;
+        }
+
+        let item_input = operation_schema(&manifest, OP_ITEM_GET, "input_schema")?;
+        assert_schema_accepts(&item_input, &json!({"id": 8863}))?;
+        assert_schema_rejects(&item_input, &json!({}))?;
+        assert_schema_rejects(&item_input, &json!({"id": "8863"}))?;
+        assert_schema_rejects(&item_input, &json!({"id": 8863, "extra": true}))?;
+
+        let item_output = operation_schema(&manifest, OP_ITEM_GET, "output_schema")?;
+        assert_schema_accepts(
+            &item_output,
+            &json!({
+                "id": 8863,
+                "type": "story",
+                "by": "dhouston",
+                "time": 1175714200,
+                "text": null,
+                "dead": false,
+                "parent": null,
+                "poll": null,
+                "kids": [8952, 9224],
+                "url": "http://www.getdropbox.com",
+                "score": 111,
+                "title": "My YC app: Dropbox",
+                "parts": [],
+                "descendants": 71,
+                "deleted": false
+            }),
+        )?;
+        assert_schema_rejects(
+            &item_output,
+            &json!({
+                "id": 8863,
+                "type": "story",
+                "by": "dhouston",
+                "time": 1175714200,
+                "text": null,
+                "dead": false,
+                "parent": null,
+                "poll": null,
+                "kids": [],
+                "url": "http://www.getdropbox.com",
+                "score": 111,
+                "title": "My YC app: Dropbox",
+                "parts": [],
+                "descendants": 71,
+                "deleted": false,
+                "extra": true
+            }),
+        )?;
+
+        let user_input = operation_schema(&manifest, OP_USER_GET, "input_schema")?;
+        assert_schema_accepts(&user_input, &json!({"username": "jl"}))?;
+        assert_schema_rejects(&user_input, &json!({"username": ""}))?;
+        assert_schema_rejects(&user_input, &json!({"username": "jl", "extra": true}))?;
+
+        let user_output = operation_schema(&manifest, OP_USER_GET, "output_schema")?;
+        assert_schema_accepts(
+            &user_output,
+            &json!({
+                "id": "jl",
+                "created": 1173923446,
+                "karma": 2937,
+                "about": null,
+                "submitted": [8265435, 8168423]
+            }),
+        )?;
+        assert_schema_rejects(&user_output, &json!({"id": "jl", "karma": 2937}))?;
+
+        let feed_input = operation_schema(&manifest, OP_TOP_STORIES, "input_schema")?;
+        assert_schema_accepts(&feed_input, &json!({}))?;
+        assert_schema_accepts(&feed_input, &json!({"limit": 0}))?;
+        assert_schema_rejects(&feed_input, &json!({"limit": -1}))?;
+        assert_schema_rejects(&feed_input, &json!({"limit": 10, "extra": true}))?;
+
+        let feed_output = operation_schema(&manifest, OP_TOP_STORIES, "output_schema")?;
+        assert_schema_accepts(&feed_output, &json!([8863, 2921983]))?;
+        assert_schema_rejects(&feed_output, &json!([8863, "2921983"]))?;
+
+        let health_input = operation_schema(&manifest, OP_HEALTH, "input_schema")?;
+        assert_schema_accepts(&health_input, &json!({}))?;
+        assert_schema_rejects(&health_input, &json!({"probe": true}))?;
+
+        let health_output = operation_schema(&manifest, OP_HEALTH, "output_schema")?;
+        assert_schema_accepts(&health_output, &json!({"status": "ok"}))?;
+        assert_schema_rejects(&health_output, &json!({"status": "degraded"}))?;
+        assert_schema_rejects(&health_output, &json!({"status": "ok", "extra": true}))?;
+
+        Ok(())
+    }
+
+    #[test]
     fn test_operations_have_ai_hints() {
         let ops = operations_info();
         for op in &ops {
@@ -1313,7 +1537,7 @@ mod tests {
     }
 
     #[test]
-    fn test_story_lists_are_none_idempotent() {
+    fn test_story_lists_are_none_idempotent() -> Result<(), String> {
         let ops = operations_info();
         for name in &[
             OP_TOP_STORIES,
@@ -1326,13 +1550,14 @@ mod tests {
             let op = ops
                 .iter()
                 .find(|o| o.id.as_str() == *name)
-                .unwrap_or_else(|| panic!("Missing op: {name}"));
+                .ok_or_else(|| format!("Missing op: {name}"))?;
             assert_eq!(
                 op.idempotency,
                 IdempotencyClass::None,
                 "Op {name} should be None idempotency"
             );
         }
+        Ok(())
     }
 
     #[test]

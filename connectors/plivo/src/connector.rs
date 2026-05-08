@@ -2120,6 +2120,30 @@ mod tests {
     }
 
     #[test]
+    fn manifest_declares_agent_actionable_ai_hints() {
+        let manifest_path =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");
+        let raw = std::fs::read_to_string(&manifest_path).expect("read manifest");
+        let manifest =
+            fcp_manifest::ConnectorManifest::parse_str(&raw).expect("manifest should validate");
+
+        for (operation_id, operation) in &manifest.provides.operations {
+            assert!(
+                !operation.ai_hints.when_to_use.trim().is_empty(),
+                "{operation_id} missing ai_hints.when_to_use"
+            );
+            assert!(
+                !operation.ai_hints.common_mistakes.is_empty(),
+                "{operation_id} missing ai_hints.common_mistakes"
+            );
+            assert!(
+                !operation.ai_hints.examples.is_empty(),
+                "{operation_id} missing ai_hints.examples"
+            );
+        }
+    }
+
+    #[test]
     fn manifest_interface_hash_is_deterministic() {
         let manifest_path =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("manifest.toml");

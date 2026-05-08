@@ -81,7 +81,6 @@ const EXPECTED_AI_HINT_GAPS: &[&str] = &[
     "mastodon",
     "mattermost",
     "nostr",
-    "plivo",
     "qq",
     "sonos",
     "telnyx",

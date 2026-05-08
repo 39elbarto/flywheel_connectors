@@ -446,6 +446,7 @@ impl RefreshGateLease {
         state.refreshing = true;
         state.refresh_generation = state.refresh_generation.saturating_add(1);
         state.publish();
+        drop(state);
         Ok(Self {
             gate: Arc::clone(gate),
         })
@@ -2439,8 +2440,7 @@ mod tests {
                 .expect("first acquire should claim the refresh gate");
 
             let waiter = RefreshGateLease::claim_or_subscribe(&gate)
-                .err()
-                .expect("second claim must subscribe while refresh is active");
+                .expect_err("second claim must subscribe while refresh is active");
 
             let join = fcp_async_core::task::spawn(waiter.wait_until_refresh_completes());
             fcp_async_core::task::yield_now().await;

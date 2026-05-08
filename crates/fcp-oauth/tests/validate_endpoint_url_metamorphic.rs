@@ -13,11 +13,11 @@
 //! - **MR.dedup (call-site verdict equivalence)** — for any URL string
 //!   `s`, `validate_oauth_endpoint_url(s, ...)` agrees with
 //!   `OAuth2Client::new(OAuth2Config::new(_, _, s, _))` on accept-vs-reject.
-//!   Ok(direct) ⇔ Ok(via OAuth2Client). Catches any reintroduced inline
+//!   Ok(direct) ⇔ Ok(via `OAuth2Client`). Catches any reintroduced inline
 //!   drift OR a refactor that removes the call from
 //!   `validate_oauth2_config`.
 //!
-//! - **MR.field-symmetry (authorization_url ≡ token_url)** — both
+//! - **MR.field-symmetry (`authorization_url` ≡ `token_url`)** — both
 //!   endpoint fields go through the same validator with only the field
 //!   label differing. Validating the same URL as `authorization_url`
 //!   vs `token_url` MUST produce the same accept-vs-reject verdict

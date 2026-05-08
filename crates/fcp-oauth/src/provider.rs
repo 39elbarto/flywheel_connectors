@@ -262,17 +262,17 @@ impl ProviderEndpoints {
     /// (builder) flow through here so the two surfaces cannot drift.
     fn validated_endpoints(&self) -> OAuthResult<ValidatedEndpoints> {
         Ok(ValidatedEndpoints {
-            authorization_url: validate_oauth_endpoint_url(
+            authorization: validate_oauth_endpoint_url(
                 &self.authorization_url,
                 "authorization_url",
             )?,
-            token_url: validate_oauth_endpoint_url(&self.token_url, "token_url")?,
-            revocation_url: self
+            token: validate_oauth_endpoint_url(&self.token_url, "token_url")?,
+            revocation: self
                 .revocation_url
                 .as_deref()
                 .map(|url| validate_oauth_endpoint_url(url, "revocation_url"))
                 .transpose()?,
-            userinfo_url: self
+            userinfo: self
                 .userinfo_url
                 .as_deref()
                 .map(|url| validate_oauth_endpoint_url(url, "userinfo_url"))
@@ -306,8 +306,8 @@ impl ProviderEndpoints {
         Ok(OAuth2Config::new(
             client_id,
             client_secret,
-            &validated.authorization_url,
-            &validated.token_url,
+            &validated.authorization,
+            &validated.token,
         ))
     }
 }
@@ -318,12 +318,12 @@ impl ProviderEndpoints {
 /// `revocation_url` and `userinfo_url` are `Option` because the source
 /// endpoints are optional; their `Some` arms have already been validated.
 struct ValidatedEndpoints {
-    authorization_url: String,
-    token_url: String,
+    authorization: String,
+    token: String,
     #[allow(dead_code)] // surfaced via validate(); not used by to_oauth2_config builder
-    revocation_url: Option<String>,
+    revocation: Option<String>,
     #[allow(dead_code)]
-    userinfo_url: Option<String>,
+    userinfo: Option<String>,
 }
 
 #[cfg(test)]

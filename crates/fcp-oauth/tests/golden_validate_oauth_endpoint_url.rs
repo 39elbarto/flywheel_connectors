@@ -18,13 +18,13 @@
 //!   not as a per-case test failure scattered across the file.
 //!
 //! Update flow:
-//!   UPDATE_GOLDENS=1 cargo test -p fcp-oauth --test golden_validate_oauth_endpoint_url
-//!   git diff crates/fcp-oauth/tests/snapshots/
+//!   `UPDATE_GOLDENS=1 cargo test -p fcp-oauth --test golden_validate_oauth_endpoint_url`
+//!   `git diff crates/fcp-oauth/tests/snapshots/`
 //!   # human review every diff line — accept only intentional changes
-//!   git add crates/fcp-oauth/tests/snapshots/
+//!   `git add crates/fcp-oauth/tests/snapshots/`
 //!
 //! The vector covers the eight rejection branches (parse error,
-//! cannot_be_a_base, missing host, embedded user, embedded password,
+//! `cannot_be_a_base`, missing host, embedded user, embedded password,
 //! fragment, plain http on non-loopback, query-allowed) plus
 //! seven accept shapes (https, https+query, https+path, https+port,
 //! loopback http, loopback http+port, loopback http on localhost).
@@ -54,7 +54,7 @@ fn canonical_inputs() -> Vec<&'static str> {
         "https://user@provider.example.com/oauth/authorize",    // embedded user only
         "not a url at all",                                     // unparseable
     ];
-    inputs.sort();
+    inputs.sort_unstable();
     inputs
 }
 
